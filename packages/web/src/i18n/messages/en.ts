@@ -2478,6 +2478,7 @@ export const en = {
   "message.attachmentComment.commentTitle": "Comment on {detail}",
   "message.messageItem.sourceUnavailable": "Unable to open source. It may be unavailable or deleted.",
   "message.messageItem.reactionCount": "{count, plural, one {# reaction} other {# reactions}}",
+  "message.messageItem.reactionNamesMore": "+{count}",
   "message.messageItem.reactionHiddenMore": "+{count} more",
   "message.messageItem.reactionAria": "{emoji} reaction from {reactors}",
   "message.messageItem.reactWith": "React with {emoji}",

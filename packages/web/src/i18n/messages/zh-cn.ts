@@ -2442,6 +2442,7 @@ export const zhCn: Record<MessageId, string> = {
   "message.attachmentComment.commentTitle": "针对 {detail} 的评论",
   "message.messageItem.sourceUnavailable": "无法打开来源，它可能不可用或已被删除。",
   "message.messageItem.reactionCount": "{count, plural, other {# 个回应}}",
+  "message.messageItem.reactionNamesMore": "+{count}",
   "message.messageItem.reactionHiddenMore": "等 {count} 人",
   "message.messageItem.reactionAria": "{reactors} 的 {emoji} 回应",
   "message.messageItem.reactWith": "用 {emoji} 回应",

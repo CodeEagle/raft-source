@@ -5002,17 +5002,32 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             {visibleReactions.map((reaction) => {
               const currentViewerReacted = hasCurrentUserReaction(reaction.emoji);
               const showFailureFlash = reactionFailureEmoji === reaction.emoji;
-              const summaryNames = readReactionActors(reaction).map((actor) => actor.displayName);
+              const actors = readReactionActors(reaction);
+              const summaryNames = actors.map((actor) => actor.displayName);
+              const reactorNames = currentViewerReacted && viewerUserId
+                ? [
+                  formatMessage({ id: "message.messageItem.reactorYou" }),
+                  ...actors.filter((actor) => actor.id !== viewerUserId).map((actor) => actor.displayName),
+                ]
+                : summaryNames;
+              const namesHiddenCount = Math.max(0, reaction.count - 2);
+              const visibleNames = reactorNames.slice(0, 2).join(", ");
               const summaryHiddenCount = Math.max(0, reaction.count - summaryNames.length);
               const reactorSummary = summaryNames.length > 0
                 ? `${summaryNames.join(", ")}${summaryHiddenCount > 0 ? ` ${formatMessage({ id: "message.messageItem.reactionHiddenMore" }, { count: summaryHiddenCount })}` : ""}`
                 : formatMessage({ id: "message.messageItem.reactionCount" }, { count: reaction.count });
               const reactionContent = (
                 <>
-                  <span className="inline-flex items-center leading-none">
+                  {actors.length > 0 && (
+                    <span className="min-w-0 max-w-[9rem] truncate">
+                      {visibleNames}
+                      {namesHiddenCount > 0 ? ` ${formatMessage({ id: "message.messageItem.reactionNamesMore" }, { count: namesHiddenCount })}` : ""}
+                    </span>
+                  )}
+                  <span className="inline-flex shrink-0 items-center leading-none">
                     <ReactionGlyph emoji={reaction.emoji} size={15} className="block" />
                   </span>
-                  <ReactionCount count={reaction.count} />
+                  {actors.length === 0 && <ReactionCount count={reaction.count} />}
                 </>
               );
               const reactionClassName = `inline-flex h-5 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap rounded px-1.5 text-[12px] font-bold leading-none text-foreground-strong theme-brutal:text-black ${
@@ -5023,7 +5038,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                     : "bg-fill-muted/40"
               }`;
               return (
-                <span key={reaction.emoji} className="inline-flex">
+                <span key={reaction.emoji} className="inline-flex min-w-0 max-w-full">
                   {canReact ? (
                     <button
                       type="button"
