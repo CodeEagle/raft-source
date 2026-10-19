@@ -3,8 +3,8 @@
   "package": "@botiverse/raft",
   "runner": "vitest run",
   "testFileGlob": "src/**/*.test.ts",
-  "fileCount": 119,
-  "total": 1153,
+  "fileCount": 127,
+  "total": 1211,
   "files": [
     {
       "file": "src/agentApiNoBypass.test.ts",
@@ -451,6 +451,24 @@
       ]
     },
     {
+      "file": "src/client.transport.test.ts",
+      "count": 4,
+      "cases": [
+        {
+          "name": "a plain JSON request goes over node:http, not fetch"
+        },
+        {
+          "name": "a redirect is re-sent through fetch, which follows it as before"
+        },
+        {
+          "name": "with an HTTP proxy configured, the request stays on fetch with the proxy dispatcher"
+        },
+        {
+          "name": "https honours NODE_EXTRA_CA_CERTS (self-signed CA)"
+        }
+      ]
+    },
+    {
       "file": "src/commands/action/prepare.test.ts",
       "count": 21,
       "cases": [
@@ -515,7 +533,7 @@
           "name": "extractHandleName strips the sigil when present and trims"
         },
         {
-          "name": "actionCardActionSchema rejects agent-prefilled runtime/model fields on agent:create"
+          "name": "actionCardActionSchema drops an agent-prefilled runtime on agent:create; a model needs hosting antiproton"
         }
       ]
     },
@@ -893,7 +911,7 @@
     },
     {
       "file": "src/commands/channel/info.test.ts",
-      "count": 3,
+      "count": 4,
       "cases": [
         {
           "name": "channel info command returns narrow visible channel facts and member counts"
@@ -903,6 +921,9 @@
         },
         {
           "name": "channel info rejects thread targets before auth bootstrap"
+        },
+        {
+          "name": "channel info takes the target as --target too, as the card's agents tried after a hold"
         }
       ]
     },
@@ -965,7 +986,7 @@
     },
     {
       "file": "src/commands/channel/members.test.ts",
-      "count": 3,
+      "count": 4,
       "cases": [
         {
           "name": "channel members command uses injected ApiClient and encodes target"
@@ -975,6 +996,9 @@
         },
         {
           "name": "channel members command maps missing target into typed CliError"
+        },
+        {
+          "name": "channel members takes the target as --target too (agents reach for it by habit); both forms must agree"
         }
       ]
     },
@@ -1053,6 +1077,45 @@
         },
         {
           "name": "task claim rejects conflicting --target and legacy --channel before auth bootstrap"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/freshness/_format.test.ts",
+      "count": 11,
+      "cases": [
+        {
+          "name": "thread hold: start anchor, skipped line, truncated previews, mention note, continue-anyway"
+        },
+        {
+          "name": "channel hold: skipped line anchors on the lowest held seq when firstShownSeq is absent"
+        },
+        {
+          "name": "server window counts and anchors are passed through: shown count, first shown seq, string seqs"
+        },
+        {
+          "name": "thread hold: no start anchor when the thread start is inside the shown window"
+        },
+        {
+          "name": "hold with no previews: pointer line only, singular noun"
+        },
+        {
+          "name": "withheld context renders the count-only notice"
+        },
+        {
+          "name": "held for the channel card alone: the card, then the paths"
+        },
+        {
+          "name": "unread messages and a changed channel card in one hold: the card before the window"
+        },
+        {
+          "name": "held for the DM peer's card alone"
+        },
+        {
+          "name": "the push budget: worst-case holds stay within 2000 code points before the paths, latest messages intact"
+        },
+        {
+          "name": "the push budget for a DM thread hold with a long peer card"
         }
       ]
     },
@@ -1253,7 +1316,7 @@
     },
     {
       "file": "src/commands/integration/appReceipts.test.ts",
-      "count": 3,
+      "count": 4,
       "cases": [
         {
           "name": "direct app read receipts recursively project only declared app fields"
@@ -1263,6 +1326,9 @@
         },
         {
           "name": "remaining direct app receipts also drop undeclared response fields"
+        },
+        {
+          "name": "setup receipts retain progress but discard nested unexpected credentials"
         }
       ]
     },
@@ -2192,7 +2258,7 @@
           "name": "formatHistory: superseded task root keeps original content and points to current text"
         },
         {
-          "name": "formatHistory: thread and reply count in header"
+          "name": "formatHistory: a message with a thread shows reply count and replyTarget, not the thread's own id"
         },
         {
           "name": "formatHistory: top-level channel message without thread state shows reply target"
@@ -2377,6 +2443,27 @@
       ]
     },
     {
+      "file": "src/commands/message/channelCard.test.ts",
+      "count": 5,
+      "cases": [
+        {
+          "name": "passive AX off, no context signal, or no card from the Server: the read is unchanged"
+        },
+        {
+          "name": "the first read in a context carries the card first; later reads do not"
+        },
+        {
+          "name": "a changed card comes again, marked as changed; a new context starts over"
+        },
+        {
+          "name": "a runtime that does not report compaction gets the card on every read"
+        },
+        {
+          "name": "a card that never reached stdout is not recorded as shown"
+        }
+      ]
+    },
+    {
       "file": "src/commands/message/check.test.ts",
       "count": 14,
       "cases": [
@@ -2421,6 +2508,33 @@
         },
         {
           "name": "task #178: a daemon without the ack route (older daemon) does not fail message check"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/message/peerCard.test.ts",
+      "count": 7,
+      "cases": [
+        {
+          "name": "a DM read whose window has no message from the peer starts with their card, once"
+        },
+        {
+          "name": "a message from the peer in the window carries the facts itself: no card"
+        },
+        {
+          "name": "a send to a peer this context never saw is held once with their card"
+        },
+        {
+          "name": "a kind-suffixed target looks up that kind only; any version this context has counts as seen"
+        },
+        {
+          "name": "a peer message that shows nothing about them (no description, no zone) does not count: the card comes"
+        },
+        {
+          "name": "a held send to a renamed peer through a thread is recorded under the name the target used too"
+        },
+        {
+          "name": "a card that only reached JSON output is recorded, so JSON-mode sends are held once too"
         }
       ]
     },
@@ -2528,7 +2642,7 @@
     },
     {
       "file": "src/commands/message/search.test.ts",
-      "count": 12,
+      "count": 14,
       "cases": [
         {
           "name": "message search command uses injected ApiClient and writes canonical results"
@@ -2565,12 +2679,18 @@
         },
         {
           "name": "message search command preserves SEARCH_TIMEOUT after an admitted query reaches statement timeout"
+        },
+        {
+          "name": "message search command says an incomplete recent search is not all the matches and prints the continue command"
+        },
+        {
+          "name": "message search command rejects --cursor outside a recent text search and with --offset"
         }
       ]
     },
     {
       "file": "src/commands/message/send.test.ts",
-      "count": 101,
+      "count": 105,
       "cases": [
         {
           "name": "resolveSendContent reads multiline content from stdin"
@@ -2664,6 +2784,18 @@
         },
         {
           "name": "formatFreshnessHoldOutput can block non-message side effects without draft copy"
+        },
+        {
+          "name": "normalizeAttachmentIdFlags splits ids an agent put in one --attachment-id"
+        },
+        {
+          "name": "normalizeAttachmentIdFlags names a bad entry by position, never echoes it, and gives a runnable next step"
+        },
+        {
+          "name": "normalizeAttachmentIdFlags rejects an empty value instead of sending without the attachment"
+        },
+        {
+          "name": "message send sends split attachment ids, and sends nothing when one is malformed"
         },
         {
           "name": "message send reconciles a timeout after commit without replaying content"
@@ -2878,6 +3010,48 @@
       ]
     },
     {
+      "file": "src/commands/message/sendAttachment.test.ts",
+      "count": 3,
+      "cases": [
+        {
+          "name": "a runtime that does not report compaction gets the cards and latest messages after every send"
+        },
+        {
+          "name": "no attachment for a runtime that reports compaction, with passive AX off, or when the read fails"
+        },
+        {
+          "name": "a DM send shows the peer's card and the latest messages"
+        }
+      ]
+    },
+    {
+      "file": "src/commands/message/sendChannelCard.test.ts",
+      "count": 7,
+      "cases": [
+        {
+          "name": "a context that never saw the card is held once with it; the unchanged draft then goes through"
+        },
+        {
+          "name": "a changed card comes back with the reply and is recorded"
+        },
+        {
+          "name": "an older context's record counts as not seen"
+        },
+        {
+          "name": "no channel card check: passive AX off, a runtime without compaction reports, a DM, or a ledger that cannot record"
+        },
+        {
+          "name": "a target that spells the channel differently is recorded under that spelling too, so it is held only once"
+        },
+        {
+          "name": "unread messages and an unseen card come in one hold, card first"
+        },
+        {
+          "name": "a card that only reached JSON output is recorded, so a JSON-mode send is held once, not forever"
+        }
+      ]
+    },
+    {
       "file": "src/commands/message/senderElision.test.ts",
       "count": 8,
       "cases": [
@@ -3041,7 +3215,7 @@
     },
     {
       "file": "src/commands/registryPin/registryPin.test.ts",
-      "count": 19,
+      "count": 20,
       "cases": [
         {
           "name": "message read"
@@ -3099,6 +3273,9 @@
         },
         {
           "name": "server error responses"
+        },
+        {
+          "name": "RaftBench service refusal uses the existing delivery response without INVALID_RESPONSE"
         }
       ]
     },
@@ -3839,8 +4016,11 @@
     },
     {
       "file": "src/core/apiFailure.test.ts",
-      "count": 7,
+      "count": 8,
       "cases": [
+        {
+          "name": "every proxy failure class starts with what the agent itself can do, then the diagnosis"
+        },
         {
           "name": "upstream_http_response: next action sends the reader to the server side, not the proxy transport log"
         },
@@ -3961,6 +4141,30 @@
       ]
     },
     {
+      "file": "src/httpTransport.test.ts",
+      "count": 6,
+      "cases": [
+        {
+          "name": "sends method, headers and JSON body; resolves status, headers and text"
+        },
+        {
+          "name": "non-2xx is a response, not an error"
+        },
+        {
+          "name": "decodes a gzip-encoded body"
+        },
+        {
+          "name": "a body cut off mid-stream rejects text(), like a fetch body-read failure"
+        },
+        {
+          "name": "a refused connection rejects with TypeError('fetch failed') carrying the socket error"
+        },
+        {
+          "name": "an aborted signal rejects with the signal's reason"
+        }
+      ]
+    },
+    {
       "file": "src/parserOutput.test.ts",
       "count": 10,
       "cases": [
@@ -4056,6 +4260,24 @@
         },
         {
           "name": "bootstrap reports a main-module load failure and exits nonzero"
+        }
+      ]
+    },
+    {
+      "file": "src/sharedImports.test.ts",
+      "count": 4,
+      "cases": [
+        {
+          "name": "CLI source imports shared values through agentCliSurface, not the shared root index"
+        },
+        {
+          "name": "agentCliSurface does not load the shared root index"
+        },
+        {
+          "name": "the root-index guard ignores type-only imports and catches value imports"
+        },
+        {
+          "name": "the surface walk follows shared imported by its own package name"
         }
       ]
     },

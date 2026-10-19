@@ -4,13 +4,14 @@ import { createHash, createHmac, randomUUID } from "node:crypto";
 import sharp from "sharp";
 import { runNamedCase } from "../test/runNamedCase";
 
-import { and, desc, eq, gt, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, sql } from "drizzle-orm";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 
 import { getDb } from "../db/index";
 import {
   agents,
   channelAgents,
+  channelHumans,
   channels,
   externalActorProjections,
   externalAddressabilityProjections,
@@ -45,12 +46,17 @@ import { createSlackBridgeEnvCredentialCipher } from "./slackBridgeEnvSecrets";
 import { SLACK_BRIDGE_CORE_BOT_SCOPES } from "./slackBridgeProductionAppContract";
 import { processExternalInboundEventOnce } from "./externalInboundWorkerService";
 import { slackBridgeInstallGrantHash } from "./slackBridgeInstallGrantService";
-import { createSlackBridgeProviderRuntime } from "./slackBridgeProviderRuntime";
+import {
+  createSlackBridgeProviderRuntime,
+  slackUsergroupNamingConflict,
+} from "./slackBridgeProviderRuntime";
+import { slackHumanHandleCandidates } from "./slackMentionTokens";
 import { createSlackInboundAttachmentAdapter } from "./slackInboundAttachmentAdapter";
 import { createSlackOutboundAttachmentAdapter } from "./slackOutboundAttachmentAdapter";
 import { lookupSlackProviderConversation } from "./slackProviderAdapter";
 import {
   listSlackBridgeAgentMentionCandidates,
+  listSlackBridgeMentionCandidates,
   reconcileSlackBridgeOAuthIdentityAppType,
   refreshSlackPublicConversationAuthority,
   slackBridgeProvisioningManifestHash,
@@ -226,6 +232,11 @@ test("true Server production composition makes all seven provisioning endpoints 
   let providerGrantedScopes = [...SLACK_BRIDGE_REQUIRED_BOT_SCOPES];
   let providerUsergroupListCalls = 0;
   let providerUsergroupsFail = false;
+  const providerUsergroupCreateAttempts: string[] = [];
+  const providerUsergroupUpdateAttempts: string[] = [];
+  const mentionReconcileClaims: string[] = [];
+  let denyMentionReconcileClaim = false;
+  const providerUsergroupCreateRefusals = new Map<string, string>();
   const providerUsergroups: Array<{
     id: string;
     name: string;
@@ -438,6 +449,14 @@ test("true Server production composition makes all seven provisioning endpoints 
           handle: string;
           description: string;
         };
+        providerUsergroupCreateAttempts.push(request.handle);
+        const refusal = providerUsergroupCreateRefusals.get(request.handle);
+        if (refusal) {
+          return new Response(JSON.stringify({ ok: false, error: refusal }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
         const group = {
           id: `SPRODUCTION${providerUsergroups.length + 1}`,
           ...request,
@@ -456,8 +475,18 @@ test("true Server production composition makes all seven provisioning endpoints 
           handle: string;
           description: string;
         };
+        providerUsergroupUpdateAttempts.push(request.handle);
         const group = providerUsergroups.find((candidate) => candidate.id === request.usergroup);
         if (!group) return new Response(JSON.stringify({ ok: false, error: "usergroup_not_found" }));
+        const refusal = request.handle === group.handle
+          ? undefined
+          : providerUsergroupCreateRefusals.get(request.handle);
+        if (refusal) {
+          return new Response(JSON.stringify({ ok: false, error: refusal }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
         Object.assign(group, {
           name: request.name,
           handle: request.handle,
@@ -532,6 +561,10 @@ test("true Server production composition makes all seven provisioning endpoints 
       runtime = await createSlackBridgeServerRuntimeFromEnv(PRODUCTION_ENV, {
         db: getDb(),
         fetch: providerFetch,
+        async claimAgentMentionReconcile(serverId, installId) {
+          mentionReconcileClaims.push(`${serverId}:${installId}`);
+          return denyMentionReconcileClaim ? null : { held: async () => true, end: () => {} };
+        },
       });
       assert.ok(runtime, "production runtime must start from complete environment authority");
       return runtime;
@@ -1115,6 +1148,15 @@ test("true Server production composition makes all seven provisioning endpoints 
     const [degradedBinding] = await getDb().select().from(externalChannelBindings)
       .where(eq(externalChannelBindings.id, binding.id));
     assert.equal(degradedBinding?.state, "active", "usergroup sync failure must not pause binding");
+    const [degradedInstall] = await getDb().select().from(externalAppInstalls)
+      .where(eq(externalAppInstalls.id, install.id));
+    assert.deepEqual(degradedInstall?.agentMentionSync && {
+      state: degradedInstall.agentMentionSync.state,
+      slackError: degradedInstall.agentMentionSync.slackError,
+    }, {
+      state: "degraded",
+      slackError: "paid_teams_only",
+    }, "deterministic usergroup failure must persist Slack's error for the settings hint");
     providerUsergroupsFail = false;
 
     await getDb().delete(externalAppInstallGrantReceipts)
@@ -1193,6 +1235,7 @@ test("true Server production composition makes all seven provisioning endpoints 
       credentialRevision: install.credentialRevision,
       now: new Date(),
     };
+    let exhaustedHumanId: string | null = null;
     try {
       await getDb().update(agents).set({
         name: "production-agent-renamed",
@@ -1208,6 +1251,16 @@ test("true Server production composition makes all seven provisioning endpoints 
         server.id,
         activeBindings,
       );
+      // A holder whose cross-replica claim lapsed sends no further Slack
+      // write and reports `unverified` (the persisted state stays as is).
+      providerUsergroupCreateAttempts.length = 0;
+      providerUsergroupUpdateAttempts.length = 0;
+      assert.equal((await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, candidates: renamedCandidates, isClaimHeld: async () => false },
+      )).kind, "unverified");
+      assert.deepEqual([...providerUsergroupCreateAttempts, ...providerUsergroupUpdateAttempts], []);
+      assert.equal(providerUsergroups[0]?.handle, "production-agent", "a lapsed holder renamed nothing");
       assert.equal((await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
         mentionAuthority,
         { serverId: server.id, candidates: renamedCandidates },
@@ -1216,7 +1269,7 @@ test("true Server production composition makes all seven provisioning endpoints 
       // Slack autocomplete shows the usergroup *name* workspace-wide; it must
       // carry the Raft server name so agents from other servers sharing the
       // workspace stay distinguishable. The handle stays the bare agent name.
-      assert.equal(providerUsergroups[0]?.name, "Production Agent Renamed · Slack Production Composition");
+      assert.equal(providerUsergroups[0]?.name, "Production Agent Renamed (agent) · Slack Production Composition");
 
       await getDb().delete(channelAgents).where(and(
         eq(channelAgents.channelId, raftChannel.id),
@@ -1247,12 +1300,270 @@ test("true Server production composition makes all seven provisioning endpoints 
         server.id,
         activeBindings,
       );
-      assert.equal((await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
-        mentionAuthority,
-        { serverId: server.id, candidates: restoredCandidates },
-      )).kind, "fact");
+      const restoredReconcile = await mentionProbe.provisioningProvider
+        .reconcileAgentMentionHandles!(
+          mentionAuthority,
+          { serverId: server.id, candidates: restoredCandidates },
+        );
+      assert.equal(restoredReconcile.kind, "fact");
+      if (restoredReconcile.kind === "fact") {
+        assert.equal(restoredReconcile.fact.handles.length, restoredCandidates.length);
+        assert.deepEqual(restoredReconcile.fact.failures, []);
+      }
       assert.equal(providerUsergroups[0]?.date_delete, 0);
       assert.equal(providerUsergroups[0]?.handle, "production-agent");
+
+      // An Agent group still carrying the pre-label name is renamed to the
+      // "(agent)" form on the next reconcile; the handle stays bare.
+      providerUsergroups[0]!.name = "Production Agent · Slack Production Composition";
+      // Raft humans in the paired channel get `raft-user:` groups alongside
+      // Agents; plain Slack groups are never touched.
+      providerUsergroups.push({
+        id: "SFOREIGNGROUP",
+        name: "Design Team",
+        handle: "design-team",
+        description: "ordinary Slack group",
+        date_delete: 0,
+      });
+      const [mentionHuman] = await getDb().insert(users).values({
+        email: `slack-composition-human-${randomUUID()}@raft.test`,
+        name: `production-human-${randomUUID().slice(0, 8)}`,
+        displayName: "Production Human",
+        passwordHash: "not-used",
+        emailVerified: true,
+      }).returning();
+      const [retiredHuman] = await getDb().insert(users).values({
+        email: `slack-composition-retired-${randomUUID()}@raft.test`,
+        name: `production-retired-${randomUUID().slice(0, 8)}`,
+        passwordHash: "not-used",
+        emailVerified: true,
+        retiredAt: new Date(),
+      }).returning();
+      await getDb().insert(channelHumans).values([
+        { channelId: raftChannel.id, userId: mentionHuman!.id },
+        { channelId: raftChannel.id, userId: retiredHuman!.id },
+      ]);
+      const humanMarker = `raft-user:${server.id}:${mentionHuman!.id}`;
+      const withHuman = await listSlackBridgeMentionCandidates(getDb(), server.id, activeBindings);
+      assert.deepEqual(withHuman.candidates.map((candidate) => candidate.agentId), [mentionAgent.id]);
+      assert.ok(withHuman.humanCandidates.some((candidate) => candidate.userId === mentionHuman!.id));
+      assert.ok(
+        withHuman.humanCandidates.every((candidate) => candidate.userId !== retiredHuman!.id),
+        "retired users are never mention candidates",
+      );
+      const humanReconcile = await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, ...withHuman },
+      );
+      assert.equal(humanReconcile.kind, "fact");
+      const humanGroup = providerUsergroups.find((group) => group.description === humanMarker);
+      assert.ok(humanGroup, "a paired-channel human gets a managed usergroup");
+      assert.equal(humanGroup.handle, mentionHuman!.name);
+      assert.equal(humanGroup.name, "Production Human · Slack Production Composition");
+      assert.equal(humanGroup.date_delete, 0);
+      assert.ok(humanReconcile.kind === "fact" && humanReconcile.fact.humanHandles?.some((handle) => (
+        handle.userId === mentionHuman!.id && handle.providerUsergroupId === humanGroup.id
+      )));
+      assert.equal(providerUsergroups[0]?.name, "Production Agent (agent) · Slack Production Composition");
+      assert.equal(providerUsergroups[0]?.handle, "production-agent");
+      assert.equal(providerUsergroups[0]?.date_delete, 0);
+
+      const resolvedHumanHandles = await runtime!.inboundWorkerDependencies
+        .resolveProviderAgentMentionHandles!({
+          eventId: "event-human-handle-resolution",
+          frozenAuthority: {
+            runtimeRevision: "runtime-human-handle-resolution",
+            provider: "slack",
+            environment: "test",
+            appRegistrationId: registration.id,
+            installId: install.id,
+            workspaceId: install.providerAuthorityId,
+            providerAuthorityId: install.providerAuthorityId,
+            providerConversationId: binding.providerConversationId,
+            bindingId: binding.id,
+            bindingEpoch: binding.bindingEpoch,
+            connectionEpoch: install.connectionEpoch,
+            raftChannelId: binding.channelId,
+            privacyClass: binding.privacyClass,
+          },
+          providerUsergroupIds: ["SPRODUCTION1", humanGroup.id, "SFOREIGNGROUP"],
+        });
+      assert.deepEqual(resolvedHumanHandles, [
+        { agentId: mentionAgent.id, providerUsergroupId: "SPRODUCTION1", handle: "production-agent" },
+        { userId: mentionHuman!.id, providerUsergroupId: humanGroup.id, handle: mentionHuman!.name },
+      ]);
+
+      // An Agent-only reconcile never disables human groups.
+      assert.equal((await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, candidates: withHuman.candidates },
+      )).kind, "fact");
+      assert.equal(humanGroup.date_delete, 0);
+
+      // The human leaving every paired channel disables only their group.
+      await getDb().delete(channelHumans).where(and(
+        eq(channelHumans.channelId, raftChannel.id),
+        eq(channelHumans.userId, mentionHuman!.id),
+      ));
+      const withoutHuman = await listSlackBridgeMentionCandidates(getDb(), server.id, activeBindings);
+      assert.ok(withoutHuman.humanCandidates.every((candidate) => candidate.userId !== mentionHuman!.id));
+      assert.equal((await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, ...withoutHuman },
+      )).kind, "fact");
+      assert.equal(humanGroup.date_delete, 1);
+      assert.equal(providerUsergroups[0]?.date_delete, 0, "the Agent group stays enabled");
+      const foreignGroup = providerUsergroups.find((group) => group.id === "SFOREIGNGROUP");
+      assert.deepEqual(foreignGroup, {
+        id: "SFOREIGNGROUP",
+        name: "Design Team",
+        handle: "design-team",
+        description: "ordinary Slack group",
+        date_delete: 0,
+      });
+
+      // Two replicas racing a create can leave a second group with the same
+      // exact marker. The reconcile keeps one deterministically (enabled,
+      // then lowest id) and disables the duplicate instead of failing every
+      // pass; a group that merely shares the name, without our marker, is
+      // never touched.
+      const agentGroup = providerUsergroups[0]!;
+      providerUsergroups.push({
+        id: "SZDUPLICATE",
+        name: "Production Agent duplicate",
+        handle: "production-agent-duplicate",
+        description: agentGroup.description,
+        date_delete: 0,
+      }, {
+        id: "SFOREIGNSAMENAME",
+        name: agentGroup.name,
+        handle: "someone-elses-group",
+        description: "ordinary Slack group",
+        date_delete: 0,
+      });
+      const healed = await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, ...withoutHuman },
+      );
+      assert.ok(healed.kind === "fact", `duplicate markers heal instead of failing: ${JSON.stringify(healed)}`);
+      assert.ok(healed.fact.handles.some((handle) => handle.providerUsergroupId === agentGroup.id));
+      assert.equal(agentGroup.date_delete, 0);
+      assert.equal(providerUsergroups.find((group) => group.id === "SZDUPLICATE")?.date_delete, 1);
+      assert.equal(providerUsergroups.find((group) => group.id === "SFOREIGNSAMENAME")?.date_delete, 0);
+      providerUsergroupUpdateAttempts.length = 0;
+      const healedAgain = await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, ...withoutHuman },
+      );
+      assert.ok(healedAgain.kind === "fact");
+      assert.deepEqual(healedAgain.fact.failures, []);
+      assert.deepEqual(providerUsergroupUpdateAttempts, [], "a healed duplicate needs no further write");
+      providerUsergroups.splice(providerUsergroups.findIndex((group) => group.id === "SZDUPLICATE"), 1);
+      providerUsergroups.splice(providerUsergroups.findIndex((group) => group.id === "SFOREIGNSAMENAME"), 1);
+
+      // Slack refusing a handle as taken (e.g. it equals a Slack username)
+      // moves that principal to its next handle candidate; a non-naming
+      // failure does not cycle candidates; exhausting every candidate is
+      // reported as a naming gap, not a failure.
+      assert.equal(slackUsergroupNamingConflict("name_already_exists"), "name");
+      assert.equal(slackUsergroupNamingConflict("handle_already_exists"), "handle");
+      assert.equal(slackUsergroupNamingConflict("invalid_name_specials"), "name");
+      assert.equal(slackUsergroupNamingConflict("ratelimited"), null);
+      assert.equal(slackUsergroupNamingConflict("missing_scope"), null);
+      const seedChannelHuman = async (prefix: string) => {
+        const [user] = await getDb().insert(users).values({
+          email: `slack-composition-${prefix}-${randomUUID()}@raft.test`,
+          name: `${prefix}-${randomUUID().slice(0, 8)}`,
+          passwordHash: "not-used",
+          emailVerified: true,
+        }).returning();
+        await getDb().insert(channelHumans).values({ channelId: raftChannel.id, userId: user!.id });
+        return user!;
+      };
+      const refusedHuman = await seedChannelHuman("production-refused");
+      const permissionHuman = await seedChannelHuman("production-permission");
+      const exhaustedHuman = await seedChannelHuman("production-exhausted");
+      const handleCandidatesOf = (user: { id: string; name: string }) => slackHumanHandleCandidates({
+        name: user.name,
+        serverSlug: server.slug,
+        userId: user.id,
+      });
+      const refusedCandidates = handleCandidatesOf(refusedHuman);
+      const permissionCandidates = handleCandidatesOf(permissionHuman);
+      const exhaustedCandidates = handleCandidatesOf(exhaustedHuman);
+      providerUsergroupCreateRefusals.set(refusedCandidates[0]!, "name_already_exists");
+      providerUsergroupCreateRefusals.set(permissionCandidates[0]!, "missing_scope");
+      for (const handle of exhaustedCandidates) {
+        providerUsergroupCreateRefusals.set(handle, "handle_already_exists");
+      }
+      providerUsergroupCreateAttempts.length = 0;
+      const withRefusals = await listSlackBridgeMentionCandidates(getDb(), server.id, activeBindings);
+      const refusalReconcile = await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, ...withRefusals },
+      );
+      assert.equal(refusalReconcile.kind, "fact");
+      assert.ok(refusalReconcile.kind === "fact");
+      const refusedGroup = providerUsergroups.find((group) => (
+        group.description === `raft-user:${server.id}:${refusedHuman.id}`
+      ));
+      assert.equal(refusedGroup?.handle, refusedCandidates[1], "refused bare handle falls back to the server-suffixed one");
+      assert.ok(refusalReconcile.fact.humanHandles?.some((handle) => handle.userId === refusedHuman.id));
+      assert.deepEqual(
+        providerUsergroupCreateAttempts.filter((handle) => permissionCandidates.includes(handle)),
+        [permissionCandidates[0]],
+        "a non-naming failure never cycles handle candidates",
+      );
+      assert.ok(providerUsergroups.every((group) => (
+        group.description !== `raft-user:${server.id}:${permissionHuman.id}`
+      )));
+      assert.deepEqual(
+        providerUsergroupCreateAttempts.filter((handle) => exhaustedCandidates.includes(handle)),
+        exhaustedCandidates,
+      );
+      // Failures cover both principal kinds: exhausting every candidate is
+      // reported as `name_taken` (the settings banner's collision hint).
+      assert.deepEqual(
+        [...refusalReconcile.fact.failures].sort((left, right) => (
+          String(left.userId).localeCompare(String(right.userId))
+        )),
+        [
+          { userId: exhaustedHuman.id, slackError: "name_taken", transient: false },
+          { userId: permissionHuman.id, slackError: "missing_scope", transient: false },
+        ].sort((left, right) => left.userId.localeCompare(right.userId)),
+      );
+      // Convergence: with Slack still refusing the bare handle (a Slack
+      // username, invisible to usergroups.list), the next pass keeps the
+      // fallback the refused human already holds — no write, no failure —
+      // instead of re-sending the refused write on every tick.
+      providerUsergroupCreateAttempts.length = 0;
+      providerUsergroupUpdateAttempts.length = 0;
+      const settledReconcile = await mentionProbe.provisioningProvider.reconcileAgentMentionHandles!(
+        mentionAuthority,
+        { serverId: server.id, ...withRefusals },
+      );
+      assert.ok(settledReconcile.kind === "fact");
+      assert.equal(refusedGroup?.handle, refusedCandidates[1]);
+      assert.ok(settledReconcile.fact.humanHandles?.some((handle) => (
+        handle.userId === refusedHuman.id && handle.handle === refusedCandidates[1]
+      )));
+      assert.deepEqual(
+        [...providerUsergroupCreateAttempts, ...providerUsergroupUpdateAttempts]
+          .filter((handle) => refusedCandidates.includes(handle)),
+        [],
+        "a settled fallback handle sends no further write",
+      );
+      assert.ok(settledReconcile.fact.failures.every((failure) => failure.userId !== refusedHuman.id));
+      // Only the exhausted human stays (with its refusals) for the lifecycle
+      // persistence check below.
+      for (const handle of [...providerUsergroupCreateRefusals.keys()]) {
+        if (!exhaustedCandidates.includes(handle)) providerUsergroupCreateRefusals.delete(handle);
+      }
+      await getDb().delete(channelHumans).where(and(
+        eq(channelHumans.channelId, raftChannel.id),
+        inArray(channelHumans.userId, [refusedHuman.id, permissionHuman.id]),
+      ));
+      exhaustedHumanId = exhaustedHuman.id;
     } finally {
       await mentionProbe.stop();
     }
@@ -1438,16 +1749,40 @@ test("true Server production composition makes all seven provisioning endpoints 
     assert.equal(retryInbound.status, 200, await retryInbound.clone().text());
     const mentionReconcileDeadline = Date.now() + 2_000;
     while (
-      String(providerUsergroups[0]?.name) !== "Production Agent Lifecycle · Slack Production Composition"
+      String(providerUsergroups[0]?.name) !== "Production Agent Lifecycle (agent) · Slack Production Composition"
       && Date.now() < mentionReconcileDeadline
     ) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     assert.equal(
       String(providerUsergroups[0]?.name),
-      "Production Agent Lifecycle · Slack Production Composition",
+      "Production Agent Lifecycle (agent) · Slack Production Composition",
       "an admitted provider event must trigger current Agent handle reconciliation",
     );
+    // Mention sync (preflight/enable and the lifecycle tick share
+    // slackBridgeMentionSyncState) persists a degraded state for a
+    // paired-channel human whose every handle candidate Slack refused:
+    // `name_taken`, with Agents and humans counted together.
+    const exhaustedSyncDeadline = Date.now() + 2_000;
+    let exhaustedSync: typeof externalAppInstalls.$inferSelect["agentMentionSync"] = null;
+    while (Date.now() < exhaustedSyncDeadline) {
+      [{ agentMentionSync: exhaustedSync }] = await getDb()
+        .select({ agentMentionSync: externalAppInstalls.agentMentionSync })
+        .from(externalAppInstalls)
+        .where(eq(externalAppInstalls.id, install.id));
+      if (exhaustedSync?.slackError === "name_taken") break;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.ok(exhaustedHumanId);
+    assert.equal(exhaustedSync?.state, "degraded");
+    assert.equal(exhaustedSync?.slackError, "name_taken");
+    assert.equal(exhaustedSync!.actual, exhaustedSync!.expected - 1);
+    assert.ok(exhaustedSync!.expected >= 2, "expected counts the Agent and the human");
+    providerUsergroupCreateRefusals.clear();
+    await getDb().delete(channelHumans).where(and(
+      eq(channelHumans.channelId, raftChannel.id),
+      eq(channelHumans.userId, exhaustedHumanId),
+    ));
     const inboundRows = await getDb().select().from(externalInboundEvents)
       .where(eq(externalInboundEvents.providerEventId, providerEventId));
     assert.equal(
@@ -1873,6 +2208,21 @@ test("true Server production composition makes all seven provisioning endpoints 
       (await waitForInstallGrantReceipt(install.id)).length,
       1,
       `the production lifecycle must repair active receiptless installs from a fresh provider observation: ${JSON.stringify(reconcile)}`,
+    );
+    // Every replica runs this lifecycle; only the one holding the install's
+    // claim talks to Slack, so replicas do not repeat the same usergroup
+    // writes at the same moment.
+    assert.ok(mentionReconcileClaims.includes(`${server.id}:${install.id}`));
+    const claimsBeforeDenied = mentionReconcileClaims.length;
+    const usergroupListsBeforeDenied = providerUsergroupListCalls;
+    denyMentionReconcileClaim = true;
+    await runtime?.requestLifecycleReconcile?.();
+    denyMentionReconcileClaim = false;
+    assert.ok(mentionReconcileClaims.length > claimsBeforeDenied, "the reconcile asked for the claim");
+    assert.equal(
+      providerUsergroupListCalls,
+      usergroupListsBeforeDenied,
+      "a replica without the install claim sends no Slack usergroup call",
     );
     const lifecycleActors = await getDb().select().from(externalActorProjections).where(and(
       eq(externalActorProjections.id, actorsAfterPreflight[0]!.id),

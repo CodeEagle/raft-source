@@ -31,8 +31,23 @@ test("AvatarSlot uses RUI identity frames and real images fill the themed conten
   // test pins both sides so neither rule can silently drop again).
   assert.match(
     avatarSlotSource,
-    /<AgentAvatar avatarUrl=\{agentAvatarUrl \?\? null\} size=\{spec\.agentPixel\} className="!h-full !w-full" \/>/,
-    "agent avatars should fill the full frame edge-to-edge so role bg never leaks",
+    /<AgentAvatar avatarUrl=\{agentAvatarUrl \?\? null\} \/>/,
+    "AvatarSlot mounts the agent leaf with no size or fill override of its own",
+  );
+  assert.match(
+    pixelAvatarSource,
+    /className=\{`size-full shrink-0 \$\{className\}`\.trim\(\)\}/,
+    "pixel agent avatars fill the full frame edge-to-edge so role bg never leaks",
+  );
+  assert.match(
+    pixelAvatarSource,
+    /className="size-full shrink-0 object-cover"/,
+    "uploaded agent avatars fill the full frame edge-to-edge so role bg never leaks",
+  );
+  assert.doesNotMatch(
+    pixelAvatarSource,
+    /width: size|height: size/,
+    "agent avatar leaves set no fixed inline box for callers to fight",
   );
   assert.match(
     gravatarAvatarSource,
@@ -50,10 +65,15 @@ test("the message row avatar opts out of the forced frame so the rui recipe owns
   // The message row used the panel-header context, whose `!size-9 !border-2`
   // (!important) beat rui's own `messageItem.avatarSlot` recipe — the img
   // stayed 32 in a 36 frame, and narrow-elegant overflowed 4px because
-  // `!size-9` also beat the `max-md` 32-slot/24-avatar tier. The row now uses
-  // a context with no forced size/frame: recipe controls both breakpoints.
-  assert.match(avatarSlotSource, /"message-row": \{ size: "md", className: "" \}/);
-  assert.match(avatarSlotSource, /\| "message-row"/);
+  // `!size-9` also beat the `max-md` 32-slot/24-avatar tier. No context forces
+  // a box now: each maps to a raft-ui size and the recipes own the rest.
+  assert.match(avatarSlotSource, /"message-row": "md",/);
+  assert.doesNotMatch(
+    avatarSlotSource,
+    /(?:^|[\s"'`])!(?:size|h|w|border|shadow)-/m,
+    "AvatarSlot forces no !important box, edge or shadow onto raft-ui's Avatar",
+  );
+  assert.match(avatarSlotSource, /export type AvatarContext = keyof typeof CONTEXT_SIZE;/);
   assert.equal(
     (messageItemSource.match(/context="message-row"/g) ?? []).length,
     2,
@@ -76,19 +96,22 @@ test("the message list leaves the avatar's left edge to the rui recipe", () => {
   assert.doesNotMatch(chatPanelSource, /\[data-theme=brutal\]_&\]:mx-/, "no brutal margin lever on message rows");
 });
 
-test("the hover toolbar's right edge rides the header action line", () => {
-  // Measured wide/narrow: the toolbar sat 22/28 px left of the header's
-  // settings button. The levers put its right edge on the same line.
-  assert.match(
-    hoverToolbarSource,
-    /className=\{`right-2 max-md:right-0\.5 max-md:\[\[data-theme=brutal\]_&\]:-right-1\.5 pointer-events-auto /,
-  );
+test("the hover toolbar's placement belongs to the rui recipe", () => {
+  // The Raft DS toolbar rides the row's top edge at the recipe's own inset
+  // (rf-msgbar: -18px / right 12). The per-theme right-edge levers slock used
+  // to carry fought that and must not come back; the call site keeps only the
+  // hit-testing. The open picker shows the toolbar through the row's own
+  // has-data-popup-open rule, so no opacity override fights the recipe.
+  assert.match(hoverToolbarSource, /className="pointer-events-auto"/);
+  assert.doesNotMatch(hoverToolbarSource, /opacity-100/);
+  assert.doesNotMatch(hoverToolbarSource, /(?:^|[\s`"])(?:max-md:)?-?right-/);
+  assert.doesNotMatch(hoverToolbarSource, /data-theme=brutal/);
 });
 
 test("known avatar surfaces do not reintroduce background-filled frames", () => {
   assert.doesNotMatch(
     settingsPanelSource,
-    /bg-brutal-lavender[\s\S]{0,160}<GravatarAvatar|<AgentAvatar avatarUrl="pixel:random:cindy-preview"/,
+    /bg-palette-lavender[\s\S]{0,160}<GravatarAvatar|<AgentAvatar avatarUrl="pixel:random:cindy-preview"/,
     "Settings account and Appearance preview avatars must not use hand-rolled background frames",
   );
   assert.match(
@@ -103,7 +126,7 @@ test("known avatar surfaces do not reintroduce background-filled frames", () => 
   );
   assert.match(
     serverSwitcherSource,
-    /<AvatarSlot context="surface-list" type="server" serverAvatarUrl=\{server\.avatarUrl\} serverInitial=\{initial\} \/>/,
+    /<AvatarSlot context="list-row" type="server" serverAvatarUrl=\{server\.avatarUrl\} serverInitial=\{initial\} \/>/,
     "Server switcher rows should route server avatars through the shared AvatarSlot list primitive",
   );
   assert.doesNotMatch(
@@ -113,7 +136,7 @@ test("known avatar surfaces do not reintroduce background-filled frames", () => 
   );
   assert.doesNotMatch(
     messageInputSource,
-    /!bg-brutal-(cyan|lavender)/,
+    /!bg-(?:palette|brutal)-(cyan|lavender)/,
     "muted mention avatars should not add role-colored background fills",
   );
   assert.doesNotMatch(
@@ -123,12 +146,12 @@ test("known avatar surfaces do not reintroduce background-filled frames", () => 
   );
   assert.doesNotMatch(
     searchPageSource,
-    /result\.type === "agentDm"[\s\S]*?bg-brutal-cyan[\s\S]*?<Bot/,
+    /result\.type === "agentDm"[\s\S]*?bg-palette-cyan[\s\S]*?<Bot/,
     "search agent-DM fallbacks should use AvatarSlot instead of a cyan icon frame",
   );
   assert.doesNotMatch(
     paletteAuditSource,
-    /avatar[\s\S]{0,200}bg-brutal-(cyan|lavender)|bg-brutal-(cyan|lavender)[\s\S]{0,200}avatar/,
+    /avatar[\s\S]{0,200}bg-(?:palette|brutal)-(cyan|lavender)|bg-(?:palette|brutal)-(cyan|lavender)[\s\S]{0,200}avatar/,
     "palette avatar examples must document the no-fill AvatarSlot shape",
   );
 });
@@ -158,8 +181,10 @@ test("AvatarSlot removes the global badge-size override and lets raft-ui own pla
   // Named decision: #proj-uiux task #817 removes the global badge size map.
   assert.match(
     avatarSlotSource,
-    /<AvatarBadge render=\{<span \/>\} className="flex rounded-full \[&>span\]:h-full \[&>span\]:w-full">\s*\{badge\}\s*<\/AvatarBadge>/,
-    "AvatarBadge must own a native positioning wrapper even when a custom badge drops injected props",
+    // Raft Design System: the status light on an avatar is a square pixel, so
+    // its wrapper takes the pixel radius (2px), not a circle.
+    /<AvatarBadge render=\{<span \/>\} offset=\{badgeOffset\} className="flex rounded-\[2px\] \[&>span\]:h-full \[&>span\]:w-full">\s*\{badge\}\s*<\/AvatarBadge>/,
+    "AvatarBadge must own a native positioning wrapper even when a custom badge drops injected props; a caller's corner goes through raft-ui's own offset, never a local class",
   );
   assert.doesNotMatch(
     avatarSlotSource,
@@ -212,4 +237,60 @@ test("Sidebar list status dots use AvatarBadge-owned placement without changing 
     /data-channel-member-avatar-badge-shell="true" className="absolute bottom-0 right-0 block size-0"/,
     "AvatarBadge must own corner geometry instead of a nested zero-size wrapper",
   );
+});
+
+test("list contexts are named for where they are used and sit on the DS avatar steps", () => {
+  // "list-row" = rows in a list (members, profile/computer lists, the
+  // workspace switcher): the DS ListRow avatar, 35 (raft-ui md). "compact-row"
+  // = dense rows (search results, forward targets): the DS small avatar, 27
+  // (sm). The former first-caller names ("surface-list", "members-row") are
+  // gone. Profiles are the DS xl hero, 99; Settings' own row is lg, 51.
+  assert.match(avatarSlotSource, /"list-row": "md",/);
+  assert.match(avatarSlotSource, /"compact-row": "sm",/);
+  assert.match(avatarSlotSource, /"profile-hero": "xl",/);
+  assert.match(avatarSlotSource, /"profile-tile": "lg",/);
+  assert.match(avatarSlotSource, /"sidebar-list": "2xs",/);
+  assert.match(avatarSlotSource, /"face-stack": "xs",/);
+  assert.doesNotMatch(avatarSlotSource, /surface-list|members-row/);
+  for (const caller of [searchPageSource, sidebarSource, channelMemberListSource, serverSwitcherSource]) {
+    assert.doesNotMatch(caller, /context="(?:surface-list|members-row)"/);
+  }
+});
+
+test("profile heroes take the DS xl hero size from the context, not a forced box or shadow", () => {
+  // DS Avatar: agent and human profiles and the onboarding hero are xl 99,
+  // whose recipe carries the hard shadow and, in dark, the die-cut ring. A
+  // forced size or `shadow-sticker` (which tailwind-merge swaps for the
+  // recipe's shadow, dropping the ring) must not come back.
+  const heroSources = {
+    agentDetail: agentDetailSource,
+    humanDetail: readFileSync(resolve(repoRoot, "src/components/member/HumanDetailPanel.tsx"), "utf8"),
+    externalDetail: readFileSync(resolve(repoRoot, "src/components/profile/ExternalIdentityDetailPanel.tsx"), "utf8"),
+    handoff: readFileSync(resolve(repoRoot, "src/components/onboarding/ServerSetupHandoffStep.tsx"), "utf8"),
+    createAgent: readFileSync(resolve(repoRoot, "src/components/agent/CreateAgentDialog.tsx"), "utf8"),
+  };
+  for (const [name, source] of Object.entries(heroSources)) {
+    assert.match(source, /context="profile-hero"/, `${name} uses the hero context`);
+    assert.doesNotMatch(source, /context="profile-tile"/, `${name} has no off-scale profile tile`);
+    assert.doesNotMatch(source, /<AvatarSlot[^>]*(?:!size-|shadow-sticker)/, `${name} adds no size or shadow to the hero`);
+  }
+});
+
+test("every avatar-edit veil is the shared AvatarEditVeil, shown on keyboard focus too", () => {
+  const veilSource = readFileSync(resolve(repoRoot, "src/components/ui/AvatarEditVeil.tsx"), "utf8");
+  assert.match(veilSource, /group-hover\/avatar-edit:opacity-100/);
+  assert.match(veilSource, /group-focus-visible\/avatar-edit:opacity-100/);
+  assert.match(veilSource, /peer-focus-visible\/avatar-edit:opacity-100/, "a file input before it in a label trigger shows it too");
+  assert.doesNotMatch(veilSource, /group-has-/, "no ancestor :has() styling a descendant");
+  assert.match(veilSource, /bg-layer-backdrop/);
+  const humanDetailSource = readFileSync(resolve(repoRoot, "src/components/member/HumanDetailPanel.tsx"), "utf8");
+  assert.match(agentDetailSource, /<AvatarEditVeil icon=\{Pencil\} \/>/);
+  assert.match(agentDetailSource, /const PROFILE_AVATAR_BUTTON_CLASS = "group\/avatar-edit relative /);
+  assert.match(humanDetailSource, /className="group\/avatar-edit relative [^"]*"[\s\S]*?<AvatarEditVeil busy=\{avatarSaving\} \/>/);
+  const settingsSource = readFileSync(resolve(repoRoot, "src/components/settings/SettingsPanel.tsx"), "utf8");
+  // Both Settings uploaders: the focusable file input comes first as the veil's peer.
+  assert.equal(settingsSource.match(/className="peer\/avatar-edit sr-only"[\s\S]*?<AvatarEditVeil busy=\{avatarSaving\} \/>/g)?.length, 2);
+  for (const source of [agentDetailSource, humanDetailSource, settingsSource]) {
+    assert.doesNotMatch(source, /absolute inset-0 flex items-center justify-center rounded-sticker bg-layer-/, "no hand-built veil");
+  }
 });

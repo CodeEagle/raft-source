@@ -1,12 +1,12 @@
 import { useIntl } from "react-intl";
-import { InlineCode } from "raft-ui";
+import { InlineCode } from "@botiverse/raft-ui";
 import type { MigrationErrorPresentation } from "./errors";
 
 export function MigrationErrorContent({ presentation }: { presentation: MigrationErrorPresentation }) {
   const { formatMessage } = useIntl();
   return (
     <div className="space-y-1.5">
-      {presentation.placement ? <div className="font-bold">{presentation.placement}</div> : null}
+      {presentation.placement ? <div className="font-semibold">{presentation.placement}</div> : null}
       <div>{presentation.message}</div>
       {presentation.issues?.length ? (
         <ul className="list-disc space-y-1 pl-5">
@@ -14,9 +14,9 @@ export function MigrationErrorContent({ presentation }: { presentation: Migratio
         </ul>
       ) : null}
       {presentation.technicalCode || presentation.diagnosticRef ? (
-        <details className="text-xs text-foreground-muted theme-brutal:text-black/60">
-          <summary className="font-bold">{formatMessage({ id: "agent.detail.technicalDetails" })}</summary>
-          <div className="space-y-0.5">
+        <details className="text-caption text-foreground-muted">
+          <summary className="font-semibold">{formatMessage({ id: "agent.detail.technicalDetails" })}</summary>
+          <div className="mt-1 space-y-0.5">
             {presentation.technicalCode ? (
               <div>
                 {formatMessage({ id: "agent.detail.technicalErrorCode" })}: {" "}

@@ -1,6 +1,11 @@
+import { getAppInstallationSetup } from "./appSetupService";
+import { normalizeAppSetupUrl, normalizeAppSetupDescription, AppSetupValidationError } from "@botiverse/raft-shared";
 import type { DatabaseExecutor } from "../db/index";
+import { AgentRuntimeProviderError } from "./agentRuntimeProviderService";
+import { assertProviderProvisioningAvailable } from "./agentRuntimeProvisionService";
+import { getHostedRuntimeModels, isHostedModelPickerEnabled } from "./hostedAgentModelService";
 import { jointChannels, jointChannelServers } from "../db/schema";
-import { isActionCardReadOnlyInServer } from "@botiverse/raft-shared";
+import { HOSTED_DEFAULT_MODEL, isActionCardReadOnlyInServer } from "@botiverse/raft-shared";
 import { publishChannelUpdate } from "./channelRealtimeEvents";
 import { socketUserServerRoom } from "../socket/platformScope";
 // Operation cards (B-mode approval replacement).
@@ -152,6 +157,7 @@ async function canonicalizeMarketplaceAppCardDisplay(
     .select({
       clientKey: oauthClients.clientId,
       clientName: oauthClients.name,
+      setupUrl: oauthClients.setupUrl, setupDescription: oauthClients.setupDescription, setupRevision: oauthClients.setupRevision,
     })
     .from(oauthClients)
     .where(and(
@@ -175,6 +181,9 @@ async function canonicalizeMarketplaceAppCardDisplay(
   return {
     ...action,
     clientName: binding.clientName,
+    setupUrl: client.setupUrl ?? undefined,
+    setupDescription: client.setupDescription ? renderThirdPartyInertText({ field: "description", value: client.setupDescription }) : undefined,
+    setupRevision: client.setupRevision,
     draftHint: `${action.agentName} requested ${binding.clientName}, which is public in the Raft Marketplace but is not installed on this Server. Installing is a Server owner/admin action; the Agent cannot install it automatically.`,
   };
 }
@@ -480,11 +489,13 @@ async function resolveActionHandles(
       const homepageUrl = validateIntegrationUrl(action.homepageUrl, "homepageUrl", action.unsafeDemoUrlOverride);
       const returnUrl = validateIntegrationUrl(action.returnUrl, "returnUrl", action.unsafeDemoUrlOverride);
       const agentManifestUrl = validateIntegrationUrl(action.agentManifestUrl, "agentManifestUrl", action.unsafeDemoUrlOverride);
+      const { setupUrl, setupDescription } = validateActionAppSetup(action);
       return {
         ...action,
         ...(homepageUrl ? { homepageUrl } : {}),
         returnUrl: returnUrl ?? action.returnUrl,
         ...(agentManifestUrl ? { agentManifestUrl } : {}),
+        ...(setupUrl ? { setupUrl, setupDescription: setupDescription ?? undefined } : {}),
       };
     }
     case "integration:update_app_registration": {
@@ -512,6 +523,37 @@ async function resolveActionHandles(
   }
 }
 
+/**
+ * `agent:create` with `hosting: "antiproton"`: refuse at prepare, not at the
+ * human's confirm, when hosting is off or unconfigured for the server, and
+ * when a preset model is not offered (the refusal lists the offered ids) or
+ * the model is admin-locked. If the provider's model list cannot be read
+ * right now, the card is still prepared: the human picks in the dialog and
+ * create checks again.
+ */
+async function assertHostedAgentCardPreparable(serverId: string, action: ActionCardAction): Promise<void> {
+  if (action.type !== "agent:create" || action.hosting !== "antiproton") return;
+  try {
+    await assertProviderProvisioningAvailable(serverId, "antiproton");
+  } catch (error) {
+    if (!(error instanceof AgentRuntimeProviderError)) throw error;
+    throw new ActionCardError(409, "HOSTED_RUNTIME_UNAVAILABLE", `${error.message}. Prepare the card without hosting so the human picks a computer.`);
+  }
+  if (action.model === undefined) return;
+  if (!await isHostedModelPickerEnabled(serverId) && action.model !== HOSTED_DEFAULT_MODEL) {
+    throw new ActionCardError(403, "HOSTED_MODEL_PICKER_DISABLED", "This server does not pick a cloud agent model; leave model out.");
+  }
+  const result = await getHostedRuntimeModels(serverId, "antiproton");
+  if (result.kind !== "ok") return;
+  if (result.view.locked) {
+    throw new ActionCardError(409, "HOSTED_MODEL_LOCKED", "An administrator sets the cloud agent model on this server; leave model out.");
+  }
+  if (!result.view.models.some((option) => option.id === action.model)) {
+    const offered = result.view.models.map((option) => option.id).join(", ");
+    throw new ActionCardError(422, "HOSTED_MODEL_NOT_OFFERED", `The cloud runtime does not offer model "${action.model}". Offered: ${offered || "none"}. Leave model out for the default.`);
+  }
+}
+
 export async function prepareActionCard(args: PrepareActionCardArgs): Promise<{
   messageId: string;
   metadata: ActionCardMetadata;
@@ -531,6 +573,7 @@ export async function prepareActionCard(args: PrepareActionCardArgs): Promise<{
   if (crossFieldError) {
     throw new ActionCardError(400, "INVALID_PAYLOAD", crossFieldError);
   }
+  await assertHostedAgentCardPreparable(args.serverId, parsed.data as ActionCardAction);
   const resolvedAction = await resolveActionHandles(
     args.serverId,
     args.requesterAgentId,
@@ -1830,6 +1873,18 @@ export function validateIntegrationUrl(raw: string | null | undefined, field: st
   return parsed.toString();
 }
 
+function validateActionAppSetup(input: { setupUrl?: string; setupDescription?: string; unsafeDemoUrlOverride?: boolean }) {
+  try {
+    return {
+      setupUrl: normalizeAppSetupUrl(validateIntegrationUrl(input.setupUrl, "setupUrl", input.unsafeDemoUrlOverride)),
+      setupDescription: normalizeAppSetupDescription(input.setupDescription),
+    };
+  } catch (error) {
+    if (error instanceof AppSetupValidationError) throw new ActionCardError(400, "INVALID_APP_SETUP", error.message);
+    throw error;
+  }
+}
+
 async function performAction(
   serverId: string,
   userId: string,
@@ -1850,6 +1905,7 @@ async function performAction(
         clientKey: oauthClients.clientId,
         clientName: oauthClients.name,
         clientAllowedScopes: oauthClients.allowedScopes,
+        setupUrl: oauthClients.setupUrl, setupRevision: oauthClients.setupRevision,
         agentId: agents.id,
         agentName: agents.name,
         agentDisplayName: agents.displayName,
@@ -1869,9 +1925,12 @@ async function performAction(
         eq(oauthClients.humanMarketplaceVisible, true),
         sql`${oauthClients.publishStatus} in ('published', 'unpublish_requested')`,
       ))
-      .limit(1);
+      .limit(1).for("update", { of: oauthClients });
     if (!binding) {
       throw new ActionCardError(409, "MARKETPLACE_APP_CHANGED", "Marketplace app is no longer installable with this card; prepare a fresh login request");
+    }
+    if (action.setupRevision !== undefined && binding.setupRevision !== action.setupRevision) {
+      throw new ActionCardError(409, "APP_SETUP_CHANGED", "App setup requirements changed; prepare a fresh installation card");
     }
     const currentNameBinding = bindMarketplaceAppName(binding.clientName);
     if (
@@ -1899,6 +1958,7 @@ async function performAction(
     if (!installed) {
       throw new ActionCardError(409, "MARKETPLACE_APP_CHANGED", "Marketplace app is no longer installable with this card; prepare a fresh login request");
     }
+    const setup = binding.setupUrl ? await getAppInstallationSetup({ clientId: binding.clientId, serverId }) : null;
     return {
       result: {
         kind: "marketplace-app-installation",
@@ -1909,6 +1969,7 @@ async function performAction(
         agentId: binding.agentId,
         agentName: binding.agentDisplayName ?? binding.agentName,
         scopes: action.scopes,
+        ...(setup?.url ? { setupUrl: setup.url } : {}),
       },
     };
   }
@@ -2040,6 +2101,7 @@ async function performAction(
     if (!returnUrl) {
       throw new ActionCardError(400, "INVALID_URL", "returnUrl is required");
     }
+    const { setupUrl, setupDescription } = validateActionAppSetup(action);
     const created = await oauthService.createOAuthClient({
       serverId,
       createdByUserId: userId,
@@ -2049,6 +2111,8 @@ async function performAction(
       homepageUrl,
       returnUrl,
       agentManifestUrl,
+      setupUrl,
+      setupDescription,
       clientId: action.clientKey,
       allowedScopes: action.scopes.length > 0 ? action.scopes : undefined,
     }, dbOrTx);
@@ -2062,6 +2126,8 @@ async function performAction(
         returnUrl: created.client.returnUrl,
         homepageUrl: created.client.homepageUrl,
         agentManifestUrl: created.client.agentManifestUrl,
+        setupUrl: created.client.setupUrl,
+        setupDescription: created.client.setupDescription,
         scopes: action.scopes ?? [],
         unsafeDemoUrlOverride: action.unsafeDemoUrlOverride,
       },

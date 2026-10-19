@@ -52,7 +52,7 @@ export function ChannelFileVisual({
   }, [canPreview, file.id, file.thumbnailUrl]);
 
   return (
-    <span className="relative flex size-14 shrink-0 items-center justify-center overflow-hidden border border-line-muted bg-layer-card theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">
+    <span className="relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-control border border-line-hairline bg-fill-muted text-foreground-muted">
       {canPreview && src ? (
         <img
           src={src}
@@ -66,7 +66,7 @@ export function ChannelFileVisual({
       <AttachmentTypeBadge
         filename={file.filename}
         data-message-affordance="channel-file-type-badge"
-        className="!absolute bottom-0 left-0"
+        className="absolute bottom-0 left-0"
       />
     </span>
   );

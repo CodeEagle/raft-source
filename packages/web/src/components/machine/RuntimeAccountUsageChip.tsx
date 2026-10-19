@@ -1,4 +1,4 @@
-import { Card, Badge, Status, Button, Progress, ProgressTrack, ProgressIndicator } from "raft-ui";
+import { Card, Badge, Status, Button, Progress, ProgressTrack, ProgressIndicator, Separator, Spinner } from "@botiverse/raft-ui";
 import CloseButton from "../ui/CloseButton";
 import {
   clearClockTimeout,
@@ -6,7 +6,7 @@ import {
 } from "@botiverse/raft-shared";
 import type { RuntimeAccountUsageProvider } from "@botiverse/raft-shared";
 import { AlertCircle, RefreshCw, X } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { ComponentProps, ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useIntl } from "react-intl";
@@ -74,11 +74,11 @@ function RuntimeUsageContents({
 }) {
   const { formatMessage, locale } = useIntl();
   if (loading && !result) {
-    return <div className="px-4 py-5 text-sm text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "machine.runtimeUsage.reading" })}</div>;
+    return <div className="px-4 py-5 text-callout text-foreground-muted">{formatMessage({ id: "machine.runtimeUsage.reading" })}</div>;
   }
   if (loadError && !result) {
     return (
-      <div className="flex items-start gap-2 px-4 py-5 text-sm text-brutal-orange">
+      <div className="flex items-start gap-2 px-4 py-5 text-callout text-warning-strong">
         <AlertCircle size={16} className="mt-0.5 shrink-0" />
         {formatMessage({ id: "machine.runtimeUsage.readFailed" })}
       </div>
@@ -87,8 +87,8 @@ function RuntimeUsageContents({
   if (!result || result.state === "missing") {
     return (
       <div className="px-4 py-5">
-        <div className="text-sm font-bold">{formatMessage({ id: "machine.runtimeUsage.noSnapshot" })}</div>
-        <p className="mt-1 text-xs leading-5 text-foreground-muted theme-brutal:text-black/55">
+        <div className="text-callout font-bold text-foreground">{formatMessage({ id: "machine.runtimeUsage.noSnapshot" })}</div>
+        <p className="mt-1 text-footnote text-foreground-muted">
           {formatMessage({ id: "machine.runtimeUsage.noSnapshotDescription" })}
         </p>
       </div>
@@ -97,56 +97,61 @@ function RuntimeUsageContents({
 
   const stale = result.state === "stale";
   return (
-    <div className={stale ? "bg-layer-inset theme-brutal:bg-gray-50" : "bg-layer-panel theme-brutal:bg-white"}>
+    // A stale snapshot sits on the sunken surface under an orange-soft notice
+    // (ink text): recoverable, so warning, never red.
+    <div className={stale ? "bg-fill-muted" : undefined}>
       {stale && (
-        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-warning-soft text-warning-strong theme-brutal:bg-brutal-orange/20 theme-brutal:text-black px-4 py-2 text-xs font-bold">
+        <div className="border-b border-line-hairline bg-warning-soft px-4 py-2 text-caption font-bold text-foreground">
           {formatMessage({ id: "machine.runtimeUsage.stale" })}
         </div>
       )}
-      <div className="divide-y divide-line-muted theme-brutal:divide-y-2 theme-brutal:divide-black/15">
-        {result.snapshot.accounts.map((account) => {
+      <div>
+        {result.snapshot.accounts.map((account, index) => {
           const reauth = account.health === "reauth_required";
           return (
-            <div key={account.accountKey} className={`px-4 py-3 ${stale ? "opacity-65" : ""}`}>
+            <Fragment key={account.accountKey}>
+            {index > 0 ? <Separator /> : null}
+            <div className="px-4 py-3">
               <div className="flex items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">
+                  <div className="truncate text-callout font-bold text-foreground">
                     {account.planLabel ?? formatMessage({ id: "machine.runtimeUsage.accountFallback" })}
                   </div>
                   {(account.maskedLabel ?? account.displayName) && (
-                    <div className="mt-0.5 truncate text-xs text-foreground-muted theme-brutal:text-black/50" data-testid="runtime-account-masked-label">
+                    <div className="mt-0.5 truncate font-mono text-mono-meta text-foreground-hint" data-testid="runtime-account-masked-label">
                       {account.maskedLabel ?? account.displayName}
                     </div>
                   )}
                 </div>
+                {/* Raft DS StatusChip: soft wash, a square pixel, one word. */}
                 <Badge
-                  appearance="solid"
+                  appearance="soft"
                   variant={account.health === "ok" ? "success" : "warning"}
-                  uppercase
                 >
+                  <Status size="md" variant={account.health === "ok" ? "success" : "warning"} aria-hidden="true" />
                   {formatMessage({ id: `machine.runtimeUsage.health.${account.health}` })}
                 </Badge>
               </div>
               {account.health === "unsupported" || account.health === "error" ? (
-                <p className="mt-3 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                <p className="mt-3 text-footnote text-foreground-muted">
                   {formatMessage({ id: account.health === "unsupported"
                     ? "machine.runtimeUsage.unsupportedDescription"
                     : "machine.runtimeUsage.readFailed" })}
                 </p>
               ) : reauth ? (
-                <p className="mt-3 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                <p className="mt-3 text-footnote text-foreground-muted">
                   {formatMessage({ id: "machine.runtimeUsage.reauthDescription" })}
                 </p>
               ) : (
                 <div className="mt-3 space-y-3">
                   {account.windows.map((window) => (
                     <div key={window.id}>
-                      <div className="flex flex-col gap-0.5 text-xs sm:flex-row sm:items-center sm:justify-between sm:gap-3">
-                        <span className="font-bold">{window.label}</span>
+                      <div className="flex flex-col gap-0.5 text-footnote sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                        <span className="font-semibold text-foreground">{window.label}</span>
                         {window.status === "parse_unavailable" ? (
-                          <span className="text-brutal-orange">{formatMessage({ id: "machine.runtimeUsage.parseUnavailable" })}</span>
+                          <span className="text-warning-strong">{formatMessage({ id: "machine.runtimeUsage.parseUnavailable" })}</span>
                         ) : (
-                          <span className="text-foreground-muted theme-brutal:text-black/55 sm:text-right">
+                          <span className="text-foreground-muted sm:text-right">
                             {window.resetsAt
                               ? formatMessage(
                                   { id: "machine.runtimeUsage.windowSummary" },
@@ -166,7 +171,8 @@ function RuntimeUsageContents({
                         <Progress
                           value={Math.round((window.usedRatio ?? 0) * 100)}
                           size="sm"
-                          variant={window.status === "limit_reached" ? "warning" : "information"}
+                          // Raft DS Progress: cyan, orange once at/over 90% of the limit.
+                          variant={window.status === "limit_reached" || (window.usedRatio ?? 0) >= 0.9 ? "warning" : "information"}
                           className="mt-1.5"
                           aria-label={window.label}
                         >
@@ -180,10 +186,12 @@ function RuntimeUsageContents({
                 </div>
               )}
             </div>
+            </Fragment>
           );
         })}
       </div>
-      <div className="border-t-2 border-line-muted theme-brutal:border-black/15 px-4 py-2 text-[11px] text-foreground-muted theme-brutal:text-black/50">
+      <Separator />
+      <div className="px-4 py-2 text-caption text-foreground-hint">
         {formatMessage(
           { id: "machine.runtimeUsage.metadata" },
           {
@@ -221,23 +229,23 @@ function Surface({
   const { formatMessage } = useIntl();
   return (
     <div data-testid={`runtime-usage-surface-${provider}`}>
-      <div className="flex items-center justify-between gap-3 border-b-2 border-line-muted theme-brutal:border-black px-4 py-3">
-        <div>
-          <div className="text-sm font-black">{formatMessage({ id: "machine.runtimeUsage.title" }, { provider: providerName(provider) })}</div>
-          <div data-testid={`runtime-version-${provider}`} className="text-[10px] font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/55">
+      <div className="flex items-center justify-between gap-3 border-b border-line-hairline px-4 py-3">
+        <div className="min-w-0">
+          <div className="text-headline text-foreground">{formatMessage({ id: "machine.runtimeUsage.title" }, { provider: providerName(provider) })}</div>
+          <div data-testid={`runtime-version-${provider}`} className="font-mono text-mono-meta text-foreground-hint">
             {runtimeVersion?.trim()
               ? formatMessage({ id: "machine.runtimeUsage.version" }, { version: runtimeVersion.trim() })
               : formatMessage({ id: "machine.runtimeUsage.versionUnavailable" })}
           </div>
-          <div className="text-[10px] font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/45">{formatMessage({ id: "machine.runtimeUsage.private" })}</div>
+          <div className="text-caption text-foreground-hint">{formatMessage({ id: "machine.runtimeUsage.private" })}</div>
         </div>
         <CloseButton type="button" className="" onClick={onClose} aria-label={formatMessage({ id: "machine.runtimeUsage.close" })}>
           <X size={16} />
         </CloseButton>
       </div>
       <RuntimeUsageContents result={result} loading={loading} loadError={loadError} />
-      <div className="flex items-center justify-between gap-3 border-t-2 border-line-muted theme-brutal:border-black px-4 py-2.5">
-        <span className="text-[11px] text-foreground-muted theme-brutal:text-black/50">
+      <div className="flex items-center justify-between gap-3 border-t border-line-hairline px-4 py-2.5">
+        <span className="text-caption text-foreground-hint">
           {refreshState === "requested"
             ? formatMessage({ id: "machine.runtimeUsage.refreshRequested" })
             : refreshState === "unconfirmed"
@@ -258,9 +266,12 @@ function Surface({
           type="button"
           onClick={onRefresh}
           disabled={refreshState === "requesting" || cooldownLeftMs > 0}
-          className="flex items-center gap-1 px-2 py-1 text-xs disabled:opacity-50"
+          className="shrink-0"
         >
-          <RefreshCw size={12} className={refreshState === "requesting" ? "animate-spin" : ""} />
+          {/* Waiting with no known end: the pixel spinner (Raft DS Loading). */}
+          {refreshState === "requesting"
+            ? <Spinner size="xs" aria-hidden="true" />
+            : <RefreshCw size={16} aria-hidden="true" />}
           {formatMessage({ id: "machine.runtimeUsage.refresh" })}
         </Button>
       </div>
@@ -542,7 +553,7 @@ export default function RuntimeAccountUsageChip({
   }, [closeSurface, mobile, open]);
 
   if (!provider) {
-    return <Badge appearance={appearance} variant={variant} uppercase={false} className={runtimeBadgeClassName(className)}>{children}</Badge>;
+    return <Badge appearance={appearance} variant={variant} className={runtimeBadgeClassName(className)}>{children}</Badge>;
   }
 
   const surface = (
@@ -568,8 +579,7 @@ export default function RuntimeAccountUsageChip({
         render={<button type="button" />}
         appearance={appearance}
         variant={variant}
-        uppercase={false}
-        className={`${runtimeBadgeClassName(className)} relative cursor-help focus:outline-none focus:ring-2 focus:ring-black focus:ring-offset-1`}
+        className={`${runtimeBadgeClassName(className)} relative cursor-help outline-none focus-visible:shadow-focus`}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={typeof children === "string" ? children : providerName(provider)}
@@ -585,7 +595,7 @@ export default function RuntimeAccountUsageChip({
             data-testid={`runtime-usage-health-${provider}`}
             size="sm"
             variant={attention ? "warning" : "success"}
-            className="ml-1 size-2"
+            className="ml-1"
             aria-label={formatMessage({ id: attention ? "machine.runtimeUsage.attention" : "machine.runtimeUsage.healthy" })}
           />
         )}
@@ -601,7 +611,9 @@ export default function RuntimeAccountUsageChip({
           {...(pinned ? dismissLayerProps : notDismissLayerProps)}
           role="dialog"
           aria-label={formatMessage({ id: "machine.runtimeUsage.dialogLabel" }, { provider: providerName(provider) })}
-          className="z-[70] w-[min(390px,calc(100vw-16px))] overflow-y-auto"
+          // A floating surface (Raft DS Popover): popover layer, seam edge,
+          // float shadow — the card recipe alone is an in-flow card.
+          className="z-[70] w-[min(390px,calc(100vw-16px))] overflow-y-auto border-line-seam bg-layer-popover shadow-float"
           style={popoverStyle}
           onMouseEnter={cancelClose}
           onMouseLeave={closeSoon}
@@ -637,7 +649,7 @@ export function RuntimeAccountUsageGateChip({
 } & RuntimeBadgeAppearance) {
   if (!enabled || !serverId) {
     return (
-      <Badge appearance={appearance} variant={variant} uppercase={false} className={runtimeBadgeClassName(className)}>
+      <Badge appearance={appearance} variant={variant} className={runtimeBadgeClassName(className)}>
         {children}
       </Badge>
     );

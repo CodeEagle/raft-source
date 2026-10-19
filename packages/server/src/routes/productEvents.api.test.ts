@@ -162,9 +162,11 @@ test("client events: registered events are stored under the analytics id only", 
   const config = await fetch(`${app.baseUrl}/api/product-events/config`, { headers: authHeaders(token, server.id) });
   assert.deepEqual(await config.json(), { clientEventsAllowed: true });
 
+  // Where and on what, derived from the request; the raw header values are never stored (cindyz / Tenny, 2026-10-14).
+  const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36";
   const res = await fetch(`${app.baseUrl}/api/product-events/batch`, {
     method: "POST",
-    headers: authHeaders(token, server.id),
+    headers: { ...authHeaders(token, server.id), "User-Agent": userAgent, "CloudFront-Viewer-Country": "DE" },
     body: JSON.stringify({
       source: "web",
       app_version: "1.2.3",
@@ -188,8 +190,16 @@ test("client events: registered events are stored under the analytics id only", 
   assert.equal(row.source, "web");
   assert.equal(row.client_session_id, SESSION_ID);
   assert.equal(row.app_version, "1.2.3");
-  assert.deepEqual(row.properties, { from: "rail" });
+  assert.deepEqual(row.properties, {
+    from: "rail",
+    $browser: "chrome",
+    $browser_version: 141,
+    $os: "windows",
+    $device_type: "desktop",
+    $country: "DE",
+  });
   assert.doesNotMatch(JSON.stringify(store.rows), new RegExp(user.id), "the Raft user id must not reach the store");
+  assert.equal(JSON.stringify(store.rows).includes("Win64"), false, "the raw user agent must not reach the store");
 });
 
 test("client events: a malformed batch is rejected", async ({ app }) => {

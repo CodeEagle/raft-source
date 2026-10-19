@@ -33,7 +33,7 @@ function readSource(path: string): string {
 
 test("joint channel store forwarding keeps the jointInvites contract", () => {
   const channelStore = readSource("store/channelStore.ts");
-  assert.match(channelStore, /jointInvites\?: Array<\{\s*targetServerSlug: string;?\s*invitedPeople: string\[\];?\s*\}>/);
+  assert.match(channelStore, /jointInvites\?: Array<\{\s*targetServerSlug: string;?\s*invitedPeople: string\[\];?\s*sameAdmin\?: boolean;?\s*\}>/);
   assert.match(channelStore, /jointInvites: opts\?\.jointInvites/);
 });
 
@@ -75,10 +75,13 @@ test("joint channel chrome uses a distinct connected-server surface", () => {
   assert.match(channelKindIcon, /if \(type === "private"\) return <Lock size=\{size\}/);
   assert.match(channelKindIcon, /if \(type === "joint"\) return <GitBranch size=\{size\}/);
   assert.match(channelKindIcon, /if \(type === "channel"\) return <Hash size=\{size\}/);
+  // The joint channel's subtitle is its description (behind the DS
+  // who-is-working line), never a "Joint with …" string.
   assert.match(
     chatPanel,
-    /const channelSubtitle =\s*isRegularChannel\s*\?\s*channel\.description\s*\?\s*<ChannelDescription description=\{channel\.description\} \/>\s*:\s*undefined\s*:\s*undefined;/,
+    /const channelSubtitle = isRegularChannel\s*\?\s*<ChannelHeaderSubtitle agentIdKey=\{channelAgentIdKey\} description=\{channel\.description \|\| null\} \/>\s*:\s*undefined;/,
   );
+  assert.match(chatPanel, /const descriptionNode = description \? <ChannelDescription description=\{description\} \/> : null;/);
   assert.doesNotMatch(chatPanel, /Joint with \$\{channel\.jointPeerServerName \|\| channel\.jointPeerServerSlug\}/);
   // Chrome labels are catalog ids now; assert the id at the call site and the
   // wording in en.ts, so neither the wiring nor the copy can drift unnoticed.
@@ -115,7 +118,7 @@ test("joint channel edit can invite another server", () => {
   assert.match(inviteMsgs, /"channel\.edit\.maxServers": "Joint channels support a maximum of \{max\} servers\."/);
   assert.match(channelStore, /jointServers\?: Array/);
   assert.match(channelStore, /jointPendingInvites\?: Array/);
-  assert.match(channelStore, /inviteJointChannelServer: \(channelId: string, input: \{\s*targetServerSlug: string;?\s*invitedPeople: string\[\];?\s*\}\) => Promise<Channel>/);
+  assert.match(channelStore, /inviteJointChannelServer: \(channelId: string, input: \{\s*targetServerSlug: string;?\s*invitedPeople: string\[\];?\s*sameAdmin\?: boolean;?\s*\}\) => Promise<Channel>/);
   assert.match(channelStore, /api\.post\(`\/channels\/\$\{channelId\}\/joint-invites`, input\)/);
 });
 
@@ -136,8 +139,9 @@ test("ordinary channel edit can convert the channel to a joint channel", () => {
   assert.match(conversionSection, /id: "channel\.edit\.convertToJoint"/);
   assert.match(conversionSection, /id: "channel\.edit\.convertSectionDescription"/);
   assert.match(conversionSection, /id: "channel\.edit\.convertConfirmIntro"/);
-  assert.match(conversionSection, /from "raft-ui"/);
-  assert.match(conversionSection, /<section[\s\S]*data-testid="channel-settings-joint-conversion-section"/);
+  assert.match(conversionSection, /from "@botiverse\/raft-ui"/);
+  // A raft-ui FormSection (a sheet section), not a card.
+  assert.match(conversionSection, /<FormSection[\s\S]*data-testid="channel-settings-joint-conversion-section"/);
   assert.doesNotMatch(conversionSection, /<Card/);
   assert.match(conversionSection, /<Progress/);
   assert.match(conversionSection, /<Badge/);

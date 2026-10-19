@@ -10,7 +10,7 @@ import {
   AlertDialogFooter,
   AlertDialogHeader,
   AlertDialogTitle,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 
 const STANDARD_LINK_PROTOCOLS = new Set(["http", "https", "mailto"]);
 
@@ -47,7 +47,7 @@ export function CustomProtocolLink({ href, children }: { href: string; children?
     <>
       <a
         href={href}
-        className="text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-brutal-pink select-text"
+        className="text-foreground-link underline decoration-2 underline-offset-2 hover:decoration-attention select-text"
         onClick={(event) => {
           event.preventDefault();
           setConfirmOpen(true);
@@ -65,8 +65,8 @@ export function CustomProtocolLink({ href, children }: { href: string; children?
             <span className="mt-1 block break-all font-mono text-[0.875em]">{href}</span>
           </AlertDialogBody>
           <AlertDialogFooter>
-            <AlertDialogCancel size="sm">{formatMessage({ id: "message.messageItem.customProtocolLink.cancel" })}</AlertDialogCancel>
-            <AlertDialogAction size="sm" onClick={handleConfirmOpen}>
+            <AlertDialogCancel size="lg">{formatMessage({ id: "message.messageItem.customProtocolLink.cancel" })}</AlertDialogCancel>
+            <AlertDialogAction size="lg" onClick={handleConfirmOpen}>
               {formatMessage({ id: "message.messageItem.customProtocolLink.confirm" })}
             </AlertDialogAction>
           </AlertDialogFooter>

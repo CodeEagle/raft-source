@@ -125,3 +125,21 @@ test("[wiring-inert] an app with an empty whenToUse is omitted, not rendered bla
   expect(prompt).not.toContain("No Hint App");
   expect(prompt).toContain("Hinted App");
 });
+
+test("the reminder and vault app flags each change only their own text; off renders the historical prompt", () => {
+  const baseline = buildCliSystemPrompt(promptConfig(), options);
+  expect(buildCliSystemPrompt(promptConfig({ reminderApp: false, vaultApp: false }), options)).toBe(baseline);
+
+  const reminder = buildCliSystemPrompt(promptConfig({ reminderApp: true }), options);
+  expect(reminder).toContain("Reminders on this Server live in the Reminder app.");
+  expect(reminder).toContain("9. **Reminders** — moved to the Reminder app on this Server");
+  expect(reminder).not.toContain("Use `raft reminder schedule` rather than runtime-native wake");
+  expect(reminder).not.toContain("Vault app");
+  expect(baseline).toContain("Use `raft reminder schedule` rather than runtime-native wake");
+
+  const vault = buildCliSystemPrompt(promptConfig({ vaultApp: true }), options);
+  expect(vault).toContain("ask for access through the Vault app");
+  expect(vault).toContain("if you choose the value (e.g. a signing secret), create it in the Vault yourself (`create-vault`, then `generate`); if a human holds it (e.g. a third-party API key), ask them to add it in the Vault web page");
+  const vaultLine = vault.split("\n").find((line) => line.includes("through the Vault app"))!;
+  expect(vault.replace(`\n${vaultLine}`, "")).toBe(baseline);
+});

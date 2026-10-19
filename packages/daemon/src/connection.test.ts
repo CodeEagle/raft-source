@@ -483,6 +483,7 @@ test("DaemonConnection logs Slock-Reason for rejected WebSocket handshakes", asy
         status_code: 401,
         slock_reason_present: true,
         slock_reason: "computer_revoked",
+        cf_pop: null,
       },
       status: "error",
     },
@@ -712,6 +713,65 @@ test("watchdog timeout traces last inbound message kind and age", async () => {
   assert.equal(disconnect?.attrs?.last_inbound_age_ms_bucket, "120s+");
 
   conn.disconnect();
+});
+
+test("connect and disconnect traces carry the CloudFront PoP of that connection, null without the header", async () => {
+  const clock = new FakeClock();
+  const traceEvents: Array<{ name: string; attrs?: Record<string, unknown>; status?: TraceStatus }> = [];
+  const logs: string[] = [];
+  const unsubscribe = subscribeDaemonLogs((event) => logs.push(event.message));
+  const sink = new MemoryTraceSink();
+  const { conn, getAllWs } = makeConnection({
+    onTraceEvent: (name, attrs, status) => traceEvents.push({ name, attrs, status }),
+    tracer: new BasicTracer({ sink }),
+    inboundWatchdogMs: 70_000,
+    clock,
+    autoOpen: false,
+  });
+  const upgrade = (ws: FakeWebSocket, headers: Record<string, string>) => ws.emit("upgrade", { headers });
+
+  try {
+    conn.connect();
+    upgrade(getAllWs()[0], { "x-amz-cf-pop": "NRT57-P7" });
+    getAllWs()[0].emit("open");
+    assert.equal(conn.cfPop, "NRT57-P7");
+    clock.advanceBy(140_000);
+
+    const probe = traceEvents.find((event) => event.name === "daemon.connection.inbound_probe_sent");
+    assert.equal(probe?.attrs?.cf_pop, "NRT57-P7");
+    const timeout = traceEvents.find((event) => event.name === "daemon.connection.watchdog_timeout");
+    assert.equal(timeout?.attrs?.cf_pop, "NRT57-P7");
+    const disconnect = traceEvents.find((event) => event.name === "daemon.connection.disconnected");
+    assert.equal(disconnect?.attrs?.close_code, 1006);
+    assert.equal(disconnect?.attrs?.last_inbound_age_ms_bucket, "120s+");
+    assert.equal(disconnect?.attrs?.cf_pop, "NRT57-P7");
+    assert.ok(logs.some((line) => line.includes("Connected to server, cf_pop=NRT57-P7")));
+    assert.ok(logs.some((line) => line.includes("Disconnected from server (code=1006") && line.includes("cf_pop=NRT57-P7")));
+
+    // The replacement connection has no header (direct or local): null, not the old PoP.
+    clock.advanceBy(1_000);
+    assert.equal(getAllWs().length, 2);
+    upgrade(getAllWs()[1], {});
+    getAllWs()[1].emit("open");
+    assert.equal(conn.cfPop, null);
+    getAllWs()[1].serverClose(1006);
+    const secondDisconnect = traceEvents.filter((event) => event.name === "daemon.connection.disconnected")[1];
+    assert.equal(secondDisconnect?.attrs?.cf_pop, null);
+    const lastDisconnectLog = logs.filter((line) => line.includes("Disconnected from server")).at(-1);
+    assert.ok(lastDisconnectLog && !lastDisconnectLog.includes("cf_pop"), "no cf_pop in the log line without the header");
+
+    const connectSpans = sink.getAllSpans().filter((span) => span.name === "daemon.connection.connect");
+    assert.deepEqual(connectSpans.map((span) => span.attrs?.cf_pop), ["NRT57-P7", null]);
+
+    // A header that is not a PoP code is not copied into traces.
+    clock.advanceBy(2_000);
+    upgrade(getAllWs()[2], { "x-amz-cf-pop": "NRT57 <script>" });
+    getAllWs()[2].emit("open");
+    assert.equal(conn.cfPop, "invalid_header");
+  } finally {
+    unsubscribe();
+    conn.disconnect();
+  }
 });
 
 test("message just before watchdog deadline extends the window deterministically", async () => {

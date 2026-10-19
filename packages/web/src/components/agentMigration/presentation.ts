@@ -11,11 +11,51 @@ import {
   parseMigrationResumableCapabilityDetail,
 } from "./errors";
 import type { MigrationErrorPresentation } from "./errors";
+import type { MessageId } from "../../i18n/messages";
 import type { AgentMigrationNotice } from "./realtime";
+import { isHostedMigration, isHostedReviewPending } from "./state";
 
 export function migrationTargetLabel(formatMessage: IntlShape["formatMessage"], machines: Machine[], targetMachineId: string | null | undefined): string {
   if (!targetMachineId) return formatMessage({ id: "agent.detail.unknownComputer" });
   return machines.find((machine) => machine.id === targetMachineId)?.name ?? targetMachineId.slice(0, 8);
+}
+
+/**
+ * After the switch a move to the cloud can stall without ending: the import or
+ * the agent's setup in the cloud failed, but a retry can still finish it. The
+ * migration stays `arriving` with one of these reasons (server R5).
+ */
+const HOSTED_ARRIVAL_ATTENTION_IDS = {
+  HOSTED_IMPORT_FAILED: "agent.migration.hosted.attention.importFailed",
+  HOSTED_IMPORT_STALLED: "agent.migration.hosted.attention.importStalled",
+  HOSTED_PROVIDER_FAILED: "agent.migration.hosted.attention.providerFailed",
+  // Not retryable: the cloud never sets up a deleted agent again under the same agent.
+  HOSTED_AGENT_DELETED: "agent.migration.hosted.attention.agentDeleted",
+  HOSTED_PROVIDER_MISMATCH: "agent.migration.hosted.attention.providerMismatch",
+} as const satisfies Record<string, MessageId>;
+
+/** The reason a switched move to the cloud needs attention, or null while it is fine or over. */
+export function hostedArrivalAttentionReason(notice: {
+  state: string;
+  targetKind?: string | null;
+  failureReason?: string | null;
+}): keyof typeof HOSTED_ARRIVAL_ATTENTION_IDS | null {
+  if (!isHostedMigration(notice) || (notice.state !== "arriving" && notice.state !== "starting")) return null;
+  const reason = notice.failureReason ?? "";
+  return Object.hasOwn(HOSTED_ARRIVAL_ATTENTION_IDS, reason) ? reason as keyof typeof HOSTED_ARRIVAL_ATTENTION_IDS : null;
+}
+
+/** The cloud never set the agent up, so Raft put it back on its Computer (terminal `failed`). */
+const HOSTED_AGENT_NOT_CREATED = "HOSTED_AGENT_NOT_CREATED";
+
+/** Where the migration goes: the target computer's name, or the cloud for a move to the cloud. */
+export function migrationNoticeTargetLabel(
+  formatMessage: IntlShape["formatMessage"],
+  machines: Machine[],
+  notice: { targetKind?: string | null; targetMachineId?: string | null },
+): string {
+  if (isHostedMigration(notice)) return formatMessage({ id: "agent.migration.hosted.targetName" });
+  return migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
 }
 
 export function migrationStartErrorPresentation(
@@ -36,6 +76,8 @@ export function migrationStartErrorPresentation(
     code: e?.response?.data?.code,
     rawMessage: e?.response?.data?.error ?? e?.message,
     context: "start",
+    // task #1268: TARGET_RUNTIME_DETECTION_PENDING copy depends on details.detectionStatus.
+    details: e?.response?.data?.details,
     computerCapabilityDetails: parseMigrationComputerCapabilityDetails(
       e?.response?.data?.details,
     ),
@@ -68,12 +110,22 @@ function migrationFailurePresentation(
   formatMessage: IntlShape["formatMessage"],
   formatTimestamp: (value: string) => string,
 ): MigrationErrorPresentation {
+  if (isHostedMigration(notice) && (notice.failureReason === HOSTED_AGENT_NOT_CREATED || notice.transportErrorCode === HOSTED_AGENT_NOT_CREATED)) {
+    const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
+    return {
+      placement: formatMessage({ id: "agent.detail.migrationStillOnSource" }, { source }),
+      message: formatMessage({ id: "agent.migration.hosted.agentNotCreated" }, { source }),
+      technicalCode: HOSTED_AGENT_NOT_CREATED,
+    };
+  }
   if (notice.flippedAt) {
     const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
     const reason = migrationFailureReasonPresentation(notice, machines, formatMessage, formatTimestamp);
     return {
       ...reason,
-      message: formatMessage({ id: "agent.detail.migrationFailedAfterMove" }, { target }),
+      message: isHostedMigration(notice)
+        ? formatMessage({ id: "agent.migration.hosted.failedAfterMove" })
+        : formatMessage({ id: "agent.detail.migrationFailedAfterMove" }, { target }),
     };
   }
   const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
@@ -93,7 +145,7 @@ function migrationFailureReasonPresentation(
   const sourceMachine = machines.find((machine) => machine.id === notice.sourceMachineId);
   const targetMachine = machines.find((machine) => machine.id === notice.targetMachineId);
   const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
-  const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
+  const target = migrationNoticeTargetLabel(formatMessage, machines, notice);
   if (notice.state === "aborted") {
     const fallback = migrationErrorPresentation({
       context: "aborted",
@@ -110,8 +162,16 @@ function migrationFailureReasonPresentation(
       ...(fallback.technicalCode ? { technicalCode: fallback.technicalCode } : {}),
     };
   }
+  const copyCode = migrationFailureCopyCode(notice.transportErrorCode, notice.failureReason);
+  // There is no second computer in a move to the cloud: only the upload from the source can drop.
+  if (isHostedMigration(notice) && copyCode === "MIGRATION_TRANSPORT_LOST") {
+    return {
+      message: formatMessage({ id: "agent.migration.hosted.transportLost" }, { source }),
+      technicalCode: copyCode,
+    };
+  }
   return migrationErrorPresentation({
-    code: migrationFailureCopyCode(notice.transportErrorCode, notice.failureReason),
+    code: copyCode,
     rawMessage: notice.transportErrorMessage,
     context: "failed",
     reason: notice.abortReason,
@@ -135,7 +195,9 @@ function migrationSourceStageMessage(
   target: string,
 ): string {
   if (notice.transportControlRegisteredAt) {
-    return formatMessage({ id: "agent.detail.migrationUploading" }, { source, target });
+    return isHostedMigration(notice)
+      ? formatMessage({ id: "agent.migration.hosted.uploading" }, { source })
+      : formatMessage({ id: "agent.detail.migrationUploading" }, { source, target });
   }
   if (!notice.sourceQuiescedAt) {
     return formatMessage({ id: "agent.detail.migrationStoppingSource" }, { source });
@@ -155,6 +217,32 @@ function migrationSourceStageMessage(
   return formatMessage({ id: "agent.detail.migrationPacking" }, { source });
 }
 
+/**
+ * Stage copy for a move to the cloud where it differs from a computer move:
+ * the cloud checks the files, the user reviews, then the agent switches. Null
+ * falls back to the shared copy (stopping/packing on the source, failures,
+ * cancel states, which pick their hosted wording inline).
+ */
+function hostedMigrationStageMessage(
+  formatMessage: IntlShape["formatMessage"],
+  notice: AgentMigrationNotice,
+  source: string,
+): string | null {
+  switch (notice.state) {
+    case "ready":
+      return formatMessage({ id: "agent.migration.hosted.checkingFiles" });
+    case "in_transit":
+      return isHostedReviewPending(notice)
+        ? formatMessage({ id: "agent.migration.hosted.waitingForReview" }, { source })
+        : formatMessage({ id: "agent.migration.hosted.checkingFiles" });
+    case "arriving":
+    case "starting":
+      return formatMessage({ id: "agent.migration.hosted.switching" });
+    default:
+      return null;
+  }
+}
+
 export function migrationSupportRef(notice: AgentMigrationNotice): string {
   return notice.migrationRef;
 }
@@ -171,12 +259,26 @@ export function migrationNoticePresentation(
   formatTimestamp: (value: string) => string,
 ): MigrationNoticePresentation {
   const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
-  const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
+  const target = migrationNoticeTargetLabel(formatMessage, machines, notice);
   const status = (message: string): MigrationNoticePresentation => ({
     intent: "info",
     title: formatMessage({ id: "agent.detail.migrationStatus" }),
     message,
   });
+  const attention = hostedArrivalAttentionReason(notice);
+  if (attention) {
+    return {
+      intent: "warning",
+      title: formatMessage({ id: "agent.migration.hosted.attention.title" }),
+      placement: formatMessage({ id: "agent.migration.hosted.attention.placement" }),
+      message: formatMessage({ id: HOSTED_ARRIVAL_ATTENTION_IDS[attention] }),
+      technicalCode: attention,
+    };
+  }
+  if (isHostedMigration(notice)) {
+    const hosted = hostedMigrationStageMessage(formatMessage, notice, source);
+    if (hosted) return status(hosted);
+  }
   switch (notice.state) {
     case "failed":
       return {
@@ -195,13 +297,17 @@ export function migrationNoticePresentation(
         ? {
             intent: "warning",
             title: formatMessage({ id: "agent.migration.cancellationNeedsAttention" }),
-            message: formatMessage({ id: "agent.migration.cancelPreAttentionMessage" }),
+            message: isHostedMigration(notice)
+              ? formatMessage({ id: "agent.migration.hosted.cancelAttentionMessage" }, { source })
+              : formatMessage({ id: "agent.migration.cancelPreAttentionMessage" }),
             technicalCode: notice.cancelErrorCode ?? undefined,
           }
         : {
             intent: "info",
             title: formatMessage({ id: "agent.migration.cancelingTitle" }),
-            message: formatMessage({ id: "agent.migration.cancelPreMessage" }),
+            message: isHostedMigration(notice)
+              ? formatMessage({ id: "agent.migration.hosted.cancelingMessage" }, { source })
+              : formatMessage({ id: "agent.migration.cancelPreMessage" }),
           };
     case "cancel_requested_post_flip":
       return notice.cancelNeedsAttention
@@ -220,7 +326,9 @@ export function migrationNoticePresentation(
       return {
         intent: "info",
         title: formatMessage({ id: "agent.migration.canceledTitle" }),
-        message: formatMessage({ id: "agent.migration.canceledPreMessage" }),
+        message: isHostedMigration(notice)
+          ? formatMessage({ id: "agent.migration.hosted.canceledMessage" }, { source })
+          : formatMessage({ id: "agent.migration.canceledPreMessage" }),
       };
     case "canceled_post_flip":
       return {
@@ -251,7 +359,9 @@ export function migrationNoticePresentation(
       return {
         intent: "success",
         title: formatMessage({ id: "agent.detail.migrationStatus" }),
-        message: formatMessage({ id: "agent.detail.migrationCompleted" }, { target }),
+        message: isHostedMigration(notice)
+          ? formatMessage({ id: "agent.migration.hosted.completed" })
+          : formatMessage({ id: "agent.detail.migrationCompleted" }, { target }),
       };
     default:
       return status(formatMessage(

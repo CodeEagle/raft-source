@@ -8,7 +8,7 @@
 import { useCallback, useEffect, useId, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { Card, Switch } from "raft-ui";
+import { ListRow, ListRowBody, ListRowDescription, ListRowGroup, ListRowTitle, Switch } from "@botiverse/raft-ui";
 import { BarChart3 } from "lucide-react";
 import { PRIVACY_URL, SHARE_USAGE_DATA_DEFAULT } from "@botiverse/raft-shared";
 import api from "../../api/client";
@@ -17,9 +17,6 @@ import { PRODUCT_ANALYTICS_SETTINGS_FLAG_KEY, useServerFeatureFlag } from "../..
 import { useServerStore } from "../../store/serverStore";
 import Banner from "../ui/Banner";
 import SectionHeader from "../ui/SectionHeader";
-
-const CARD_CLASS =
-  "border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm";
 
 function SwitchRow({
   idPrefix,
@@ -38,27 +35,27 @@ function SwitchRow({
   onCheckedChange: (checked: boolean) => void;
   footer?: ReactNode;
 }) {
+  // DS ListRow › a setting row: raft-ui's `plain` display-only ListRow (the
+  // Switch is the target) in an inset group; a save failure shows under it.
   return (
-    <Card className={CARD_CLASS}>
-      <div className="flex items-start justify-between gap-4">
-        <span className="min-w-0">
-          <span id={`${idPrefix}-label`} className="block text-sm font-bold text-foreground-strong">{title}</span>
-          <span id={`${idPrefix}-description`} className="mt-0.5 block text-xs leading-5 text-foreground-muted">
+    <ListRowGroup>
+      <ListRow variant="plain" interactive={false}>
+        <ListRowBody>
+          <ListRowTitle id={`${idPrefix}-label`}>{title}</ListRowTitle>
+          <ListRowDescription id={`${idPrefix}-description`} wrap>
             {description}
-          </span>
-        </span>
+          </ListRowDescription>
+        </ListRowBody>
         <Switch
-          size="md"
           checked={checked}
           disabled={disabled}
           onCheckedChange={onCheckedChange}
           aria-labelledby={`${idPrefix}-label`}
           aria-describedby={`${idPrefix}-description`}
-          className="mt-0.5 shrink-0"
         />
-      </div>
-      {footer}
-    </Card>
+      </ListRow>
+      {footer ? <div className="px-4 pb-3">{footer}</div> : null}
+    </ListRowGroup>
   );
 }
 
@@ -92,7 +89,7 @@ function UsageDataSettingsCardContent() {
         description={(
           <>
             {formatMessage({ id: "settings.usageData.description" })}{" "}
-            <a href={PRIVACY_URL} target="_blank" rel="noreferrer" className="font-bold underline underline-offset-2">
+            <a href={PRIVACY_URL} target="_blank" rel="noreferrer" className="font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px]">
               {formatMessage({ id: "settings.usageData.learnMore" })}
             </a>
           </>
@@ -101,7 +98,7 @@ function UsageDataSettingsCardContent() {
         disabled={saving}
         onCheckedChange={handleChange}
         footer={failed && (
-          <Banner intent="warning" density="sm" className="mt-3 font-bold">
+          <Banner intent="warning" density="sm">
             {formatMessage({ id: "settings.usageData.saveFailed" })}
           </Banner>
         )}
@@ -175,7 +172,7 @@ function WorkspaceProductAnalyticsSectionContent() {
         disabled={saving || settings === null || !settings.canManageProductAnalytics}
         onCheckedChange={handleChange}
         footer={failed && (
-          <Banner intent="warning" density="sm" className="mt-3 font-bold">
+          <Banner intent="warning" density="sm">
             {formatMessage({ id: "settings.workspaceProductAnalytics.saveFailed" })}
           </Banner>
         )}

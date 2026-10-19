@@ -1,5 +1,6 @@
 import { respondToTaskWriteError } from "../lib/taskWriteErrorResponse";
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { refuseIfRemindersMovedToApp } from "./reminderAppRollout";
 // LEGACY AGENT API SURFACE: DO NOT ADD OR EXPAND ROUTES HERE.
 //
 // This router exists for old daemon builds and compatibility clients that
@@ -69,6 +70,7 @@ import {
   getEffectiveLimits,
   getServerCapabilities,
   renderThirdPartyInertText,
+  isSlackBridgedExternalProvider,
   isReminderStatus,
   isTaskStatus,
   legacyAgentSendBodySchema,
@@ -503,6 +505,10 @@ export async function buildAgentResolvedMessagePayload(
     sender_description: sender?.description ?? null,
     sender_timezone: external ? null : message.senderTimezone ?? null,
     ...messageService.toAgentVisibleExternalMessage(message),
+    ...(external && {
+      mentioned: messageService.isSlackBridgedExternalMessage(message)
+        && messageService.isAgentPersonallyMentioned(message.mentions, requestingAgentId),
+    }),
     content: messageService.appendAgentFacingForwardedSnapshot(
       messageService.renderAgentVisibleMessageContent(message, renderedContent),
       external ? null : "actionMetadata" in message ? message.actionMetadata : null,
@@ -516,11 +522,15 @@ export async function buildAgentResolvedMessagePayload(
       height: attachment.height,
       thumbnailUrl: getThumbnailUrl(attachment.thumbnailKey),
     })),
-    task_status: external ? null : message.taskStatus,
-    task_number: external ? null : message.taskNumber,
-    task_assignee_type: !external && message.taskAssigneeType ? toAgentFacingActorType(message.taskAssigneeType) : null,
-    task_assignee_id: external ? null : message.taskAssigneeId,
-    task_assignee_name: external ? null : taskAssigneeName,
+    // External rows carry no task authority keys at all (not even null): the
+    // Agent API envelope contract rejects their presence on external_message.
+    ...(!external && {
+      task_status: message.taskStatus,
+      task_number: message.taskNumber,
+      task_assignee_type: message.taskAssigneeType ? toAgentFacingActorType(message.taskAssigneeType) : null,
+      task_assignee_id: message.taskAssigneeId,
+      task_assignee_name: taskAssigneeName,
+    }),
     ...(!external && message.taskCurrentProjection && {
       task_current_projection: {
         title: message.taskCurrentProjection.title,
@@ -2802,7 +2812,7 @@ internalRouter.post("/agent/:id/messages/:messageId/reactions", requireAgentScop
       "message:updated",
       projectRichMessageSocketPayload(messageService.stripViewerScopedAttachmentCommentMetadata(enriched)),
     );
-    res.json(messageService.projectAgentVisibleHttpMessageResponse(enriched));
+    res.json(messageService.projectAgentVisibleHttpMessageResponse(enriched, enriched.content, agent.id));
   } catch (err) {
     if (err instanceof ChannelConversionInProgressError) {
       res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
@@ -2881,7 +2891,7 @@ internalRouter.delete("/agent/:id/messages/:messageId/reactions", requireAgentSc
       "message:updated",
       projectRichMessageSocketPayload(messageService.stripViewerScopedAttachmentCommentMetadata(enriched)),
     );
-    res.json(messageService.projectAgentVisibleHttpMessageResponse(enriched));
+    res.json(messageService.projectAgentVisibleHttpMessageResponse(enriched, enriched.content, agent.id));
   } catch (err) {
     if (err instanceof ChannelConversionInProgressError) {
       res.status(err.status).json({ error: err.message, code: err.code, conversionEpoch: err.conversionEpoch });
@@ -3362,6 +3372,10 @@ internalRouter.get("/agent/:id/history", requireAgentScope("message:read"), asyn
             external ? null : actionMetadata,
           ),
           ...messageService.toAgentVisibleExternalMessage(message),
+          ...(external && {
+            mentioned: messageService.isSlackBridgedExternalMessage(message)
+              && messageService.isAgentPersonallyMentioned(message.mentions, agentId),
+          }),
         };
       }),
       has_more: hasOlder || hasNewer,
@@ -3493,15 +3507,17 @@ internalRouter.get("/agent/:id/search", requireAgentScope("message:read"), async
       results: searchResponse.results.map((result, index) => {
         const { externalMessage, ...visibleResult } = result;
         const external = result.senderType === "external_projection";
+        // Slack-bridged rows read like ordinary messages; other external content stays inert.
+        const inert = external && !isSlackBridgedExternalProvider(externalMessage?.provider);
         const taskFact = external ? undefined : taskFacts.get(result.id);
         return {
           ...visibleResult,
           senderType: toAgentFacingActorType(result.senderType),
           ...(externalMessage ? { external_message: externalMessage } : {}),
-          content: external
+          content: inert
             ? renderThirdPartyInertText({ field: "tool_result", value: result.content })
             : renderedContents[index],
-          snippet: external
+          snippet: inert
             ? renderThirdPartyInertText({ field: "tool_result", value: result.snippet })
             : renderedSnippets[index],
           ...(taskFact && {
@@ -4832,6 +4848,7 @@ internalRouter.post("/agent/:id/reminders", async (req, res) => {
       res.status(result.status).json({ error: result.error });
       return;
     }
+    if (await refuseIfRemindersMovedToApp(res, result.agent.serverId)) return;
 
     const { title, fireAt, delaySeconds, msgId, payload, repeat, tz, channel } = req.body ?? {};
     if (typeof title !== "string" || title.trim().length === 0) {
@@ -5040,6 +5057,7 @@ internalRouter.post("/agent/:id/reminders/:reminderId/snooze", async (req, res) 
       res.status(result.status).json({ error: result.error });
       return;
     }
+    if (await refuseIfRemindersMovedToApp(res, result.agent.serverId)) return;
 
     const { delaySeconds } = req.body ?? {};
     const schedule = resolveScheduleInput({ delaySeconds }, Date.now());
@@ -5096,6 +5114,7 @@ internalRouter.patch("/agent/:id/reminders/:reminderId", async (req, res) => {
       res.status(result.status).json({ error: result.error });
       return;
     }
+    if (await refuseIfRemindersMovedToApp(res, result.agent.serverId)) return;
 
     const existing = await reminderCrud.getAppReminderById(req.params.reminderId);
     if (!existing || existing.serverId !== req.serverId || existing.ownerAgentId !== req.params.id) {

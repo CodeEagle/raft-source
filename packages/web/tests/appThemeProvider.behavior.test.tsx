@@ -12,6 +12,7 @@ import {
   APP_THEME_PREFERENCES_STORAGE_KEY,
   APP_THEME_STORAGE_KEY,
 } from "../src/theme/appTheme";
+import { RAFT_DARK_THEME_CHROME_COLOR, RAFT_LIGHT_THEME_CHROME_COLOR } from "../src/theme/appThemeChrome";
 
 function accessToken(subject: string): string {
   const payload = Buffer.from(JSON.stringify({ sub: subject, type: "access" }))
@@ -34,27 +35,28 @@ window.matchMedia = ((query: string) => ({
 })) as typeof window.matchMedia;
 
 function ThemeProbe() {
-  const { preset, setPreset } = useAppTheme();
+  const { mode, resolvedMode, setMode } = useAppTheme();
   useEffect(() => {
     beforePaintSnapshots.push({
-      preset,
+      mode,
       rootTheme: document.documentElement.dataset.theme,
       light: document.documentElement.classList.contains("light"),
       dark: document.documentElement.classList.contains("dark"),
       themeColor: document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.content,
     });
-  }, [preset]);
+  }, [mode, resolvedMode]);
   return (
     <div>
-      <output data-testid="preset">{preset}</output>
-      <button type="button" onClick={() => setPreset("elegant-light")}>Use elegant</button>
+      <output data-testid="mode">{mode}</output>
+      <output data-testid="resolved">{resolvedMode}</output>
+      <button type="button" onClick={() => setMode("light")}>Use light</button>
     </div>
   );
 }
 
 const originalLocalStorage = window.localStorage;
 const beforePaintSnapshots: Array<{
-  preset: string;
+  mode: string;
   rootTheme: string | undefined;
   light: boolean;
   dark: boolean;
@@ -86,7 +88,6 @@ afterEach(() => {
   window.localStorage.clear();
   beforePaintSnapshots.length = 0;
   setAccount(null);
-  delete document.documentElement.dataset.theme;
   document.documentElement.classList.remove("light", "dark");
   document.documentElement.style.removeProperty("color-scheme");
 });
@@ -120,9 +121,9 @@ test("legacy brutal stays light even when the system is dark and storage cannot 
     </AppThemeProvider>,
   );
 
-  assert.equal(screen.getByTestId("preset").textContent, "brutal");
+  assert.equal(screen.getByTestId("mode").textContent, "light");
   await waitFor(() => {
-    assert.equal(document.documentElement.dataset.theme, "brutal");
+    assert.equal(document.documentElement.hasAttribute("data-theme"), false, "only the mode reaches <html>; no theme family");
     assert.equal(document.documentElement.classList.contains("dark"), false);
   });
   assert.equal(window.localStorage.getItem(APP_THEME_PREFERENCES_STORAGE_KEY), null);
@@ -137,30 +138,41 @@ test("the device preference restores and persists without an account", async () 
     </AppThemeProvider>,
   );
 
-  assert.equal(screen.getByTestId("preset").textContent, "elegant-dark");
+  assert.equal(screen.getByTestId("mode").textContent, "dark");
   await waitFor(() => {
-    assert.equal(document.documentElement.dataset.theme, "elegant");
+    assert.equal(document.documentElement.hasAttribute("data-theme"), false, "only the mode reaches <html>; no theme family");
     assert.equal(document.documentElement.classList.contains("dark"), true);
     assert.equal(
       document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')?.content,
-      "#141411",
+      RAFT_DARK_THEME_CHROME_COLOR,
     );
   });
 
-  fireEvent.click(screen.getByRole("button", { name: "Use elegant" }));
+  fireEvent.click(screen.getByRole("button", { name: "Use light" }));
 
-  assert.equal(screen.getByTestId("preset").textContent, "elegant-light");
+  assert.equal(screen.getByTestId("mode").textContent, "light");
   assert.equal(
     window.localStorage.getItem(APP_THEME_PREFERENCES_STORAGE_KEY),
-    JSON.stringify({ mode: "light", lightThemeId: "elegant", darkThemeId: "elegant" }),
+    JSON.stringify({ mode: "light" }),
   );
   assert.deepEqual(beforePaintSnapshots.at(-1), {
-    preset: "elegant-light",
-    rootTheme: "elegant",
+    mode: "light",
+    rootTheme: undefined,
     light: true,
     dark: false,
-    themeColor: "#FFFFFF",
+    themeColor: RAFT_LIGHT_THEME_CHROME_COLOR,
   });
+});
+
+test("following the system resolves to the system's mode", () => {
+  systemDark = true;
+  render(
+    <AppThemeProvider>
+      <ThemeProbe />
+    </AppThemeProvider>,
+  );
+  assert.equal(screen.getByTestId("mode").textContent, "system");
+  assert.equal(screen.getByTestId("resolved").textContent, "dark");
 });
 
 test("switching accounts keeps the same device theme", () => {
@@ -175,27 +187,29 @@ test("switching accounts keeps the same device theme", () => {
       <ThemeProbe />
     </AppThemeProvider>,
   );
-  assert.equal(screen.getByTestId("preset").textContent, "elegant-dark");
+  assert.equal(screen.getByTestId("mode").textContent, "dark");
 
   act(() => setAccount("account-b"));
-  assert.equal(screen.getByTestId("preset").textContent, "elegant-dark");
+  assert.equal(screen.getByTestId("mode").textContent, "dark");
 
   act(() => setAccount(null));
-  assert.equal(screen.getByTestId("preset").textContent, "elegant-dark");
+  assert.equal(screen.getByTestId("mode").textContent, "dark");
 });
 
-test("a storage event refreshes the device preference", () => {
+test("a storage event from another tab refreshes the device preference", () => {
   window.localStorage.clear();
   render(
     <AppThemeProvider>
       <ThemeProbe />
     </AppThemeProvider>,
   );
-  assert.equal(screen.getByTestId("preset").textContent, "brutal");
+  assert.equal(screen.getByTestId("mode").textContent, "system");
 
+  const next = JSON.stringify({ mode: "light" });
+  window.localStorage.setItem(APP_THEME_PREFERENCES_STORAGE_KEY, next);
   act(() => window.dispatchEvent(new StorageEvent("storage", {
     key: APP_THEME_PREFERENCES_STORAGE_KEY,
-    newValue: JSON.stringify({ mode: "light", lightThemeId: "elegant", darkThemeId: "elegant" }),
+    newValue: next,
   })));
-  assert.equal(screen.getByTestId("preset").textContent, "elegant-light");
+  assert.equal(screen.getByTestId("mode").textContent, "light");
 });

@@ -4,13 +4,15 @@
 // This is an AX contract, not an implementation detail.
 
 import { axSurface } from "../../core/renderer";
+import type {
+  AgentAttachmentCommentRow,
+  AgentAttachmentUploadedLike,
+} from "@botiverse/raft-shared";
 import {
   formatAgentAttachmentComments,
   formatAgentAttachmentDownloaded,
   formatAgentAttachmentUploaded,
-  type AgentAttachmentCommentRow,
-  type AgentAttachmentUploadedLike,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 export type AttachmentUploadedLike = AgentAttachmentUploadedLike;
 export type CommentRow = AgentAttachmentCommentRow;

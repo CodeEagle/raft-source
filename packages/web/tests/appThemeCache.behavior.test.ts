@@ -44,25 +44,26 @@ test("theme preferences use one device key and default to following the system",
 
 test("a saved device preference round-trips without an account id", () => {
   const storage = memoryStorage();
-  const preferences = {
-    mode: "light" as const,
-    lightThemeId: "elegant" as const,
-    darkThemeId: "elegant" as const,
-  };
+  const preferences = { mode: "light" as const };
 
   assert.equal(writeDeviceThemePreferences(preferences, storage), true);
   assert.deepEqual(readDeviceThemePreferences(storage), preferences);
   assert.equal(storage.length, 1);
 });
 
+test("a record from the two-axis build keeps its mode; its theme ids no longer select anything", () => {
+  const storage = memoryStorage();
+  storage.setItem(
+    APP_THEME_PREFERENCES_STORAGE_KEY,
+    JSON.stringify({ mode: "dark", lightThemeId: "brutal", darkThemeId: "elegant" }),
+  );
+  assert.deepEqual(readDeviceThemePreferences(storage), { mode: "dark" });
+});
+
 test("legacy device and single-account preferences migrate once", () => {
   const legacy = memoryStorage();
   legacy.setItem(APP_THEME_STORAGE_KEY, "elegant-dark");
-  const promoted = {
-    mode: "dark" as const,
-    lightThemeId: "elegant" as const,
-    darkThemeId: "elegant" as const,
-  };
+  const promoted = { mode: "dark" as const };
   assert.deepEqual(readDeviceThemePreferences(legacy), promoted);
   assert.equal(legacy.getItem(DEVICE_THEME_STORAGE_KEY), JSON.stringify(promoted));
 
@@ -74,7 +75,7 @@ test("legacy device and single-account preferences migrate once", () => {
     `${APP_THEME_PRESET_STORAGE_KEY_PREFIX}account-a`,
     JSON.stringify({ mode: "light", lightThemeId: "elegant", darkThemeId: "elegant" }),
   );
-  assert.equal(readDeviceThemePreferences(oneAccount).lightThemeId, "elegant");
+  assert.equal(readDeviceThemePreferences(oneAccount).mode, "light");
 
   const manyAccounts = memoryStorage();
   manyAccounts.setItem(`${APP_THEME_PRESET_STORAGE_KEY_PREFIX}account-a`, "elegant-dark");
@@ -101,11 +102,7 @@ test("a readable but unwritable legacy preference still keeps its theme", () => 
     },
   };
 
-  assert.deepEqual(readDeviceThemePreferences(storage), {
-    mode: "dark",
-    lightThemeId: "elegant",
-    darkThemeId: "elegant",
-  });
+  assert.deepEqual(readDeviceThemePreferences(storage), { mode: "dark" });
   assert.equal(writes, 1);
   assert.equal(storage.getItem(DEVICE_THEME_STORAGE_KEY), null);
 });

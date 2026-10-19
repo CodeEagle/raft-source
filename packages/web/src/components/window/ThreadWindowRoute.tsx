@@ -1,9 +1,8 @@
-import CloseButton from "../ui/CloseButton";
 import { useCallback, useEffect, useEffectEvent, useMemo, useState } from "react";
 import { MapPin, X } from "lucide-react";
 import { useIntl } from "react-intl";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { Button } from "raft-ui";
+import { Button, PanelAction } from "@botiverse/raft-ui";
 import ThreadPanel from "../message/ThreadPanel";
 import LegacyTaskPanel from "../task/LegacyTaskPanel";
 import TaskModalHead from "../task/TaskModalHead";
@@ -203,13 +202,15 @@ export default function ThreadWindowRoute() {
   }, [legacyChannelId, legacyChannelType, legacyMessageId, viewInChannel]);
   const taskPageSlot = task ? (
     <>
-      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line-hairline bg-layer-panel px-4 py-2 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white">
+      {/* Head actions are raft-ui PanelAction; md:pr-[13px] is the panel-head
+          recipe's right edge, landing the last glyph 20px from the edge. */}
+      <div className="flex shrink-0 items-center justify-between gap-3 border-b border-line-seam bg-layer-canvas px-4 py-2 md:pr-[13px]">
         <Tooltip
           content={task.title}
           disableHoverablePopup
           contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
         >
-          <strong className="truncate text-sm" data-testid="task-page-identity">
+          <strong className="truncate text-subhead font-bold text-foreground" data-testid="task-page-identity">
             {formatMessage({ id: "task.modal.taskWithNumber" }, { taskNumber: task.taskNumber })}
           </strong>
         </Tooltip>
@@ -219,32 +220,26 @@ export default function ThreadWindowRoute() {
             disableHoverablePopup
             contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
           >
-            <Button
-              type="button"
+            <PanelAction
               onClick={viewTaskInChannel}
-              size="icon-sm"
-              variant="outline"
-              className="size-7"
               aria-label={formatMessage({ id: "message.threadPanel.viewInChannel" })}
               data-testid="task-view-in-channel"
             >
-              <MapPin size={14} />
-            </Button>
+              <MapPin />
+            </PanelAction>
           </Tooltip>
           <Tooltip
             content={formatMessage({ id: "task.modal.close" })}
             disableHoverablePopup
             contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
           >
-            <CloseButton
-              type="button"
+            <PanelAction
               onClick={closeWindow}
-              className=" flex size-7 items-center justify-center "
               aria-label={formatMessage({ id: "task.modal.close" })}
               data-testid="task-close"
             >
-              <X size={14} />
-            </CloseButton>
+              <X />
+            </PanelAction>
           </Tooltip>
         </div>
       </div>
@@ -253,12 +248,12 @@ export default function ThreadWindowRoute() {
   ) : undefined;
 
   return (
-    <main className="flex h-dvh max-h-dvh min-h-0 w-full flex-col overflow-hidden bg-layer-canvas-muted font-display theme-brutal:bg-brutal-cream" data-testid="thread-window-route">
+    <main className="flex h-dvh max-h-dvh min-h-0 w-full flex-col overflow-hidden bg-layer-sidebar font-display" data-testid="thread-window-route">
       <div className="flex min-h-0 flex-1 justify-center bg-layer-canvas p-0 sm:bg-transparent sm:p-3">
         {invalidTarget || asyncError ? (
-          <div className="flex w-full max-w-2xl flex-col items-center justify-center gap-4 rounded-lg border border-line-muted bg-layer-panel p-8 text-center shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal">
-            <p className="font-bold text-foreground-strong">{asyncError ?? formatMessage({ id: "message.threadPanel.loadFailedTitle" })}</p>
-            <Button type="button" onClick={closeWindow} size="sm" variant="outline" className="font-bold">
+          <div className="flex w-full max-w-2xl flex-col items-center justify-center gap-4 rounded-container border border-line-seam bg-layer-canvas p-8 text-center">
+            <p className="text-headline text-foreground">{asyncError ?? formatMessage({ id: "message.threadPanel.loadFailedTitle" })}</p>
+            <Button type="button" onClick={closeWindow} size="sm" variant="outline">
               {formatMessage({ id: "message.threadPanel.closeThread" })}
             </Button>
           </div>
@@ -270,7 +265,7 @@ export default function ThreadWindowRoute() {
             onViewInChannel={viewLegacyTaskInChannel}
           />
         ) : surfaceParentMessageId ? (
-          <div data-testid="thread-window-surface" className={`flex w-full max-w-none flex-col bg-layer-canvas sm:max-w-3xl sm:border sm:border-line-muted sm:shadow-raft-md theme-brutal:sm:border-2 theme-brutal:sm:border-black theme-brutal:sm:bg-white theme-brutal:sm:shadow-brutal ${
+          <div data-testid="thread-window-surface" className={`flex w-full max-w-none flex-col bg-layer-canvas sm:max-w-3xl sm:rounded-container sm:border sm:border-line-seam ${
             task
               ? "min-h-full overflow-hidden sm:min-h-0 sm:h-[calc(100dvh-1.5rem)] sm:max-h-full"
               : "min-h-full overflow-hidden sm:h-[calc(100dvh-1.5rem)] sm:max-h-full"
@@ -281,8 +276,8 @@ export default function ThreadWindowRoute() {
             </div>
           </div>
         ) : (
-          <div className="flex h-[calc(100dvh-1.5rem)] max-h-full w-full max-w-3xl items-center justify-center rounded-lg border border-line-muted bg-layer-panel shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal">
-            <span className="text-foreground-hint">{formatMessage({ id: "common.loading" })}</span>
+          <div className="flex h-[calc(100dvh-1.5rem)] max-h-full w-full max-w-3xl items-center justify-center rounded-container border border-line-seam bg-layer-canvas">
+            <span className="text-callout text-foreground-hint">{formatMessage({ id: "common.loading" })}</span>
           </div>
         )}
       </div>

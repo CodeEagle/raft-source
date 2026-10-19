@@ -42,10 +42,9 @@ test("MessageItem bare refs use shared Slock Ref scanners", () => {
 test("MessageItem resolves bare mention labels from the canonical identity directory", () => {
   const source = readFileSync(new URL("../src/components/message/MessageItem.tsx", import.meta.url), "utf8");
 
-  assert.match(source, /const safeName = name\.replace/);
-  assert.match(source, /data-mention="\$\{safeName\}"/);
+  assert.match(source, /dataMention: name,/);
   assert.match(source, /const visibleLabel = resolvedMention\?\.displayName/);
-  assert.match(source, /escapeMessageHtmlText\(visibleLabel\)/);
+  assert.match(source, /messageTokenNode\("a", visibleLabel,/);
   assert.match(source, /resolveMentionByIdentity\(entry\.type, entry\.id\)/);
   assert.match(source, /: `@\$\{name\}`/);
   assert.doesNotMatch(source, /pendingLabel=/);
@@ -102,7 +101,7 @@ test("all message reference chips share one box from the RUI recipe (no local fo
   assert.match(source, /raftPermalink[\s\S]*?<PermalinkReferenceChip\b/);
   assert.match(permalinkChip, /<ReferenceChip[\s\S]*?icon=\{Link\}/);
   assert.match(permalinkChip, /<ReferenceChip[\s\S]*?variant="link"/);
-  assert.match(permalinkChip, /text-\[10px\] font-normal leading-none text-foreground-placeholder/);
+  assert.match(permalinkChip, /font-mono text-label font-normal leading-none text-foreground-hint/);
 
   // Comment ref chips render through ReferenceChip with the MessageSquare icon
   // and the stone color (distinct from the permalink's soft-signal, per stdrc).
@@ -134,7 +133,7 @@ test("all message reference chips share one box from the RUI recipe (no local fo
   assert.doesNotMatch(permalinkChip, /cursor-pointer/);
   assert.doesNotMatch(mention, /cursor-pointer/);
   assert.doesNotMatch(attachmentCommentRefChip, /cursor-pointer/);
-  assert.doesNotMatch(source, /dataTaskRef[\s\S]*?bg-brutal-lime/);
+  assert.doesNotMatch(source, /dataTaskRef[\s\S]*?bg-palette-lime/);
   assert.doesNotMatch(taskRefSection, /inline-flex/);
   assert.doesNotMatch(taskRefSection, /font-mono text-sm/);
   assert.doesNotMatch(taskRefSection, /py-0\.5/);

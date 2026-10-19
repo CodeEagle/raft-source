@@ -1,3 +1,4 @@
+import { ambientProcessEnv } from "../processEnvPatch";
 import {
   type ChildProcess,
   spawn,
@@ -45,6 +46,7 @@ function killWindowsProcessTree(pid: number): void {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
+    env: ambientProcessEnv(),
   });
   killer.unref();
 }
@@ -65,6 +67,7 @@ function resolvePosixShell(): { shell: string; args: string[] } {
   if (existsSync("/bin/bash")) return { shell: "/bin/bash", args: ["-c"] };
   try {
     const result = spawnSync("which", ["bash"], {
+      env: ambientProcessEnv(),
       encoding: "utf8",
       timeout: 5_000,
     });
@@ -283,7 +286,7 @@ export function createPiPosixOperations(
       const child = spawnProcess(shellConfig.shell, [...shellConfig.args, command], {
         cwd,
         detached: true,
-        env: env ?? process.env,
+        env: env ?? ambientProcessEnv(),
         stdio: ["ignore", "pipe", "pipe"],
         windowsHide: true,
       });

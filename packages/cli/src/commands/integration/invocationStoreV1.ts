@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { currentDate } from "@botiverse/raft-shared";
+import { currentDate } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import type { AgentContext } from "../../auth/env";
 import type { AgentManifestActionV1 } from "./manifestV1";

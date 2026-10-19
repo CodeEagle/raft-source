@@ -173,8 +173,9 @@ test("PendingMentionActionStrip renders flush with the composer width", () => {
 
   assert.ok(rootClass, "strip root should render a class contract");
   assert.match(rootClass, /\bw-full\b/);
-  assert.match(rootClass, /\bbg-brutal-cream\b/);
-  assert.doesNotMatch(rootClass, /\bbg-soft-signal\b/);
+  // Raft DS card surface: white surface + content hairline, never a wash.
+  assert.match(rootClass, /\bbg-layer-card\b/);
+  assert.doesNotMatch(rootClass, /\bbg-(?:palette-yellow|soft-signal)\b/);
   assert.doesNotMatch(rootClass, /\bml-12\b/);
   assert.doesNotMatch(rootClass, /\bmr-2\b/);
   assert.doesNotMatch(html, /Undelivered mentions/);

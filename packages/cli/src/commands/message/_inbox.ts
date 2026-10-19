@@ -11,12 +11,14 @@
 // numeric `since` is a filter there). Managed runners go through the daemon
 // and keep the immediate ack.
 
+import type {
+  AgentApiEventsResponse,
+  AgentApiRequestQueryByRoute,
+} from "@botiverse/raft-shared";
 import {
   AGENT_API_EVENTS_ACK_HEADER,
   AGENT_API_EVENTS_ACK_LEASE,
-  type AgentApiEventsResponse,
-  type AgentApiRequestQueryByRoute,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import type { AgentContext } from "../../auth/env";
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test as nodeTest } from "vitest";
 import "./helpers/domSetup";
 import type { ReactNode } from "react";
-import { toast } from "raft-ui";
+import { toast } from "@botiverse/raft-ui";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 // ChatPanel's Leave-channel flow mounts the react-intl-migrated ConfirmDialog,
@@ -175,7 +175,7 @@ function renderChatPanel(
 
 function renderSidebarForMute(
   channelOrChannels: Channel | Channel[],
-  options: { pinnedChannelIds?: string[]; mobileInline?: boolean; bottomSlot?: ReactNode } = {},
+  options: { pinnedChannelIds?: string[]; mobileInline?: boolean } = {},
 ) {
   const channels = Array.isArray(channelOrChannels) ? channelOrChannels : [channelOrChannels];
   const selectedChannel = channels[channels.length - 1]!;
@@ -245,7 +245,7 @@ function renderSidebarForMute(
   return render(
     <MemoryRouter initialEntries={[`/s/${server.slug}/channel/${selectedChannel.id}`]}>
       <TestIntlProvider>
-        <Sidebar mobileInline={options.mobileInline} bottomSlot={options.bottomSlot} />
+        <Sidebar mobileInline={options.mobileInline} />
       </TestIntlProvider>
     </MemoryRouter>,
   );
@@ -777,7 +777,9 @@ test("channel drawer keeps mute, runtime confirmation and leave actions distinct
   fireEvent.click(screen.getByTestId("channel-overflow-stop-agents"));
   assert.ok(await screen.findByRole("heading", { name: "Stop All Agents" }));
   fireEvent.click(screen.getAllByRole("button", { name: "Cancel" }).find((button) => !(button as HTMLButtonElement).disabled)!);
-  await waitFor(() => assert.equal(screen.queryAllByText("Stop All Agents").length, 0));
+  // The trigger row reads "Stop All Agents" too (it names the dialog it opens),
+  // so the closed check looks for the dialog's heading.
+  await waitFor(() => assert.equal(screen.queryAllByRole("heading", { name: "Stop All Agents" }).length, 0));
   fireEvent.click(screen.getByTestId("channel-overflow-leave"));
   const confirm = await screen.findByTestId("channel-overflow-leave-confirm");
   assert.match(confirm.parentElement?.parentElement?.textContent ?? "", /Existing followed threads are not automatically unfollowed/);
@@ -1030,16 +1032,16 @@ test("sidebar shows every active channel regardless of membership and excludes a
   }
 });
 
-test("sidebar bottom activity stays after the bounded scroll region in flex flow", () => {
+test("sidebar ends with its bounded scroll region: no live-activity bar below the list", () => {
+  // Raft Design System › Sidebar / AgentActivity: who is working sits in the
+  // head (WorkingNowSummary), so nothing is stacked under the scroll region.
   api.get = (() => new Promise(() => {})) as typeof api.get;
   const channel = makeChannel({
     id: "sidebar-live-activity-layout",
     serverId: "server-sidebar-mute",
     name: "live-activity-layout",
   });
-  renderSidebarForMute(channel, {
-    bottomSlot: <div data-testid="sidebar-live-activity-slot">Live activity</div>,
-  });
+  renderSidebarForMute(channel);
 
   const root = screen.getByTestId("sidebar-root");
   const scrollRegion = Array.from(root.children).find((element) =>
@@ -1049,16 +1051,8 @@ test("sidebar bottom activity stays after the bounded scroll region in flex flow
       && element.classList.contains("flex-1"),
   );
   assert.ok(scrollRegion, "the mounted sidebar keeps a bounded flex scroll region");
-
-  const slot = screen.getByTestId("sidebar-live-activity-slot");
-  const wrapper = slot.parentElement;
-  assert.ok(wrapper, "the live activity slot has a layout wrapper");
-  assert.equal(scrollRegion.nextElementSibling, wrapper, "the slot follows the scroll region as a flex sibling");
-  assert.equal(wrapper.parentElement, root);
-  assert.equal(wrapper.classList.contains("pointer-events-none"), true);
-  assert.equal(wrapper.classList.contains("shrink-0"), true);
-  assert.equal(wrapper.classList.contains("absolute"), false);
-  assert.equal(wrapper.classList.contains("bottom-0"), false);
+  assert.equal(scrollRegion.nextElementSibling, null, "the scroll region is the sidebar's last child");
+  assert.ok(scrollRegion.contains(screen.getByTestId("sidebar-scroll-surface")));
 });
 
 test("sidebar refreshes cross-server unread state after a server notification preference event", async () => {
@@ -1233,16 +1227,20 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
   assert.equal(mutedIcon.className.includes("ml-auto"), false);
   assert.equal(mutedIcon.className.includes("size-4"), true);
   assert.equal(mutedIcon.className.includes("text-black/40"), false);
-  assert.equal(mutedIcon.className.includes("bg-brutal-orange/25"), false);
+  assert.equal(mutedIcon.className.includes("bg-palette-orange/25"), false);
   assert.ok(mutedIcon.querySelector(".lucide-bell-off"));
+  // Raft Design System › Sidebar `rf-srow--muted`: the name is ink-2, not bold,
+  // and its unread is the grey mono count (`rf-count`), never the pink badge.
+  // raft-ui SidebarItem draws both from the row's tone (`tone="muted"`).
   const mutedName = within(mutedRow as HTMLElement).getByText("muted-unread");
-  assert.equal(mutedName.className.includes("text-black/70"), true);
-  assert.equal(mutedName.className.includes("font-bold"), false);
+  assert.equal(mutedName.closest('[data-slot="sidebar-item"]')?.getAttribute("data-tone"), "muted");
+  assert.match(mutedName.className, /data-\[tone=unread\]/, "only the unread tone bolds the name");
+  assert.doesNotMatch(mutedName.className, /(^|\s)(font-bold|text-foreground-muted)(\s|$)/, "no hand-set ink or weight");
   const mutedQuietUnread = within(mutedRow as HTMLElement).getByText("99+");
   assert.equal(mutedQuietUnread.className.includes("ml-1"), true);
-  assert.equal(mutedQuietUnread.className.includes("text-black/50"), true);
+  assert.equal(mutedQuietUnread.className.includes("text-foreground-hint"), true);
   assert.equal(mutedQuietUnread.className.includes("font-mono"), true);
-  assert.equal(mutedQuietUnread.className.includes("bg-brutal-pink"), false);
+  assert.notEqual(mutedQuietUnread.getAttribute("data-slot"), "sidebar-item-count");
   assert.equal(within(mutedRow as HTMLElement).queryByTestId("sidebar-mention-marker"), null);
 
   const mutedMentionRow = document.querySelector('[data-sidebar-channel-id="channel-muted-mention"]');
@@ -1250,12 +1248,14 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
   assert.ok(within(mutedMentionRow as HTMLElement).getByTestId("sidebar-activity-muted"));
   const mutedMentionQuietUnread = within(mutedMentionRow as HTMLElement).getByText("99");
   assert.equal(mutedMentionQuietUnread.className.includes("ml-1"), true);
-  assert.equal(mutedMentionQuietUnread.className.includes("text-black/50"), true);
-  assert.equal(mutedMentionQuietUnread.className.includes("bg-brutal-pink"), false);
+  assert.equal(mutedMentionQuietUnread.className.includes("text-foreground-hint"), true);
+  assert.notEqual(mutedMentionQuietUnread.getAttribute("data-slot"), "sidebar-item-count");
+  // @you is raft-ui's indicator sticker (DS `rf-badge--mention`), not a hand-rolled chip.
   const mentionMarker = within(mutedMentionRow as HTMLElement).getByTestId("sidebar-mention-marker");
   assert.equal(mentionMarker.getAttribute("aria-label"), "Mentioned you");
+  assert.equal(mentionMarker.getAttribute("role"), "img");
+  assert.equal(mentionMarker.getAttribute("data-slot"), "sidebar-item-indicator");
   assert.equal(mentionMarker.className.includes("ml-1"), true);
-  assert.equal(mentionMarker.className.includes("bg-soft-signal"), true);
   assert.ok(mentionMarker.querySelector(".lucide-at-sign"));
 
   const unmutedMentionRow = document.querySelector('[data-sidebar-channel-id="channel-unmuted-mention"]');
@@ -1266,24 +1266,28 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
   assert.equal(unmutedMentionMarker.className.includes("ml-auto"), false);
   assert.equal(unmutedMentionMarker.className.includes("rounded"), true);
   const unmutedMentionUnreadBadge = within(unmutedMentionRow as HTMLElement).getByText("99");
-  assert.equal(unmutedMentionUnreadBadge.className.includes("bg-brutal-pink"), true);
+  assert.equal(unmutedMentionUnreadBadge.getAttribute("data-slot"), "sidebar-item-count");
   assert.equal(unmutedMentionUnreadBadge.className.includes("ml-auto"), true);
 
   const unmutedRow = document.querySelector('[data-sidebar-channel-id="channel-unmuted-unread"]');
   assert.ok(unmutedRow);
   assert.equal(within(unmutedRow as HTMLElement).queryByTestId("sidebar-activity-muted"), null);
   const unmutedName = within(unmutedRow as HTMLElement).getByText("unmuted-unread");
-  assert.equal(unmutedName.className.includes("text-black/70"), false);
+  assert.equal(unmutedName.className.includes("text-foreground-muted"), false);
   assert.equal(unmutedName.className.includes("font-bold"), true);
   const unmutedUnreadBadge = within(unmutedRow as HTMLElement).getByText("99+");
   assert.equal(unmutedUnreadBadge.className.includes("ml-auto"), true);
   assert.equal(unmutedUnreadBadge.className.includes("ml-1"), false);
-  assert.equal(unmutedUnreadBadge.className.includes("bg-brutal-pink"), true);
+  assert.equal(unmutedUnreadBadge.getAttribute("data-slot"), "sidebar-item-count");
 
   const normalIdleRow = document.querySelector('[data-sidebar-channel-id="channel-normal-idle"]');
   assert.ok(normalIdleRow);
   const normalIdleName = within(normalIdleRow as HTMLElement).getByText("normal-idle");
-  assert.equal(normalIdleName.className.trim(), "min-w-0 text-sm truncate");
+  // Row type (15/20 500) comes from SidebarItem and the name is raft-ui's row
+  // title (one line, an ellipsis); an idle name adds no tone or weight.
+  assert.equal(normalIdleName.getAttribute("data-slot"), "sidebar-item-title");
+  assert.equal(normalIdleRow.getAttribute("data-tone"), null, "an idle row has no tone");
+  assert.doesNotMatch(normalIdleName.className, /(^|\s)(text-foreground-(muted|hint)|font-bold)(\s|$)/);
   assert.ok(within(normalIdleRow as HTMLElement).queryByTestId("sidebar-quiet-new-dot") === null, "hasNew only lights non-joined rows");
 
   const unjoinedNewRow = document.querySelector('[data-sidebar-channel-id="channel-unjoined-new"]');
@@ -1295,11 +1299,13 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
   const unjoinedRow = document.querySelector('[data-sidebar-channel-id="channel-muted-unjoined"]');
   assert.ok(unjoinedRow);
   assert.equal(within(unjoinedRow as HTMLElement).queryByTestId("sidebar-activity-muted"), null);
+  // Not joined = `rf-srow--away`: the name is ink-3; its unread is the grey count.
+  // raft-ui SidebarItem `tone="away"` draws the ink-3 name.
   const unjoinedName = within(unjoinedRow as HTMLElement).getByText("muted-unjoined");
-  assert.equal(unjoinedName.className.includes("text-black/40"), true);
+  assert.equal(unjoinedName.closest('[data-slot="sidebar-item"]')?.getAttribute("data-tone"), "away");
   const unjoinedUnreadBadge = within(unjoinedRow as HTMLElement).getByText("99");
   assert.equal(unjoinedUnreadBadge.className.includes("ml-auto"), true);
-  assert.equal(unjoinedUnreadBadge.className.includes("text-black/50"), true);
+  assert.equal(unjoinedUnreadBadge.className.includes("text-foreground-hint"), true);
   assert.equal(unjoinedUnreadBadge.className.includes("font-mono"), true);
 
   const mutedDraftRow = document.querySelector('[data-sidebar-channel-id="channel-muted-draft"]');
@@ -1308,8 +1314,12 @@ test("sidebar mutes ordinary unread presentation while keeping row and draft vis
   const draftPencil = Array.from((mutedDraftRow as HTMLElement).querySelectorAll("svg"))
     .find((node) => node.className.baseVal.includes("lucide-pencil"));
   assert.ok(draftPencil);
-  assert.equal(draftPencil.className.baseVal.includes("ml-1"), true);
-  assert.equal(draftPencil.className.baseVal.includes("text-black/40"), true);
+  // The draft mark is raft-ui's row meta icon, like the muted bell beside it
+  // (ink-3, turning ink on the selected row).
+  const draftMark = draftPencil.parentElement as HTMLElement;
+  assert.equal(draftMark.getAttribute("data-slot"), "sidebar-item-meta-icon");
+  assert.equal(draftMark.className.includes("ml-1"), true);
+  assert.equal(draftMark.className.includes("text-foreground-hint"), true);
 });
 
 test("collapsed Sidebar section shows attention for ordinary unread", () => {

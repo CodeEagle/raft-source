@@ -5,6 +5,7 @@
 // command, and there is nothing to cancel.
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import type {
@@ -32,15 +33,17 @@ import {
   type AgentClaimResult,
 } from "../agentText/tasks";
 import type { AgentApiHeldFreshnessResponse } from "../agentApiMessageContract";
+import { formatAgentHold } from "../agentText/hold";
 import { taskClaimArgv, taskUpdateArgv, unreadMessagesInterrupt, type RaftInterrupt, type RaftInterrupted } from "./interrupt";
 import { formatHint, hintStep, RAFT_HINTS, type RaftHintOptions, type RaftHintStyle } from "./hint";
 import { isHeldResponse } from "./messages";
+import type { SeenFrontier } from "./frontier";
 import { failureFromClientResult, failureOutcome, keyedWriteFailure, opError, validateOpRequest, type RaftNextStep, type RaftOutcome } from "./outcome";
 import { requestSchema } from "./requestSchema";
 
-const taskChannelSchema = z.string().describe("The channel the task board belongs to, for example `#proj-sdk`.");
-const taskNumberSchema = z.number().int().positive().describe("The task number on that channel's board.");
-const raftTaskStatusSchema = z.enum(["todo", "in_progress", "in_review", "done", "closed"]);
+const taskChannelSchema = lazySchema("taskChannelSchema", () => z.string().describe("The channel the task board belongs to, for example `#proj-sdk`."));
+const taskNumberSchema = lazySchema("taskNumberSchema", () => z.number().int().positive().describe("The task number on that channel's board."));
+const raftTaskStatusSchema = lazySchema("raftTaskStatusSchema", () => z.enum(["todo", "in_progress", "in_review", "done", "closed"]));
 // Mirrors `TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU` from the shared root index;
 // declared here so this module does not pull the whole shared package into
 // SDK bundles. `agentOps.test.ts` pins the two literals to each other.
@@ -55,11 +58,11 @@ export interface ClaimTasksRequest {
   messageIds?: string[];
 }
 
-export const claimTasksRequestSchema = requestSchema<ClaimTasksRequest>()(z.object({
+export const claimTasksRequestSchema = lazySchema("claimTasksRequestSchema", () => requestSchema<ClaimTasksRequest>()(z.object({
   target: taskChannelSchema,
   taskNumbers: z.array(z.number().int().positive()).optional().describe("Task numbers to claim."),
   messageIds: z.array(z.string()).optional().describe("Full or short ids of top-level messages to claim as tasks."),
-}));
+})));
 
 export type RaftClaimRowState = "claimed" | "already_yours" | "conflict" | "refused";
 
@@ -89,14 +92,33 @@ export type ClaimTasksOutcome =
   | RaftInterrupted;
 
 /**
- * A held task call: the interrupt whose resume is the identical command, with
- * no cancel (a held task call saved nothing). `context` is today's held text.
+ * What a task write tells the Server its model context has seen of the board
+ * (glimpse G2), as a send does: the Server holds the write when the board has
+ * newer messages. Nothing seen yet in this context attests nothing, and an
+ * unattested write is not held.
  */
-function heldTaskInterrupt(target: string, data: AgentApiHeldFreshnessResponse, action: string, after: string, argv: string[], style: RaftHintStyle): RaftInterrupt {
+function taskAttestation(target: string, frontier: SeenFrontier | undefined): { seenUpToSeq?: number; seenExactSeqs?: number[] } {
+  if (!frontier) return {};
+  const seen = frontier.attestation(target);
+  return {
+    ...(seen.seenUpToSeq === undefined ? {} : { seenUpToSeq: seen.seenUpToSeq }),
+    ...(seen.seenExactSeqs.length > 0 ? { seenExactSeqs: seen.seenExactSeqs.slice(0, 2_500) } : {}),
+  };
+}
+
+/**
+ * A held task call: the interrupt whose resume is the identical command, with
+ * no cancel (a held task call saved nothing). `context` is the held text the
+ * CLI prints (`formatAgentHold`). It carries the call's context, so
+ * `frontier.recordHeld(interrupt)` books under it on any view.
+ */
+function heldTaskInterrupt(target: string, data: AgentApiHeldFreshnessResponse, action: string, after: string, argv: string[], style: RaftHintStyle, frontier: SeenFrontier | undefined): RaftInterrupt {
   const interrupt = unreadMessagesInterrupt({ target, hold: data, context: "", resume: { argv }, hints: style });
-  const noun = interrupt.newMessageCount === 1 ? "message" : "messages";
-  const context = `Held — ${interrupt.newMessageCount} unread ${noun} in ${target}. ${action}\nRead them with: ${formatHint(RAFT_HINTS.messageRead({ target }), style)}\n${after}`;
-  return { ...interrupt, context };
+  return {
+    ...interrupt,
+    context: formatAgentHold(target, data, { heldAction: action, draftInstructions: `${after}\n`, isolationInstructions: `${action} ${after}\n` }, style).trimEnd(),
+    ...(frontier?.contextId ? { contextId: frontier.contextId } : {}),
+  };
 }
 
 function rowState(result: AgentApiTaskClaimResult): RaftClaimRowState {
@@ -128,6 +150,7 @@ function claimText(claim: RaftClaimResult, style: RaftHintStyle): string {
 export async function claimTasks(
   client: Pick<AgentApiClient, "tasks">,
   request: ClaimTasksRequest,
+  frontier?: SeenFrontier,
   options: RaftHintOptions = {},
 ): Promise<ClaimTasksOutcome> {
   const style = options.hints ?? "cli";
@@ -142,6 +165,7 @@ export async function claimTasks(
     channel: request.target,
     ...(numbers.length ? { task_numbers: numbers } : {}),
     ...(ids.length ? { message_ids: ids } : {}),
+    ...taskAttestation(request.target, frontier),
   });
   if (!result.ok) return failureFromClientResult(result);
   const data = result.data;
@@ -154,6 +178,7 @@ export async function claimTasks(
       "After reviewing, rerun the claim if it is still correct.",
       taskClaimArgv(request.target, numbers, ids),
       style,
+      frontier,
     );
     return {
       ok: true,
@@ -199,11 +224,11 @@ export interface ListTasksRequest {
   status?: RaftTaskStatus | "all";
 }
 
-export const listTasksRequestSchema = requestSchema<ListTasksRequest>()(z.object({
+export const listTasksRequestSchema = lazySchema("listTasksRequestSchema", () => requestSchema<ListTasksRequest>()(z.object({
   target: z.string().optional().describe("A channel's board, for example `#proj-sdk`. Pass exactly one of target or mine."),
   mine: z.boolean().optional().describe("true: your own tasks across channels instead of one board."),
   status: z.enum(["todo", "in_progress", "in_review", "done", "closed", "all"]).optional().describe("Filter by status; all includes done and closed."),
-}));
+})));
 
 export interface RaftTaskBoard {
   scope: "channel" | "mine";
@@ -263,7 +288,7 @@ export interface CreateTasksRequest {
   idempotencyKey?: string;
 }
 
-export const createTasksRequestSchema = requestSchema<CreateTasksRequest>()(z.object({
+export const createTasksRequestSchema = lazySchema("createTasksRequestSchema", () => requestSchema<CreateTasksRequest>()(z.object({
   target: taskChannelSchema,
   tasks: z.array(z.object({
     title: z.string().describe("Task title."),
@@ -271,7 +296,7 @@ export const createTasksRequestSchema = requestSchema<CreateTasksRequest>()(z.ob
   })).describe("One entry per task to create."),
   assignee: z.string().optional().describe("`@handle`: yourself to start in_progress, or (owner/admin) someone else to reserve a todo."),
   idempotencyKey: z.string().optional().describe("One key per logical create; generated when omitted and returned. Repeat the same request with the same key within 24 hours to retry without creating the tasks twice."),
-}));
+})));
 
 export type RaftTasksCreated = AgentApiTaskCreateResponse & {
   target: string;
@@ -320,7 +345,7 @@ export interface TaskRef {
 
 const taskRefFields = { target: taskChannelSchema, taskNumber: taskNumberSchema };
 
-export const taskRefSchema = requestSchema<TaskRef>()(z.object(taskRefFields));
+export const taskRefSchema = lazySchema("taskRefSchema", () => requestSchema<TaskRef>()(z.object(taskRefFields)));
 
 function requireTaskRef(request: TaskRef, schema: z.ZodType = taskRefSchema) {
   const invalid = validateOpRequest(schema, request); if (invalid) return invalid;
@@ -344,12 +369,12 @@ export interface AssignTaskRequest extends TaskRef {
   expectedRevision?: number;
 }
 
-export const assignTaskRequestSchema = requestSchema<AssignTaskRequest>()(z.object({
+export const assignTaskRequestSchema = lazySchema("assignTaskRequestSchema", () => requestSchema<AssignTaskRequest>()(z.object({
   ...taskRefFields,
   // Required: an omitted argument is an error, never a silent clear (Tenny, 2026-10-04). Clear with tasks.unassign.
   assignee: z.string().trim().min(1).describe("`@handle` to assign (yourself, or someone else if you are an owner/admin). To clear an assignment use tasks.unassign."),
   expectedRevision: z.number().int().nonnegative().optional().describe("Revision of the task you just read; the change is refused if it moved."),
-}));
+})));
 
 export async function assignTask(
   client: Pick<AgentApiClient, "tasks">,
@@ -378,10 +403,10 @@ export interface UnassignTaskRequest extends TaskRef {
   expectedRevision?: number;
 }
 
-export const unassignTaskRequestSchema = requestSchema<UnassignTaskRequest>()(z.object({
+export const unassignTaskRequestSchema = lazySchema("unassignTaskRequestSchema", () => requestSchema<UnassignTaskRequest>()(z.object({
   ...taskRefFields,
   expectedRevision: z.number().int().nonnegative().optional().describe("Revision of the task you just read; the change is refused if it moved."),
-}));
+})));
 
 /** Clear a task's assignee (the CLI's `raft task unassign`): the explicit way to clear, never an omitted `assignee`. */
 export async function unassignTask(
@@ -409,10 +434,10 @@ export interface UpdateTaskStatusRequest extends TaskRef {
   status: RaftTaskStatus;
 }
 
-export const updateTaskStatusRequestSchema = requestSchema<UpdateTaskStatusRequest>()(z.object({
+export const updateTaskStatusRequestSchema = lazySchema("updateTaskStatusRequestSchema", () => requestSchema<UpdateTaskStatusRequest>()(z.object({
   ...taskRefFields,
   status: raftTaskStatusSchema.describe("todo → in_progress → in_review → done; closed from anywhere."),
-}));
+})));
 
 export type UpdateTaskStatusOutcome =
   | RaftOutcome<UpdateTaskStatusRequest, "updated">
@@ -426,8 +451,9 @@ function heldTaskWrite(
   kind: string,
   argv: string[],
   style: RaftHintStyle,
+  frontier: SeenFrontier | undefined,
 ): RaftInterrupted {
-  const interrupt = heldTaskInterrupt(target, data, action, "After reviewing, repeat the operation if it is still correct.", argv, style);
+  const interrupt = heldTaskInterrupt(target, data, action, "After reviewing, repeat the operation if it is still correct.", argv, style, frontier);
   return {
     ok: true,
     state: "interrupted",
@@ -446,13 +472,19 @@ function heldTaskWrite(
 export async function updateTaskStatus(
   client: Pick<AgentApiClient, "tasks">,
   request: UpdateTaskStatusRequest,
+  frontier?: SeenFrontier,
   options: RaftHintOptions = {},
 ): Promise<UpdateTaskStatusOutcome> {
   const invalid = requireTaskRef(request, updateTaskStatusRequestSchema); if (invalid) return invalid;
-  const result = await client.tasks.updateStatus({ channel: request.target, task_number: request.taskNumber, status: request.status });
+  const result = await client.tasks.updateStatus({
+    channel: request.target,
+    task_number: request.taskNumber,
+    status: request.status,
+    ...taskAttestation(request.target, frontier),
+  });
   if (!result.ok) return failureFromClientResult(result);
   if (isHeldResponse(result.data)) {
-    return heldTaskWrite(request.target, result.data, "The status change was not applied.", "retry_update_status", taskUpdateArgv(request.target, request.taskNumber, request.status), options.hints ?? "cli");
+    return heldTaskWrite(request.target, result.data, "The status change was not applied.", "retry_update_status", taskUpdateArgv(request.target, request.taskNumber, request.status), options.hints ?? "cli", frontier);
   }
   const done = request.status === "in_review";
   return {
@@ -470,11 +502,11 @@ export interface AmendTaskRequest extends TaskRef {
   description?: string | null;
 }
 
-export const amendTaskRequestSchema = requestSchema<AmendTaskRequest>()(z.object({
+export const amendTaskRequestSchema = lazySchema("amendTaskRequestSchema", () => requestSchema<AmendTaskRequest>()(z.object({
   ...taskRefFields,
   title: z.string().optional().describe("New title."),
   description: z.string().nullable().optional().describe("New description; null clears it."),
-}));
+})));
 
 export type AmendTaskOutcome =
   | RaftOutcome<AgentApiTaskAmendSuccessResponse & { target: string }, "amended">
@@ -488,7 +520,12 @@ function taskAmendArgv(request: AmendTaskRequest): string[] {
   ];
 }
 
-export async function amendTask(client: Pick<AgentApiClient, "tasks">, request: AmendTaskRequest, options: RaftHintOptions = {}): Promise<AmendTaskOutcome> {
+export async function amendTask(
+  client: Pick<AgentApiClient, "tasks">,
+  request: AmendTaskRequest,
+  frontier?: SeenFrontier,
+  options: RaftHintOptions = {},
+): Promise<AmendTaskOutcome> {
   const invalid = requireTaskRef(request, amendTaskRequestSchema); if (invalid) return invalid;
   if (request.title === undefined && request.description === undefined) {
     return failureOutcome(opError("INVALID_REQUEST", { message: "Pass a new title, a new description, or description: null to clear it." }));
@@ -498,10 +535,11 @@ export async function amendTask(client: Pick<AgentApiClient, "tasks">, request: 
     task_number: request.taskNumber,
     ...(request.title === undefined ? {} : { title: request.title }),
     ...(request.description === undefined ? {} : { description: request.description }),
+    ...taskAttestation(request.target, frontier),
   });
   if (!result.ok) return failureFromClientResult(result);
   if (isHeldResponse(result.data)) {
-    return heldTaskWrite(request.target, result.data, "The amendment was not applied.", "retry_amend", taskAmendArgv(request), options.hints ?? "cli");
+    return heldTaskWrite(request.target, result.data, "The amendment was not applied.", "retry_amend", taskAmendArgv(request), options.hints ?? "cli", frontier);
   }
   return { ok: true, state: "amended", data: { ...result.data, target: request.target }, next: null, text: formatAgentTaskAmended(result.data) };
 }
@@ -553,10 +591,10 @@ export interface ConvertMessageToTaskRequest {
   messageId: string;
 }
 
-export const convertMessageToTaskRequestSchema = requestSchema<ConvertMessageToTaskRequest>()(z.object({
+export const convertMessageToTaskRequestSchema = lazySchema("convertMessageToTaskRequestSchema", () => requestSchema<ConvertMessageToTaskRequest>()(z.object({
   target: taskChannelSchema,
   messageId: z.string().describe("Full or short id of a top-level message in that channel."),
-}));
+})));
 
 export async function convertMessageToTask(
   client: Pick<AgentApiClient, "tasks">,

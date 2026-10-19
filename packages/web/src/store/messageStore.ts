@@ -17,6 +17,7 @@ import type { ThreadSummary } from "./threadStore";
 import { setCurrentPrincipalId } from "./principalRuntime";
 import {
   captureReceiverPrivateIngressContext,
+  captureHumanActivityIngressContext,
   invalidateReceiverPrivateIngressContexts,
   isReceiverPrivateIngressContextCurrent,
   registerReceiverPrivatePrincipalReader,
@@ -31,6 +32,7 @@ import { reactionReadModelStore } from "./reactionReadModels";
 import { triggerMessagesSyncCoreReset } from "./messageSyncCoreReset";
 import {
   getAcceptedReadState,
+  normalizeReadStateUpdatedBulk,
   consumeReadStateSnapshotRows,
   getReadStateLedgerGeneration,
   hasAcceptedReadStateChangedAfter,
@@ -97,6 +99,9 @@ export interface MessageMention {
   type: "user" | "agent" | "external";
   id: string;
   name: string;
+  /** Read-only public projection only: the label to show instead of `@name`.
+   *  Its `id` is display-local there, never a principal id. */
+  displayName?: string;
 }
 
 export interface PendingMentionAction {
@@ -416,6 +421,7 @@ export interface MessageState {
   applyReadStateProjection: (channelId: string) => ReadStateProjection;
   clearUnread: (channelId: string) => void;
   markRead: (channelId: string) => Promise<void>;
+  markConversationRead: (channelId: string) => Promise<void>;
   markUnread: (channelId: string) => Promise<void>;
   setNearBottom: (val: boolean) => void;
   markCurrentChannelRead: () => void;
@@ -698,6 +704,10 @@ function currentChannelWindowMeta(state: MessageState): ChannelWindowMeta {
  *  triggering re-renders when non-current channels' metadata changes. */
 const channelMetaMap = new Map<string, ChannelMeta>();
 
+// Window reloads replace loading flags; request ownership must outlive them.
+// A stale ingress may be replaced, but its completion cannot release its successor.
+const olderPageFlights = new Map<string, ReceiverPrivateIngressContext>();
+
 function getChannelMeta(channelId: string): ChannelMeta {
   return channelMetaMap.get(channelId) ?? DEFAULT_META;
 }
@@ -744,6 +754,9 @@ function getCachedChannelWindowState(
 const manualUnreadSkipChannels = loadManualUnreadSkips();
 const pendingReadSeqs = loadPendingReadSeqs();
 const pendingReadRequests = new Map<string, Promise<void>>();
+// A canonical unread receipt can arrive before its RW summary. Keep its count
+// until that summary proves the same (or a newer) cursor version; no timer.
+const pendingUnreadReceipts = new Map<string, { readStateVersion: number; unreadCount: number; maxReadSeq: number; latestActivitySeq?: number }>();
 const localReadSuppressions = new Map<string, LocalReadSuppression>();
 const AUTO_READ_ACTIVE_TAB_STORAGE_KEY = "slock_auto_read_active_tab_id";
 const AUTO_READ_TAB_ID = (() => {
@@ -1581,14 +1594,24 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       const unreadSource: unknown = typeof data === "object" && data !== null && "channels" in data
         ? (data as { channels?: unknown }).channels
         : data;
+      const unreadRows = typeof unreadSource === "object" && unreadSource !== null
+        ? Object.entries(unreadSource as Record<string, UnreadWireRow>).map(([channelId, value]) => ({
+          scopeId: channelId,
+          readState: typeof value === "object" && value !== null ? value.readState : undefined,
+        }))
+        : [];
+      for (const [channelId, receipt] of pendingUnreadReceipts) {
+        const accepted = getAcceptedReadState(serverId, channelId);
+        const row = unreadRows.find((candidate) => candidate.scopeId === channelId)?.readState;
+        if ((accepted && accepted.readStateVersion > receipt.readStateVersion)
+          || (row?.kind === "present" && row.readStateVersion >= receipt.readStateVersion
+            && (receipt.latestActivitySeq === undefined || Number(row.latestActivity?.seq ?? 0) >= receipt.latestActivitySeq))) {
+          pendingUnreadReceipts.delete(channelId);
+        }
+      }
       consumeReadStateSnapshotRows(
         serverId,
-        typeof unreadSource === "object" && unreadSource !== null
-          ? Object.entries(unreadSource as Record<string, UnreadWireRow>).map(([channelId, value]) => ({
-            scopeId: channelId,
-            readState: typeof value === "object" && value !== null ? value.readState : undefined,
-          }))
-          : [],
+        unreadRows.filter((row) => !pendingUnreadReceipts.has(row.scopeId)),
         { ledgerGenerationAtRequest: requestReadStateGeneration },
       );
       const snapshot = parseUnreadSnapshot(data);
@@ -1612,7 +1635,11 @@ export const useMessageStore = create<MessageState>((set, get) => ({
           // Stryker disable next-line ConditionalExpression: scopes without an accepted fact intentionally keep the server snapshot; read-state race tests cover accepted scopes.
           if (!readState) continue;
           const readStateChangedDuringRequest = hasAcceptedReadStateChangedAfter(serverId, channelId, requestReadStateGeneration);
-          if (!readStateChangedDuringRequest) continue;
+          const row = unreadRows.find((candidate) => candidate.scopeId === channelId)?.readState;
+          const snapshotAtAcceptedVersion = row?.kind === "present"
+            && row.readStateVersion === readState.readStateVersion
+            && row.maxReadSeq === String(readState.maxReadSeq);
+          if (!readStateChangedDuringRequest || snapshotAtAcceptedVersion) continue;
           const result = applyAcceptedReadStateProjection(nextState, channelId, readState);
           if (result.projection.complete) {
             nextState = result.state;
@@ -1623,6 +1650,9 @@ export const useMessageStore = create<MessageState>((set, get) => ({
             ...nextState,
             ...preserveUnreadSummaryForChannel(state, nextState, channelId),
           };
+        }
+        for (const [channelId, receipt] of pendingUnreadReceipts) {
+          nextState.unreadCounts = applyUnreadCount(nextState.unreadCounts, channelId, receipt.unreadCount);
         }
         return {
           unreadCounts: nextState.unreadCounts,
@@ -1668,6 +1698,7 @@ export const useMessageStore = create<MessageState>((set, get) => ({
   },
 
   markRead: async (channelId) => {
+    pendingUnreadReceipts.delete(channelId);
     const { data } = await api.post(`/channels/${channelId}/read-all`);
     const seq = Number(data?.seq ?? 0);
     if (seq > 0) {
@@ -1678,7 +1709,45 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     get().clearUnread(channelId);
   },
 
+  markConversationRead: async (channelId) => {
+    pendingUnreadReceipts.delete(channelId);
+    const ingress = captureHumanActivityIngressContext(get().currentUserId);
+    const { data } = await api.post(`/channels/${channelId}/conversation-read-all`);
+    if (!isReceiverPrivateIngressContextCurrent(ingress)) return;
+    // HTTP and socket receipts share the same versioned ingress. Loading the
+    // bridge on demand avoids pulling the Activity store into the startup path.
+    const { applyReadStateUpdate } = await import("./applyReadStateUpdate");
+    if (!isReceiverPrivateIngressContextCurrent(ingress)) return;
+    for (const update of normalizeReadStateUpdatedBulk(data)) {
+      applyReadStateUpdate(update);
+      if (update.scopeId !== channelId) continue;
+      const accepted = getAcceptedReadState(ingress.serverId, channelId);
+      if (accepted?.readStateVersion !== update.readStateVersion) continue;
+      const state = get();
+      const projection = state.applyReadStateProjection(channelId);
+      const knownNewerMessage = state.channelMessages[channelId]?.some((message) =>
+        (message.seq ?? 0) > update.maxReadSeq && !isSelfAuthoredMessage(message, state.currentUserId));
+      // The root may never have been opened in this tab. The acknowledged
+      // frontier clears its old count. Subsequent live messages advance the
+      // receipt's activity evidence and count until the summary catches up. Older RW summaries cannot
+      // reintroduce the already-read messages.
+      pendingUnreadReceipts.set(channelId, {
+        readStateVersion: update.readStateVersion,
+        unreadCount: projection.complete ? projection.unreadCount : knownNewerMessage ? (state.unreadCounts[channelId] ?? 1) : 0,
+        maxReadSeq: update.maxReadSeq,
+        ...(knownNewerMessage ? { latestActivitySeq: getMaxSeq(state.channelMessages[channelId] ?? []) } : {}),
+      });
+      if (!projection.complete && !knownNewerMessage) state.clearUnread(channelId);
+    }
+    await Promise.all([get().loadUnreadCounts(), useThreadStore.getState().loadFollowedThreads()]);
+  },
+
   markUnread: async (channelId) => {
+    const epoch = useServerStore.getState().serverEpoch;
+    const serverId = useServerStore.getState().current?.id;
+    const userId = get().currentUserId;
+    const isCurrent = () => useServerStore.getState().serverEpoch === epoch
+      && useServerStore.getState().current?.id === serverId && get().currentUserId === userId;
     const inFlightRead = pendingReadRequests.get(channelId);
     forgetPendingRead(channelId);
     forgetLocalReadSuppression(channelId);
@@ -1687,16 +1756,22 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     } else {
       forgetManualUnread(channelId);
     }
-    set((state) => ({
-      unreadCounts: applyUnreadCount(state.unreadCounts, channelId, Math.max(1, state.unreadCounts[channelId] ?? 0)),
-    }));
-
+    // Do not invent a badge before the server finds an eligible message.
     try {
       if (inFlightRead) {
         await inFlightRead.catch(() => {});
       }
+      if (!isCurrent()) return;
       const { data } = await api.post(`/channels/${channelId}/unread`);
+      if (!isCurrent()) return;
       const unreadCount = Number(data?.unreadCount ?? 0);
+      const version = Number(data?.readStateVersion ?? 0);
+      pendingUnreadReceipts.delete(channelId);
+      if (version > 0) {
+        const accepted = getAcceptedReadState(serverId, channelId);
+        if (accepted && accepted.readStateVersion > version) return;
+        pendingUnreadReceipts.set(channelId, { readStateVersion: version, unreadCount, maxReadSeq: Number(data?.maxReadSeq ?? 0) });
+      }
       if (get().currentChannelId === channelId && unreadCount > 0) {
         rememberManualUnread(channelId);
       } else {
@@ -1891,6 +1966,8 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const state = get();
     const targetChannelId = channelId ?? state.currentChannelId;
     if (!targetChannelId) return;
+    const activeFlight = olderPageFlights.get(targetChannelId);
+    if (activeFlight && isReceiverPrivateIngressContextCurrent(activeFlight)) return;
     const targetMessages = getBucket(state.channelMessages, targetChannelId);
     const targetMeta = selectChannelWindowMeta(state, targetChannelId);
     if (targetMeta.loadingOlder || !targetMeta.hasMore || targetMessages.length === 0) return;
@@ -1898,11 +1975,12 @@ export const useMessageStore = create<MessageState>((set, get) => ({
     const minSeq = Math.min(...targetMessages.map((m) => m.seq || Infinity));
     if (!minSeq || minSeq === Infinity) return;
 
+    const ingressContext = captureReceiverPrivateIngressContext(state.currentUserId);
+    olderPageFlights.set(targetChannelId, ingressContext);
     set((state) => ({
       loadingOlder: targetChannelId === state.currentChannelId ? true : state.loadingOlder,
       channelWindowMeta: updateWindowMetaRecord(state.channelWindowMeta, targetChannelId, { loadingOlder: true }),
     }));
-    const ingressContext = captureReceiverPrivateIngressContext(state.currentUserId);
     try {
       const limit = 50;
       const { data } = await api.get(
@@ -1945,11 +2023,16 @@ export const useMessageStore = create<MessageState>((set, get) => ({
         }, [targetChannelId]);
       });
     } catch {
+      if (!isReceiverPrivateIngressContextCurrent(ingressContext)) return;
       set((state) => ({
         // Stryker disable next-line ConditionalExpression,EqualityOperator,BooleanLiteral: load-older failure spinner reset is legacy UI scaffolding outside read-state projection behavior.
         loadingOlder: targetChannelId === state.currentChannelId ? false : state.loadingOlder,
         channelWindowMeta: updateWindowMetaRecord(state.channelWindowMeta, targetChannelId, { loadingOlder: false }),
       }));
+    } finally {
+      if (olderPageFlights.get(targetChannelId) === ingressContext) {
+        olderPageFlights.delete(targetChannelId);
+      }
     }
   },
 
@@ -2064,6 +2147,16 @@ export const useMessageStore = create<MessageState>((set, get) => ({
       const project = (nextState: Partial<MessageState>) =>
         withAcceptedReadStateProjection(state, nextState, [message.channelId]);
       forgetPendingGapMessage(message.channelId, message.id);
+      const receipt = pendingUnreadReceipts.get(message.channelId);
+      if (receipt && (message.seq ?? 0) > receipt.maxReadSeq
+        && !isSelfAuthoredMessage(message, state.currentUserId)
+        && !state.channelMessages[message.channelId]?.some((known) => known.id === message.id)) {
+        pendingUnreadReceipts.set(message.channelId, {
+          ...receipt,
+          unreadCount: receipt.unreadCount + 1,
+          latestActivitySeq: Math.max(receipt.latestActivitySeq ?? 0, message.seq ?? 0),
+        });
+      }
       forgetLocalReadSuppressionIfNewerMessage(message.channelId, message.seq);
 
       // Always store in the channel bucket (even for non-current channels)
@@ -2770,6 +2863,7 @@ registerServerReset(() =>
     invalidateReceiverPrivateIngressContexts();
     triggerMessagesSyncCoreReset();
     resetPendingReads();
+    pendingUnreadReceipts.clear();
     clearPendingGapMessages();
     useMessageStore.setState({
       channelMessages: {},

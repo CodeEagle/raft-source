@@ -181,7 +181,7 @@ test("ThreadPanel header and action menu render zh-cn titles", async () => {
 
   // The open-parent control is icon-only. Its accessible name and Tooltip
   // content resolve zh; native title is intentionally absent so there is one
-  // tooltip system. onOpenParentChannel is undefined here → "在频道中查看".
+  // tooltip system → "在频道中查看".
   const openParent = screen.getByRole("menuitem", { name: "在频道中查看" });
   assert.equal(openParent.getAttribute("title"), null);
   assert.match(openParent.querySelector("svg")?.getAttribute("class") ?? "", /lucide-map-pin/);
@@ -450,8 +450,8 @@ test("ThreadPanel ignores Escape when focus is outside the panel", async () => {
   }
 });
 
-test("loaded, loading, and empty thread parents keep balanced brutal spacing", async () => {
-  const expectedClasses = ["border-b", "border-line-muted", "bg-layer-panel", "px-3", "py-3"];
+test("loaded, loading, and empty thread parents share one recipe, with room above for the hover toolbar", async () => {
+  const expectedClasses = ["border-b", "border-line-hairline", "bg-layer-canvas", "px-3", "pt-5", "pb-3"];
   const assertParentRecipe = (branch: string) => {
     const parent = screen.getByTestId("thread-panel-parent");
     for (const className of expectedClasses) {

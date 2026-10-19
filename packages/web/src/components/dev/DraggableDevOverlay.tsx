@@ -6,7 +6,7 @@ import {
   useSensors,
 } from "@dnd-kit/core";
 import type { DragEndEvent } from "@dnd-kit/core";
-import { Popover, PopoverContent, PopoverTrigger } from "raft-ui";
+import { Popover, PopoverContent, PopoverTrigger } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { CSSProperties, ReactNode, SyntheticEvent } from "react";

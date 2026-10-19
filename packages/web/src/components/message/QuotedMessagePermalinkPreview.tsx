@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ParsedRaftPermalink } from "@botiverse/raft-shared";
+import { Card, Skeleton } from "@botiverse/raft-ui";
 import api from "../../api/client";
 import { useAgentStore } from "../../store/agentStore";
 import { useAuthStore } from "../../store/authStore";
@@ -72,17 +73,17 @@ export default function QuotedMessagePermalinkPreview({
 
   if (state.status === "loading") {
     return (
-      <div className="w-full animate-pulse border-2 border-black bg-white">
-        <div className="h-[34px] border-b-2 border-black bg-white/60" />
+      <Card className="w-full">
+        <div className="h-[34px] border-b border-line-hairline" />
         <div className="flex gap-3 px-3 py-2.5">
-          <div className="size-7 shrink-0 border-2 border-black bg-black/5" />
+          <Skeleton className="size-7 shrink-0" />
           <div className="flex-1 space-y-2">
-            <div className="h-3 w-32 bg-black/10" />
-            <div className="h-3 w-full bg-black/10" />
-            <div className="h-3 w-3/4 bg-black/10" />
+            <Skeleton variant="line" className="w-32" />
+            <Skeleton variant="line" className="w-full" />
+            <Skeleton variant="line" className="w-3/4" />
           </div>
         </div>
-      </div>
+      </Card>
     );
   }
 

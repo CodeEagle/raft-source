@@ -9,6 +9,7 @@ import {
   captureShellEnv,
   parseEnvFrame,
   serializeEnvFrame,
+  SHELL_ENV_STATE_ENV_VAR,
   SHELL_ENV_PROTECTED_KEYS,
 } from "./shellEnvCapture";
 import {
@@ -1015,4 +1016,14 @@ test("a flushed valid frame followed by nonzero exit still fails (fd-transport p
     assert.equal(result.ok, false, JSON.stringify(result));
     assert.equal((result as { code: string }).code, "SHELL_ENV_SHELL_EXITED_NONZERO");
   }
+});
+
+test("a detached replacement does not inherit the incumbent's shell-env outcome", async () => {
+  const { buildDetachedServiceEnv } = await import("./service");
+  const env = buildDetachedServiceEnv(
+    { PATH: "/usr/bin", [SHELL_ENV_STATE_ENV_VAR]: "unavailable:SHELL_ENV_TIMEOUT" },
+    { sourceServicePid: 42 },
+  );
+  assert.equal(env[SHELL_ENV_STATE_ENV_VAR], undefined);
+  assert.equal(env.PATH, "/usr/bin");
 });

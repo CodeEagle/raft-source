@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 import { useIntl } from "react-intl";
-import { useTheme } from "raft-ui";
+import { useTheme } from "@botiverse/raft-ui";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AppProviders } from "../src/AppProviders";
 import { useAppTheme } from "../src/hooks/useAppTheme";
@@ -23,14 +23,28 @@ function Probe() {
   return (
     <>
       <output data-testid="probe">
-        {theme.preset}|{rui.theme}|{formatMessage({ id: "common.close" })}|{location.pathname}
+        {theme.resolvedMode}|{rui.resolvedMode}|{formatMessage({ id: "common.close" })}|{location.pathname}
       </output>
+      <button
+        type="button"
+        data-testid="probe-rui-mode"
+        onClick={() => rui.setMode(rui.resolvedMode === "dark" ? "light" : "dark")}
+      >
+        mode
+      </button>
       <button type="button" data-testid="probe-navigate" onClick={() => navigate("/s/demo/channel/c1")}>go</button>
     </>
   );
 }
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  try {
+    window.localStorage.clear();
+  } catch {
+    // storage unavailable: nothing to reset
+  }
+});
 
 test("AppProviders supplies every root context the app relies on: app theme, raft-ui theme, intl, localized toast bridge, router", async () => {
   render(
@@ -39,10 +53,20 @@ test("AppProviders supplies every root context the app relies on: app theme, raf
     </AppProviders>,
   );
   const probe = screen.getByTestId("probe");
-  const [preset, ruiTheme, closeLabel, pathname] = (probe.textContent ?? "").split("|");
+  const [resolvedMode, ruiMode, closeLabel, pathname] = (probe.textContent ?? "").split("|");
   assert.equal(pathname, "/", "router context resolves (the injected router wraps the app)");
-  assert.ok(preset, "useAppTheme resolves (AppThemeProvider present)");
-  assert.ok(["brutal", "elegant"].includes(ruiTheme), `raft-ui theme resolves (got ${ruiTheme})`);
+  assert.ok(["light", "dark"].includes(resolvedMode), "useAppTheme resolves (AppThemeProvider present)");
+  assert.equal(ruiMode, resolvedMode, `raft-ui theme follows the app's mode (got ${ruiMode})`);
+  // raft-ui's default context is inert (its setMode does nothing), so a mode
+  // change requested through raft-ui only lands when its ThemeProvider is
+  // mounted and wired to the app theme.
+  const nextMode = resolvedMode === "dark" ? "light" : "dark";
+  fireEvent.click(screen.getByTestId("probe-rui-mode"));
+  await waitFor(() => {
+    const [appMode, ruiNextMode] = (screen.getByTestId("probe").textContent ?? "").split("|");
+    assert.equal(appMode, nextMode, "a raft-ui mode change reaches the app theme (ThemeProvider present)");
+    assert.equal(ruiNextMode, nextMode);
+  });
   assert.ok(closeLabel && closeLabel !== "common.close", "intl resolves a real message (Locale + Intl providers present)");
 
   // Imperative toasts from non-React code go through the bridge that

@@ -1,16 +1,18 @@
+import type {
+  DaemonApiClientFailure,
+  DaemonApiClientResult,
+  DaemonApiContractRejectionDiagnostic,
+  DaemonApiRawFailure,
+  DaemonApiRawTransport,
+  DaemonApiRequestBodyByRoute,
+  DaemonApiRequestQueryByRoute,
+  DaemonApiResponseByRoute,
+  DaemonApiRouteKey,
+} from "@botiverse/raft-shared";
 import {
   buildDaemonApiRawRoutePath,
   createDaemonApiClient as createSharedDaemonApiClient,
-  type DaemonApiClientFailure,
-  type DaemonApiClientResult,
-  type DaemonApiContractRejectionDiagnostic,
-  type DaemonApiRawFailure,
-  type DaemonApiRawTransport,
-  type DaemonApiRequestBodyByRoute,
-  type DaemonApiRequestQueryByRoute,
-  type DaemonApiResponseByRoute,
-  type DaemonApiRouteKey,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import type { ApiResponse } from "./client";
 import { CliError } from "./core/errors";

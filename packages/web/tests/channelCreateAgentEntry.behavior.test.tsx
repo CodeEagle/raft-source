@@ -238,7 +238,7 @@ test("A: the create entry sits at the candidate-list bottom and opens the dialog
 
   const list = screen.getByTestId("add-member-candidate-list");
   const entry = within(list).getByTestId("add-member-create-agent-entry");
-  assert.ok(within(entry).getByText("Create a New Agent"));
+  assert.ok(within(entry).getByText("Create Agent"));
   assert.ok(
     within(entry).getByText("Joins #product-design automatically after creation"),
     "the entry must state its auto-join consequence on the row itself",
@@ -266,11 +266,11 @@ test("A: the create entry sits at the candidate-list bottom and opens the dialog
   });
   const contextStrip = screen.getByTestId("create-agent-channel-context");
   assert.match(contextStrip.textContent ?? "", /#product-design/);
-  // The strip carries the entry's promise; the frozen mock renders it as a
-  // cyan, black-bordered band — a grey caption was rejected as the weakest
-  // possible carrier (Duoyu, PR #7372 design review).
-  assert.match(contextStrip.className, /bg-brutal-cyan/);
-  assert.match(contextStrip.className, /border-2/);
+  // The strip carries the entry's promise as a cyan band — a grey caption was
+  // rejected as the weakest possible carrier (Duoyu, PR #7372 design review).
+  // Raft DS: an info wash is cyan-soft and, being a highlight, has no ink edge.
+  assert.match(contextStrip.className, /bg-info-soft/);
+  assert.doesNotMatch(contextStrip.className, /border-2/);
 });
 
 test("A2: with search hits, the generic row does not smuggle the search text into the dialog", async () => {
@@ -280,13 +280,15 @@ test("A2: with search hits, the generic row does not smuggle the search text int
   // "runtime" matches the seeded Runtime Scout — the row stays generic.
   fireEvent.change(screen.getByPlaceholderText("Name"), { target: { value: "runtime" } });
   const entry = screen.getByTestId("add-member-create-agent-entry");
-  assert.ok(within(entry).getByText("Create a New Agent"), "row label must stay generic on a hit");
+  assert.ok(within(entry).getByText("Create Agent"), "row label must stay generic on a hit");
 
   fireEvent.click(entry);
   await waitFor(() => {
     const nameInput = document.getElementById("create-agent-name") as HTMLInputElement | null;
     assert.ok(nameInput, "the create dialog must open");
-    assert.equal(nameInput.value, "", "an unpromised name must not be prefilled");
+    // The dialog's own suggested name is fine; the search text is not.
+    assert.notEqual(nameInput.value, "runtime", "an unpromised name must not be prefilled from the search");
+    assert.match(nameInput.value, /^[a-z]+-[a-z]+$/, "a fresh create starts with a suggested name");
   });
 });
 
@@ -348,7 +350,7 @@ test("B: a no-hit search steps the entry up and strips the leading @ from the su
     within(entry).getByText("Create Agent “deploy-bot”"),
     "the typed text becomes the suggested name with the display-@ removed",
   );
-  assert.match(entry.className, /bg-soft-signal/, "the no-hit state promotes the entry visually");
+  assert.match(entry.className, /bg-brand-soft/, "the no-hit state promotes the entry visually");
 
   fireEvent.click(entry);
   await waitFor(() => {
@@ -368,7 +370,7 @@ test("C: without createAgents the entry is visible but disabled, with the reason
     "the enabled entry must not render without the createAgents capability",
   );
   const disabled = screen.getByTestId("add-member-create-agent-entry-disabled");
-  assert.ok(within(disabled).getByText("Create a New Agent"));
+  assert.ok(within(disabled).getByText("Create Agent"));
   assert.match(
     disabled.textContent ?? "",
     /needs an owner or admin/,

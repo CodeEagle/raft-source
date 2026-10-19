@@ -78,7 +78,7 @@ test("computer rows show a machine description when present", () => {
 
   const description = screen.getByText("Lab bench runner");
   assert.ok(
-    description.className.includes("text-black/60"),
-    "machine description must render as muted secondary row text",
+    description.className.includes("text-foreground-muted"),
+    "machine description must render as muted (ink-2) secondary row text",
   );
 });

@@ -1,5 +1,6 @@
 import PublicServerChannelRow from "./PublicServerChannelRow";
 import PublicServerSidebarFrame from "./PublicServerSidebarFrame";
+import SectionEyebrow from "../ui/SectionEyebrow";
 
 interface PublicServerChannelSidebarChannel {
   id: string;
@@ -37,9 +38,9 @@ export default function PublicServerChannelSidebar({
       {/* Below sm the column is 144px wide, too narrow for the label on one
           line at the signed-in metrics, so it wraps there as it did before. */}
       <div className="mb-1 flex h-6 items-center justify-between px-2 max-sm:h-auto max-sm:min-h-6">
-        <p className="min-w-0 flex-1 truncate text-xs font-bold uppercase tracking-widest text-foreground-strong max-sm:whitespace-normal max-sm:text-[11px] max-sm:tracking-wider theme-brutal:text-black" data-public-channel-label>
+        <SectionEyebrow as="div" className="min-w-0 flex-1 truncate max-sm:whitespace-normal" data-public-channel-label>
           {channelsLabel}
-        </p>
+        </SectionEyebrow>
       </div>
       {channels.map((channel) => (
         <PublicServerChannelRow

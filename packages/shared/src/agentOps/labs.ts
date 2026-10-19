@@ -6,6 +6,7 @@
 // Server's 409, `server_labs_version_conflict`).
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient, AgentApiClientFailure } from "../agentApiClient";
 import type { AgentApiServerLabsMutationResponse, AgentApiServerLabsResponse } from "../agentApiContract";
@@ -13,17 +14,17 @@ import { raftToolNameFor, type RaftHintOptions } from "./hint";
 import { failureFromClientResult, failureOutcome, opError, validateOpRequest, type RaftFailure, type RaftOutcome } from "./outcome";
 import { requestSchema } from "./requestSchema";
 
-export const listLabsRequestSchema = z.object({});
+export const listLabsRequestSchema = lazySchema("listLabsRequestSchema", () => z.object({}));
 
 export interface SetLabsAccessRequest {
   enabled: boolean;
   expectedVersion?: number;
 }
 
-export const setLabsAccessRequestSchema = requestSchema<SetLabsAccessRequest>()(z.object({
+export const setLabsAccessRequestSchema = lazySchema("setLabsAccessRequestSchema", () => requestSchema<SetLabsAccessRequest>()(z.object({
   enabled: z.boolean().describe("true turns Labs access on for the server; false turns it off."),
   expectedVersion: z.number().int().nonnegative().optional().describe("The Labs version from the list you are acting on; pass it whenever you read the list earlier, so a change made since then is refused. Omitted, the current version is used and the last write wins."),
-}));
+})));
 
 export interface SetLabEnrollmentRequest {
   lab: string;
@@ -31,11 +32,11 @@ export interface SetLabEnrollmentRequest {
   expectedVersion?: number;
 }
 
-export const setLabEnrollmentRequestSchema = requestSchema<SetLabEnrollmentRequest>()(z.object({
+export const setLabEnrollmentRequestSchema = lazySchema("setLabEnrollmentRequestSchema", () => requestSchema<SetLabEnrollmentRequest>()(z.object({
   lab: z.string().describe("The lab's key, from the Labs list."),
   enabled: z.boolean().describe("true enrolls the server in the lab; false leaves it."),
   expectedVersion: z.number().int().nonnegative().optional().describe("The Labs version from the list you are acting on; pass it whenever you read the list earlier, so a change made since then is refused. Omitted, the current version is used and the last write wins."),
-}));
+})));
 
 /** An operation name as the caller sees it: the tool name in tool form. */
 function opName(name: string, options: RaftHintOptions): string {

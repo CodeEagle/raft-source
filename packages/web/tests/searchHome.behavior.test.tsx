@@ -572,6 +572,9 @@ test("initial search failure renders an error card with a working retry", async 
 
   const errorHeading = await screen.findByText("Search failed");
   assert.ok(errorHeading);
+  // Drawn as a DS warning Banner, the failure box keeps its earlier
+  // non-live semantics (raft-ui's Banner defaults to role="alert").
+  assert.ok(errorHeading.closest('[role="alert"]') === null, "search failure box stays a non-live region");
   assert.equal(screen.queryByText("No results found"), null, "failure must not render as an empty result set");
 
   const failedAttempts = attempts;
@@ -769,7 +772,9 @@ test("an empty search URL restores and selects the last query once, with filters
     assert.equal(input.selectionStart, input.value.length);
     assert.equal(input.selectionEnd, input.value.length);
   });
-  assert.ok(screen.getByText("Scope 1"));
+  // The applied scope chip keeps its "Scope 1" label; the count is its own
+  // machine-type node (DS rf-filter__count), so match on the label's text.
+  assert.ok(screen.getAllByText((_, element) => element?.tagName === "SPAN" && element.textContent === "Scope 1").length > 0);
   assert.ok(screen.getByText("Last 7 Days"));
   assert.ok(screen.getByText("Recent"));
 });

@@ -1,3 +1,5 @@
+import { assertAccountLinkCompleted } from "../utils/pendingAccountLink";
+import type { PendingAccountLink } from "../utils/pendingAccountLink";
 import { create } from "zustand";
 import api from "../api/client";
 import { disconnectSocket, updateSocketAuthFromStorage } from "../api/socket";
@@ -92,7 +94,7 @@ interface AuthState {
   initialized: boolean;
   restoreState: AuthRestoreState;
 
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, pendingLink?: PendingAccountLink) => Promise<void>;
   register: (email: string, password: string, legalAcceptance: { acceptTerms: boolean; termsVersion: string; privacyVersion: string; legalAcceptanceSource?: "signup" | "invite" }) => Promise<void>;
   completeOnboardingProfile: (
     name: string,
@@ -347,10 +349,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     !!(localStorage.getItem("slock_access_token") && localStorage.getItem("slock_refresh_token")),
   ),
 
-  login: async (email, password) => {
+  login: async (email, password, pendingLink) => {
     set({ loading: true });
     try {
-      const { data } = await api.post("/auth/login", { email, password });
+      const { data } = await api.post("/auth/login", { email, password, ...(pendingLink ? { pendingLinkToken: pendingLink.token } : {}) });
+      if (pendingLink) assertAccountLinkCompleted(data, pendingLink);
       // Signing in on purpose retires the "I logged out" suppression.
       clearSlockdevManualLogout();
       localStorage.setItem("slock_access_token", data.accessToken);

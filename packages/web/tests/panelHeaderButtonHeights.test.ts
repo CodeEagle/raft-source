@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dirname, "..");
 
-test("thread panel header action buttons share fixed h-7 height", () => {
+test("thread panel header close is the raft-ui PanelAction head icon button", () => {
   const source = readFileSync(
     resolve(repoRoot, "src/components/message/ThreadPanel.tsx"),
     "utf8",
@@ -13,14 +13,22 @@ test("thread panel header action buttons share fixed h-7 height", () => {
 
   // X close button: visible in modal (centered dialog), hidden in
   // mobile-modal (full-screen, back chevron), and `hidden lg:flex` in side
-  // (msg=804c045d clarification).
+  // (msg=804c045d clarification). The class carries visibility only: the
+  // size is raft-ui's PanelAction (44 on a phone, the DS small 32 on
+  // desktop), not a hand-set square or a Button size.
   assert.match(
     source,
-    /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex size-7 items-center justify-center"\s*:\s*"hidden size-7 items-center justify-center lg:flex"/,
+    /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex"\s*:\s*"hidden lg:flex"/,
   );
+  assert.match(
+    source,
+    /<PanelAction\s+onClick=\{handleClose\}\s+className=\{closeButtonClassName\}\s+aria-label=\{formatMessage\(\{ id: "common\.close" \}\)\}\s+data-testid="thread-close"/,
+  );
+  assert.doesNotMatch(source, /<CloseButton\s+size="icon-lg"/);
+  assert.doesNotMatch(source, /size-7 items-center justify-center/);
 });
 
-test("profile panel header action buttons share fixed h-7 height", () => {
+test("profile panel header actions are raft-ui PanelAction head icon buttons", () => {
   const agentSource = readFileSync(
     resolve(repoRoot, "src/components/agent/AgentDetailPanel.tsx"),
     "utf8",
@@ -30,12 +38,11 @@ test("profile panel header action buttons share fixed h-7 height", () => {
     "utf8",
   );
 
-  assert.match(
-    humanSource,
-    /className="\s*flex size-7 items-center justify-center\s*"/,
-  );
+  // The profile header actions are DS header icon buttons: raft-ui's
+  // PanelAction (44 with a 22px glyph on a phone, the DS small 32 with an
+  // 18px glyph on desktop) for Message and Close.
   const messageButtonIdx = humanSource.search(
-    /className="flex size-7 items-center justify-center"\s+aria-label=\{formatMessage\(\{ id: "member\.detail\.message" \}\)\}\s+data-slot="button"\s*>\s*<DirectMessageIcon width=\{14\} height=\{14\} \/>\s*<\/Button>/,
+    /<PanelAction\s+onClick=\{handleMessage\}\s+aria-label=\{formatMessage\(\{ id: "member\.detail\.message" \}\)\}\s*>\s*<DirectMessageIcon width=\{22\} height=\{22\} aria-hidden="true" \/>\s*<\/PanelAction>/,
   );
   assert.ok(messageButtonIdx >= 0, "human profile Message icon-button anchor not found");
   assert.doesNotMatch(
@@ -44,11 +51,11 @@ test("profile panel header action buttons share fixed h-7 height", () => {
   );
   assert.match(
     agentSource,
-    /className=\{` size-7 items-center justify-center \$\{onBack \? "flex" : "hidden md:flex"\}`\}/,
+    /<PanelAction\s+onClick=\{onClose\}\s+className=\{onBack \? "flex" : "hidden md:flex"\}/,
   );
   assert.match(
     humanSource,
-    /className=\{` size-7 items-center justify-center \$\{onBack \? "flex" : "hidden md:flex"\}`\}/,
+    /<PanelAction\s+onClick=\{onClose\}\s+className=\{onBack \? "flex" : "hidden md:flex"\}/,
   );
   assert.doesNotMatch(
     agentSource,
@@ -76,4 +83,21 @@ test("secondary panel header icon actions use the shared h-7 icon button contrac
   }
 
   assert.equal(existsSync(resolve(repoRoot, "src/components/ui/Button.tsx")), false);
+});
+
+test("task #1298: server-switcher triggers shrink their full-bleed avatar on selected so the card frame shows", () => {
+  const source = readFileSync(
+    resolve(repoRoot, "src/components/layout/LeftRail.tsx"),
+    "utf8",
+  );
+  // Both triggers (public rail + authenticated rail) host a full-bleed avatar
+  // image, so the recipe's selected card (light bg + shadow) is invisible
+  // behind it and the shadow reads as a doubled edge. The fix: the trigger is
+  // a `group` and the avatar shrinks one step on selected.
+  const triggers = source.match(/className="group size-10[^\n]*"[^]*?group-data-\[selected=true\]:!size-8/g) ?? [];
+  assert.equal(
+    triggers.length,
+    2,
+    "both server-switcher triggers (public + authenticated rail) must carry the group + selected-shrink pair",
+  );
 });

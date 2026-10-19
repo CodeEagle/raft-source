@@ -1,8 +1,13 @@
+import { raftbenchContextQuerySchema, raftbenchReportSchema } from "@botiverse/raft-shared";
+import { readContext as readRaftbenchContext, submitReport as submitRaftbenchReport, RaftbenchError } from "../raftbench/service";
+import { getAppInstallationSetup } from "../services/appSetupService";
 import { issueAgentAudienceJwt, AgentAudienceJwtError } from "../services/agentAudienceJwtService";
 import { respondToTaskWriteError } from "../lib/taskWriteErrorResponse";
 import { sharedSseStreamRegistry } from "../services/sseStreamRegistry";
 import { isReadMutationFenceRefusal } from "../services/readMutationSequencer";
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
+import { refuseIfRemindersMovedToApp } from "./reminderAppRollout";
+import { evaluateFeatureFlags, REMINDER_APP_FEATURE_FLAG_KEY, VAULT_APP_FEATURE_FLAG_KEY } from "../services/featureFlagService";
 // /internal/agent-api/* — RFC v0.8 sk_agent_* runner data-plane surface.
 // New managed-runner daemon builds use this surface for agent data-plane work
 // after successful runner credential mint. If mint fails, startup hard-fails;
@@ -84,10 +89,12 @@ import {
   getServerCapabilities,
   type AgentApiTaskClaimConflict,
   type AgentMessage,
+  type ApmFreshnessSideEffectAction,
   type ExternalAgentActivityEvent,
   type ExternalAgentActivityIngestRequest,
   isTaskStatus,
   renderThirdPartyInertText,
+  isSlackBridgedExternalProvider,
   type ActionCardAction,
   type ReminderStatus,
   type ServerId,
@@ -107,6 +114,10 @@ import {
   THIRD_PARTY_EVENT_DELIVERED_REPORT_MAX_IDS,
   isThirdPartyEventId,
   buildIntegrationInviteUrl,
+  channelCardRev,
+  peerCardHasContent,
+  type AgentApiChannelCard,
+  type AgentApiPeerCard,
   type Tracer,
 } from "@botiverse/raft-shared";
 import * as agentService from "../services/agentService";
@@ -204,6 +215,8 @@ import {
   resolveProfileViewForAgent,
 } from "./internal";
 import { getDb } from "../db/index";
+import { managedMcpAgentErrorMessage } from "./managedMcpAgentErrors";
+import { MCP_CALL_INTERNAL_ERROR_TEXT } from "@botiverse/raft-shared";
 import {
   agents,
   attachments,
@@ -211,6 +224,8 @@ import {
   channels,
   jointChannels,
   jointChannelServers,
+  managedMcpServers,
+  raftbenchConfigs,
   messageMentions,
   messages,
 } from "../db/schema";
@@ -241,6 +256,7 @@ import {
   runSingleAttachmentUpload,
 } from "./attachments";
 import { addTraceEvent, errorClassOf, getCurrentTraceSpan, recordTraceEvent, tracePhase, withTraceChildSpan, withTraceRoot } from "../tracing/semanticTrace";
+import { agentRequestContextFromHeaders, recordAgentContextReturned } from "../tracing/agentContextReturnTrace";
 import { agentIdHashAttrs, serverIdHashAttrs } from "../tracing/traceIdentity";
 import { traceSendRouteFailure, traceSendRouteCatch } from "../tracing/sendRouteFailure";
 import { traceQuerySpan } from "../tracing/queryTrace";
@@ -297,6 +313,8 @@ import { subscribeAgentCredentialRevocation } from "../services/agentCredentialR
 import { ManagedMcpGatewayError } from "../services/managedMcpGateway";
 import { ManagedMcpOAuthError } from "../services/managedMcpOAuthService";
 import { getHostedRuntimeSummary } from "../services/agentRuntimeProvisionService";
+import { setRequestTraceErrorCode } from "../middleware/requestObservability";
+import { taskStatusRejectionCode } from "./agentApiErrorTrace";
 import {
   FeedbackLocatorIngestError,
   ingestFeedbackLocator,
@@ -374,7 +392,9 @@ async function rebuildPendingThirdPartyAgentEvents(
     agentId,
     excludeEventIds: pendingEventIds,
   });
+  const serviceOnly = await agentService.isRaftBenchServiceAgent(agentId);
   for (const message of rebuilt) {
+    if (serviceOnly && message.third_party_event?.client_id !== "system.raftbench") continue;
     agentOrchestrator.deliverToLocalInbox(agentId, message, { notifyPendingReceive: false });
   }
 }
@@ -887,6 +907,7 @@ function agentApiRequestValidators<K extends AgentApiRouteKey>(routeKey: K): Req
  * legacy router and fails when a counterpart here lacks the same grant.
  */
 export const AGENT_API_ROUTE_GRANTS: Partial<Record<AgentApiRouteKey, AgentScope>> = {
+  raftbenchContext: "message:read",
   attachmentUpload: "attachment:upload",
   attachmentUploadSessionCreate: "attachment:upload",
   attachmentUploadSessionComplete: "attachment:upload",
@@ -947,6 +968,10 @@ function requireAgentGrant(scope: AgentScope): RequestHandler {
     }
     req.scopeDenyReason = reason;
     req.scopeRequired = scope;
+    if (req.raftbenchServiceAgent) {
+      res.status(403).json({ error: "This service agent no longer has the required read permission.", code: "raftbench_read_permission_revoked", requiredScope: scope, suggestedNextAction: "Stop this run. An administrator has to restore its read grants; retrying will not help." });
+      return;
+    }
     res.status(403).json({ error: "missing required scope", requiredScope: scope, reason });
   };
   (handler as RequestHandler & { __agentScope?: AgentScope }).__agentScope = scope;
@@ -1104,7 +1129,11 @@ function toAgentApiTimestamp(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function toAgentApiMessageEnvelope(message: AgentApiMessageSource, content: string): AgentApiMessageEnvelope {
+function toAgentApiMessageEnvelope(
+  message: AgentApiMessageSource,
+  content: string,
+  viewerAgentId: string,
+): AgentApiMessageEnvelope {
   const { senderHandle, ...messageEnvelopeFields } = message;
   const createdAt = toAgentApiTimestamp(message.createdAt);
   const timestamp = toAgentApiTimestamp(message.timestamp);
@@ -1117,6 +1146,7 @@ function toAgentApiMessageEnvelope(message: AgentApiMessageSource, content: stri
     return messageService.projectAgentVisibleHttpMessageResponse(
       message as messageService.EnrichedMessageRow,
       content,
+      viewerAgentId,
     ) as AgentApiMessageEnvelope;
   }
   const envelope: AgentApiMessageEnvelope = {
@@ -1352,6 +1382,118 @@ async function resolveAgentActivityMuteTarget(req: Request, res: Response) {
   return channel;
 }
 
+/** What a gated write's freshness check found: see {@link evaluateAgentFreshness}. */
+type AgentFreshnessEvaluation = {
+  latestFreshnessSeq: number;
+  latestFreshnessMessageId: string | null;
+  attestedBoundarySeq: number;
+  attestedBoundaryMessageId: string | null;
+  newMessageCount: number;
+  attestedTargetType: attestedSendService.AttestedSendTargetType;
+  boundarySource: string;
+  formalMentionFacts: Awaited<ReturnType<typeof attestedSendService.getFormalMentionFacts>>;
+  useAttentionFacts: boolean;
+  seenExactSeqs: number[];
+};
+
+/**
+ * The freshness check a gated write runs (a send, and a task claim, status
+ * update or amend): the newest message in the conversation the agent did not
+ * write itself, against the model-seen boundary its request attests. One
+ * function, so every gated write holds by the same rule.
+ */
+async function evaluateAgentFreshness(input: {
+  agentId: string;
+  channelId: string;
+  channelType: "channel" | "private" | "joint" | "dm" | "thread";
+  seenUpToSeq: number | undefined;
+  requestedSeenExactSeqs: number[] | undefined;
+}): Promise<AgentFreshnessEvaluation> {
+  const { agentId, channelId, channelType, seenUpToSeq, requestedSeenExactSeqs } = input;
+  const selfSender = { senderType: "agent" as const, senderId: agentId };
+  const useAttentionFacts = channelType !== "thread";
+  const latestAnchor = useAttentionFacts
+    ? await attestedSendService.getLatestAgentAttentionAnchor(agentId, channelId, {
+      excludeSender: selfSender,
+    })
+    : await attestedSendService.getLatestMessageAnchor(channelId, {
+      excludeSender: selfSender,
+    });
+  const hasClientSeenBoundary = typeof seenUpToSeq === "number" && Number.isFinite(seenUpToSeq);
+  const clientSeenUpToSeq = hasClientSeenBoundary
+    ? Math.max(0, Math.floor(seenUpToSeq))
+    : 0;
+  const threadParentAnchor = !hasClientSeenBoundary && channelType === "thread"
+    ? await attestedSendService.getThreadParentAnchor(channelId)
+    : null;
+  // Freshness proof must come from the current model-seen boundary.
+  // Durable legacy read-ish cursors cannot prove the model actually saw
+  // the messages; delivery ack state is volatile inbox state. The only
+  // fallback is a cold thread's parent message.
+  const latestFreshnessSeq = Math.max(latestAnchor.seq, threadParentAnchor?.seq ?? 0);
+  const latestFreshnessMessageId = latestAnchor.seq > 0 && latestAnchor.seq >= (threadParentAnchor?.seq ?? 0)
+    ? latestAnchor.messageId
+    : (threadParentAnchor?.messageId ?? latestAnchor.messageId);
+  const fallbackBoundarySeq = threadParentAnchor?.seq ?? 0;
+  const attestedBoundarySeq = Math.min(
+    hasClientSeenBoundary ? clientSeenUpToSeq : fallbackBoundarySeq,
+    latestFreshnessSeq,
+  );
+  const attestedBoundaryMessageId = attestedBoundarySeq <= 0
+    ? null
+    : attestedBoundarySeq === threadParentAnchor?.seq
+      ? threadParentAnchor.messageId
+      : await attestedSendService.getMessageIdForSeq(channelId, attestedBoundarySeq);
+  const seenExactSeqs = [...new Set((requestedSeenExactSeqs ?? [])
+    .map((seq) => Math.floor(Number(seq)))
+    .filter((seq) => Number.isInteger(seq)
+      && seq > attestedBoundarySeq
+      && seq <= latestFreshnessSeq))]
+    .slice(0, 2_500);
+  const newMessageCount = latestFreshnessSeq > attestedBoundarySeq
+    ? useAttentionFacts
+      ? await attestedSendService.countAgentAttentionMessagesAfterSeq(agentId, channelId, attestedBoundarySeq, {
+        excludeSender: selfSender,
+        latestSeq: latestFreshnessSeq,
+        excludeExactSeqs: seenExactSeqs,
+      })
+      : await attestedSendService.countMessagesAfterSeq(channelId, attestedBoundarySeq, {
+        excludeSender: selfSender,
+        latestSeq: latestFreshnessSeq,
+        excludeExactSeqs: seenExactSeqs,
+      })
+    : 0;
+  const attestedTargetType = toAttestedSendTargetType(channelType);
+  const boundarySource = hasClientSeenBoundary
+    ? "client_seen"
+    : seenExactSeqs.length > 0
+      ? "client_seen_exact"
+    : threadParentAnchor
+      ? "thread_parent"
+      : "none";
+  const formalMentionFacts = latestFreshnessSeq > attestedBoundarySeq
+    ? await attestedSendService.getFormalMentionFacts(
+        agentId,
+        channelId,
+        attestedBoundarySeq,
+        latestFreshnessSeq,
+        seenExactSeqs,
+      )
+    : { count: 0, firstMessageId: null, firstHandle: null };
+  return {
+    latestFreshnessSeq,
+    latestFreshnessMessageId,
+    attestedBoundarySeq,
+    attestedBoundaryMessageId,
+    newMessageCount,
+    attestedTargetType,
+    boundarySource,
+    formalMentionFacts,
+    useAttentionFacts,
+    seenExactSeqs,
+  };
+}
+
 async function listRecentFreshnessMessagesAfterSeq(
   agentId: string,
   agentServerId: string,
@@ -1390,9 +1532,333 @@ async function listRecentFreshnessMessagesAfterSeq(
   // identity of the send target once and label each held envelope with it.
   const identity = await messageService.resolveAgentConversationIdentity(agentServerId, agentId, channelId);
   return recentMessages.map((message) => ({
-    ...toAgentApiMessageEnvelope(message, typeof message.content === "string" ? message.content : ""),
+    ...toAgentApiMessageEnvelope(message, typeof message.content === "string" ? message.content : "", agentId),
     ...identity,
   }));
+}
+
+/**
+ * The held response of a gated write (a send, a task claim, status update or
+ * amend) whose freshness check found newer messages: the bounded window of
+ * them, the read position and delivery acknowledgements when every counted
+ * message was shown, the recorded hold (`gate_triggered`, with the board's
+ * channel id so a task write's retry can find it), and the agent's activity.
+ * One function, so every gated write holds with the same envelope.
+ */
+async function renderAgentFreshnessHold(req: Request, hold: {
+  action: ApmFreshnessSideEffectAction;
+  agentId: string;
+  serverId: string;
+  agentServerId: string;
+  channelId: string;
+  channelType: "channel" | "private" | "joint" | "dm" | "thread";
+  target: string;
+  withhold: boolean;
+  agentOrchestrator: AgentOrchestrator;
+  evaluation: AgentFreshnessEvaluation;
+  /** Task writes: which write was held, so only its own rerun is covered by the hold. */
+  writeKey?: string;
+  /** Send only: the draft this send replaced, how often it was held, and whether it is `--send-draft`. */
+  replacedExisting?: boolean;
+  reholdCount?: number;
+  isSendDraft?: boolean;
+}): Promise<AgentApiHeldFreshnessResponse> {
+  const { action, agentId, serverId, agentServerId, channelId, channelType, target, withhold, agentOrchestrator } = hold;
+  const replacedExisting = hold.replacedExisting ?? false;
+  const reholdCount = hold.reholdCount ?? 0;
+  const isSendDraft = hold.isSendDraft ?? false;
+  const {
+    attestedBoundarySeq: boundarySeq,
+    attestedBoundaryMessageId: boundaryMessageId,
+    latestFreshnessSeq: latestSeq,
+    latestFreshnessMessageId: latestMessageId,
+    boundarySource,
+    attestedTargetType,
+    useAttentionFacts,
+    seenExactSeqs,
+  } = hold.evaluation;
+  const mentionCount = hold.evaluation.formalMentionFacts.count;
+  const heldMessages = withhold
+    ? []
+    : await listRecentFreshnessMessagesAfterSeq(
+        agentId,
+        serverId,
+        channelId,
+        boundarySeq,
+        ATTESTED_SEND_HELD_CONTEXT_LIMIT,
+        latestSeq,
+        useAttentionFacts,
+        {
+          excludeSender: { senderType: "agent", senderId: agentId },
+          excludeExactSeqs: seenExactSeqs,
+        },
+      );
+  const heldSeqs = heldMessages
+    .map((message) => Number((message as { seq?: unknown }).seq))
+    .filter((seq) => Number.isInteger(seq) && seq > 0);
+  recordAgentContextReturned({
+    source: "hold",
+    agentId,
+    channelId,
+    ...agentRequestContextFromHeaders(req.headers),
+    seqs: heldSeqs,
+  });
+  const attentionHoldCount = latestSeq > boundarySeq
+    ? useAttentionFacts
+      ? await attestedSendService.countAgentAttentionMessagesAfterSeq(agentId, channelId, boundarySeq, {
+        excludeSender: { senderType: "agent", senderId: agentId },
+        latestSeq,
+        excludeExactSeqs: seenExactSeqs,
+      })
+      : await attestedSendService.countMessagesAfterSeq(channelId, boundarySeq, {
+        excludeSender: { senderType: "agent", senderId: agentId },
+        latestSeq,
+        excludeExactSeqs: seenExactSeqs,
+      })
+    : 0;
+  const shownMessageCount = heldMessages.length;
+  // Without a model-seen boundary, do not present the whole target
+  // history as "new messages"; this is a bounded first-touch context.
+  const hasModelSeenProof = boundarySource === "client_seen" || boundarySource === "client_seen_exact";
+  const firstTouchContextCount = withhold
+    ? Math.min(attentionHoldCount, ATTESTED_SEND_HELD_CONTEXT_LIMIT)
+    : shownMessageCount;
+  const holdCount = hasModelSeenProof ? attentionHoldCount : firstTouchContextCount;
+  const omittedMessageCount = !withhold && hasModelSeenProof
+    ? Math.max(0, attentionHoldCount - shownMessageCount)
+    : 0;
+  // Chat semantics (task #41 final review): the hold's obligation is the honest
+  // in-the-moment sentence: true skipped count (omittedMessageCount,
+  // attention semantics — never a seq span) plus the runnable --before
+  // anchor (minShownSeq). Nothing is persisted or re-surfaced.
+  const minShownSeq = heldSeqs.length > 0 ? Math.min(...heldSeqs) : null;
+  // Thread digest anchor: where this conversation started. Only fetched
+  // for threads, only when context is shown, and only when the parent
+  // is not already inside the displayed window.
+  const threadParentMessage = !withhold && channelType === "thread"
+    ? await attestedSendService.getThreadParentMessage(channelId)
+    : null;
+  // The read position moves to latestSeq only when this hold showed every
+  // message it counts. When some were omitted (the context cap), they
+  // have not been handed to the agent; marking them read would drop them
+  // from its inbox (an external agent never receives them otherwise), so
+  // the position stays and they are delivered as usual.
+  const showedEveryHeldMessage = shownMessageCount >= attentionHoldCount;
+  if (!withhold && showedEveryHeldMessage) {
+    // Task #93 line B: the agent's own read is a side effect of the send; a read-state fence refusal must not fail
+    // the send. Any other error still surfaces.
+    const readState = await channelService.markRead(
+      { kind: "agent", id: agentId },
+      channelId,
+      latestSeq,
+    ).catch((error: unknown) => {
+      if (isReadMutationFenceRefusal(error)) return null;
+      throw error;
+    });
+    if (readState) {
+      await emitScopeReadUpdated({
+        io: req.app.get("io") as SocketServer | undefined,
+        serverId: agentServerId,
+        scopeId: channelId,
+        peerKind: "agent",
+        peerId: agentId,
+        maxReadSeq: readState.maxReadSeq,
+        changed: readState.changed,
+      });
+    }
+  }
+  if (!withhold && latestSeq > boundarySeq) {
+    // Held context is returned inline; do not also redeliver it as unread.
+    // Only what was shown: omitted messages stay queued for delivery.
+    if (showedEveryHeldMessage) {
+      agentOrchestrator.acknowledgeDeliveredMessagesForChannelUpToSeq?.(
+        agentId,
+        channelId,
+        latestSeq,
+      ) ?? agentOrchestrator.acknowledgeDeliveredMessagesForChannel(agentId, channelId, heldSeqs);
+    } else {
+      agentOrchestrator.acknowledgeDeliveredMessagesForChannel(agentId, channelId, heldSeqs);
+    }
+  }
+  await attestedSendService.recordGateTriggered({
+    id: randomUUID(),
+    agentId: agentId,
+    serverId: agentServerId,
+    targetType: attestedTargetType,
+    targetRef: target,
+  }, {
+    lastSeenMessageId: boundaryMessageId,
+    latestMessageId,
+    hasFormalMentionSinceLastSeen: false,
+    draftReplacedExisting: replacedExisting,
+    newMessageCount: holdCount,
+    boundarySource,
+    boundarySeq,
+    latestSeq,
+    action,
+    channelId,
+    writeKey: hold.writeKey,
+  });
+  const freshnessDecision = {
+    action,
+    decision: "syncing_hold" as const,
+    ...(withhold ? { freshnessContextMode: "withheld" as const } : {}),
+    target,
+    reason: hasModelSeenProof ? "server_stale_model_boundary" : "server_first_touch_context",
+    pendingMaxSeq: latestSeq,
+    modelSeenSeq: boundarySource === "client_seen" ? boundarySeq : 0,
+    heldMessageCount: shownMessageCount,
+    omittedMessageCount,
+  };
+  const producerFactId = buildApmFreshnessDecisionProducerFactId(agentId, freshnessDecision);
+  const envelope = projectApmHeldFreshnessEnvelope<AgentApiMessageEnvelope>({
+    producerFactId,
+    action,
+    decision: "syncing_hold",
+    heldMessages,
+    newMessageCount: holdCount,
+    omittedMessageCount,
+    seenUpToSeq: latestSeq,
+    freshnessContextMode: withhold ? "withheld" : undefined,
+  });
+  if (withhold) {
+    await recordAgentRaftAction(req, agentId, {
+      title: "Reviewer-isolation freshness hold",
+      text: `${formatAttestedMessageCount(holdCount)} withheld`,
+    });
+  } else {
+    const activity = projectApmHeldFreshnessActivity({
+      producerFactId,
+      action,
+      decision: "syncing_hold",
+      target,
+      messageCount: shownMessageCount,
+    });
+    const title = action === "send" && (reholdCount > 0 || isSendDraft) ? "Send draft held" : activity.entry.title;
+    await recordAgentRaftAction(req, agentId, {
+      title,
+      text: activity.entry.text,
+      producerFactId,
+      activity: activity.statusEntry.activity,
+      activityDetail: title,
+    });
+  }
+  return {
+    ...(!withhold ? { ok: true } : {}),
+    ...envelope.body,
+    ...(!withhold
+      ? { mentionAnnotation: { formalMentionCount: mentionCount } }
+      : {}),
+    ...(!withhold && action === "send"
+      ? { continueAnywaySuggested: reholdCount >= 3 }
+      : {}),
+    ...(!withhold
+      ? { seenUpToMessageId: latestMessageId }
+      : {}),
+    ...(!withhold && minShownSeq !== null
+      ? { firstShownSeq: minShownSeq }
+      : {}),
+    ...(!withhold
+      && threadParentMessage
+      && (minShownSeq === null || threadParentMessage.seq < minShownSeq)
+      ? {
+        threadParentMessage: {
+          seq: threadParentMessage.seq,
+          messageId: threadParentMessage.messageId,
+          senderName: threadParentMessage.senderName,
+          createdAt: threadParentMessage.createdAt?.toISOString() ?? null,
+          content: threadParentMessage.content,
+        },
+      }
+      : {}),
+  };
+}
+
+type TaskWriteFreshnessAction = "task_claim" | "task_update" | "task_amend";
+
+/**
+ * Glimpse G2: the freshness gate on a task write (claim, status update,
+ * amend), by the same check and hold as a send.
+ *
+ * - It runs only when the request attests what its model context has seen
+ *   (`seenUpToSeq`, or a non-empty `seenExactSeqs`). A request without them,
+ *   as every client before G2 sends, is never held.
+ * - The conversation is the task's board channel (the daemon's hold target
+ *   too); a task's thread is not checked.
+ * - No draft and no `--anyway`: the write is not applied, and rerunning it
+ *   after reading passes.
+ * - At most one hold per catch-up: when this same write (`writeKey`: the
+ *   action and its task) was held on this board within
+ *   TASK_WRITE_REHOLD_WINDOW_MS and the rerun's boundary covers that hold,
+ *   newer messages that arrived meanwhile do not hold it again, or a busy
+ *   board would hold every retry. Another write on the board is checked as
+ *   usual. The hold is a row, so a rerun on any replica finds it; it is looked
+ *   up only when about to hold. Reviewer isolation shows no messages, so its
+ *   rerun cannot catch up: there, a recent hold of the write lets it pass.
+ *
+ * Returns the held response, or null to apply the write.
+ */
+async function holdTaskWriteForFreshness(req: Request, input: {
+  action: TaskWriteFreshnessAction;
+  /** The write's identity on the board: the action and its task(s). */
+  writeKey: string;
+  agentId: string;
+  serverId: string;
+  ctx: AgentApiTaskChannelContext;
+  /** The board as the client spelled it, echoed in the hold. */
+  target: string;
+  seenUpToSeq: number | undefined;
+  seenExactSeqs: number[] | undefined;
+  freshnessContextMode: string | undefined;
+}): Promise<AgentApiHeldFreshnessResponse | null> {
+  const { action, agentId, serverId, ctx } = input;
+  const attested = typeof input.seenUpToSeq === "number" || (input.seenExactSeqs?.length ?? 0) > 0;
+  if (!attested || !isSendFreshnessEnabled(ctx.agent.serverId, agentId)) return null;
+  const withhold = input.freshnessContextMode === "withheld";
+  const gate = await tracePhase(
+    async () => {
+      const evaluation = await evaluateAgentFreshness({
+        agentId,
+        channelId: ctx.channelId,
+        channelType: ctx.channelType,
+        seenUpToSeq: input.seenUpToSeq,
+        requestedSeenExactSeqs: input.seenExactSeqs,
+      });
+      if (evaluation.newMessageCount === 0) return { evaluation, outcome: "passed" as const };
+      const lastHold = await attestedSendService.getRecentGateTriggered(
+        agentId,
+        ctx.channelId,
+        input.writeKey,
+        attestedSendService.TASK_WRITE_REHOLD_WINDOW_MS,
+      );
+      const caughtUp = lastHold !== null && (withhold || evaluation.attestedBoundarySeq >= lastHold.latestSeq);
+      return { evaluation, outcome: caughtUp ? "repeat_passed" as const : "held" as const };
+    },
+    (_durationMs, result) => ({
+      name: "agent_api_task.freshness.evaluated",
+      attrs: {
+        action,
+        outcome: result.outcome,
+        boundary_source: result.evaluation.boundarySource,
+        new_message_count: result.evaluation.newMessageCount,
+        freshness_context_mode: withhold ? "withheld" : "inline",
+      },
+    }),
+  );
+  if (gate.outcome !== "held") return null;
+  return renderAgentFreshnessHold(req, {
+    action,
+    agentId,
+    serverId,
+    agentServerId: ctx.agent.serverId,
+    channelId: ctx.channelId,
+    channelType: ctx.channelType,
+    target: input.target,
+    withhold,
+    agentOrchestrator: req.app.get("agentOrchestrator") as AgentOrchestrator,
+    evaluation: gate.evaluation,
+    writeKey: input.writeKey,
+  });
 }
 
 async function recordAgentRaftAction(
@@ -1403,6 +1869,19 @@ async function recordAgentRaftAction(
   const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
   if (typeof agentOrchestrator?.recordAgentRaftAction !== "function") return;
   await agentOrchestrator.recordAgentRaftAction(agentId, event);
+}
+
+/**
+ * Closed-set client label for send traces: `cli` (raft CLI, also via the
+ * daemon credential proxy), `daemon`, `other`, or `absent` (no header: SDK and
+ * hosted runtimes do not send one today).
+ */
+function agentApiClientKind(req: Request): "cli" | "daemon" | "other" | "absent" {
+  const client = req.header("X-Raft-Client") ?? req.header("X-Slock-Client");
+  if (!client) return "absent";
+  if (client === "cli") return "cli";
+  if (client.startsWith("daemon")) return "daemon";
+  return "other";
 }
 
 function isRaftCliRequest(req: Request): boolean {
@@ -1425,6 +1904,7 @@ function recordRaftCliActivity(
 
 async function serializeOAuthClientForAgentApi(
   client: Awaited<ReturnType<typeof oauthService.listOAuthClients>>[number],
+  serverId: string,
 ) {
   const isThirdPartyGlobal = client.appType === "third_party_global";
   const agentManifest = oauthService.resolveAgentManifest(client);
@@ -1446,6 +1926,11 @@ async function serializeOAuthClientForAgentApi(
       : null,
     homepageUrl: client.homepageUrl ?? null,
     returnUrl: client.returnUrl ?? null,
+    ...(client.setupUrl ? {
+      setupUrl: client.setupUrl,
+      setupDescription: client.setupDescription ? renderThirdPartyInertText({ field: "description", value: client.setupDescription }) : null,
+      setup: await getAppInstallationSetup({ clientId: client.id, serverId }),
+    } : {}),
     agentManifestUrl: agentManifest.url,
     agentManifestUrlSource: agentManifest.source ?? null,
     createdAt: client.createdAt.toISOString(),
@@ -1470,6 +1955,7 @@ async function serializeMarketplaceOAuthClientForAgentApi(
       ? renderThirdPartyInertText({ field: "data_access", value: client.dataAccessSummary })
       : null,
     homepageUrl: client.homepageUrl ?? null,
+    ...(client.setupUrl ? { setupUrl: client.setupUrl, setupDescription: client.setupDescription ? renderThirdPartyInertText({ field: "description", value: client.setupDescription }) : null } : {}),
     agentManifestUrl: agentManifest.url,
     agentManifestUrlSource: agentManifest.source ?? null,
     allowedScopes: client.allowedScopes ?? [],
@@ -1550,17 +2036,28 @@ type AgentApiTaskChannelContext = {
   surface: TaskChannelSurface;
 };
 
+/** Null when the channel can't be used for tasks; the reason goes on the request span (o11y T1), the body stays "Agent or channel not found". */
 async function resolveAgentApiTaskChannel(
   agentId: string,
   serverId: string,
   channelRef: string,
+  res: Response,
 ): Promise<AgentApiTaskChannelContext | null> {
   const agent = await agentService.getAgent(agentId);
-  if (!agent || agent.serverId !== serverId) return null;
+  if (!agent || agent.serverId !== serverId) {
+    setRequestTraceErrorCode(res, "agent_not_found");
+    return null;
+  }
   const resolved = await channelService.resolveChannelByName(serverId, agentId, channelRef);
-  if (!resolved) return null;
+  if (!resolved) {
+    setRequestTraceErrorCode(res, "channel_not_found");
+    return null;
+  }
   const surface = await resolveTaskChannelSurface(serverId, resolved.channelId);
-  if (!surface) return null;
+  if (!surface) {
+    setRequestTraceErrorCode(res, "task_channel_unavailable");
+    return null;
+  }
   return {
     agent,
     channelId: surface.localChannel.id,
@@ -1573,6 +2070,7 @@ async function resolveAgentApiTaskChannel(
 
 function rejectAgentApiTaskWriteIfNeeded(canPost: boolean, res: Response): boolean {
   if (!canPost) {
+    setRequestTraceErrorCode(res, "channel_membership_required");
     res.status(403).json({ error: "Agent must join this channel to modify tasks" });
     return true;
   }
@@ -1628,6 +2126,11 @@ const ALLOWED_EXTERNAL_ACTIVITY_KEYS = new Set([
   "occurred_at",
   "durationMs",
   "duration_ms",
+  "toolUseId",
+  "tool_use_id",
+  "exitCode",
+  "exit_code",
+  "ok",
   "errorClass",
   "error_class",
   "toolInput",
@@ -1639,9 +2142,18 @@ const ALLOWED_EXTERNAL_ACTIVITY_KEYS = new Set([
   "toolOutputTruncated",
   "tool_output_truncated",
   "truncated",
+  // A subagent's event (ids and enums; validated at ingest).
+  "subagent",
 ]);
 
-function parseExternalAgentActivityIngest(body: unknown): ExternalAgentActivityIngestRequest | { error: string; code: string } {
+const EXTERNAL_ACTIVITY_IGNORED_FIELD_REPORT_LIMIT = 20;
+
+type ParsedExternalAgentActivityIngest = ExternalAgentActivityIngestRequest & {
+  /** Unknown event field names stripped before ingest (bounded, for logs). */
+  ignoredFields: string[];
+};
+
+function parseExternalAgentActivityIngest(body: unknown): ParsedExternalAgentActivityIngest | { error: string; code: string } {
   if (!body || typeof body !== "object") {
     return { error: "Request body is required", code: "body_required" };
   }
@@ -1655,18 +2167,27 @@ function parseExternalAgentActivityIngest(body: unknown): ExternalAgentActivityI
   if (candidate.events.length > EXTERNAL_ACTIVITY_EVENT_LIMIT) {
     return { error: `events cannot exceed ${EXTERNAL_ACTIVITY_EVENT_LIMIT}`, code: "events_too_many" };
   }
+  const events: ExternalAgentActivityEvent[] = [];
+  const ignoredFields = new Set<string>();
   for (const event of candidate.events) {
     if (!event || typeof event !== "object" || Array.isArray(event)) {
       return { error: "events must contain objects", code: "event_invalid" };
     }
-    for (const key of Object.keys(event)) {
+    // Unknown fields are stripped, not rejected: a 400 fails the whole batch and
+    // stalls the sender's cursor, so a newer bridge adding a field would stop
+    // all its activity. Only allowlisted fields reach ingest.
+    const known: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(event)) {
       if (FORBIDDEN_EXTERNAL_ACTIVITY_KEYS.has(key)) {
         return { error: "transcript_path is not accepted on activity ingest", code: "transcript_path_forbidden" };
       }
-      if (!ALLOWED_EXTERNAL_ACTIVITY_KEYS.has(key)) {
-        return { error: `unknown activity event field: ${key}`, code: "event_field_unknown" };
+      if (ALLOWED_EXTERNAL_ACTIVITY_KEYS.has(key)) {
+        known[key] = value;
+      } else if (ignoredFields.size < EXTERNAL_ACTIVITY_IGNORED_FIELD_REPORT_LIMIT) {
+        ignoredFields.add(key.slice(0, 64));
       }
     }
+    events.push(known as ExternalAgentActivityEvent);
     // raft-agent-status.v1 fields. Legacy hook-outcome `status` values are
     // still accepted (and ignored for status) so existing bridges keep working.
     const { status, detail } = event as { status?: unknown; detail?: unknown };
@@ -1682,7 +2203,8 @@ function parseExternalAgentActivityIngest(body: unknown): ExternalAgentActivityI
   }
   return {
     schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
-    events: candidate.events as ExternalAgentActivityEvent[],
+    events,
+    ignoredFields: [...ignoredFields],
     ...(typeof candidate.coreSessionId === "string" ? { coreSessionId: candidate.coreSessionId } : {}),
     ...(typeof candidate.adapterInstance === "string" ? { adapterInstance: candidate.adapterInstance } : {}),
     ...(typeof candidate.dropped === "number" ? { dropped: candidate.dropped } : {}),
@@ -1749,22 +2271,34 @@ function buildWakeHint(message: AgentMessage): AgentApiWakeHint | null {
   return hint;
 }
 
-function sendManagedMcpAgentApiError(error: unknown, res: Response): void {
+function sendManagedMcpAgentApiError(error: unknown, res: Response, context: { serverName?: string | null; toolName?: string | null; mcpServerId?: string | null; isCall?: boolean } = {}): void {
+  // The agent-facing words for the common failures (managedMcpAgentErrors),
+  // also as suggestedNextAction, which raft-sdk shows as the next action (it
+  // never shows a raw `error`); anything else keeps its original message.
+  const body = (code: string, message: string) => {
+    const agentText = managedMcpAgentErrorMessage(code, context);
+    return agentText ? { error: agentText, code, suggestedNextAction: agentText } : { error: message, code };
+  };
   if (error instanceof ManagedMcpServiceError) {
     const status = error.code.endsWith("not_found") ? 404 : 409;
-    res.status(status).json({ error: error.message, code: error.code });
+    res.status(status).json(body(error.code, error.message));
     return;
   }
   if (error instanceof ManagedMcpCredentialError) {
-    res.status(503).json({ error: error.message, code: error.code });
+    res.status(503).json(body(error.code, error.message));
     return;
   }
   if (error instanceof ManagedMcpGatewayError) {
-    res.status(error.code === "managed_mcp_unreachable" ? 502 : 409).json({ error: error.message, code: error.code });
+    res.status(error.code === "managed_mcp_unreachable" ? 502 : 409).json(body(error.code, error.message));
     return;
   }
   if (error instanceof ManagedMcpOAuthError) {
-    res.status(error.code === "managed_mcp_oauth_busy" ? 503 : 409).json({ error: error.message, code: error.code });
+    res.status(error.code === "managed_mcp_oauth_busy" ? 503 : 409).json(body(error.code, error.message));
+    return;
+  }
+  // On a call, an unexpected failure can come after the remote tool ran: say so (same words as raft-sdk).
+  if (context.isCall) {
+    res.status(500).json({ error: MCP_CALL_INTERNAL_ERROR_TEXT, code: "managed_mcp_internal_error", suggestedNextAction: MCP_CALL_INTERNAL_ERROR_TEXT });
     return;
   }
   res.status(500).json({ error: "Managed MCP request failed", code: "managed_mcp_internal_error" });
@@ -1812,7 +2346,12 @@ registerAgentApiRoute(
       },
     ));
   } catch (error) {
-    sendManagedMcpAgentApiError(error, res);
+    const request = req.body as AgentApiRequestBodyByRoute["managedMcpCall"];
+    const [named] = await getDb().select({ name: managedMcpServers.name }).from(managedMcpServers)
+      .where(and(eq(managedMcpServers.id, request.mcpServerId), eq(managedMcpServers.serverId, req.serverId!)))
+      .limit(1)
+      .catch(() => []);
+    sendManagedMcpAgentApiError(error, res, { serverName: named?.name ?? null, toolName: request.toolName, mcpServerId: request.mcpServerId, isCall: true });
   }
   },
 );
@@ -1870,6 +2409,24 @@ internalAgentApiRouter.get("/", async (req, res) => {
  * The acting agent is the credential-bound runner principal; there is no
  * URL `:id` to spoof.
  */
+/**
+ * The rollout flags a managed agent's Computer gets at start (AgentConfig
+ * reminderApp / vaultApp), for agents that build their own prompt. An
+ * evaluation failure reads as off, as it does at agent start.
+ */
+async function agentContextFeatures(serverId: string): Promise<{ reminderApp: boolean; vaultApp: boolean }> {
+  try {
+    const [reminderApp, vaultApp] = await evaluateFeatureFlags([
+      { key: REMINDER_APP_FEATURE_FLAG_KEY, serverId },
+      { key: VAULT_APP_FEATURE_FLAG_KEY, serverId },
+    ]);
+    return { reminderApp: reminderApp?.enabled === true, vaultApp: vaultApp?.enabled === true };
+  } catch (error) {
+    console.warn("[agent-context] app rollout flag evaluation failed; reporting both off", serializeErrorForLog(error));
+    return { reminderApp: false, vaultApp: false };
+  }
+}
+
 // Identity bootstrap. A managed agent learns who it is from the standing
 // system prompt its daemon builds; an external agent has no daemon, so it asks
 // here. The prompt is the self-hosted-runner guide rendered by the same shared
@@ -1917,6 +2474,7 @@ registerAgentApiRoute("agentContext", async (req, res) => {
       server: { id: server.id, slug: server.slug, name: server.name },
       credential: { capabilities: [...(req.agentCredentialScopes ?? [])] },
       prompt,
+      features: await agentContextFeatures(serverId),
     });
   } catch (err) {
     sendJsonServerError(req, res, {
@@ -2169,6 +2727,41 @@ registerAgentApiRoute("knowledgeSearch", async (req, res) => {
   await handleAgentKnowledgeSearch(req, res, { agentId: actingAgentId, serverId });
 });
 
+/** Channel types that have a card (passive-AX `channel` resource): the listable ones, not DMs or threads. */
+const CHANNEL_CARD_TYPES: ReadonlySet<string> = new Set(channelService.LISTABLE_CHANNEL_TYPES);
+
+type ChannelCardRow = { id: string; name: string; type: string; description: string | null; archivedAt: Date | null };
+
+function channelCardOf(row: ChannelCardRow): AgentApiChannelCard {
+  return {
+    id: row.id,
+    name: row.name,
+    type: row.type,
+    description: row.description ?? null,
+    archived: row.archivedAt != null,
+  };
+}
+
+/**
+ * The channel whose card goes with `channel`: the channel itself, a thread's
+ * parent channel, or a joint thread's local parent projection (its projection
+ * has no parent message). Null for DMs and threads under them. The one rule
+ * for both history reads and sends, so a card recorded on read passes a send.
+ */
+async function resolveChannelCardRow(
+  channel: (ChannelCardRow & { parentMessageId?: string | null }) | null | undefined,
+  serverId: string,
+): Promise<ChannelCardRow | null> {
+  if (!channel) return null;
+  if (CHANNEL_CARD_TYPES.has(channel.type)) return channel;
+  if (channel.type !== "thread") return null;
+  const parentChannelId = channel.parentMessageId
+    ? (await messageService.getMessage(channel.parentMessageId))?.channelId ?? null
+    : (await channelService.getJointThreadProjectionByLocalThread(channel.id, serverId))?.localParentChannelId ?? null;
+  const parent = parentChannelId ? await channelService.getChannel(parentChannelId) : null;
+  return parent && CHANNEL_CARD_TYPES.has(parent.type) ? parent : null;
+}
+
 /**
  * GET /internal/agent-api/history?channel=<ref>&limit=<n>&before=<id|seq>&after=<id|seq>&around=<id|seq>
  *
@@ -2233,7 +2826,8 @@ registerAgentApiRoute("historyRead", async (req, res) => {
       if (found.kind === "absent") {
         // Deliberately the SAME neutral body used for an invisible channel, and a
         // CONSTANT: echoing the requested id here would make two ids distinguishable
-        // even while errorCode stayed identical.
+        // even while errorCode stayed identical. The span (never the caller) says which.
+        setRequestTraceErrorCode(res, "third_party_event_not_found");
         res.status(404).json(CHANNEL_NOT_FOUND_BODY);
         return;
       }
@@ -2268,6 +2862,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
           if (anchored) {
             // The anchor is genuinely here and genuinely has no replies -- the only
             // case where we may say so, because we checked.
+            setRequestTraceErrorCode(res, "thread_has_no_replies");
             res.status(404).json({
               error: `No thread on message ${threadShortId} in ${baseRef}: the message is here, but it has no replies yet.`,
               errorCode: "NOT_FOUND",
@@ -2277,12 +2872,14 @@ registerAgentApiRoute("historyRead", async (req, res) => {
           }
           // No anchor here. Covers both "no such message anywhere" and "it lives in
           // another channel" -- one body for both, so they cannot be told apart.
+          setRequestTraceErrorCode(res, "thread_anchor_not_found");
           res.status(404).json(threadAnchorNotFoundBody(baseRef));
           return;
         }
       }
       // The parent channel itself is missing or invisible. Shared neutral body:
       // it must not distinguish "does not exist" from "you cannot see it".
+      setRequestTraceErrorCode(res, threadShortId ? "thread_parent_channel_not_found" : "channel_not_found");
       res.status(404).json(CHANNEL_NOT_FOUND_BODY);
       return;
     }
@@ -2290,6 +2887,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
     const channelId = resolved.channelId;
     const hasAccess = await channelService.canAgentAccessChannel(channelId, actingAgentId);
     if (!hasAccess) {
+      setRequestTraceErrorCode(res, "history_not_accessible");
       res.status(403).json({ error: "You do not have access to this history" });
       return;
     }
@@ -2503,6 +3101,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
       projectionChannelId,
     );
     let dmHistoryScope = channel?.type === "dm";
+    const cardChannel = await resolveChannelCardRow(channel, serverId);
     if (channel?.type === "thread" && channel.parentMessageId) {
       const parent = await messageService.getMessage(channel.parentMessageId);
       const parentChannel = parent ? await channelService.getChannel(parent.channelId) : null;
@@ -2514,6 +3113,14 @@ registerAgentApiRoute("historyRead", async (req, res) => {
         resolvedHistoryTarget = `${parentTarget}:${channel.parentMessageId.slice(0, 8)}`;
       }
     }
+    const peerCard = dmHistoryScope ? await resolvePeerCard(serverId, actingAgentId, channel) : null;
+    recordAgentContextReturned({
+      source: "history",
+      agentId: actingAgentId,
+      channelId: projectionChannelId,
+      ...agentRequestContextFromHeaders(req.headers),
+      seqs: shownMsgs.map((message) => message.seq),
+    });
     sendAgentApiResponse("historyRead", res, {
       target: resolvedHistoryTarget ?? channelRef,
       ...(dmHistoryScope && channel && { consumption_scope: {
@@ -2532,6 +3139,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
             ),
             message.actionMetadata,
           ),
+          actingAgentId,
         )
       ),
       has_more: hasOlder || hasNewer,
@@ -2543,6 +3151,8 @@ registerAgentApiRoute("historyRead", async (req, res) => {
         unread_after_seq: unreadAfterSeq,
         read_through_seq: Math.max(unreadAfterSeq, readThroughSeq ?? 0),
       }),
+      ...(cardChannel && { channel_card: channelCardOf(cardChannel) }),
+      ...(peerCard && { peer_card: peerCard }),
     });
   } catch (err) {
     sendJsonServerError(req, res, {
@@ -2678,7 +3288,7 @@ internalAgentApiRouter.get("/messages/:messageId/mention-deliveries", requireAge
       return;
     }
     const [message] = await getDb()
-      .select({ senderType: messages.senderType, senderId: messages.senderId })
+      .select({ senderType: messages.senderType, senderId: messages.senderId, channelId: messages.channelId })
       .from(messages)
       .where(eq(messages.id, messageId))
       .limit(1);
@@ -2703,13 +3313,22 @@ internalAgentApiRouter.get("/messages/:messageId/mention-deliveries", requireAge
         .where(inArray(messageMentions.id, rows.map((row) => row.occurrenceId)));
       for (const mention of authored) handles.set(mention.id, mention.handleAtSendTime);
     }
-    res.status(200).json({
-      messageId,
-      deliveries: rows.map((row) => projectMentionDeliveryForSender(
-        handles.get(row.occurrenceId) ?? "",
-        mentionDeliveryOccurrenceService.evaluateMentionDeliveryOccurrence(row),
-      )),
-    });
+    const serviceTargets = await getDb().select({ agentId: agents.id }).from(agents)
+      .innerJoin(raftbenchConfigs, eq(raftbenchConfigs.agentId, agents.id))
+      .where(inArray(agents.id, rows.map(row => row.agentId)));
+    const serviceIds = new Set(serviceTargets.map(row => row.agentId));
+    const deliveries = rows.map((row) => serviceIds.has(row.agentId)
+      ? { targetHandle: handles.get(row.occurrenceId) ?? "", outcome: "lost" as const, reasonCategory: "unclassified" as const }
+      : projectMentionDeliveryForSender(handles.get(row.occurrenceId) ?? "", mentionDeliveryOccurrenceService.evaluateMentionDeliveryOccurrence(row)));
+    const dmPeers = await getDb().select({ agentId: agents.id, name: agents.name }).from(channels)
+      .innerJoin(channelAgents, eq(channelAgents.channelId, channels.id))
+      .innerJoin(agents, eq(agents.id, channelAgents.agentId))
+      .innerJoin(raftbenchConfigs, eq(raftbenchConfigs.agentId, agents.id))
+      .where(and(eq(channels.id, message.channelId), eq(channels.type, "dm")));
+    for (const peer of dmPeers) {
+      if (!serviceIds.has(peer.agentId)) deliveries.push({ targetHandle: peer.name, outcome: "lost", reasonCategory: "unclassified" });
+    }
+    res.status(200).json({ messageId, deliveries });
   } catch (err) {
     console.error("internal.agent-api.sender-mention-deliveries error:", serializeErrorForLog(err));
     // LOOKUP_FAILED, not a verdict: "the query did not run" and "I read the rows
@@ -2853,6 +3472,7 @@ async function handleReaction(
   const serverId = req.serverId!;
   const emoji = parseReactionEmoji(req.body?.emoji);
   if (!emoji) {
+    setRequestTraceErrorCode(res, "emoji_invalid");
     res.status(400).json({ error: "A valid emoji is required" });
     return;
   }
@@ -2860,31 +3480,37 @@ async function handleReaction(
   const msgId = typeof req.params.msgId === "string" ? req.params.msgId : "";
   const resolvedMessageId = await messageService.resolveMessageIdVisibleToAgent(serverId, actingAgentId, msgId);
   if (!resolvedMessageId.ok) {
+    setRequestTraceErrorCode(res, resolvedMessageId.status === 404 ? "message_not_found" : "message_id_invalid");
     res.status(resolvedMessageId.status).json({ error: resolvedMessageId.error });
     return;
   }
   const message = await messageService.getMessage(resolvedMessageId.messageId);
   if (!message) {
+    setRequestTraceErrorCode(res, "message_not_found");
     res.status(404).json({ error: "Message not found" });
     return;
   }
 
   const channel = await channelService.getChannel(message.channelId);
   if (!channel || channel.serverId !== serverId) {
+    setRequestTraceErrorCode(res, "channel_not_found");
     res.status(404).json({ error: "Channel not found" });
     return;
   }
   const canAccess = await channelService.canAgentAccessChannel(message.channelId, actingAgentId);
   if (!canAccess) {
+    setRequestTraceErrorCode(res, "message_not_found");
     res.status(404).json({ error: "Message not found" });
     return;
   }
   if (message.messageType === "system") {
+    setRequestTraceErrorCode(res, "system_message_not_reactable");
     res.status(400).json({ error: "System messages cannot receive reactions" });
     return;
   }
   const canPost = await channelService.canAgentPostToChannel(message.channelId, actingAgentId);
   if (!canPost) {
+    setRequestTraceErrorCode(res, "channel_membership_required");
     res.status(403).json({ error: "Agent must join this channel to react to messages" });
     return;
   }
@@ -2898,10 +3524,12 @@ async function handleReaction(
     throw err;
   }
   if (await isChannelReadOnlyByBillingFeature(message.channelId, serverId)) {
+    setRequestTraceErrorCode(res, "channel_read_only");
     res.status(403).json({ error: "This joint channel is read-only because it has more than 2 free servers. It becomes writable again when a server upgrades or a free server leaves." });
     return;
   }
   if (await isChannelReadOnlyByQuota(message.channelId, serverId)) {
+    setRequestTraceErrorCode(res, "channel_read_only");
     res.status(403).json({ error: "This channel is read-only on your current plan. Upgrade to continue." });
     return;
   }
@@ -2930,7 +3558,7 @@ async function handleReaction(
     "message:updated",
     projectRichMessageSocketPayload(messageService.stripViewerScopedAttachmentCommentMetadata(enriched)),
   );
-  res.json(toAgentApiMessageEnvelope(enriched, enriched.content));
+  res.json(toAgentApiMessageEnvelope(enriched, enriched.content, actingAgentId));
 }
 
 registerAgentApiRoute("messageReactionAdd", ...agentApiRequestValidators("messageReactionAdd"), validateAgentApiResponseMiddleware("messageReactionAdd"), async (req, res) => {
@@ -3520,8 +4148,12 @@ internalAgentApiRouter.post("/activity", requireAgentCapability("read"), async (
       return;
     }
 
-    const result = await agentOrchestrator.recordExternalAgentActivity(actingAgentId, parsed, serverId);
-    res.json({ ok: true, ...result });
+    const { ignoredFields, ...ingest } = parsed;
+    if (ignoredFields.length > 0) {
+      console.warn(`[internal.agent-api.activity] agent ${actingAgentId}: ignored unknown event fields: ${ignoredFields.join(", ")}`);
+    }
+    const result = await agentOrchestrator.recordExternalAgentActivity(actingAgentId, ingest, serverId);
+    res.json({ ok: true, ...result, ...(ignoredFields.length > 0 ? { ignoredFields } : {}) });
   } catch (err) {
     sendJsonServerError(req, res, {
       error: "Failed to ingest activity",
@@ -4455,6 +5087,48 @@ internalAgentApiRouter.post("/attachments/:attachmentId/comments", requireAgentC
   }
 });
 
+/**
+ * The other side of the DM `channel` is in (a DM, or a thread under one) as
+ * the agent sees them: kind, handle, description, and the zone their latest
+ * message there carried. Null when not a DM, for the agent's own or an app
+ * DM, and for a peer with nothing to show (no description and no zone).
+ */
+async function resolvePeerCard(
+  serverId: string,
+  agentId: string,
+  channel: { id: string; type: string; parentMessageId?: string | null } | null | undefined,
+): Promise<AgentApiPeerCard | null> {
+  if (!channel) return null;
+  let dmChannelId: string | null = channel.type === "dm" ? channel.id : null;
+  if (!dmChannelId && channel.type === "thread" && channel.parentMessageId) {
+    const parent = await messageService.getMessage(channel.parentMessageId);
+    const parentChannel = parent ? await channelService.getChannel(parent.channelId) : null;
+    if (parentChannel?.type === "dm") dmChannelId = parentChannel.id;
+  }
+  if (!dmChannelId) return null;
+  const peer = await channelService.getDmPeerForAgent(serverId, agentId, dmChannelId);
+  if (!peer) return null;
+  const timezone = peer.kind === "human"
+    ? await messageService.getLatestSenderTimezone([...new Set([dmChannelId, channel.id])], "user", peer.id)
+    : null;
+  const card: AgentApiPeerCard = { kind: peer.kind, name: peer.name, description: peer.description, timezone };
+  return peerCardHasContent(card) ? card : null;
+}
+
+/** Whether this agent already committed a send with this idempotency key. */
+async function isAgentSendKeyCommitted(agentId: string, idempotencyKey: string): Promise<boolean> {
+  const [committed] = await getDb()
+    .select({ id: messages.id })
+    .from(messages)
+    .where(and(
+      eq(messages.senderType, "agent"),
+      eq(messages.senderId, agentId),
+      eq(messages.agentSendKey, idempotencyKey),
+    ))
+    .limit(1);
+  return Boolean(committed);
+}
+
 async function handleAgentApiMessageSend(
   req: Request,
   res: Response,
@@ -4478,6 +5152,7 @@ async function handleAgentApiMessageSend(
       draftReplacedExisting,
       seenUpToSeq,
       seenExactSeqs: requestedSeenExactSeqs,
+      seenCards,
       freshnessContextMode,
     } = sendBody;
     const mentions = routeKey === "messageSendV2" && "mentions" in sendBody
@@ -4500,6 +5175,7 @@ async function handleAgentApiMessageSend(
 
     addTraceEvent("agent_api_send.request.started", {
       target_kind: inferAgentApiSendTargetKind(target),
+      client_kind: agentApiClientKind(req),
       content_chars: typeof content === "string" ? content.length : 0,
       attachment_count: attachmentCount,
       idempotency_key_present: typeof idempotencyKey === "string" && idempotencyKey.length > 0,
@@ -4651,6 +5327,57 @@ async function handleAgentApiMessageSend(
       throw err;
     }
 
+    // Cards (passive AX): the target's channel card (`seenCards.channel`) and
+    // a DM target's peer card (`seenCards.peer`), each only for a client that
+    // names the version its model context has (null: not seen). Never seen in
+    // this context: held once, like unread messages. Seen an older version:
+    // sent, with the new card in the reply. Reviewer isolation sends no new
+    // context, so it carries no card either.
+    const seenChannelCard = withholdFreshnessContext ? undefined : seenCards?.channel;
+    const seenPeerCard = withholdFreshnessContext ? undefined : seenCards?.peer;
+    const targetChannel = seenChannelCard === undefined && seenPeerCard === undefined
+      ? null
+      : await channelService.getChannel(resolved.channelId);
+    const channelCardCheck = seenChannelCard === undefined
+      ? null
+      : await (async () => {
+        const row = await resolveChannelCardRow(targetChannel, serverId);
+        if (!row) return null;
+        const card = channelCardOf(row);
+        return channelCardRev(card) === seenChannelCard ? null : { card, changed: seenChannelCard !== null };
+      })();
+    // The peer is checked for "seen in this context" only: their zone travels
+    // with each message, so a version compare would call every message from
+    // another place a change. A changed description reaches the agent with
+    // their next message.
+    const peerCardCheck = seenPeerCard !== null
+      ? null
+      : await (async () => {
+        const card = await resolvePeerCard(serverId, actingAgentId, targetChannel);
+        return card ? { card, changed: false } : null;
+      })();
+    const unseenCardReasons = [
+      ...(channelCardCheck && !channelCardCheck.changed ? ["channel_card"] : []),
+      ...(peerCardCheck && !peerCardCheck.changed ? ["peer_card"] : []),
+    ];
+    // A retry of a send that already committed replays its receipt below; it
+    // is not held for a card the original send was not held for.
+    const holdForCards = unseenCardReasons.length > 0
+      && !isContinueAnyway
+      && !(typeof idempotencyKey === "string" && idempotencyKey.length > 0
+        && await isAgentSendKeyCommitted(actingAgentId, idempotencyKey));
+    const cardFields = {
+      ...(channelCardCheck ? { channelCard: channelCardCheck.card, ...(channelCardCheck.changed ? { channelCardChanged: true } : {}) } : {}),
+      ...(peerCardCheck ? { peerCard: peerCardCheck.card } : {}),
+    };
+    for (const [name, seen, check] of [["channel", seenChannelCard, channelCardCheck], ["peer", seenPeerCard, peerCardCheck]] as const) {
+      if (seen === undefined) continue;
+      addTraceEvent(`agent_api_send.${name}_card.evaluated`, {
+        outcome: check === null ? "seen" : check.changed ? "changed" : holdForCards ? "held" : "unseen_not_held",
+        target_type: resolved.type,
+      });
+    }
+
     const io = req.app.get("io");
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
     let attestedSendActivityContext: {
@@ -4662,89 +5389,14 @@ async function handleAgentApiMessageSend(
     if (shouldRunSendFreshness) {
       const freshness = await tracePhase(
         async () => {
-          const selfSender = { senderType: "agent" as const, senderId: actingAgentId };
-          const useAttentionFacts = resolved.type !== "thread";
-          const latestAnchor = useAttentionFacts
-            ? await attestedSendService.getLatestAgentAttentionAnchor(actingAgentId, resolved.channelId, {
-              excludeSender: selfSender,
-            })
-            : await attestedSendService.getLatestMessageAnchor(resolved.channelId, {
-              excludeSender: selfSender,
-            });
-          const hasClientSeenBoundary = typeof seenUpToSeq === "number" && Number.isFinite(seenUpToSeq);
-          const clientSeenUpToSeq = hasClientSeenBoundary
-            ? Math.max(0, Math.floor(seenUpToSeq))
-            : 0;
-          const threadParentAnchor = !hasClientSeenBoundary && resolved.type === "thread"
-            ? await attestedSendService.getThreadParentAnchor(resolved.channelId)
-            : null;
-          // Freshness proof must come from the current model-seen boundary.
-          // Durable legacy read-ish cursors cannot prove the model actually saw
-          // the messages; delivery ack state is volatile inbox state. The only
-          // fallback is a cold thread's parent message.
-          const latestFreshnessSeq = Math.max(latestAnchor.seq, threadParentAnchor?.seq ?? 0);
-          const latestFreshnessMessageId = latestAnchor.seq > 0 && latestAnchor.seq >= (threadParentAnchor?.seq ?? 0)
-            ? latestAnchor.messageId
-            : (threadParentAnchor?.messageId ?? latestAnchor.messageId);
-          const fallbackBoundarySeq = threadParentAnchor?.seq ?? 0;
-          const attestedBoundarySeq = Math.min(
-            hasClientSeenBoundary ? clientSeenUpToSeq : fallbackBoundarySeq,
-            latestFreshnessSeq,
-          );
-          const attestedBoundaryMessageId = attestedBoundarySeq <= 0
-            ? null
-            : attestedBoundarySeq === threadParentAnchor?.seq
-              ? threadParentAnchor.messageId
-              : await attestedSendService.getMessageIdForSeq(resolved.channelId, attestedBoundarySeq);
-          const seenExactSeqs = [...new Set((requestedSeenExactSeqs ?? [])
-            .map((seq) => Math.floor(Number(seq)))
-            .filter((seq) => Number.isInteger(seq)
-              && seq > attestedBoundarySeq
-              && seq <= latestFreshnessSeq))]
-            .slice(0, 2_500);
-          const newMessageCount = latestFreshnessSeq > attestedBoundarySeq
-            ? useAttentionFacts
-              ? await attestedSendService.countAgentAttentionMessagesAfterSeq(actingAgentId, resolved.channelId, attestedBoundarySeq, {
-                excludeSender: selfSender,
-                latestSeq: latestFreshnessSeq,
-                excludeExactSeqs: seenExactSeqs,
-              })
-              : await attestedSendService.countMessagesAfterSeq(resolved.channelId, attestedBoundarySeq, {
-                excludeSender: selfSender,
-                latestSeq: latestFreshnessSeq,
-                excludeExactSeqs: seenExactSeqs,
-              })
-            : 0;
-          const attestedTargetType = toAttestedSendTargetType(resolved.type);
-          const boundarySource = hasClientSeenBoundary
-            ? "client_seen"
-            : seenExactSeqs.length > 0
-              ? "client_seen_exact"
-            : threadParentAnchor
-              ? "thread_parent"
-              : "none";
-          const formalMentionFacts = latestFreshnessSeq > attestedBoundarySeq
-            ? await attestedSendService.getFormalMentionFacts(
-                actingAgentId,
-                resolved.channelId,
-                attestedBoundarySeq,
-                latestFreshnessSeq,
-                seenExactSeqs,
-              )
-            : { count: 0, firstMessageId: null, firstHandle: null };
-          return {
-            latestFreshnessSeq,
-            latestFreshnessMessageId,
-            attestedBoundarySeq,
-            attestedBoundaryMessageId,
-            newMessageCount,
-            attestedTargetType,
-            boundarySource,
-            formalMentionFacts,
-            useAttentionFacts,
-            seenExactSeqs,
-            shouldHoldForFreshness: !isContinueAnyway && newMessageCount > 0,
-          };
+          const evaluation = await evaluateAgentFreshness({
+            agentId: actingAgentId,
+            channelId: resolved.channelId,
+            channelType: resolved.type,
+            seenUpToSeq,
+            requestedSeenExactSeqs,
+          });
+          return { ...evaluation, shouldHoldForFreshness: !isContinueAnyway && evaluation.newMessageCount > 0 };
         },
         (_durationMs, result) => ({
           name: "agent_api_send.freshness.evaluated",
@@ -4765,220 +5417,24 @@ async function handleAgentApiMessageSend(
         newMessageCount: freshness.newMessageCount,
       };
 
-      const renderHeldResponse = async (
-        replacedExisting: boolean,
-        reholdCount: number,
-        boundarySeq: number,
-        boundaryMessageId: string | null,
-        latestSeq: number,
-        latestMessageId: string | null,
-        mentionCount: number,
-        boundarySource: string,
-        attestedTargetType: attestedSendService.AttestedSendTargetType,
-        useAttentionFacts: boolean,
-        seenExactSeqs: number[],
-      ): Promise<AgentApiHeldFreshnessResponse> => {
-        const heldMessages = withholdFreshnessContext
-          ? []
-          : await listRecentFreshnessMessagesAfterSeq(
-              actingAgentId,
-              serverId,
-              resolved.channelId,
-              boundarySeq,
-              ATTESTED_SEND_HELD_CONTEXT_LIMIT,
-              latestSeq,
-              useAttentionFacts,
-              {
-                excludeSender: { senderType: "agent", senderId: actingAgentId },
-                excludeExactSeqs: seenExactSeqs,
-              },
-            );
-        const heldSeqs = heldMessages
-          .map((message) => Number((message as { seq?: unknown }).seq))
-          .filter((seq) => Number.isInteger(seq) && seq > 0);
-        const attentionHoldCount = latestSeq > boundarySeq
-          ? useAttentionFacts
-            ? await attestedSendService.countAgentAttentionMessagesAfterSeq(actingAgentId, resolved.channelId, boundarySeq, {
-              excludeSender: { senderType: "agent", senderId: actingAgentId },
-              latestSeq,
-              excludeExactSeqs: seenExactSeqs,
-            })
-            : await attestedSendService.countMessagesAfterSeq(resolved.channelId, boundarySeq, {
-              excludeSender: { senderType: "agent", senderId: actingAgentId },
-              latestSeq,
-              excludeExactSeqs: seenExactSeqs,
-            })
-          : 0;
-        const shownMessageCount = heldMessages.length;
-        // Without a model-seen boundary, do not present the whole target
-        // history as "new messages"; this is a bounded first-touch context.
-        const hasModelSeenProof = boundarySource === "client_seen" || boundarySource === "client_seen_exact";
-        const firstTouchContextCount = withholdFreshnessContext
-          ? Math.min(attentionHoldCount, ATTESTED_SEND_HELD_CONTEXT_LIMIT)
-          : shownMessageCount;
-        const holdCount = hasModelSeenProof ? attentionHoldCount : firstTouchContextCount;
-        const omittedMessageCount = !withholdFreshnessContext && hasModelSeenProof
-          ? Math.max(0, attentionHoldCount - shownMessageCount)
-          : 0;
-        // Chat semantics (task #41 final review): the hold's obligation is the honest
-        // in-the-moment sentence: true skipped count (omittedMessageCount,
-        // attention semantics — never a seq span) plus the runnable --before
-        // anchor (minShownSeq). Nothing is persisted or re-surfaced.
-        const minShownSeq = heldSeqs.length > 0 ? Math.min(...heldSeqs) : null;
-        // Thread digest anchor: where this conversation started. Only fetched
-        // for threads, only when context is shown, and only when the parent
-        // is not already inside the displayed window.
-        const threadParentMessage = !withholdFreshnessContext && resolved.type === "thread"
-          ? await attestedSendService.getThreadParentMessage(resolved.channelId)
-          : null;
-        // The read position moves to latestSeq only when this hold showed every
-        // message it counts. When some were omitted (the context cap), they
-        // have not been handed to the agent; marking them read would drop them
-        // from its inbox (an external agent never receives them otherwise), so
-        // the position stays and they are delivered as usual.
-        const showedEveryHeldMessage = shownMessageCount >= attentionHoldCount;
-        if (!withholdFreshnessContext && showedEveryHeldMessage) {
-          // Task #93 line B: the agent's own read is a side effect of the send; a read-state fence refusal must not fail
-          // the send. Any other error still surfaces.
-          const readState = await channelService.markRead(
-            { kind: "agent", id: actingAgentId },
-            resolved.channelId,
-            latestSeq,
-          ).catch((error: unknown) => {
-            if (isReadMutationFenceRefusal(error)) return null;
-            throw error;
-          });
-          if (readState) {
-            await emitScopeReadUpdated({
-              io: req.app.get("io") as SocketServer | undefined,
-              serverId: agent.serverId,
-              scopeId: resolved.channelId,
-              peerKind: "agent",
-              peerId: actingAgentId,
-              maxReadSeq: readState.maxReadSeq,
-              changed: readState.changed,
-            });
-          }
-        }
-        if (!withholdFreshnessContext && latestSeq > boundarySeq) {
-          // Held context is returned inline; do not also redeliver it as unread.
-          // Only what was shown: omitted messages stay queued for delivery.
-          if (showedEveryHeldMessage) {
-            agentOrchestrator.acknowledgeDeliveredMessagesForChannelUpToSeq?.(
-              actingAgentId,
-              resolved.channelId,
-              latestSeq,
-            ) ?? agentOrchestrator.acknowledgeDeliveredMessagesForChannel(actingAgentId, resolved.channelId, heldSeqs);
-          } else {
-            agentOrchestrator.acknowledgeDeliveredMessagesForChannel(actingAgentId, resolved.channelId, heldSeqs);
-          }
-        }
-        await attestedSendService.recordGateTriggered({
-          id: randomUUID(),
-          agentId: actingAgentId,
-          serverId: agent.serverId,
-          targetType: attestedTargetType,
-          targetRef: target,
-        }, {
-          lastSeenMessageId: boundaryMessageId,
-          latestMessageId,
-          hasFormalMentionSinceLastSeen: false,
-          draftReplacedExisting: replacedExisting,
-          newMessageCount: holdCount,
-          boundarySource,
-          boundarySeq,
-          latestSeq,
-        });
-        const freshnessDecision = {
-          action: "send" as const,
-          decision: "syncing_hold" as const,
-          ...(withholdFreshnessContext ? { freshnessContextMode: "withheld" as const } : {}),
-          target,
-          reason: hasModelSeenProof ? "server_stale_model_boundary" : "server_first_touch_context",
-          pendingMaxSeq: latestSeq,
-          modelSeenSeq: boundarySource === "client_seen" ? boundarySeq : 0,
-          heldMessageCount: shownMessageCount,
-          omittedMessageCount,
-        };
-        const producerFactId = buildApmFreshnessDecisionProducerFactId(actingAgentId, freshnessDecision);
-        const envelope = projectApmHeldFreshnessEnvelope<AgentApiMessageEnvelope>({
-          producerFactId,
-          action: "send",
-          decision: "syncing_hold",
-          heldMessages,
-          newMessageCount: holdCount,
-          omittedMessageCount,
-          seenUpToSeq: latestSeq,
-          freshnessContextMode: withholdFreshnessContext ? "withheld" : undefined,
-        });
-        if (withholdFreshnessContext) {
-          await recordAgentRaftAction(req, actingAgentId, {
-            title: "Reviewer-isolation freshness hold",
-            text: `${formatAttestedMessageCount(holdCount)} withheld`,
-          });
-        } else {
-          const activity = projectApmHeldFreshnessActivity({
-            producerFactId,
-            action: "send",
-            decision: "syncing_hold",
-            target,
-            messageCount: shownMessageCount,
-          });
-          const title = reholdCount > 0 || isSendDraft ? "Send draft held" : activity.entry.title;
-          await recordAgentRaftAction(req, actingAgentId, {
-            title,
-            text: activity.entry.text,
-            producerFactId,
-            activity: activity.statusEntry.activity,
-            activityDetail: title,
-          });
-        }
-        return {
-          ...(!withholdFreshnessContext ? { ok: true } : {}),
-          ...envelope.body,
-          ...(!withholdFreshnessContext
-            ? { mentionAnnotation: { formalMentionCount: mentionCount } }
-            : {}),
-          ...(!withholdFreshnessContext
-            ? { continueAnywaySuggested: reholdCount >= 3 }
-            : {}),
-          ...(!withholdFreshnessContext
-            ? { seenUpToMessageId: latestMessageId }
-            : {}),
-          ...(!withholdFreshnessContext && minShownSeq !== null
-            ? { firstShownSeq: minShownSeq }
-            : {}),
-          ...(!withholdFreshnessContext
-            && threadParentMessage
-            && (minShownSeq === null || threadParentMessage.seq < minShownSeq)
-            ? {
-              threadParentMessage: {
-                seq: threadParentMessage.seq,
-                messageId: threadParentMessage.messageId,
-                senderName: threadParentMessage.senderName,
-                createdAt: threadParentMessage.createdAt?.toISOString() ?? null,
-                content: threadParentMessage.content,
-              },
-            }
-            : {}),
-        };
-      };
 
       if (freshness.shouldHoldForFreshness) {
         const response = await tracePhase(
-          () => renderHeldResponse(
-            draftReplacedExisting === true,
-            parsedDraftReholdCount,
-            freshness.attestedBoundarySeq,
-            freshness.attestedBoundaryMessageId,
-            freshness.latestFreshnessSeq,
-            freshness.latestFreshnessMessageId,
-            freshness.formalMentionFacts.count,
-            freshness.boundarySource,
-            freshness.attestedTargetType,
-            freshness.useAttentionFacts,
-            freshness.seenExactSeqs,
-          ),
+          () => renderAgentFreshnessHold(req, {
+            action: "send",
+            agentId: actingAgentId,
+            serverId,
+            agentServerId: agent.serverId,
+            channelId: resolved.channelId,
+            channelType: resolved.type,
+            target,
+            withhold: withholdFreshnessContext,
+            agentOrchestrator,
+            evaluation: freshness,
+            replacedExisting: draftReplacedExisting === true,
+            reholdCount: parsedDraftReholdCount,
+            isSendDraft,
+          }),
           (_durationMs, result) => ({
             name: "agent_api_send.held_response.rendered",
             attrs: {
@@ -4995,9 +5451,34 @@ async function handleAgentApiMessageSend(
           held_message_count: response.heldMessages?.length ?? 0,
           new_message_count: response.newMessageCount ?? 0,
         });
-        sendAgentApiResponse(routeKey, res, response);
+        sendAgentApiResponse(routeKey, res, {
+          ...response,
+          ...(holdForCards ? { holdReasons: ["unread_messages", ...unseenCardReasons] } : {}),
+          ...cardFields,
+        });
         return;
       }
+    }
+
+    if (holdForCards) {
+      // No unread messages: the cards alone hold the send. Nothing was shown
+      // from the conversation, so read positions do not move.
+      await recordAgentRaftAction(req, actingAgentId, {
+        title: unseenCardReasons.includes("channel_card") ? "Send held for the channel card" : "Send held for the DM peer's card",
+        text: `target: ${target}\nreason: ${unseenCardReasons.join(", ")} not in the agent's current context`,
+      });
+      addTraceEvent("response.ready", { status_code: 200, state: "held", held_message_count: 0, new_message_count: 0 });
+      sendAgentApiResponse(routeKey, res, {
+        ok: true,
+        state: "held",
+        holdReasons: unseenCardReasons,
+        heldMessages: [],
+        newMessageCount: 0,
+        shownMessageCount: 0,
+        omittedMessageCount: 0,
+        ...cardFields,
+      });
+      return;
     }
 
     const sendAttention = await buildDriveByJoinedToPostAttention(actingAgentId, resolved, target);
@@ -5085,6 +5566,7 @@ async function handleAgentApiMessageSend(
       ...(sendAttention ? { attention: sendAttention } : {}),
       ...(pendingMentionActions.length > 0 ? { pendingMentionActions } : {}),
       ...(unresolvedMentionHandles.length > 0 ? { unresolvedMentionHandles } : {}),
+      ...cardFields,
     });
   } catch (err) {
     if (routeKey === "messageSendV2" && err instanceof messageService.MentionValidationError && err.code) {
@@ -5380,18 +5862,22 @@ registerAgentApiRoute("resolveChannel", ...agentApiRequestValidators("resolveCha
 
     const resolved = await resolveWritableAgentTarget(serverId, agentId, target);
     if (resolved === "forbidden") {
+      setRequestTraceErrorCode(res, "target_forbidden");
       res.status(403).json({ error: forbiddenMessageForTarget(target) });
       return;
     }
     if (resolved === "peer-not-found") {
+      setRequestTraceErrorCode(res, "peer_not_found");
       res.status(404).json({ error: `User or agent not found: @${target.slice(4)}` });
       return;
     }
     if (resolved === "self-dm") {
+      setRequestTraceErrorCode(res, "self_dm");
       res.status(400).json({ error: "Cannot create a DM with yourself" });
       return;
     }
     if (!resolved) {
+      setRequestTraceErrorCode(res, "channel_not_found");
       res.status(404).json({ error: notFoundMessageForTarget(target) });
       return;
     }
@@ -5447,6 +5933,11 @@ registerAgentApiRoute("messageSearch", async (req, res) => {
       return;
     }
     const sort = queryInput.sort === "recent" ? "recent" : "relevance";
+    const cursor = queryInput.cursor ? searchService.parseMessageSearchWalkCursor(queryInput.cursor) : undefined;
+    if (cursor === null || (cursor && (!query || sort !== "recent"))) {
+      res.status(400).json({ error: "Invalid search cursor: pass back nextCursor unchanged, with the same query and --sort recent" });
+      return;
+    }
     const hasMeaningfulFilter = Boolean(channelId || senderFilter.senderId || after || before);
     if (!query && !hasMeaningfulFilter) {
       sendAgentApiResponse("messageSearch", res, { results: [], hasMore: false });
@@ -5464,6 +5955,7 @@ registerAgentApiRoute("messageSearch", async (req, res) => {
       sort: query ? sort : "recent",
       limit,
       offset,
+      cursor,
       signal: requestAbort.signal,
     });
     const [renderedContents, renderedSnippets, taskFacts, commentScopes] = await Promise.all([
@@ -5491,6 +5983,8 @@ registerAgentApiRoute("messageSearch", async (req, res) => {
       results: searchResponse.results.map((result, index) => {
         const { externalMessage, ...visibleResult } = result;
         const external = result.senderType === "external_projection";
+        // Slack-bridged rows read like ordinary messages; other external content stays inert.
+        const inert = external && !isSlackBridgedExternalProvider(externalMessage?.provider);
         const taskFact = external ? undefined : taskFacts.get(result.id);
         const taskProjectionFields = taskFact ? {
           taskStatus: taskFact.taskStatus,
@@ -5504,13 +5998,13 @@ registerAgentApiRoute("messageSearch", async (req, res) => {
           ...visibleResult,
           senderType: toAgentFacingActorType(result.senderType),
           ...(externalMessage ? { external_message: externalMessage } : {}),
-          content: external
+          content: inert
             ? renderThirdPartyInertText({ field: "tool_result", value: result.content })
             : renderAgentCommentScopedContent(
                 renderedContents[index] ?? result.content,
                 commentScopes.get(result.id),
               ),
-          snippet: external
+          snippet: inert
             ? renderThirdPartyInertText({ field: "tool_result", value: result.snippet })
             : renderedSnippets[index] ?? result.snippet,
           ...taskProjectionFields,
@@ -5969,6 +6463,7 @@ registerAgentApiRoute("assistantOwnerMessages", ...agentApiRequestValidators("as
             renderAgentCommentScopedContent(renderedContents[index] ?? "", message.commentRef),
             message.actionMetadata,
           ),
+          req.actingAgentId!,
         )
       ),
       hasMore: hasOlder || hasNewer,
@@ -6030,7 +6525,7 @@ registerAgentApiRoute("profileUpdate", ...agentApiRequestValidators("profileUpda
     // rewrite its own instructions, so only a human may change it.
     if (hasDescription && await getHostedRuntimeSummary(agentId)) {
       res.status(403).json({
-        error: "A hosted agent's description is its instructions and only a human can change it",
+        error: "A cloud agent's description is its instructions and only a human can change it",
         code: "hosted_agent_description_human_only",
         suggestedNextAction: "Your description is your instructions, so only a human can change it: ask one to edit it in your Profile tab in Raft. Nothing was changed; to update your display name or avatar, retry without the description.",
       });
@@ -6211,7 +6706,7 @@ registerAgentApiRoute("integrationList", async (req, res) => {
       });
 
     sendAgentApiResponse("integrationList", res, {
-      services: await Promise.all(clients.map(serializeOAuthClientForAgentApi)),
+      services: await Promise.all(clients.map((client) => serializeOAuthClientForAgentApi(client, serverId))),
       activeLogins,
     });
   } catch (err) {
@@ -6270,7 +6765,7 @@ registerAgentApiRoute("integrationToken", ...agentApiRequestValidators("integrat
     sendAgentApiResponse("integrationToken", res, result);
   } catch (error) {
     if (error instanceof AgentAudienceJwtError) {
-      res.status(error.code === "AGENT_JWT_CONFIGURATION_INVALID" ? 503 : 403).json({
+      res.status(403).json({
         error: error.code, errorCode: error.code,
       });
       return;
@@ -6350,7 +6845,7 @@ registerAgentApiRoute("integrationLogin", ...agentApiRequestValidators("integrat
       const response: AgentApiResponseByRoute["integrationLogin"] = {
         status: "install_required",
         nextAction: "install_from_marketplace",
-        service: await serializeOAuthClientForAgentApi(marketplaceResolved.client),
+        service: await serializeOAuthClientForAgentApi(marketplaceResolved.client, serverId),
         scopes,
         installation: {
           serverSlug: server.slug,
@@ -6416,7 +6911,7 @@ registerAgentApiRoute("integrationLogin", ...agentApiRequestValidators("integrat
     if (requested.grantStatus === "pending") {
       const response: AgentApiResponseByRoute["integrationLogin"] = {
         status: "approval_required",
-        service: await serializeOAuthClientForAgentApi(resolved.client),
+        service: await serializeOAuthClientForAgentApi(resolved.client, serverId),
         scopes: requested.request.scopes ?? [],
         requestId: requested.request.id,
         approval: {
@@ -6481,7 +6976,7 @@ registerAgentApiRoute("integrationLogin", ...agentApiRequestValidators("integrat
     const responseStatus = requested.grantStatus === "reused" ? "already_logged_in" : "logged_in";
     sendAgentApiResponse("integrationLogin", res, {
       status: responseStatus,
-      service: await serializeOAuthClientForAgentApi(resolved.client),
+      service: await serializeOAuthClientForAgentApi(resolved.client, serverId),
       scopes: requested.request.scopes ?? [],
       requestId: requested.request.id,
     });
@@ -6569,6 +7064,8 @@ registerAgentApiRoute("integrationAppPrepare", ...agentApiRequestValidators("int
     const homepageUrl = optionalIntegrationString(body.homepageUrl);
     const returnUrl = optionalIntegrationString(body.returnUrl);
     const agentManifestUrl = optionalIntegrationString(body.agentManifestUrl);
+    const setupUrl = optionalIntegrationString(body.setupUrl);
+    const setupDescription = optionalIntegrationString(body.setupDescription);
 
     const name = optionalIntegrationString(body.name);
     if (!name) {
@@ -6588,6 +7085,8 @@ registerAgentApiRoute("integrationAppPrepare", ...agentApiRequestValidators("int
       homepageUrl,
       returnUrl,
       agentManifestUrl,
+      setupUrl,
+      setupDescription,
       scopes,
       unsafeDemoUrlOverride,
       draftHint: draftHint ?? `Agent prepared a Login with Raft app registration for ${name}. The requester becomes the app owner after server commit and receives the initial secret through a private transient handoff; only a lost handoff should be recovered with rotate-secret --output <new-private-path>. No secret is stored in this card.`,
@@ -6751,7 +7250,7 @@ registerAgentApiRoute("integrationAppUpdate", ...agentApiRequestValidators("inte
       res.status(400).json({ error: "clientKey is required" });
       return;
     }
-    const updatedFields = ["name", "description", "whenToUse", "category", "homepageUrl", "returnUrl", "agentManifestUrl", "scopes"]
+    const updatedFields = ["name", "description", "whenToUse", "category", "homepageUrl", "returnUrl", "agentManifestUrl", "setupUrl", "setupDescription", "scopes"]
       .filter((field) => body[field as keyof typeof body] !== undefined);
     if (updatedFields.length === 0) {
       res.status(400).json({ error: "At least one app field is required" });
@@ -6782,6 +7281,8 @@ registerAgentApiRoute("integrationAppUpdate", ...agentApiRequestValidators("inte
       agentManifestUrl: body.agentManifestUrl === undefined
         ? undefined
         : actionCardsService.validateIntegrationUrl(body.agentManifestUrl, "agentManifestUrl", unsafeDemoUrlOverride),
+      setupUrl: body.setupUrl === undefined ? undefined : actionCardsService.validateIntegrationUrl(body.setupUrl, "setupUrl", unsafeDemoUrlOverride),
+      setupDescription: body.setupDescription,
       allowedScopes: body.scopes === undefined
         ? undefined
         : (() => {
@@ -6826,7 +7327,7 @@ registerAgentApiRoute("integrationAppUpdate", ...agentApiRequestValidators("inte
       }
       if (
         err.message.includes("required") ||
-        err.message.includes("agentManifestUrl") ||
+        err.message.includes("agentManifestUrl") || err.message.includes("setup") ||
         err.message.includes("scope") ||
         err.message.includes("whenToUse")
       ) {
@@ -7205,7 +7706,7 @@ registerAgentApiRoute("taskList", async (req, res) => {
       return;
     }
 
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel!);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel!, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -7358,7 +7859,7 @@ registerAgentApiRoute("taskCreate", ...agentApiRequestValidators("taskCreate"), 
     });
     if (idempotency && await replayAgentApiIdempotentWrite(idempotency, res)) return;
 
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -7572,7 +8073,7 @@ registerAgentApiRoute("taskClaim", ...agentApiRequestValidators("taskClaim"), as
       return;
     }
 
-    const { channel, task_numbers, message_ids } = req.body as AgentApiRequestBodyByRoute["taskClaim"];
+    const { channel, task_numbers, message_ids, seenUpToSeq, seenExactSeqs, freshnessContextMode } = req.body as AgentApiRequestBodyByRoute["taskClaim"];
     const hasTaskNumbers = Array.isArray(task_numbers) && task_numbers.length > 0;
     const hasMessageIds = Array.isArray(message_ids) && message_ids.length > 0;
     const claimMode = taskClaimMode(hasTaskNumbers, hasMessageIds);
@@ -7588,7 +8089,7 @@ registerAgentApiRoute("taskClaim", ...agentApiRequestValidators("taskClaim"), as
       return;
     }
 
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       traceTaskClaimFinished({
         outcome: "rejected",
@@ -7626,6 +8127,28 @@ registerAgentApiRoute("taskClaim", ...agentApiRequestValidators("taskClaim"), as
         const existing = await taskService.getTaskByNumber(ctx.storageChannelId, taskNumber);
         if (existing && rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, existing.createdAt, res)) return;
       }
+    }
+
+    const held = await holdTaskWriteForFreshness(req, {
+      action: "task_claim",
+      writeKey: `task_claim:${[...(task_numbers ?? [])].sort((a, b) => a - b).join(",")}|${[...(message_ids ?? [])].sort().join(",")}`,
+      agentId,
+      serverId,
+      ctx,
+      target: channel,
+      seenUpToSeq,
+      seenExactSeqs,
+      freshnessContextMode,
+    });
+    if (held) {
+      traceTaskClaimFinished({
+        outcome: "held",
+        reason: "freshness",
+        claim_mode: claimMode,
+        input_count: inputCount,
+      });
+      sendAgentApiResponse("taskClaim", res, held);
+      return;
     }
 
     await traceQuerySpan({
@@ -7788,7 +8311,7 @@ registerAgentApiRoute("taskUnclaim", ...agentApiRequestValidators("taskUnclaim")
     }
 
     const { channel, task_number } = req.body as AgentApiRequestBodyByRoute["taskUnclaim"];
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -7906,7 +8429,7 @@ registerAgentApiRoute("taskAssign", ...agentApiRequestValidators("taskAssign"), 
 
     const { channel, task_number, assignee: assigneeRef, expected_revision } =
       req.body as AgentApiRequestBodyByRoute["taskAssign"];
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -7978,8 +8501,8 @@ registerAgentApiRoute("taskUpdateStatus", ...agentApiRequestValidators("taskUpda
       return;
     }
 
-    const { channel, task_number, status } = req.body as AgentApiRequestBodyByRoute["taskUpdateStatus"];
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const { channel, task_number, status, seenUpToSeq, seenExactSeqs, freshnessContextMode } = req.body as AgentApiRequestBodyByRoute["taskUpdateStatus"];
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -7997,6 +8520,22 @@ registerAgentApiRoute("taskUpdateStatus", ...agentApiRequestValidators("taskUpda
     }
     if (rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, task.createdAt, res)) return;
 
+    const held = await holdTaskWriteForFreshness(req, {
+      action: "task_update",
+      writeKey: `task_update:${task.id}:${status}`,
+      agentId,
+      serverId,
+      ctx,
+      target: channel,
+      seenUpToSeq,
+      seenExactSeqs,
+      freshnessContextMode,
+    });
+    if (held) {
+      sendAgentApiResponse("taskUpdateStatus", res, held);
+      return;
+    }
+
     // Same shape as the browser route: try the ordinary member-level update,
     // then let an actor holding `deleteAnyTask` force it. Agents carry a
     // `serverAgentMembers.role`, so an admin agent is a real state — this route
@@ -8009,6 +8548,7 @@ registerAgentApiRoute("taskUpdateStatus", ...agentApiRequestValidators("taskUpda
       }
     }
     if (typeof result === "string") {
+      setRequestTraceErrorCode(res, taskStatusRejectionCode(result));
       res.status(409).json({ error: result });
       return;
     }
@@ -8072,7 +8612,7 @@ registerAgentApiRoute("taskResourceReceipt", ...agentApiRequestValidators("taskR
 
     const { channel, task_number, receipt } =
       req.body as AgentApiRequestBodyByRoute["taskResourceReceipt"];
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -8178,7 +8718,7 @@ registerAgentApiRoute("taskDelete", ...agentApiRequestValidators("taskDelete"), 
     }
 
     const { channel, task_number } = req.body as AgentApiRequestBodyByRoute["taskDelete"];
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -8260,7 +8800,7 @@ registerAgentApiRoute("taskConvert", ...agentApiRequestValidators("taskConvert")
     }
 
     const { channel, message_id } = req.body as AgentApiRequestBodyByRoute["taskConvert"];
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -8347,8 +8887,8 @@ registerAgentApiRoute("taskAmend", ...agentApiRequestValidators("taskAmend"), as
       return;
     }
 
-    const { channel, task_number, title, description } = req.body as AgentApiRequestBodyByRoute["taskAmend"];
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const { channel, task_number, title, description, seenUpToSeq, seenExactSeqs, freshnessContextMode } = req.body as AgentApiRequestBodyByRoute["taskAmend"];
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -8365,6 +8905,22 @@ registerAgentApiRoute("taskAmend", ...agentApiRequestValidators("taskAmend"), as
       return;
     }
     if (rejectHistoricalJointTaskWriteIfNeeded(ctx.surface, task.createdAt, res)) return;
+
+    const held = await holdTaskWriteForFreshness(req, {
+      action: "task_amend",
+      writeKey: `task_amend:${task.id}`,
+      agentId,
+      serverId,
+      ctx,
+      target: channel,
+      seenUpToSeq,
+      seenExactSeqs,
+      freshnessContextMode,
+    });
+    if (held) {
+      sendAgentApiResponse("taskAmend", res, held);
+      return;
+    }
 
     const patch: taskService.TaskAmendPatch = {};
     if (title !== undefined) patch.title = title;
@@ -8437,7 +8993,7 @@ registerAgentApiRoute("taskHistory", ...agentApiRequestValidators("taskHistory")
     const query = validateAgentApiQuery("taskHistory", req, res);
     if (!query) return;
     const { channel, task_number } = query;
-    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel);
+    const ctx = await resolveAgentApiTaskChannel(agentId, serverId, channel, res);
     if (!ctx) {
       res.status(404).json({ error: "Agent or channel not found" });
       return;
@@ -8477,28 +9033,32 @@ registerAgentApiRoute("taskHistory", ...agentApiRequestValidators("taskHistory")
 });
 
 export const REMINDERS_UNSUPPORTED_FOR_EXTERNAL_AGENTS = "reminders_unsupported_for_external_agents";
-
 /**
- * Reminders are fired by the agent's Computer (the daemon schedules them
- * locally). An external agent has no Computer, so a reminder it schedules
- * would be stored and then never fire. Refuse the mutation explicitly rather
- * than report success for a reminder that cannot work. Runs before request
- * validation so the answer does not depend on the payload. Reads (list, log)
- * and cancel stay available: they are truthful for an external agent.
+ * Guards the legacy reminder writes (schedule, update, snooze). Runs before
+ * request validation so the answer does not depend on the payload. Reads
+ * (list, log) and cancel stay available in both cases below, and reminders
+ * already queued keep firing.
+ *
+ * - External agent: reminders are fired by the agent's Computer (the daemon
+ *   schedules them locally); an external agent has none, so a reminder it
+ *   schedules would be stored and never fire.
+ * - `reminder_app` on for the server: reminders moved to the Reminder app
+ *   (see refuseIfRemindersMovedToApp).
  */
-const refuseReminderMutationForExternalAgent: RequestHandler = async (req, res, next) => {
+const refuseLegacyReminderMutation: RequestHandler = async (req, res, next) => {
   try {
     const external = typeof req.actingAgentIsExternal === "boolean"
       ? req.actingAgentIsExternal
       : isExternalAgentRuntime((await agentService.getAgent(req.actingAgentId!))?.runtime ?? "");
-    if (!external) {
-      next();
+    if (external) {
+      res.status(409).json({
+        error: "Reminders are not yet supported for external agents: a reminder is fired by the agent's Raft computer, and an external agent has none. Nothing was scheduled.",
+        code: REMINDERS_UNSUPPORTED_FOR_EXTERNAL_AGENTS,
+      });
       return;
     }
-    res.status(409).json({
-      error: "Reminders are not yet supported for external agents: a reminder is fired by the agent's Raft computer, and an external agent has none. Nothing was scheduled.",
-      code: REMINDERS_UNSUPPORTED_FOR_EXTERNAL_AGENTS,
-    });
+    if (await refuseIfRemindersMovedToApp(res, req.serverId)) return;
+    next();
   } catch (err) {
     next(err);
   }
@@ -8527,7 +9087,7 @@ registerAgentApiRoute("reminderList", ...agentApiRequestValidators("reminderList
   }
 });
 
-registerAgentApiRoute("reminderCreate", refuseReminderMutationForExternalAgent, ...agentApiRequestValidators("reminderCreate"), async (req, res) => {
+registerAgentApiRoute("reminderCreate", refuseLegacyReminderMutation, ...agentApiRequestValidators("reminderCreate"), async (req, res) => {
   try {
     const agentId = req.actingAgentId!;
     const serverId = req.serverId!;
@@ -8581,6 +9141,7 @@ registerAgentApiRoute("reminderCreate", refuseReminderMutationForExternalAgent, 
       }
       const ctx = await channelService.resolveChannelByName(serverId, agentId, channel);
       if (!ctx) {
+        setRequestTraceErrorCode(res, "channel_not_found");
         res.status(404).json({ error: "Agent or channel not found" });
         return;
       }
@@ -8628,10 +9189,12 @@ registerAgentApiRoute("reminderCancel", ...agentApiRequestValidators("reminderCa
     const { reminderId } = req.params as AgentApiRequestParamsByRoute["reminderCancel"];
     const existing = await loadOwnedReminder(reminderId, serverId, agentId);
     if (!existing) {
+      setRequestTraceErrorCode(res, "reminder_not_found");
       res.status(404).json({ error: "Reminder not found" });
       return;
     }
     if (existing.status !== "scheduled" && existing.status !== "fired") {
+      setRequestTraceErrorCode(res, "reminder_not_active");
       res.status(409).json({ error: `Reminder is already ${existing.status}` });
       return;
     }
@@ -8641,6 +9204,7 @@ registerAgentApiRoute("reminderCancel", ...agentApiRequestValidators("reminderCa
       expectedVersion: existing.version,
     });
     if (!canceled) {
+      setRequestTraceErrorCode(res, "reminder_state_conflict");
       res.status(409).json({ error: "Reminder state changed; refresh and retry" });
       return;
     }
@@ -8665,7 +9229,7 @@ registerAgentApiRoute("reminderCancel", ...agentApiRequestValidators("reminderCa
   }
 });
 
-registerAgentApiRoute("reminderSnooze", refuseReminderMutationForExternalAgent, ...agentApiRequestValidators("reminderSnooze"), async (req, res) => {
+registerAgentApiRoute("reminderSnooze", refuseLegacyReminderMutation, ...agentApiRequestValidators("reminderSnooze"), async (req, res) => {
   try {
     const agentId = req.actingAgentId!;
     const serverId = req.serverId!;
@@ -8673,16 +9237,19 @@ registerAgentApiRoute("reminderSnooze", refuseReminderMutationForExternalAgent, 
     const { delaySeconds } = req.body as AgentApiRequestBodyByRoute["reminderSnooze"];
     const schedule = resolveScheduleInput({ delaySeconds }, Date.now());
     if (!schedule.ok) {
+      setRequestTraceErrorCode(res, "reminder_schedule_invalid");
       res.status(400).json({ error: schedule.error });
       return;
     }
 
     const existing = await loadOwnedReminder(reminderId, serverId, agentId);
     if (!existing) {
+      setRequestTraceErrorCode(res, "reminder_not_found");
       res.status(404).json({ error: "Reminder not found" });
       return;
     }
     if (existing.status !== "scheduled" && existing.status !== "fired") {
+      setRequestTraceErrorCode(res, "reminder_not_active");
       res.status(409).json({
         error: `Reminder ${existing.id} is ${existing.status}; only scheduled or fired reminders can be snoozed`,
       });
@@ -8694,6 +9261,7 @@ registerAgentApiRoute("reminderSnooze", refuseReminderMutationForExternalAgent, 
       expectedVersion: existing.version,
     });
     if (!snoozed) {
+      setRequestTraceErrorCode(res, "reminder_state_conflict");
       res.status(409).json({ error: "Reminder state changed; refresh and retry" });
       return;
     }
@@ -8717,7 +9285,7 @@ registerAgentApiRoute("reminderSnooze", refuseReminderMutationForExternalAgent, 
   }
 });
 
-registerAgentApiRoute("reminderUpdate", refuseReminderMutationForExternalAgent, ...agentApiRequestValidators("reminderUpdate"), async (req, res) => {
+registerAgentApiRoute("reminderUpdate", refuseLegacyReminderMutation, ...agentApiRequestValidators("reminderUpdate"), async (req, res) => {
   try {
     const agentId = req.actingAgentId!;
     const serverId = req.serverId!;
@@ -8726,16 +9294,19 @@ registerAgentApiRoute("reminderUpdate", refuseReminderMutationForExternalAgent, 
 
     const existing = await loadOwnedReminder(reminderId, serverId, agentId);
     if (!existing) {
+      setRequestTraceErrorCode(res, "reminder_not_found");
       res.status(404).json({ error: "Reminder not found" });
       return;
     }
     if (existing.status === "fired") {
+      setRequestTraceErrorCode(res, "reminder_not_active");
       res.status(409).json({
         error: `Reminder ${existing.id} is fired; snooze it back to scheduled before updating, or schedule a new reminder`,
       });
       return;
     }
     if (existing.status !== "scheduled") {
+      setRequestTraceErrorCode(res, "reminder_not_active");
       res.status(409).json({ error: `Reminder ${existing.id} is ${existing.status}` });
       return;
     }
@@ -8747,6 +9318,7 @@ registerAgentApiRoute("reminderUpdate", refuseReminderMutationForExternalAgent, 
       title != null ? "title" : null,
     ].filter(Boolean);
     if (mutations.length !== 1) {
+      setRequestTraceErrorCode(res, "reminder_update_invalid");
       res.status(400).json({ error: "update requires exactly one of fireAt/delaySeconds, repeat, or title" });
       return;
     }
@@ -8756,6 +9328,7 @@ registerAgentApiRoute("reminderUpdate", refuseReminderMutationForExternalAgent, 
     if (fireAt != null || delaySeconds != null) {
       const schedule = resolveScheduleInput({ fireAt, delaySeconds }, Date.now());
       if (!schedule.ok) {
+        setRequestTraceErrorCode(res, "reminder_schedule_invalid");
         res.status(400).json({ error: schedule.error });
         return;
       }
@@ -8769,10 +9342,12 @@ registerAgentApiRoute("reminderUpdate", refuseReminderMutationForExternalAgent, 
       patch = { kind: "recurrence", recurrence };
     } else {
       if (typeof title !== "string" || title.trim().length === 0) {
+        setRequestTraceErrorCode(res, "reminder_title_invalid");
         res.status(400).json({ error: "title must be a non-empty string" });
         return;
       }
       if (title.length > REMINDER_MAX_TITLE_LEN) {
+        setRequestTraceErrorCode(res, "reminder_title_invalid");
         res.status(400).json({ error: `title must be at most ${REMINDER_MAX_TITLE_LEN} characters` });
         return;
       }
@@ -8784,6 +9359,7 @@ registerAgentApiRoute("reminderUpdate", refuseReminderMutationForExternalAgent, 
       expectedVersion: existing.version,
     });
     if (!updated) {
+      setRequestTraceErrorCode(res, "reminder_state_conflict");
       res.status(409).json({ error: "Reminder state changed; refresh and retry" });
       return;
     }
@@ -9037,4 +9613,29 @@ registerAgentApiRoute("actionPrepare", ...agentApiRequestValidators("actionPrepa
       err,
     });
   }
+});
+
+function sendRaftbenchError(error: unknown, res: Response): void {
+  if (error instanceof RaftbenchError) {
+    res.status(error.status).json({ error: error.message, code: error.code, suggestedNextAction: error.suggestedNextAction, ...(error.issues ? { issues: error.issues } : {}) });
+  } else {
+    console.error("RaftBench request failed", serializeErrorForLog(error));
+    res.status(503).json({ error: "RaftBench could not confirm this request. An interrupted submission may already have been accepted.", code: "raftbench_unavailable", suggestedNextAction: "Retry the same context request or identical submission after a short delay." });
+  }
+}
+registerAgentApiRoute("raftbenchContext", validateAgentApiResponseMiddleware("raftbenchContext"), async (req, res) => {
+  const parsed = raftbenchContextQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: "Invalid context request.", code: "raftbench_validation_failed", issues: parsed.error.issues, suggestedNextAction: "Use the assigned run ID and nextCursor returned by context." }); return;
+  }
+  try { sendAgentApiResponse("raftbenchContext", res, await readRaftbenchContext(req.serverId!, req.actingAgentId!, parsed.data)); }
+  catch (error) { sendRaftbenchError(error, res); }
+});
+registerAgentApiRoute("raftbenchSubmit", validateAgentApiResponseMiddleware("raftbenchSubmit"), async (req, res) => {
+  const parsed = raftbenchReportSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(422).json({ error: "Result validation failed; nothing has been saved.", code: "raftbench_validation_failed", issues: parsed.error.issues.map(issue => ({ path: issue.path.join("."), message: issue.message, suggestedFix: "Correct this field to match the result schema. Nothing has been saved." })), suggestedNextAction: "Correct all listed fields once. If still invalid, submit incomplete with the validation failure as its reason." }); return;
+  }
+  try { sendAgentApiResponse("raftbenchSubmit", res, await submitRaftbenchReport(req.serverId!, req.actingAgentId!, parsed.data)); }
+  catch (error) { sendRaftbenchError(error, res); }
 });

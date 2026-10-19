@@ -3,6 +3,8 @@ import sharp from "sharp";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, ne, not, or, sql, type SQL } from "drizzle-orm";
 import {
   isSafeOAuthReturnUrl,
+  normalizeAppSetupUrl,
+  normalizeAppSetupDescription,
   RAFT_OAUTH_DEFAULT_ALLOWED_SCOPES,
   RAFT_OAUTH_PUBLIC_DISCOVERY_SCOPES,
   LEGACY_OAUTH_CLIENT_CATEGORY_ALIASES,
@@ -159,6 +161,9 @@ export type OAuthClientRecord = {
   homepageUrl: string | null;
   returnUrl: string | null;
   agentManifestUrl: string | null;
+  setupUrl: string | null;
+  setupDescription: string | null;
+  setupRevision: number;
   allowedScopes: string[] | null;
   logoUrl: string | null;
   humanMarketplaceVisible: boolean;
@@ -346,6 +351,9 @@ const OAUTH_CLIENT_PUBLIC_COLUMNS = {
   homepageUrl: oauthClients.homepageUrl,
   returnUrl: oauthClients.returnUrl,
   agentManifestUrl: oauthClients.agentManifestUrl,
+  setupUrl: oauthClients.setupUrl,
+  setupDescription: oauthClients.setupDescription,
+  setupRevision: oauthClients.setupRevision,
   allowedScopes: oauthClients.allowedScopes,
   logoUrl: oauthClients.logoUrl,
   humanMarketplaceVisible: oauthClients.humanMarketplaceVisible,
@@ -971,7 +979,23 @@ function auditClientDiff(
       diff[key] = { before: before[key] ?? null, after: after[key] ?? null };
     }
   }
+  if (before.setupUrl !== after.setupUrl) diff.setupUrl = { before: Boolean(before.setupUrl), after: Boolean(after.setupUrl) };
+  if (before.setupDescription !== after.setupDescription) diff.setupDescription = { before: Boolean(before.setupDescription), after: Boolean(after.setupDescription) };
+  if (before.setupRevision !== after.setupRevision) diff.setupRevision = { before: before.setupRevision, after: after.setupRevision };
   return diff;
+}
+
+function applyAppSetupUpdate(
+  before: OAuthClientRecord,
+  input: { setupUrl?: string | null; setupDescription?: string | null },
+  updates: Partial<typeof oauthClients.$inferInsert>,
+) {
+  if (input.setupUrl === undefined && input.setupDescription === undefined) return;
+  const url = input.setupUrl === undefined ? before.setupUrl : normalizeAppSetupUrl(input.setupUrl);
+  const description = input.setupDescription === undefined ? before.setupDescription : normalizeAppSetupDescription(input.setupDescription);
+  updates.setupUrl = url;
+  updates.setupDescription = url ? description : null;
+  if (url !== before.setupUrl) updates.setupRevision = before.setupRevision + 1;
 }
 
 function normalizeReviewStatus(raw: unknown): Extract<OAuthClientPublishStatus, "published" | "rejected" | "private"> {
@@ -989,9 +1013,12 @@ export async function createOAuthClient(input: {
   homepageUrl?: string | null;
   returnUrl?: string | null;
   agentManifestUrl?: string | null;
+  setupUrl?: string | null;
+  setupDescription?: string | null;
   clientId?: string;
   allowedScopes?: unknown;
   category?: unknown;
+  enableBot?: boolean;
 }, dbOrTx: ReturnType<typeof getDb> = getDbForService()) {
   const db = dbOrTx;
   const trimmedName = input.name.trim();
@@ -1006,6 +1033,8 @@ export async function createOAuthClient(input: {
     throw new Error("slock_builtin OAuth clients are retired");
   }
   const allowedScopes = normalizeAllowedScopes(input.allowedScopes);
+  const setupUrl = normalizeAppSetupUrl(input.setupUrl);
+  const setupDescription = normalizeAppSetupDescription(input.setupDescription);
   createOAuthClientObserverForService?.();
 
   return db.transaction(async (tx) => {
@@ -1022,10 +1051,13 @@ export async function createOAuthClient(input: {
       homepageUrl: input.homepageUrl?.trim() || null,
       returnUrl: normalizeReturnUrl(input.returnUrl),
       agentManifestUrl: normalizeAgentManifestUrl(input.agentManifestUrl),
+      setupUrl,
+      setupDescription: setupUrl ? setupDescription : null,
       allowedScopes,
       category: normalizeCategory(input.category),
       logoUrl: null,
       createdByUserId: input.createdByUserId,
+      enableBot: Boolean(input.enableBot),
     }).returning(OAUTH_CLIENT_PUBLIC_COLUMNS);
 
     await integrationAuditService.recordIntegrationAuditEvent({
@@ -1403,6 +1435,8 @@ export async function updateOAuthClientForAgent(input: {
   homepageUrl?: string | null;
   returnUrl?: string | null;
   agentManifestUrl?: string | null;
+  setupUrl?: string | null;
+  setupDescription?: string | null;
   allowedScopes?: unknown;
 }): Promise<AgentAppMutationResult<OAuthClientRecord> | { status: "invalid_return_url" }> {
   if (input.returnUrl !== undefined && (!input.returnUrl || !isSafeOAuthReturnUrl(input.returnUrl))) {
@@ -1445,6 +1479,7 @@ export async function updateOAuthClientForAgent(input: {
     if (input.homepageUrl !== undefined) updates.homepageUrl = input.homepageUrl?.trim() || null;
     if (input.returnUrl !== undefined) updates.returnUrl = normalizeReturnUrl(input.returnUrl);
     if (input.agentManifestUrl !== undefined) updates.agentManifestUrl = normalizeAgentManifestUrl(input.agentManifestUrl);
+    applyAppSetupUpdate(before, input, updates);
     if (input.allowedScopes !== undefined) updates.allowedScopes = normalizeAllowedScopes(input.allowedScopes);
 
     const [updated] = await tx
@@ -2366,7 +2401,10 @@ export async function reviewOAuthClientPublish(input: {
       const installedRows = status === "private"
         ? await tx.select({ serverId: oauthClientInstalls.serverId })
           .from(oauthClientInstalls)
-          .where(eq(oauthClientInstalls.clientId, current.id))
+          .where(and(
+            eq(oauthClientInstalls.clientId, current.id),
+            ne(oauthClientInstalls.serverId, current.serverId),
+          ))
           .for("update")
         : [];
       const installedServerIds = installedRows.map((row) => row.serverId);
@@ -2394,11 +2432,36 @@ export async function reviewOAuthClientPublish(input: {
         return null;
       }
 
+      // Marketplace removal does not uninstall the publisher's own App.
+      // Preserve the existing source installation, including all consent and
+      // bot bindings. If it was already missing, restore only basic login;
+      // extra installation permissions require their normal approval path.
+      if (status === "private") {
+        await tx.insert(oauthClientInstalls).values({
+          serverId: updated.serverId,
+          clientId: updated.id,
+          installedBySystem: true,
+        }).onConflictDoNothing();
+      }
+
       let removedInstallCount = 0;
       let revokedGrantCount = 0;
       let revokedTokenCount = 0;
       let deniedPendingRequestCount = 0;
       if (status === "private" && installedServerIds.length > 0) {
+        // Design-v3 §uninstall: tombstone app-owned bot bindings + soft-delete
+        // their agents BEFORE the install rows cascade-delete the bindings.
+        const { uninstallManagedAppBot } = await import("./appBotIdentityService");
+        for (const serverId of installedServerIds) {
+          const [inst] = await tx.select({ id: oauthClientInstalls.id })
+            .from(oauthClientInstalls)
+            .where(and(
+              eq(oauthClientInstalls.clientId, updated.id),
+              eq(oauthClientInstalls.serverId, serverId),
+            ))
+            .limit(1);
+          if (inst) await uninstallManagedAppBot(tx, { installId: inst.id });
+        }
         const removedInstalls = await tx.delete(oauthClientInstalls)
           .where(and(
             eq(oauthClientInstalls.clientId, updated.id),
@@ -2669,6 +2732,18 @@ export async function uninstallMarketplaceOAuthClient(input: {
       actorUserId: input.revokedByUserId,
     }, tx);
 
+    // Design-v3 §uninstall: tombstone app-owned bot binding + soft-delete the
+    // managed bot agent before the install row is removed.
+    const { uninstallManagedAppBot } = await import("./appBotIdentityService");
+    const [installToDelete] = await tx.select({ id: oauthClientInstalls.id })
+      .from(oauthClientInstalls)
+      .where(and(
+        eq(oauthClientInstalls.serverId, input.serverId),
+        eq(oauthClientInstalls.clientId, client.id),
+      ))
+      .limit(1);
+    if (installToDelete) await uninstallManagedAppBot(tx, { installId: installToDelete.id });
+
     const [install] = await tx.delete(oauthClientInstalls)
       .where(and(
         eq(oauthClientInstalls.serverId, input.serverId),
@@ -2792,6 +2867,7 @@ export async function listInstalledAppPromptCatalog(
         ? renderThirdPartyInertText({ field: "description", value: client.description })
         : null,
       whenToUse: renderThirdPartyInertText({ field: "when_to_use", value: whenToUse }),
+      service: client.clientId,
     });
   }
   return catalog;
@@ -2833,8 +2909,11 @@ export async function updateOAuthClient(input: {
   homepageUrl?: string | null;
   returnUrl?: string | null;
   agentManifestUrl?: string | null;
+  setupUrl?: string | null;
+  setupDescription?: string | null;
   allowedScopes?: unknown;
   category?: unknown;
+  enableBot?: boolean;
 }, dbOrTx: ReturnType<typeof getDb> = getDbForService()) {
   const db = dbOrTx;
   return db.transaction(async (tx) => {
@@ -2844,7 +2923,8 @@ export async function updateOAuthClient(input: {
         eq(oauthClients.id, input.clientId),
         isSourceOwnedEditableAppPredicate(input.serverId),
       ))
-      .limit(1);
+      .limit(1)
+      .for("update");
 
     if (!before) {
       return null;
@@ -2883,6 +2963,11 @@ export async function updateOAuthClient(input: {
     if (input.category !== undefined) {
       updates.category = normalizeCategory(input.category);
     }
+    if (input.enableBot !== undefined) {
+      updates.enableBot = Boolean(input.enableBot);
+    }
+
+    applyAppSetupUpdate(before, input, updates);
 
     const [updated] = await tx.update(oauthClients)
       .set(updates)

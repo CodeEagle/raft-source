@@ -703,3 +703,13 @@ test("server error responses", async () => {
     },
   }], undefined, "404 not found");
 });
+
+test("RaftBench service refusal uses the existing delivery response without INVALID_RESPONSE", async () => {
+  const run = await runPinned(["mention", "delivery", "--message", MSG_SENT], [{
+    path: /\/messages\/.+\/mention-deliveries$/,
+    data: { messageId: MSG_SENT, deliveries: [{ targetHandle: "raftbench-service", outcome: "lost", reasonCategory: "unclassified" }] },
+  }]);
+  expect(run.exitCode).toBe(0);
+  expect(run.stderr).toBe("");
+  expect(run.stdout).toContain("LOST — cause is outside the seat-availability set; re-route");
+});

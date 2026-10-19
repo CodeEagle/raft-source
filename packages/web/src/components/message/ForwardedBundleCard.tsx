@@ -20,7 +20,7 @@ import {
   MessageForwardedBundleItems,
   MessageForwardedBundleSource,
   MessageImageGalleryPreview,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import MarkdownContent from "../markdown/MarkdownContent";
 import AttachmentTooltip from "./attachmentTooltip";
@@ -234,7 +234,7 @@ function ForwardedBundleImageTile({
       {resolvedSrc ? (
         <img src={resolvedSrc} alt={attachment.filename} loading="lazy" />
       ) : (
-        <div className="flex h-full w-full items-center justify-center bg-layer-inset text-foreground-hint">
+        <div className="flex h-full w-full items-center justify-center bg-fill-muted text-foreground-hint">
           <ImageIcon aria-hidden size={18} />
         </div>
       )}
@@ -279,7 +279,6 @@ function ForwardedBundleAttachmentChip({
       <AttachmentChip
         attachment={asMessageAttachment}
         ariaLabel={formatMessage({ id: "message.forwardedBundle.openAttachment" }, { filename: attachment.filename })}
-      variant="compact"
       isOptimistic={false}
       onClick={onOpen && attachment.id ? handleOpen : undefined}
       affordance={previewable ? "preview" : "download"}

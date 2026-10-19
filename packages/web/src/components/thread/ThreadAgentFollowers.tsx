@@ -1,4 +1,4 @@
-import { Button, Popover, PopoverContent, PopoverTrigger, toast } from "raft-ui";
+import { Button, Popover, PopoverContent, PopoverTrigger, toast } from "@botiverse/raft-ui";
 import { AlertCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { useIntl } from "react-intl";
@@ -101,21 +101,21 @@ export default function ThreadAgentFollowers({
             onClick={stopEventPropagation}
             onPointerDown={stopEventPropagation}
             size={variant === "header" ? "sm" : undefined}
-            variant="outline"
+            variant="ghost"
             className={variant === "header"
-              ? "h-7 gap-1 px-1.5 text-xs font-bold"
-              : "inline-flex h-5 items-center gap-1 rounded border border-line-muted theme-brutal:border-black/25 bg-layer-panel theme-brutal:bg-white px-1.5 text-[10px] font-bold text-foreground-muted theme-brutal:text-black/60 hover:border-line-muted theme-brutal:hover:border-black"}
+              ? "gap-1.5 px-1.5"
+              : "h-[22px] gap-1 rounded-chip bg-fill-muted px-1.5 text-foreground-muted"}
             aria-label={label}
             data-testid={`thread-followers-${variant}-trigger`}
           >
-            <span className="flex -space-x-1" aria-hidden="true">
+            <span className="flex -space-x-[5px]" aria-hidden="true">
               {roster.error ? (
                 <AlertCircle size={variant === "header" ? 14 : 12} />
               ) : agents.slice(0, 3).map((agent) => (
                 <AvatarSlot key={agent.id} context={variant === "header" ? "sidebar-list" : "preview-mini"} type="agent" agentAvatarUrl={agent.avatarUrl} />
               ))}
             </span>
-            {roster.error ? null : <span>{agents.length}</span>}
+            {roster.error ? null : <span className="font-mono text-mono-meta">{agents.length}</span>}
           </Button>
         )}
       />
@@ -132,24 +132,24 @@ export default function ThreadAgentFollowers({
         className="w-72 p-0"
         data-testid="thread-followers-popover"
       >
-        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-brutal-cream px-3 py-2 text-sm font-bold">
+        <div className="flex min-h-11 items-center border-b border-line-seam px-4 text-headline">
           {formatMessage({ id: "thread.followers.title" })}
         </div>
         <div className="max-h-72 overflow-y-auto p-2">
           {roster?.loading && !roster.loaded ? (
-            <div className="px-2 py-4 text-center text-xs font-bold text-foreground-placeholder theme-brutal:text-black/45" data-testid="thread-followers-loading">
+            <div className="px-2 py-4 text-center text-callout text-foreground-hint" data-testid="thread-followers-loading">
               {formatMessage({ id: "thread.followers.loading" })}
             </div>
           ) : roster?.error ? (
-            <div className="flex flex-col items-center gap-2 px-2 py-4 text-center text-xs font-bold text-foreground-muted theme-brutal:text-black/60" data-testid="thread-followers-error">
+            <div className="flex flex-col items-center gap-2 px-2 py-4 text-center text-callout text-foreground-muted" data-testid="thread-followers-error">
               <AlertCircle size={18} />
               {formatMessage({ id: "thread.followers.loadFailed" })}
-              <Button variant="outline" size="sm" type="button" className="bg-layer-panel theme-brutal:bg-white px-2 py-1" onClick={retryLoad}>
+              <Button variant="outline" size="sm" type="button" onClick={retryLoad}>
                 {formatMessage({ id: "thread.followers.retry" })}
               </Button>
             </div>
           ) : agents.length === 0 ? (
-            <div className="px-2 py-4 text-center text-xs font-bold text-foreground-placeholder theme-brutal:text-black/45" data-testid="thread-followers-empty">
+            <div className="px-2 py-4 text-center text-callout text-foreground-hint" data-testid="thread-followers-empty">
               {formatMessage({ id: "thread.followers.empty" })}
             </div>
           ) : agents.map((agent) => (

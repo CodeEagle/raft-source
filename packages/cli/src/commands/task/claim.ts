@@ -6,7 +6,8 @@
 // claim several tasks in one call.
 
 import type { Command } from "commander";
-import { type AgentApiTaskClaimBody, type AgentApiTaskClaimSuccessResponse, TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU } from "@botiverse/raft-shared";
+import type { AgentApiTaskClaimBody, AgentApiTaskClaimSuccessResponse } from "@botiverse/raft-shared";
+import { TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

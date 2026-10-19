@@ -15,6 +15,16 @@ export const MIGRATION_PROGRESS_STEPS = [
   "agent.detail.migrationStepComplete",
 ] as const;
 
+// A move to the cloud has no target computer to start on; instead the user
+// reviews which files come over and confirms the switch. Same last-step rule.
+export const HOSTED_MIGRATION_PROGRESS_STEPS = [
+  "agent.migration.hosted.stepUpload",
+  "agent.migration.hosted.stepCheckFiles",
+  "agent.migration.hosted.stepReview",
+  "agent.migration.hosted.stepSwitch",
+  "agent.migration.hosted.stepComplete",
+] as const;
+
 export type AgentMigrationPhase = "active" | "completed" | "failed" | "canceled";
 
 interface AgentMigrationStateInfo {
@@ -70,9 +80,49 @@ export function isCanceledMigrationState(state: string): boolean {
   return migrationPhase(state) === "canceled";
 }
 
-export function canCancelMigration(notice: { state: string; revision?: number | null }): boolean {
+export function isHostedMigration(notice: { targetKind?: string | null }): boolean {
+  return notice.targetKind === "hosted";
+}
+
+export function canCancelMigration(notice: {
+  state: string;
+  revision?: number | null;
+  targetKind?: string | null;
+  flippedAt?: string | null;
+}): boolean {
+  // After the switch a cloud agent already runs in the cloud; there is no
+  // computer to hand it back to, so the server refuses the cancel.
+  if (isHostedMigration(notice) && (notice.flippedAt || notice.state === "arriving" || notice.state === "starting")) {
+    return false;
+  }
   return migrationStateInfo(notice.state)?.cancellable === true
     && Number.isInteger(notice.revision) && (notice.revision ?? 0) > 0;
+}
+
+/** The hosted review is built and waits for the user's confirm (or cancel). */
+export function isHostedReviewPending(notice: {
+  state: string;
+  targetKind?: string | null;
+  hosted?: { reviewReadyAt?: string | null; reviewConfirmedAt?: string | null } | null;
+}): boolean {
+  return isHostedMigration(notice)
+    && notice.state === "in_transit"
+    && Boolean(notice.hosted?.reviewReadyAt)
+    && !notice.hosted?.reviewConfirmedAt;
+}
+
+/** 0-based step in HOSTED_MIGRATION_PROGRESS_STEPS; the steps' length once completed. */
+export function hostedMigrationProgressStep(notice: {
+  state: string;
+  readyAt?: string | null;
+  flippedAt?: string | null;
+  hosted?: { reviewReadyAt?: string | null } | null;
+}): number {
+  if (isCompletedMigrationState(notice.state)) return HOSTED_MIGRATION_PROGRESS_STEPS.length;
+  if (notice.flippedAt || notice.state === "arriving" || notice.state === "starting") return 3;
+  if (notice.hosted?.reviewReadyAt) return 2;
+  if (notice.readyAt || notice.state === "ready" || notice.state === "in_transit") return 1;
+  return 0;
 }
 
 export function migrationProgressStep(notice: {

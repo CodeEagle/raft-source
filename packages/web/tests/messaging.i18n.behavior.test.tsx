@@ -149,7 +149,7 @@ test("catalog pins messaging residue MessageIds", () => {
   assert.equal(en["message.chatPanel.archived"], "Archived");
   assert.equal(en["message.chatPanel.joinChannel"], "Join #{channel}");
   assert.equal(en["message.chatPanel.messageNotFound"], "Message not found");
-  assert.equal(en["message.messageItem.deletedBadge"], "Deleted");
+  assert.equal(en["message.messageItem.deletedBadge"], "Archived");
   assert.equal(en["message.attachmentAnchor.htmlRegion"], "HTML region");
   assert.equal(en["message.attachmentAnchor.rowSingle"], "Row {n}");
   assert.equal(en["message.attachmentAnchor.rowRange"], "Row {start}–{end}");

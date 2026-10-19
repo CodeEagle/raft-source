@@ -16,12 +16,12 @@ test("markdown inline code renderers use raft-ui InlineCode directly", () => {
 
   for (const source of [markdownContent, inlinePreview, agentWorkspace, announcementModal]) {
     assert.match(source, /InlineCode/);
-    assert.match(source, /from "raft-ui"/);
+    assert.match(source, /from "@botiverse\/raft-ui"/);
   }
 
   assert.doesNotMatch(
     markdownContent,
-    /<code className="border border-black bg-soft-signal\/40 px-1 \[font-size:inherit\] font-mono/,
+    /<code className="border border-black bg-palette-yellow\/40 px-1 \[font-size:inherit\] font-mono/,
   );
 });
 
@@ -33,7 +33,7 @@ test("inline prose tokens use InlineCode while command blocks retain code semant
     readSource("src/components/machine/CommandRow.tsx"),
   ].join("\n");
 
-  assert.match(skillsPanel, /<InlineCode className="text-\[11px\] text-foreground-placeholder theme-brutal:text-black\/40">\{path\}<\/InlineCode>/);
+  assert.match(skillsPanel, /<InlineCode className="min-w-0 text-mono-meta text-foreground-hint">\{path\}<\/InlineCode>/);
   assert.match(paletteAudit, /<InlineCode>file:line<\/InlineCode>/);
 
   assert.match(computerCommandGuide, /<CopyableCode[\s>]/);

@@ -57,7 +57,8 @@ test("message gallery uses a quiet background instead of checkerboard", () => {
   assert.doesNotMatch(gallerySource, /imageGalleryBackgroundClass/);
   assert.doesNotMatch(source, /transparentImageBackgroundClass/);
   assert.doesNotMatch(gallerySource, /transparentImageBackgroundClass/);
-  assert.match(gallerySource, /bg-brutal-cream\/60/);
+  // The tile surface (DS media frame: hairline + sunken fill) is the recipe's.
+  assert.doesNotMatch(gallerySource, /bg-palette-cream/);
   assert.doesNotMatch(source, /border-2 border-black bg-transparent/);
   assert.doesNotMatch(gallerySource, /border-2 border-black bg-transparent/);
   // The channel files surface still paints the class on its own image.

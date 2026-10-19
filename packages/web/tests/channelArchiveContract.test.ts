@@ -1,9 +1,7 @@
 import assert from "node:assert/strict";
-import {
-  ARCHIVED_CHANNEL_ICON_CLASS,
-  ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
-  ARCHIVED_CHANNEL_TEXT_CLASS,
-} from "../src/components/channel/channelArchiveVisual";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { ARCHIVED_CHANNEL_ICON_CLASS } from "../src/components/channel/channelArchiveVisual";
 import { buildSearchEntityResults } from "../src/components/search/searchEntities";
 import type { Channel } from "../src/store/channelStore";
 
@@ -203,7 +201,13 @@ test("entity search returns archived channels (same ranking rules, no archive fi
 });
 
 test("archived channel muted treatment tokens stay pinned", () => {
-  assert.equal(ARCHIVED_CHANNEL_TEXT_CLASS, "text-foreground-muted");
-  assert.equal(ARCHIVED_CHANNEL_MUTED_TEXT_CLASS, "text-foreground-muted");
-  assert.equal(ARCHIVED_CHANNEL_ICON_CLASS, "border-line-muted bg-fill-muted text-foreground-muted");
+  // The archived tile keeps the neutral channel tile; only its glyph recedes.
+  assert.equal(ARCHIVED_CHANNEL_ICON_CLASS, "text-foreground-hint");
+  // Title and subtitle use the search row's own muted state (DS ListRow).
+  const entityRow = readFileSync(
+    resolve(import.meta.dirname, "../src/components/search/EntityResultRow.tsx"),
+    "utf8",
+  );
+  assert.match(entityRow, /<SearchEntityResultTitle[^>]*muted=\{isArchivedChannelResult\}/);
+  assert.match(entityRow, /<SearchEntityResultDescription muted=\{isArchivedChannelResult\}/);
 });

@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import { RotateCcw } from "lucide-react";
-import { RadioGroup, RadioGroupItem } from "raft-ui";
+import { RadioGroup, RadioGroupItem } from "@botiverse/raft-ui";
 import { useAgentStore } from "../../store/agentStore";
 import Banner from "../ui/Banner";
 import type { MessageId } from "../../i18n/messages";
@@ -59,14 +59,11 @@ export default function ResetAgentDialog({
       : STANDARD_OPTIONS;
 
   const selectedOption = options.find((o) => o.mode === mode)!;
-  // Severity now rides the semantic Button variant instead of the legacy
-  // `confirmColor` colour-string, which ConfirmDialog only kept around to map
-  // back onto these same three tones via CONFIRM_TONES_BY_LEGACY_COLOR.
-  // Restart is `primary`, not `information`: rui's elegant `information` pairs
-  // white text with a light cyan fill (measured 1.91:1 in Elegant light), which
-  // this dialog used to paper over with `!text-black`. `primary` measures
-  // >=12.75:1 in all three themes by itself, so no override is needed.
-  const confirmVariant = mode === "full" ? "danger" : mode === "session" ? "warning" : "primary";
+  // The confirm colour states the consequence (DS Dialog): restart and session
+  // reset interrupt the agent but it comes back, so they are the orange
+  // `warning`; the full reset deletes the workspace and cannot be undone, so it
+  // is the red `danger`, paired with the red-soft destructive banner below.
+  const confirmVariant = mode === "full" ? "danger" : "warning";
 
   return (
     <ConfirmDialog
@@ -77,31 +74,31 @@ export default function ResetAgentDialog({
         <div className="space-y-3">
           {/* Standard rui RadioGroup. These were three hand-rolled <button>s
               carrying their own border/tint/hover rules, which is why they read
-              as Brutal panels under every theme (@Artea, task #660). The group
+              as heavy panels (@Artea, task #660). The group
               is a single-select list, so the radio semantics come free: arrow
               keys, one tab stop, and a real checked state for assistive tech. */}
           <RadioGroup
             value={mode}
             onValueChange={handleModeChange}
             aria-label={formatMessage({ id: "agent.reset.title" }, { name: agentName })}
-            className="gap-3"
+            className="gap-0"
           >
             {options.map((opt) => (
-              <label key={opt.mode} className="flex items-start gap-3">
+              <label key={opt.mode} className="flex min-h-11 items-start gap-3 py-3">
                 <RadioGroupItem
                   value={opt.mode}
-                  className="mt-0.5 shrink-0"
+                  className="shrink-0"
                   data-testid={`agent-reset-option-${opt.mode}`}
                 />
-                <span className="min-w-0">
-                  <span className="block text-sm font-bold uppercase">{formatMessage({ id: opt.labelId })}</span>
-                  <span className="mt-1 block text-xs text-foreground-muted">{formatMessage({ id: opt.descId })}</span>
+                <span className="flex min-w-0 flex-col gap-0.5">
+                  <span className="text-subhead font-semibold text-foreground">{formatMessage({ id: opt.labelId })}</span>
+                  <span className="text-footnote font-normal text-foreground-muted">{formatMessage({ id: opt.descId })}</span>
                 </span>
               </label>
             ))}
           </RadioGroup>
           {mode === "full" && (
-            <Banner intent="warning" density="sm" withIcon className="font-bold">
+            <Banner intent="destructive" density="sm" withIcon>
               {formatMessage({ id: "agent.reset.fullWarning" })}
             </Banner>
           )}

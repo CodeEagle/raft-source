@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { lazySchema } from "./lazySchema";
+import { isSlackBridgedExternalProvider } from "./externalProjection";
 
 const optionalStringSchema = lazySchema("optionalStringSchema", () => z.string().trim().optional());
 const optionalStringArraySchema = lazySchema("optionalStringArraySchema", () => z.array(z.string().trim().min(1)).optional());
@@ -25,6 +26,58 @@ export const agentApiStructuredMentionSchema = lazySchema("agentApiStructuredMen
   name: z.string().trim().min(1).max(128),
 }));
 
+/**
+ * A channel's card (passive-AX `channel` resource, versioned by
+ * `channelCardRev`): what `raft channel info` shows about it. Returned with
+ * history reads, and by a send that names its card version.
+ */
+export const agentApiChannelCardSchema = lazySchema("agentApiChannelCardSchema", () => passthroughObject({
+  id: z.string().min(1),
+  name: z.string(),
+  type: z.string().nullable().optional(),
+  description: z.string().nullable().optional(),
+  archived: z.boolean().optional(),
+}));
+
+export interface AgentApiChannelCard {
+  id: string;
+  name: string;
+  type?: string | null;
+  description?: string | null;
+  archived?: boolean;
+}
+
+/**
+ * The other side of a DM (the `sender` passive resource): their kind, handle,
+ * description, and the zone their latest message carried. Returned with
+ * history reads of a DM, and by a send that names its version.
+ */
+export const agentApiPeerCardSchema = lazySchema("agentApiPeerCardSchema", () => passthroughObject({
+  kind: z.enum(["human", "agent"]),
+  name: z.string(),
+  description: z.string().nullable().optional(),
+  timezone: z.string().nullable().optional(),
+}));
+
+export interface AgentApiPeerCard {
+  kind: "human" | "agent";
+  name: string;
+  description?: string | null;
+  timezone?: string | null;
+}
+
+/**
+ * Card versions the sender has in its current model context. `channel`: the
+ * `channelCardRev` of the target's channel card; `peer`: the `peerCardRev`
+ * this context has for a DM target's peer (only null-or-not is compared:
+ * the zone travels with each message). Null: this context has not seen it.
+ * Absent: the client does not track that card (today's behavior).
+ */
+const agentApiSeenCardsSchema = lazySchema("agentApiSeenCardsSchema", () => z.object({
+  channel: z.string().min(1).nullable().optional(),
+  peer: z.string().min(1).nullable().optional(),
+}));
+
 const agentApiSendBodyKnownSchema = lazySchema("agentApiSendBodyKnownSchema", () => z.object({
   target: z.string().optional(),
   content: z.string().optional(),
@@ -38,6 +91,7 @@ const agentApiSendBodyKnownSchema = lazySchema("agentApiSendBodyKnownSchema", ()
   draftReplacedExisting: optionalBooleanSchema,
   seenUpToSeq: optionalNumberSchema,
   seenExactSeqs: optionalExactSeqArraySchema,
+  seenCards: agentApiSeenCardsSchema.optional(),
   freshnessContextMode: agentApiFreshnessContextModeSchema.optional(),
 }));
 
@@ -150,7 +204,14 @@ export const agentApiMessageEnvelopeSchema = lazySchema("agentApiMessageEnvelope
   if (senderTypes.length === 0 || senderTypes.some((v) => v !== "third_party_app")) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: "external_message requires inert third_party_app sender type", path: ["senderType"] });
   }
-  if (value.mentioned !== false) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "external_message must be explicitly non-mentioned", path: ["mentioned"] });
+  // Slack-bridged messages carry the reader's mention fact like an ordinary
+  // message; every other external provider must stay explicitly non-mentioned.
+  const mentioned = (value as { mentioned?: unknown }).mentioned;
+  if (typeof mentioned !== "boolean") {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "external_message must carry an explicit mentioned boolean", path: ["mentioned"] });
+  } else if (mentioned && !isSlackBridgedExternalProvider(value.external_message.provider)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "non-Slack external_message must be explicitly non-mentioned", path: ["mentioned"] });
+  }
   for (const field of Object.keys(value)) if (isAgentApiExternalMessageForbiddenAuthorityField(field)) {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: `external_message cannot carry ${field} authority`, path: [field] });
   }
@@ -178,6 +239,15 @@ export const agentApiHeldFreshnessResponseSchema = lazySchema("agentApiHeldFresh
   withheldMessageCount: optionalNumberSchema,
   seenUpToSeq: optionalNumberSchema,
   seenUpToMessageId: nullableStringSchema.optional(),
+  /** Why the send was held; absent means unread messages (`unread_messages`). */
+  // Open set: a reason an older client does not know must not fail its parse.
+  holdReasons: z.array(z.string()).optional(),
+  /** The target's channel card, when the send named a version this context has not seen. */
+  channelCard: agentApiChannelCardSchema.optional(),
+  /** True when this context saw an older version of `channelCard`. */
+  channelCardChanged: optionalBooleanSchema,
+  /** A DM target's peer card, when this context has not seen the peer. */
+  peerCard: agentApiPeerCardSchema.optional(),
 }));
 
 export const agentApiSendSentResponseSchema = lazySchema("agentApiSendSentResponseSchema", () => passthroughObject({
@@ -195,6 +265,12 @@ export const agentApiSendSentResponseSchema = lazySchema("agentApiSendSentRespon
       stillArrives: optionalStringArraySchema,
     }).optional(),
   }).optional(),
+  /** The target's channel card, when the send named a version this context has not seen. */
+  channelCard: agentApiChannelCardSchema.optional(),
+  /** True when this context saw an older version of `channelCard`. */
+  channelCardChanged: optionalBooleanSchema,
+  /** A DM target's peer card, when this context has not seen the peer. */
+  peerCard: agentApiPeerCardSchema.optional(),
 }));
 
 export const agentApiSendNotFoundResponseSchema = lazySchema("agentApiSendNotFoundResponseSchema", () => passthroughObject({
@@ -236,6 +312,7 @@ interface AgentApiSendBodyKnownFields {
   draftReplacedExisting?: boolean;
   seenUpToSeq?: number;
   seenExactSeqs?: number[];
+  seenCards?: { channel?: string | null; peer?: string | null };
   freshnessContextMode?: "inline" | "withheld";
 }
 
@@ -339,6 +416,14 @@ export interface AgentApiHeldFreshnessResponse {
     createdAt?: string | null;
     content?: string;
   };
+  /** Why the send was held (`unread_messages`, `channel_card`, `peer_card`, …); absent means unread messages. */
+  holdReasons?: string[];
+  /** The target's channel card, when the send named a version this context has not seen. */
+  channelCard?: AgentApiChannelCard;
+  /** This context saw an older version of `channelCard`. */
+  channelCardChanged?: boolean;
+  /** A DM target's peer card, when this context has not seen the peer. */
+  peerCard?: AgentApiPeerCard;
   [key: string]: unknown;
 }
 
@@ -359,6 +444,12 @@ export interface AgentApiSendSentResponse {
     };
     [key: string]: unknown;
   };
+  /** The target's channel card, when the send named a version this context has not seen. */
+  channelCard?: AgentApiChannelCard;
+  /** This context saw an older version of `channelCard`. */
+  channelCardChanged?: boolean;
+  /** A DM target's peer card, when this context has not seen the peer. */
+  peerCard?: AgentApiPeerCard;
   [key: string]: unknown;
 }
 

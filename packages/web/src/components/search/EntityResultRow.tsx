@@ -11,14 +11,11 @@ import {
   SearchEntityResultHeader,
   SearchEntityResultIcon,
   SearchEntityResultLeading,
-} from "raft-ui";
+  SearchEntityResultTitle,
+} from "@botiverse/raft-ui";
 import AgentActivityDot from "../agent/AgentActivityDot";
 import AvatarSlot from "../ui/AvatarSlot";
-import {
-  ARCHIVED_CHANNEL_ICON_CLASS,
-  ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
-  ARCHIVED_CHANNEL_TEXT_CLASS,
-} from "../channel/channelArchiveVisual";
+import { ARCHIVED_CHANNEL_ICON_CLASS } from "../channel/channelArchiveVisual";
 import { ChannelKindIcon } from "../channel/channelKindIcon";
 import type { SearchEntityResult as SearchEntityRecord } from "./searchEntities";
 import { formatEntitySubtitle, RETURN_KEY_GLYPH } from "./MessageSearchPage";
@@ -59,21 +56,22 @@ export function EntityResultRow({
     : null;
   const isArchivedChannelResult = result.type === "channel" && !!result.archivedAt;
 
-  // The card frame, hover and selected states belong to rui's
-  // SearchEntityResult. A second square frame on this wrapper showed its dark
-  // corners around rui's rounded selection ring (task #694).
+  // The row frame, hover and selected states belong to rui's
+  // SearchEntityResult. The wrapper carries the row's test id, keyboard-active
+  // marker and context menu; because every row sits in its own wrapper, the
+  // DS ListRow hairline (drawn between sibling rows, from the text start)
+  // is drawn here instead of on the button.
   return (
     <div
       data-testid={channelPinnedRef ? `search-channel-result-${channelPinnedRef.id}` : undefined}
       data-active={selected ? "true" : undefined}
       onContextMenu={channelPinnedRef && !result.archivedAt ? handleContextMenu : undefined}
-      className="flex w-full"
+      className="relative flex w-full not-first:before:pointer-events-none not-first:before:absolute not-first:before:top-0 not-first:before:right-0 not-first:before:left-[55px] not-first:before:z-[1] not-first:before:border-t not-first:before:border-line-hairline"
     >
       <SearchEntityResult
         type="button"
         onClick={handleClick}
         selected={selected}
-        className="theme-brutal:hover:shadow-brutal-sm theme-brutal:active:shadow-brutal-sm theme-brutal:data-[selected=true]:shadow-brutal-sm"
       >
         <SearchEntityResultLeading>
           {result.type === "channel" ? (
@@ -84,45 +82,50 @@ export function EntityResultRow({
             </SearchEntityResultIcon>
           ) : result.type === "computer" ? (
             <SearchEntityResultIcon>
-              <Monitor size={14} />
+              <Monitor size={14} aria-hidden="true" />
             </SearchEntityResultIcon>
           ) : result.type === "agentDm" ? (
             result.agentId ? (
               <AvatarSlot
-                context="surface-list"
+                context="compact-row"
                 type="agent"
                 agentAvatarUrl={agentAvatarUrl}
                 badge={<AgentActivityDot agentId={result.agentId} />}
               />
             ) : (
-              <AvatarSlot context="surface-list" type="agent" agentAvatarUrl={null} />
+              <AvatarSlot context="compact-row" type="agent" agentAvatarUrl={null} />
             )
           ) : result.userId ? (
             <AvatarSlot
-              context="surface-list"
+              context="compact-row"
               type="human"
               humanAvatarUrl={humanMember?.avatarUrl}
               gravatarHash={humanMember?.gravatarHash}
             />
           ) : (
-            <AvatarSlot context="surface-list" type="human" humanPlaceholder />
+            <AvatarSlot context="compact-row" type="human" humanPlaceholder />
           )}
         </SearchEntityResultLeading>
         <SearchEntityResultContent>
           <SearchEntityResultHeader>
-            <span className={`truncate text-sm font-bold ${isArchivedChannelResult ? ARCHIVED_CHANNEL_TEXT_CLASS : "text-foreground-strong"}`}>
+            <SearchEntityResultTitle className="truncate" muted={isArchivedChannelResult}>
               {result.title}
-            </span>
-            <Badge appearance="soft" variant="muted" uppercase>
+            </SearchEntityResultTitle>
+            {/* The kind is a machine label after the name (DS `rf-tag`), not a
+                coloured chip: identity comes from the tile/avatar. */}
+            <Badge appearance="outline">
               {result.type === "channel" ? formatMessage({ id: "search.channel" }) : result.type === "computer" ? formatMessage({ id: "search.badgeComputer" }) : result.type === "agentDm" ? formatMessage({ id: "search.badgeAgent" }) : formatMessage({ id: "search.badgeHuman" })}
             </Badge>
             {result.archivedAt && (
-              <Badge appearance="soft" variant={isArchivedChannelResult ? "muted" : "warning"} uppercase>
+              <Badge
+                appearance={isArchivedChannelResult ? "outline" : "soft"}
+                variant={isArchivedChannelResult ? undefined : "warning"}
+              >
                 {formatMessage({ id: "search.archived" })}
               </Badge>
             )}
           </SearchEntityResultHeader>
-          <SearchEntityResultDescription className={isArchivedChannelResult ? ARCHIVED_CHANNEL_MUTED_TEXT_CLASS : undefined}>
+          <SearchEntityResultDescription muted={isArchivedChannelResult}>
             {formatEntitySubtitle(result.subtitle, formatMessage)}
           </SearchEntityResultDescription>
         </SearchEntityResultContent>

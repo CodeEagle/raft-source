@@ -79,14 +79,19 @@ test.describe("Search Escape routing", () => {
     await dismissOwnerOnboarding(request, seedState, login.accessToken);
   });
 
-  test("global empty Search exits through the server root, while a query exits to its source channel", async ({
+  // Task #143: at desktop width the web presents search as the ⌘K overlay over
+  // the current view (as Raft Desktop does), so Escape closes it back to the
+  // channel you were on — empty or with a query. The full-page "empty search
+  // exits through the server root" contract still holds where search is a page:
+  // see "empty non-deferred channel-filter Search exits through the server root".
+  test("desktop-width rail Search is the overlay: Escape returns to the source channel, empty or with a query", async ({
     page,
     request,
   }) => {
     const seedState = await waitForSeedState();
     const login = await loginViaApi(request, seedState);
     const channelPath = `/s/${seedState.server.slug}/channel/${seedState.channel.id}`;
-    const defaultChannelPath = await installControlledServerRootDefault(
+    await installControlledServerRootDefault(
       page,
       request,
       seedState,
@@ -97,22 +102,24 @@ test.describe("Search Escape routing", () => {
     await page.goto(channelPath);
     await expect(page.locator("textarea")).toBeVisible();
 
-    await page.getByTestId("left-rail-tab-search").click();
+    await page.getByTestId("app-top-bar-search").click();
     await expect(page).toHaveURL(new RegExp(`/s/${seedState.server.slug}/search$`));
+    await expect(page.getByTestId("desktop-search-overlay")).toBeVisible();
 
-    const searchInput = page.locator('input[placeholder*="Search" i]').first();
+    const searchInput = page.getByTestId("message-search-input");
     await expect(searchInput).toBeFocused();
     await searchInput.press("Escape");
-    await expectDesktopServerRootRedirect(page, defaultChannelPath);
+    await expect(page).toHaveURL(new RegExp(`${channelPath}$`));
 
     await page.goto(`${channelPath}?msg=${seedState.messages.focusMessageId}`);
     await expect(page.locator("textarea")).toBeVisible();
     const querySourceUrl = page.url();
-    await page.getByTestId("left-rail-tab-search").click();
-    const querySearchInput = page.locator('input[placeholder*="Search" i]').first();
+    await page.getByTestId("app-top-bar-search").click();
+    const querySearchInput = page.getByTestId("message-search-input");
     await expect(querySearchInput).toBeFocused();
     await querySearchInput.fill(seedState.messages.latestContent);
-    await querySearchInput.press("Enter");
+    // In the overlay Enter opens the selected hit; the typed query is already
+    // in the URL (the URL is the query's source of truth in both presentations).
     await expect(page).toHaveURL(new RegExp(`/s/${seedState.server.slug}/search\\?q=`));
     await querySearchInput.press("Escape");
     await expect(page).toHaveURL(querySourceUrl);
@@ -135,7 +142,7 @@ test.describe("Search Escape routing", () => {
       ),
     );
 
-    const searchInput = page.locator('input[placeholder*="Search" i]').first();
+    const searchInput = page.getByTestId("message-search-input");
     await expect(searchInput).toBeFocused();
     await searchInput.press("Escape");
     await expect(page).toHaveURL(new RegExp(`${channelPath}$`));
@@ -157,7 +164,7 @@ test.describe("Search Escape routing", () => {
     await page.keyboard.press(searchShortcut);
     await expect(page).toHaveURL(new RegExp(`/s/${seedState.server.slug}/search$`));
 
-    const searchInput = page.locator('input[placeholder*="Search" i]').first();
+    const searchInput = page.getByTestId("message-search-input");
     await expect(searchInput).toBeFocused();
     await searchInput.press("Escape");
     await expect(page).toHaveURL(new RegExp(`${channelPath}$`));
@@ -181,7 +188,7 @@ test.describe("Search Escape routing", () => {
     await page.setViewportSize({ width: 1280, height: 800 });
     await page.goto(filteredSearchPath);
 
-    const searchInput = page.locator('input[placeholder*="Search" i]').first();
+    const searchInput = page.getByTestId("message-search-input");
     await expect(searchInput).toBeFocused();
     await searchInput.press("Escape");
     await expectDesktopServerRootRedirect(page, defaultChannelPath);

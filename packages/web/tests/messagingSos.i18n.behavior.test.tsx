@@ -74,7 +74,9 @@ test("SOSDialog renders its real confirmation surface in zh-cn", () => {
   );
   assert.ok(screen.getByRole("button", { name: zh["common.confirm.cancel"] }));
   const stop = screen.getByRole("button", { name: zh["message.sos.stopAction"] });
-  assert.match(stop.className, /bg-brutal-orange/);
+  // The stop action is raft-ui's warning Button: the warning sticker fill.
+  assert.equal(stop.getAttribute("data-slot"), "button");
+  assert.match(stop.className, /(?:^| )bg-warning(?: |$)/);
   assert.doesNotMatch(stop.textContent ?? "", /Stop All Agents/);
 });
 

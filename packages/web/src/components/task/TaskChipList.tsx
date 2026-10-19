@@ -1,6 +1,6 @@
 import { memo } from "react";
 import { useIntl } from "react-intl";
-import { TaskChip } from "raft-ui";
+import { TaskChip } from "@botiverse/raft-ui";
 
 import type { Task } from "../../store/taskStore";
 
@@ -49,7 +49,7 @@ function TaskChipListInner({ tasks, onOpenTask }: TaskChipListProps) {
             <button
               type="button"
               onClick={() => onOpenTask(task)}
-              className="group flex w-full items-center gap-2 border border-black/20 bg-white px-3 py-1.5 text-left transition-colors hover:border-black/50 hover:bg-black/[0.03]"
+              className="group flex w-full items-center gap-2 rounded-control border border-line-hairline bg-layer-card px-3 py-1.5 text-left outline-none hover:press-overlay active:press-overlay focus-visible:shadow-focus"
               data-testid="message-task-chip"
               data-task-id={task.id}
               aria-label={formatMessage(
@@ -59,11 +59,11 @@ function TaskChipListInner({ tasks, onOpenTask }: TaskChipListProps) {
             />
           }
         >
-          <span className="shrink-0 font-mono text-xs text-black/40" data-testid="message-task-chip-number">
+          <span className="shrink-0 font-mono text-mono-meta text-foreground-hint" data-testid="message-task-chip-number">
             {taskNumberLabel(task.taskNumber)}
           </span>
           <span
-            className="min-w-0 flex-1 truncate text-sm text-black"
+            className="min-w-0 flex-1 truncate text-callout text-foreground"
             data-testid="message-task-chip-title"
           >
             {task.title}

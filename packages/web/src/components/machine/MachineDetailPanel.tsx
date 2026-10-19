@@ -1,4 +1,4 @@
-import { Input, Textarea, Card, Badge, Button, CopyableCode, CopyableCodeAction, PanelTitle, Spinner } from "raft-ui";
+import { Input, Textarea, Card, Badge, Button, CopyableCode, CopyableCodeAction, InlineCode, PanelTitle, Separator, Spinner, Status, IconTile, ListRowGroup } from "@botiverse/raft-ui";
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, KeyboardEvent } from "react";
 import { useIntl } from "react-intl";
@@ -34,7 +34,6 @@ import { canViewMachineRuntimeAccountUsage } from "../../utils/machineRuntimeUsa
 import ConfirmDialog from "../ConfirmDialog";
 import { trackAgentCreateOpened } from "../../analytics/journey";
 import CreateAgentDialog from "../agent/CreateAgentDialog";
-import StatusDot from "../ui/StatusDot";
 import Tooltip from "../ui/Tooltip";
 import PanelHeader from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
@@ -47,10 +46,36 @@ import ComputerReleaseNotesAffordance from "./ComputerReleaseNotesAffordance";
 import { formatFileSizeBytes } from "../../utils/fileSizePresentation";
 import { CommandCopyRoot } from "./CommandCopyRoot";
 import { WorkspaceDeleteButton } from "./WorkspaceDeleteButton";
+import { useRuntimeRescan } from "./useRuntimeRescan";
 import { BulkResetOptionCard } from "./BulkResetOptionCard";
 import { MachineAgentRow } from "./MachineAgentRow";
 
 const EMPTY_WORKSPACES: MachineWorkspaceEntry[] = [];
+
+// Raft Design System type roles used across this panel. Space Grotesk is what
+// people say; Space Mono is what machines write (versions, paths, sizes,
+// hostnames, runtimes, commands).
+/** A quiet line where a list or value is empty (13/18, ink-3). */
+const DETAIL_EMPTY_NOTE_CLASS_NAME = "text-footnote text-foreground-hint";
+/** Explanatory copy above a control or a command (13/18, ink-2). */
+const DETAIL_HELP_CLASS_NAME = "text-footnote text-foreground-muted";
+/** A sentence about something that went wrong but can be fixed (orange ink). */
+const DETAIL_PROBLEM_CLASS_NAME = "text-footnote text-warning-strong";
+/** The label of one step / one command line (field label: 13/18 600). */
+const DETAIL_STEP_LABEL_CLASS_NAME = "text-footnote font-semibold text-foreground";
+/** A UI text button (Raft DS: ink, 1.5px underline, 600). */
+const DETAIL_TEXT_BUTTON_CLASS_NAME =
+  "rounded-sticker text-footnote font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none hover:bg-fill-pressed focus-visible:shadow-focus";
+/** Layout only: raft-ui's CopyableCode draws the Raft DS command line. */
+const COMMAND_LINE_CLASS_NAME = "min-w-0 flex-1";
+
+/** Workspace status → its Raft DS status light (active online, an orphan is
+ *  the problem, stopped / deleted are offline stone). */
+function workspaceStatusTone(status: MachineWorkspaceEntry["status"]): "success" | "warning" | "default" {
+  if (status === "active") return "success";
+  if (status === "orphan") return "warning";
+  return "default";
+}
 
 /** The "cannot delete" notice has nothing to confirm; OK only closes it. */
 function acknowledgeCannotDelete() {}
@@ -136,16 +161,15 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
     <div>
       <SectionHeader
         className="mb-2"
-        icon={<FolderOpen size={14} className="text-foreground-strong theme-brutal:text-black" />}
+        icon={<FolderOpen size={14} className="text-foreground-muted" />}
         label={formatMessage({ id: "machine.detail.agentWorkspaces" })}
         action={
           <Button size="sm"
             variant="outline"
             onClick={handleScan}
             disabled={loading}
-            className="px-2 py-1 text-xs flex items-center gap-1"
           >
-            <RefreshCw size={12} className={loading ? "animate-spin" : ""} />
+            {loading ? <Spinner size="xs" aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
             {loading
               ? formatMessage({ id: "machine.detail.scanning" })
               : scanned
@@ -156,13 +180,13 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
       />
 
       {!scanned && !loading && (
-        <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
+        <div className={DETAIL_EMPTY_NOTE_CLASS_NAME}>
           {formatMessage({ id: "machine.detail.workspacesPrompt" })}
         </div>
       )}
 
       {scanned && workspaces.length === 0 && (
-        <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
+        <div className={DETAIL_EMPTY_NOTE_CLASS_NAME}>
           {formatMessage({ id: "machine.detail.noWorkspaceDirectories" })}
         </div>
       )}
@@ -177,51 +201,56 @@ function WorkspacesSection({ machineId, canManageMachines }: { machineId: string
       )}
 
       {scanned && deletedCount > 0 && (
-        <div className="mb-2 border-2 border-line-muted theme-brutal:border-black bg-fill-muted theme-brutal:bg-gray-200 px-3 py-2 text-xs text-foreground-strong theme-brutal:text-black">
+        <Banner intent="info" density="sm" live={false} className="mb-2">
           {formatMessage(
             { id: "machine.detail.deletedWorkspaceBanner" },
             { count: deletedCount, strong: (chunks) => <strong key="strong">{chunks}</strong> },
           )}
-        </div>
+        </Banner>
       )}
 
       {sortedWorkspaces.length > 0 && (
+        // One row per workspace (surface, hairline, container radius). A row
+        // with no matching agent is the problem: orange-soft; a retained
+        // deleted agent's row sits on the sunken surface.
         <div className="space-y-1.5">
           {sortedWorkspaces.map((ws: MachineWorkspaceEntry) => (
             <div
               key={ws.directoryName}
-              className={`flex items-center gap-2 border-2 px-3 py-2 ${
- ws.status === "orphan"
- ? "border-warning bg-warning-soft theme-brutal:border-brutal-orange theme-brutal:bg-brutal-orange/10"
- : ws.status === "deleted"
- ? "border-line-muted bg-fill-muted theme-brutal:border-black theme-brutal:bg-gray-100"
- : "border-line-muted theme-brutal:border-black/30"
- }`}
+              className={`flex items-center gap-3 rounded-container border border-line-hairline px-3 py-2.5 ${
+                ws.status === "orphan"
+                  ? "bg-warning-soft"
+                  : ws.status === "deleted"
+                    ? "bg-fill-muted"
+                    : "bg-layer-card"
+              }`}
             >
-              <FolderOpen size={14} className="shrink-0 text-foreground-muted theme-brutal:text-black/40" />
+              <FolderOpen size={16} className="shrink-0 text-foreground-muted" aria-hidden="true" />
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span className="font-bold text-xs text-foreground-strong theme-brutal:text-black truncate">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="truncate text-callout font-semibold text-foreground">
                     {ws.agentName || ws.directoryName}
                   </span>
-                  <Badge uppercase variant={ws.status === "active" ? "success" : ws.status === "orphan" ? "warning" : "muted"}>
+                  {/* Raft DS StatusChip: soft wash + square pixel + one word. */}
+                  <Badge appearance="soft" variant={workspaceStatusTone(ws.status)}>
+                    <Status size="md" variant={workspaceStatusTone(ws.status)} aria-hidden="true" />
                     {formatWorkspaceStatus(ws.status)}
                   </Badge>
                 </div>
-                <div className="mt-0.5 text-[10px] text-foreground-muted theme-brutal:text-black/40 font-mono break-all">
+                <div className="mt-0.5 break-all font-mono text-mono-meta text-foreground-hint">
                   {workspaceLocation(ws)}
                 </div>
                 {ws.status === "deleted" && (
-                  <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/60">
+                  <div className="mt-0.5 text-caption text-foreground-muted">
                     {formatMessage({ id: "machine.detail.agentDeletedWorkspaceRetained" })}
                   </div>
                 )}
                 {ws.status === "orphan" && (
-                  <div className="mt-0.5 text-[10px] font-bold uppercase tracking-wide text-warning-strong theme-brutal:text-brutal-orange">
+                  <div className="mt-0.5 text-caption font-semibold text-warning-strong">
                     {formatMessage({ id: "machine.detail.noMatchingAgentRecord" })}
                   </div>
                 )}
-                <div className="flex items-center gap-3 mt-0.5 text-[10px] text-foreground-muted theme-brutal:text-black/50 font-mono">
+                <div className="mt-0.5 flex items-center gap-3 font-mono text-mono-meta text-foreground-hint">
                   <span>{formatFileSizeBytes(ws.totalSizeBytes, formatMessage)}</span>
                   <span>{formatMessage({ id: "machine.detail.fileCount" }, { count: ws.fileCount })}</span>
                   <span>
@@ -345,19 +374,19 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
       mode: "restart",
       label: formatMessage({ id: "machine.detail.bulkRestart" }),
       desc: formatMessage({ id: "machine.detail.bulkRestartDescription" }),
-      selectedClass: "border-line-muted theme-brutal:border-black bg-info-soft theme-brutal:bg-brutal-cyan/20 theme-brutal:shadow-brutal-sm",
+      selectedClass: "bg-info-soft",
     },
     {
       mode: "session",
       label: formatMessage({ id: "machine.detail.bulkResetSession" }),
       desc: formatMessage({ id: "machine.detail.bulkResetSessionDescription" }),
-      selectedClass: "border-line-muted theme-brutal:border-black bg-warning-soft theme-brutal:bg-brutal-orange/20 theme-brutal:shadow-brutal-sm",
+      selectedClass: "bg-warning-soft",
     },
     {
       mode: "full",
       label: formatMessage({ id: "machine.detail.bulkFullReset" }),
       desc: formatMessage({ id: "machine.detail.bulkFullResetDescription" }),
-      selectedClass: "border-line-muted theme-brutal:border-black bg-danger-soft theme-brutal:bg-brutal-red/20 theme-brutal:shadow-brutal-sm",
+      selectedClass: "bg-danger-soft",
     },
   ], [formatMessage]);
 
@@ -509,20 +538,18 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                       variant="outline"
                       type="button"
                       onClick={allSelected ? clearAllAgents : selectAllAgents}
-                      className="px-2 py-1 text-xs flex items-center gap-1"
                     >
-                      <Check size={12} />
+                      <Check size={16} />
                       {allSelected
                         ? formatMessage({ id: "machine.detail.clearAll" })
                         : formatMessage({ id: "machine.detail.selectAll" })}
                     </Button>
                     <Button size="sm"
-                      variant="outline"
+                      variant="ghost"
                       type="button"
                       onClick={clearSelection}
-                      className="px-2 py-1 text-xs flex items-center gap-1"
                     >
-                      <X size={12} />
+                      <X size={16} />
                       {formatMessage({ id: "common.confirm.cancel" })}
                     </Button>
                   </>
@@ -531,20 +558,20 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                     variant="outline"
                     type="button"
                     onClick={enterSelectionMode}
-                    className="px-2 py-1 text-xs flex items-center gap-1"
                   >
-                    <Check size={12} />
+                    <Check size={16} />
                     {formatMessage({ id: "machine.detail.select" })}
                   </Button>
                 )
               )}
               {canManageMachines && !selectionMode && (
+                // Not this page's single pink action (that is Upgrade): an ink-line
+                // button, like New Task in a channel.
                 <Button size="sm"
-                  variant="accent"
+                  variant="outline"
                   onClick={openCreateAgent}
-                  className="px-2 py-1 text-xs flex items-center gap-1"
                 >
-                  <Plus size={12} />
+                  <Plus size={16} />
                   {formatMessage({ id: "machine.detail.create" })}
                 </Button>
               )}
@@ -552,7 +579,7 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
           }
         />
         {machineAgents.length === 0 ? (
-          <div className="text-sm text-foreground-muted theme-brutal:text-black/40 italic">
+          <div className={DETAIL_EMPTY_NOTE_CLASS_NAME}>
             {formatMessage({ id: "machine.detail.noAgentsAssigned" })}
           </div>
         ) : (
@@ -564,8 +591,8 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                 withIcon
                 data-testid="bulk-model-success-banner"
                 actions={
-                  <Button size="icon-xs" variant="ghost" type="button" onClick={dismissBulkReceipt} aria-label={formatMessage({ id: "machine.detail.bulkModel.dismiss" })}>
-                    <X size={12} />
+                  <Button size="icon-sm" variant="ghost" type="button" onClick={dismissBulkReceipt} aria-label={formatMessage({ id: "machine.detail.bulkModel.dismiss" })}>
+                    <X size={14} />
                   </Button>
                 }
               >
@@ -586,12 +613,12 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                 actions={
                   <div className="flex items-center gap-1.5">
                     {canManageMachines && (
-                      <Button size="xs" variant="outline" type="button" onClick={retryBulkModel} data-testid="bulk-model-try-again">
+                      <Button size="sm" variant="outline" type="button" onClick={retryBulkModel} data-testid="bulk-model-try-again">
                         {formatMessage({ id: "machine.detail.bulkModel.tryAgain" })}
                       </Button>
                     )}
-                    <Button size="icon-xs" variant="ghost" type="button" onClick={dismissBulkReceipt} aria-label={formatMessage({ id: "machine.detail.bulkModel.dismiss" })}>
-                      <X size={12} />
+                    <Button size="icon-sm" variant="ghost" type="button" onClick={dismissBulkReceipt} aria-label={formatMessage({ id: "machine.detail.bulkModel.dismiss" })}>
+                      <X size={14} />
                     </Button>
                   </div>
                 }
@@ -602,9 +629,11 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
               </Banner>
             )}
             {canManageMachines && selectedCount > 0 && (
-              <SurfaceListItem selected interactive={false} className="bg-layer-canvas-muted px-3 py-2 theme-brutal:bg-gray-100">
+              // The bulk toolbar is about the selected rows: the selection's
+              // cyan-soft wash (SurfaceListItem selected).
+              <SurfaceListItem selected interactive={false} className="px-3 py-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <SectionEyebrow className="mr-auto !text-foreground-strong theme-brutal:text-black">
+                  <SectionEyebrow tone="ink" className="mr-auto">
                     {formatMessage({ id: "machine.detail.selectedCount" }, { count: selectedCount })}
                   </SectionEyebrow>
                   <Tooltip content={
@@ -617,9 +646,8 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                     type="button"
                     onClick={startSelectedAgents}
                     disabled={bulkAction !== null || selectedOfflineAgents.length === 0 || !canStartLike}
-                    className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
                   >
-                    <Play size={12} />
+                    <Play size={16} />
                     {bulkAction === "start"
                       ? formatMessage({ id: "machine.detail.starting" })
                       : formatMessage({ id: "machine.detail.start" })}
@@ -631,9 +659,8 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                     type="button"
                     onClick={openStopConfirm}
                     disabled={bulkAction !== null || selectedOnlineAgents.length === 0}
-                    className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
                   >
-                    <Square size={12} />
+                    <Square size={16} />
                     {formatMessage({ id: "machine.detail.stop" })}
                   </Button>
                   </Tooltip>
@@ -647,9 +674,8 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                     type="button"
                     onClick={openResetOptions}
                     disabled={bulkAction !== null || !canStartLike}
-                    className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
                   >
-                    <RotateCcw size={12} />
+                    <RotateCcw size={16} />
                     {formatMessage({ id: "machine.detail.restartReset" })}
                   </Button>
                   </Tooltip>
@@ -660,35 +686,38 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
                       type="button"
                       onClick={openBulkModel}
                       disabled={bulkAction !== null || selectedCount === 0}
-                      className="flex items-center gap-1 px-2 py-1 text-xs disabled:cursor-not-allowed theme-brutal:disabled:bg-gray-200"
                       data-testid="bulk-change-model-button"
                     >
-                      <ArrowLeftRight size={12} />
+                      <ArrowLeftRight size={16} />
                       {formatMessage({ id: "machine.detail.bulkModel.button" })}
                     </Button>
                     </Tooltip>
                   )}
                 </div>
                 {bulkError && (
-                  <Banner intent="warning" density="sm" className="mt-2 font-bold">
+                  <Banner intent="warning" density="sm" className="mt-2">
                     {bulkError}
                   </Banner>
                 )}
               </SurfaceListItem>
             )}
-            {machineAgents.map((agent) => (
-              <MachineAgentRow
-                key={agent.id}
-                agent={agent}
-                displayState={displayStateFor(agent)}
-                selectionMode={selectionMode}
-                selected={selectedAgentIds.has(agent.id)}
-                canManageMachines={canManageMachines}
-                onToggleSelection={toggleAgentSelection}
-                onOpenAgent={openAgent}
-                highlighted={!!highlightedIds?.includes(agent.id)}
-              />
-            ))}
+            {/* DS ListRow › `rf-list--inset`: the agents are one card with
+                hairlines between rows (AvatarListRow is a raft-ui ListRow). */}
+            <ListRowGroup>
+              {machineAgents.map((agent) => (
+                <MachineAgentRow
+                  key={agent.id}
+                  agent={agent}
+                  displayState={displayStateFor(agent)}
+                  selectionMode={selectionMode}
+                  selected={selectedAgentIds.has(agent.id)}
+                  canManageMachines={canManageMachines}
+                  onToggleSelection={toggleAgentSelection}
+                  onOpenAgent={openAgent}
+                  highlighted={!!highlightedIds?.includes(agent.id)}
+                />
+              ))}
+            </ListRowGroup>
           </div>
         )}
       </div>
@@ -727,27 +756,28 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
               ))}
             </div>
             {bulkResetMode === "full" && (
-              <Banner intent="warning" density="sm" withIcon className="mt-3 font-bold">
+              <Banner intent="destructive" density="sm" withIcon className="mt-3">
                 {formatMessage({ id: "machine.detail.fullResetWarning" })}
               </Banner>
             )}
-            <div className="mt-5 flex justify-end gap-3">
-              <Button size="sm"
-                variant="outline"
+            {/* Raft DS Dialog: Cancel (ghost) on the left, the confirm's colour
+                says the consequence — restarting or resetting the session
+                interrupts but recovers (orange); a full reset cannot be undone (red). */}
+            <div className="mt-5 flex justify-end gap-2">
+              <Button size="lg"
+                variant="ghost"
                 type="button"
                 onClick={closeResetOptions}
-                className="px-4 py-2 text-sm"
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
-              <Button size="sm"
-                variant={bulkResetMode === "full" ? "danger" : bulkResetMode === "session" ? "warning" : "information"}
+              <Button size="lg"
+                variant={bulkResetMode === "full" ? "danger" : "warning"}
                 type="button"
                 onClick={resetSelectedAgents}
                 disabled={bulkAction !== null}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
               >
-                <RotateCcw size={14} />
+                <RotateCcw size={16} />
                 {bulkAction
                   ? formatMessage({ id: "machine.detail.restarting" })
                   : bulkResetOptions.find((opt) => opt.mode === bulkResetMode)!.label}
@@ -762,7 +792,7 @@ function MachineAgentList({ machine, canManageMachines, canViewRuntimeAccountUsa
           message={formatMessage({ id: "machine.detail.stopAgentsMessage" }, { count: selectedOnlineAgents.length })}
           confirmLabel={formatMessage({ id: "machine.detail.stopAgentsTitle" })}
           loadingLabel={formatMessage({ id: "machine.detail.stopping" })}
-          confirmColor="bg-brutal-orange"
+          confirmVariant="warning"
           onConfirm={stopSelectedAgents}
           onClose={closeStopConfirm}
         />
@@ -910,6 +940,17 @@ export default function MachineDetailPanel({
     capabilities.migrateAgents,
     ].some(Boolean);
   const canViewRuntimeAccountUsage = canViewMachineRuntimeAccountUsage(machine, currentUserId, capabilities);
+  // task #1268: explicit detection state from the server (never inferred from an empty list).
+  const rescanRuntimes = useMachineStore((s) => s.rescanRuntimes);
+  const { state: rescanState, rescan: onRescanRuntimes } = useRuntimeRescan(machine.id, rescanRuntimes);
+  const runtimeDetection = machine.runtimeDetection ?? null;
+  // Endpoint-equivalent eligibility (servers.ts rescan route: machine creator
+  // or the editMachines capability) — never the broader canManageMachines.
+  const canRescanRuntimes = capabilities.editMachines
+    || machine.computerAttachedByCurrentUser === true
+    || (currentUserId !== null && machine.creator?.id === currentUserId);
+  const detectionReasonLabel = (reason: "deadline" | "child_failed" | "cancelled" | undefined) =>
+    formatMessage({ id: `machine.detail.runtimeDetection.reason.${reason ?? "child_failed"}` });
   const handleDelete = useCallback(async () => {
     await deleteMachine(machine.id);
     setShowDeleteConfirm(false);
@@ -987,7 +1028,7 @@ export default function MachineDetailPanel({
     && compareComputerVersions(machine.computerVersion, upgradeRequest.targetVersion) < 0,
   );
   const statusCommandText = machineComputerCommands?.status ?? "raft-computer status";
-  const statusCommand = <code className="font-mono">{statusCommandText}</code>;
+  const statusCommand = <InlineCode>{statusCommandText}</InlineCode>;
   // Click → POST → refreshed row with `upgradeRequest.state === "pending"`
   // takes a moment; without this the button gave no feedback until then.
   // Per-machine store slice (not component state) so a remount mid-request
@@ -1084,11 +1125,11 @@ export default function MachineDetailPanel({
     }
   }, [computerOperationProgress, machine.id, setComputerOperation]);
 
-  const handleStartRename = () => {
+  const handleStartRename = useCallback(() => {
     setDraftName(machine.name);
     setNameError("");
     setEditingName(true);
-  };
+  }, [machine.name]);
 
   const handleSaveRename = useCallback(async () => {
     const nextName = draftName.trim();
@@ -1138,11 +1179,11 @@ export default function MachineDetailPanel({
     }
   }, [handleCancelRename, handleSaveRename]);
 
-  const handleStartEditDescription = () => {
+  const handleStartEditDescription = useCallback(() => {
     setDraftDescription(machine.description ?? "");
     setDescriptionError("");
     setEditingDescription(true);
-  };
+  }, [machine.description]);
 
   const handleSaveDescription = useCallback(async () => {
     const nextDescription = draftDescription.trim();
@@ -1214,38 +1255,49 @@ export default function MachineDetailPanel({
         <PanelHeader
           title={machine.name}
           icon={<Monitor size={18} />}
-          iconBg="bg-primary-soft theme-brutal:bg-soft-signal text-foreground-strong theme-brutal:text-black"
           iconAlwaysVisible
           onMobileBack={onMobileBack}
           mobileBackProps={mobileBackProps}
         />
       )}
 
-      <div className="flex-1 overflow-y-auto bg-layer-panel theme-brutal:bg-white">
-        {/* Profile info — machine icon + name + status */}
-        <div className="flex items-start gap-4 px-5 py-5 border-b border-line-muted theme-brutal:border-black/10">
-          <Card className="flex size-16 shrink-0 items-center justify-center p-0"><Monitor size={28} />
-          </Card>
-          <div className="min-w-0 flex-1">
-            <PanelTitle className="min-w-0 text-foreground-muted theme-brutal:text-black theme-brutal:text-lg">{machine.name}</PanelTitle>
+      <div className="flex-1 overflow-y-auto bg-layer-canvas">
+        {/* Profile info — machine tile + name + status chip + hostname.
+            A computer is a thing, not a person: a neutral square tile. */}
+        <div className="flex items-start gap-4 px-5 py-5">
+          <IconTile size="lg">
+            <Monitor aria-hidden="true" />
+          </IconTile>
+          <div className="min-w-0 flex-1 space-y-1">
+            <PanelTitle className="min-w-0">{machine.name}</PanelTitle>
+            {/* Raft DS StatusChip: soft wash, square pixel, one word — online
+                lime, a web upgrade's reconnect is busy (yellow), offline stone. */}
             <div className="flex min-w-0 items-center gap-2">
-              <StatusDot
-                tone={machine.status === "online" ? "bg-brutal-lime" : upgradeReconnecting ? "bg-brutal-cyan" : "bg-gray-400"}
+              <Badge
+                appearance="soft"
+                variant={machine.status === "online" ? "success" : upgradeReconnecting ? "primary" : "muted"}
                 className="shrink-0"
-              />
-              <span className="shrink-0 text-sm text-foreground-muted theme-brutal:text-black/60 font-mono" data-testid="machine-connection-status">
-                {machine.status === "online"
-                  ? formatMessage({ id: "machine.detail.connected" })
-                  : upgradeReconnecting
-                    ? formatMessage({ id: "machine.detail.upgradeV2.inProgress" })
-                    : formatMessage({ id: "machine.detail.offline" })}
-              </span>
+              >
+                <Status
+                  size="md"
+                  variant={machine.status === "online" ? "success" : upgradeReconnecting ? "primary" : "default"}
+                  aria-hidden="true"
+                />
+                <span data-testid="machine-connection-status">
+                  {machine.status === "online"
+                    ? formatMessage({ id: "machine.detail.connected" })
+                    : upgradeReconnecting
+                      ? formatMessage({ id: "machine.detail.upgradeV2.inProgress" })
+                      : formatMessage({ id: "machine.detail.offline" })}
+                </span>
+              </Badge>
             </div>
             {machine.hostname && (
-              <div className="truncate text-sm text-foreground-muted theme-brutal:text-black/50 font-mono">{machine.hostname}</div>
+              <div className="truncate font-mono text-mono-meta text-foreground-hint">{machine.hostname}</div>
             )}
           </div>
         </div>
+        <Separator />
 
         {/* Host slot (desktop task #124): local controls for the machine the
             Electron shell runs on (start / stop / restart / reinstall the
@@ -1268,32 +1320,33 @@ export default function MachineDetailPanel({
         )}
 
         {/* Name */}
-        <div className="px-5 py-4 border-b border-line-muted theme-brutal:border-black/10">
+        <div className="px-5 py-4">
           <div className="flex items-center gap-2 mb-1">
             <SectionEyebrow as="div">
               {formatMessage({ id: "machine.detail.name" })}
             </SectionEyebrow>
             {canManageMachines && !editingName && (
               <Tooltip content={formatMessage({ id: "machine.detail.editComputerName" })}>
-              <button
+              <Button
                 type="button"
+                size="icon-sm"
+                variant="ghost"
                 onClick={handleStartRename}
-                className="text-foreground-muted theme-brutal:text-black/40 hover:text-black transition-colors"
                 aria-label={formatMessage({ id: "machine.detail.editComputerName" })}
               >
-                <Pencil size={12} />
-              </button>
+                <Pencil size={14} />
+              </Button>
               </Tooltip>
             )}
           </div>
           {canManageMachines && editingName ? (
-            <div className="space-y-[5px]">
+            <div className="space-y-2">
               <Input
                 ref={nameInputRef}
                 value={draftName}
                 onChange={handleNameChange}
                 onKeyDown={handleNameKeyDown}
-                className="w-full text-sm"
+                className="w-full"
                 placeholder={formatMessage({ id: "machine.detail.computerName" })}
                 autoFocus
                 disabled={savingName}
@@ -1303,57 +1356,57 @@ export default function MachineDetailPanel({
                   variant="accent"
                   onClick={handleSaveRenameClick}
                   disabled={savingName}
-                  className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   {formatMessage({ id: "machine.detail.save" })}
                 </Button>
                 <Button size="sm"
-                  variant="outline"
+                  variant="ghost"
                   onClick={handleCancelRename}
                   disabled={savingName}
-                  className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
             </div>
             {nameError && (
-              <div className="text-xs font-bold text-danger-strong theme-brutal:text-brutal-red">
+              <div className="text-caption text-danger-strong">
                 {nameError}
               </div>
             )}
             </div>
           ) : (
-            <p className="text-sm text-foreground-muted theme-brutal:text-black">{machine.name}</p>
+            <p className="text-callout text-foreground">{machine.name}</p>
           )}
         </div>
+        <Separator />
 
         {/* Description */}
-        <div className="px-5 py-4 border-b border-line-muted theme-brutal:border-black/10">
+        <div className="px-5 py-4">
           <div className="flex items-center gap-2 mb-1">
             <SectionEyebrow as="div">
               {formatMessage({ id: "machine.detail.description" })}
             </SectionEyebrow>
             {canManageMachines && !editingDescription && (
               <Tooltip content={formatMessage({ id: "machine.detail.editComputerDescription" })}>
-              <button
+              <Button
                 type="button"
+                size="icon-sm"
+                variant="ghost"
                 onClick={handleStartEditDescription}
-                className="text-foreground-muted theme-brutal:text-black/40 hover:text-black transition-colors"
                 aria-label={formatMessage({ id: "machine.detail.editComputerDescription" })}
               >
-                <Pencil size={12} />
-              </button>
+                <Pencil size={14} />
+              </Button>
               </Tooltip>
             )}
           </div>
           {canManageMachines && editingDescription ? (
-            <div className="space-y-[5px]">
+            <div className="space-y-2">
               <Textarea
                 ref={descriptionInputRef}
                 value={draftDescription}
                 onChange={handleDescriptionChange}
                 onKeyDown={handleDescriptionKeyDown}
-                className="min-h-20 w-full resize-y text-sm leading-relaxed"
+                className="min-h-20 w-full resize-y"
                 placeholder={formatMessage({ id: "machine.detail.descriptionPlaceholder" })}
                 maxLength={500}
                 autoFocus
@@ -1365,41 +1418,43 @@ export default function MachineDetailPanel({
                     variant="accent"
                     onClick={handleSaveDescriptionClick}
                     disabled={savingDescription}
-                    className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {formatMessage({ id: "machine.detail.save" })}
                   </Button>
                   <Button size="sm"
-                    variant="outline"
+                    variant="ghost"
                     onClick={handleCancelDescription}
                     disabled={savingDescription}
-                    className="px-2 py-1 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
                   >
                     {formatMessage({ id: "common.confirm.cancel" })}
                   </Button>
                 </div>
-                <span className="text-[11px] text-foreground-muted theme-brutal:text-black/40 font-mono">
+                <span className="font-mono text-mono-meta text-foreground-hint">
                   {draftDescription.length}/500
                 </span>
               </div>
               {descriptionError && (
-                <div className="text-xs font-bold text-danger-strong theme-brutal:text-brutal-red">
+                <div className="text-caption text-danger-strong">
                   {descriptionError}
                 </div>
               )}
             </div>
           ) : (
-            <p className={`whitespace-pre-wrap text-sm leading-relaxed ${machine.description ? "text-foreground-muted theme-brutal:text-black" : "text-foreground-placeholder theme-brutal:text-black/40 italic"}`}>
+            <p className={`whitespace-pre-wrap text-callout ${machine.description ? "text-foreground" : "text-foreground-hint"}`}>
               {machine.description || formatMessage({ id: "machine.detail.noDescription" })}
             </p>
           )}
         </div>
+        <Separator />
 
         {/* Info */}
-        <div className="px-5 py-4 border-b border-line-muted theme-brutal:border-black/10">
+        <div className="px-5 py-4">
           <SectionEyebrow as="div" className="mb-3">
             {formatMessage({ id: "machine.detail.info" })}
           </SectionEyebrow>
+          {/* Raft DS PropertyList (stacked): label 13/18 500 ink-3 above each
+              value; what machines write (OS, versions, runtimes, dates) in
+              Space Mono. KeyValueRow owns the label/value type. */}
           <div className="space-y-3">
             {/* OS */}
             {machine.os && <KeyValueRow label={formatMessage({ id: "machine.detail.osLabel" })} value={machine.os} mono />}
@@ -1414,13 +1469,13 @@ export default function MachineDetailPanel({
                 value={
                   machine.computerVersion ? (
                     <div>
-                      <span className={`text-sm font-mono ${computerVersionFact.kind === "outdated" ? "text-warning-strong theme-brutal:text-brutal-orange font-bold" : "text-foreground-strong theme-brutal:text-black"}`}>
+                      <span className={`font-mono ${computerVersionFact.kind === "outdated" ? "font-bold text-warning-strong" : "text-foreground"}`}>
                         v{machine.computerVersion}
                       </span>
                       {computerVersionFact.kind === "current" && (
                         <>
                           {" "}
-                          <span className="text-xs text-foreground-muted theme-brutal:text-black/60">
+                          <span className="text-caption text-foreground-hint">
                             · {formatMessage({ id: "machine.detail.upToDate" })}
                           </span>
                         </>
@@ -1428,7 +1483,7 @@ export default function MachineDetailPanel({
                       {computerVersionFact.kind === "outdated" && (
                         <>
                           {" "}
-                          <span className="text-xs text-warning-strong theme-brutal:text-brutal-orange font-bold">
+                          <span className="text-caption font-bold text-warning-strong">
                             · {formatMessage(
                               { id: "machine.detail.versionAvailable" },
                               { version: computerVersionFact.availableVersion },
@@ -1444,11 +1499,11 @@ export default function MachineDetailPanel({
                       )}
                     </div>
                   ) : machine.status === "online" ? (
-                    <span className="text-sm text-foreground-muted theme-brutal:text-black/40 italic">
+                    <span className="text-foreground-hint">
                       {formatMessage({ id: "machine.detail.readingVersion" })}
                     </span>
                   ) : (
-                    <span className="text-sm text-foreground-muted theme-brutal:text-black/40 italic">—</span>
+                    <span className="text-foreground-hint">—</span>
                   )
                 }
               />
@@ -1456,23 +1511,50 @@ export default function MachineDetailPanel({
             {/* Online, not a manager, newer version exists: say who can act
                 (the offline card has its own admin-only line). */}
             {machine.isComputer && !canManageMachines && machine.status === "online" && computerVersionFact.kind === "outdated" && (
-              <p className="text-xs text-foreground-muted theme-brutal:text-black/60" data-testid="computer-upgrade-ask-admin">
+              <p className={DETAIL_HELP_CLASS_NAME} data-testid="computer-upgrade-ask-admin">
                 {formatMessage(
                   { id: "machine.detail.upgradeStatus.askAdmin" },
                   { version: computerVersionFact.availableVersion },
                 )}
               </p>
             )}
-            {/* Detected Runtimes */}
+            {/* task #1268: detection state. pending / incomplete keep the last confirmed list below. */}
+            {machine.status === "online" && runtimeDetection && runtimeDetection.status !== "complete" && (
+              <div className={`flex flex-wrap items-center gap-2 ${DETAIL_HELP_CLASS_NAME}`} data-testid="machine-runtime-detection">
+                {runtimeDetection.status === "pending" && <Spinner size="sm" aria-hidden="true" />}
+                <span>
+                  {runtimeDetection.status === "pending"
+                    ? formatMessage({ id: "machine.detail.runtimeDetection.pending" })
+                    : (runtimeDetection.unfinishedRuntimes ?? []).length > 0
+                      ? formatMessage(
+                          { id: "machine.detail.runtimeDetection.incomplete" },
+                          { reason: detectionReasonLabel(runtimeDetection.reason), runtimes: (runtimeDetection.unfinishedRuntimes ?? []).map((id) => formatRuntimeLabelWithStatus(id, formatMessage)).join(", ") },
+                        )
+                      : formatMessage({ id: "machine.detail.runtimeDetection.incompleteNone" }, { reason: detectionReasonLabel(runtimeDetection.reason) })}
+                </span>
+                {runtimeDetection.status === "incomplete" && canRescanRuntimes && (
+                  <Button size="sm" variant="outline" disabled={rescanState.status === "running"} onClick={onRescanRuntimes} data-testid="machine-runtime-detection-rescan">
+                    {formatMessage({ id: rescanState.status === "running" ? "machine.detail.runtimeDetection.rescanning" : "machine.detail.runtimeDetection.rescan" })}
+                  </Button>
+                )}
+                {runtimeDetection.status === "incomplete" && !canRescanRuntimes && (
+                  <span data-testid="machine-runtime-detection-rescan-hint">{formatMessage({ id: "machine.detail.runtimeDetection.rescanNotAllowed" })}</span>
+                )}
+                {rescanState.status === "failed" && (
+                  <span className="text-warning-strong" data-testid="machine-runtime-detection-rescan-error">
+                    {formatMessage({ id: `machine.detail.runtimeDetection.rescanFailed.${rescanState.error === "forbidden" ? "forbidden" : "generic"}` })}
+                  </span>
+                )}
+              </div>
+            )}
+            {/* Detected Runtimes — Raft DS runtime tags drawn by the badge
+                recipe: cyan-soft when detected, stone-soft when not. */}
             <KeyValueRow
               label={formatMessage({ id: "machine.detail.detectedRuntimes" })}
               value={
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {getMachineRuntimeDisplayOptions().map((r) => {
                     const detected = machine.runtimes.includes(r.id);
-                    const chipClassName = detected
-                      ? "bg-info-soft text-info-strong theme-brutal:bg-brutal-cyan theme-brutal:text-black"
-                      : "bg-fill-muted text-foreground-muted";
                     return (
                       <RuntimeAccountUsageGateChip
                         key={r.id}
@@ -1481,7 +1563,8 @@ export default function MachineDetailPanel({
                         runtimeVersion={machine.runtimeVersions?.[r.id]}
                         serverId={serverId}
                         machineId={machine.id}
-                        className={chipClassName}
+                        appearance="soft"
+                        variant={detected ? "information" : "muted"}
                       >
                         {formatRuntimeLabelWithStatus(r.id, formatMessage)}{formatRuntimeAvailabilitySuffix(runtimeAvailabilitySuffix(r, machine.runtimes), formatMessage)}
                       </RuntimeAccountUsageGateChip>
@@ -1495,7 +1578,7 @@ export default function MachineDetailPanel({
               <KeyValueRow
                 label={formatMessage({ id: "machine.detail.created" })}
                 value={createdDate}
-                valueClassName="tabular-nums theme-brutal:font-mono"
+                mono
               />
               {/* Creator — managed Computers only; raw daemon rows preserve
                   their existing Created-only presentation. */}
@@ -1508,7 +1591,7 @@ export default function MachineDetailPanel({
                       <button
                         type="button"
                         onClick={() => openProfile("human", machine.creator!.id)}
-                        className="flex items-center gap-2 text-sm text-foreground-strong theme-brutal:text-black hover:underline"
+                        className="-mx-1.5 flex min-w-0 items-center gap-1.5 rounded-chip px-1.5 py-0.5 text-callout text-foreground outline-none hover:bg-fill-pressed focus-visible:shadow-focus"
                       >
                         <AvatarSlot
                           context="creator-link"
@@ -1516,13 +1599,13 @@ export default function MachineDetailPanel({
                           humanAvatarUrl={machine.creator.avatarUrl}
                           gravatarHash={machine.creator.gravatarHash}
                         />
-                        <span className="font-bold">{machine.creator.displayName || machine.creator.name}</span>
-                        <span className="font-mono text-xs text-foreground-muted theme-brutal:text-black/50">
+                        <span className="truncate font-semibold">{machine.creator.displayName || machine.creator.name}</span>
+                        <span className="font-mono text-mono-meta text-foreground-hint">
                           {formatMessage({ id: "common.handle" }, { name: machine.creator.name })}
                         </span>
                       </button>
                     ) : (
-                      <span className="text-sm italic text-foreground-muted theme-brutal:text-black/40">
+                      <span className="text-foreground-hint">
                         {formatMessage({ id: "agent.detail.noCreatorAssigned" })}
                       </span>
                     )
@@ -1532,6 +1615,7 @@ export default function MachineDetailPanel({
             </div>
           </div>
         </div>
+        <Separator />
 
         <div className="px-5 py-4 space-y-6">
           {/* Rows connected with the retired standalone daemon: the only
@@ -1553,7 +1637,7 @@ export default function MachineDetailPanel({
                     </SectionEyebrow>
                     {windowsMachine ? <Badge.Experimental /> : null}
                   </div>
-                  <p className="mb-2 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                  <p className={`mb-2 ${DETAIL_HELP_CLASS_NAME}`}>
                     {formatMessage(
                       { id: "machine.detail.migrateDescription" },
                       {
@@ -1569,9 +1653,9 @@ export default function MachineDetailPanel({
                       ["computer-setup", formatMessage({ id: "machine.detail.setupStep" }), computerSetupCommand],
                     ] as const).map(([target, label, command]) => (
                       <div key={target}>
-                        <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{label}</div>
+                        <div className={`mb-1 ${DETAIL_STEP_LABEL_CLASS_NAME}`}>{label}</div>
                         <CommandCopyRoot target={target} copied={copiedCommand === target} onCopy={handleCopy}>
-                          <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
+                          <CopyableCode className={COMMAND_LINE_CLASS_NAME}>
                             {command}
                           </CopyableCode>
                           <Tooltip content={formatMessage({ id: "machine.detail.copyCommandLabel" }, { label })}>
@@ -1593,45 +1677,43 @@ export default function MachineDetailPanel({
               <SectionEyebrow as="div" className="mb-2">
                 {formatMessage({ id: "machine.detail.connection" })}
               </SectionEyebrow>
-              <div className="text-xs text-foreground-muted theme-brutal:text-black/40 font-mono">
+              <div className={DETAIL_HELP_CLASS_NAME}>
                 {formatMessage({ id: "machine.detail.connectCommandsAdminOnly" })}
               </div>
             </div>
           )}
 
+          {/* Read-before-acting notice (Raft DS Banner, info): the computer is
+              restarting into the new version. Part of the page, not news. */}
           {upgradeReconnecting && (
-            <Card className="p-4" data-testid="computer-upgrade-reconnecting">
-              <div className="flex items-start gap-2">
-                <Spinner size="xs" aria-hidden="true" className="mt-1 shrink-0" />
-                <div className="min-w-0 space-y-1">
-                  <p className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
-                    {formatMessage(
-                      { id: "machine.detail.upgradeStatus.reconnecting" },
-                      { version: upgradeInFlight?.targetVersion ?? "" },
-                    )}
-                  </p>
-                  {canManageMachines && (
-                    <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
-                      {formatMessage(
-                        { id: "machine.detail.upgradeStatus.reconnectingHint" },
-                        { command: statusCommand },
-                      )}
-                    </p>
-                  )}
-                </div>
-              </div>
-            </Card>
+            <Banner
+              intent="info"
+              live={false}
+              data-testid="computer-upgrade-reconnecting"
+              icon={<Spinner size="xs" aria-hidden="true" className="mt-1 shrink-0" />}
+              title={formatMessage(
+                { id: "machine.detail.upgradeStatus.reconnecting" },
+                { version: upgradeInFlight?.targetVersion ?? "" },
+              )}
+            >
+              {canManageMachines
+                ? formatMessage(
+                  { id: "machine.detail.upgradeStatus.reconnectingHint" },
+                  { command: statusCommand },
+                )
+                : null}
+            </Banner>
           )}
 
           {machine.isComputer && machine.status !== "online" && !upgradeReconnecting && (
             <div data-testid="computer-recovery-card">
               <div className="mb-2 flex items-center gap-2">
-                <Terminal size={16} className="text-foreground-strong theme-brutal:text-black" />
+                <Terminal size={16} className="text-foreground-muted" aria-hidden="true" />
                 <SectionEyebrow as="div">{formatMessage({ id: "machine.detail.bringComputerOnline" })}</SectionEyebrow>
               </div>
 
               {upgradeReconnectOverdue && (
-                <p className="mb-2 text-xs leading-5 text-warning-strong theme-brutal:text-brutal-orange" data-testid="computer-upgrade-reconnect-overdue">
+                <p className={`mb-2 ${DETAIL_PROBLEM_CLASS_NAME}`} data-testid="computer-upgrade-reconnect-overdue">
                   {formatMessage(
                     { id: "machine.detail.upgradeStatus.reconnectOverdue" },
                     { version: upgradeInFlight?.targetVersion ?? "" },
@@ -1645,7 +1727,7 @@ export default function MachineDetailPanel({
                       failed / no response: say so here too, not only on the
                       online card. */}
                   {requestOutcomeStillTrue && (
-                    <p className="text-xs leading-5 text-warning-strong theme-brutal:text-brutal-orange" data-testid="computer-upgrade-request-outcome">
+                    <p className={DETAIL_PROBLEM_CLASS_NAME} data-testid="computer-upgrade-request-outcome">
                       {upgradeRequest?.state === "failed"
                         ? formatMessage(
                             { id: "machine.detail.upgradeStatus.failed" },
@@ -1662,12 +1744,12 @@ export default function MachineDetailPanel({
                       WS relay), so an offline Computer cannot get a web button. */}
                   {computerRecoveryRestartCommand && (
                     <div>
-                      <p className="mb-2 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                      <p className={`mb-2 ${DETAIL_HELP_CLASS_NAME}`}>
                         {formatMessage({ id: "machine.detail.recoveryRestartDescription" }, { serverSlug })}
                       </p>
                       <CommandCopyRoot target="terminal-restart" copied={copiedCommand === "terminal-restart"} onCopy={handleCopy}>
                         <CopyableCode
-                          className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
+                          className={COMMAND_LINE_CLASS_NAME}
                           data-testid="computer-recovery-restart"
                         >
                           {computerRecoveryRestartCommand}
@@ -1684,14 +1766,14 @@ export default function MachineDetailPanel({
 
                   {/* Diagnostics — reuse the existing status/doctor commands. */}
                   <div>
-                    <p className="mb-2 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                    <p className={`mb-2 ${DETAIL_HELP_CLASS_NAME}`}>
                       {formatMessage({ id: "machine.detail.offlineDiagnosticsPrompt" })}
                     </p>
                     <div className="space-y-2">
                       {terminalStatusCommands.map(({ command, target }) => (
                         <CommandCopyRoot key={command} target={target} copied={copiedCommand === target} onCopy={handleCopy}>
                           <CopyableCode
-                            className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
+                            className={COMMAND_LINE_CLASS_NAME}
                             data-testid={`computer-recovery-${target === "terminal-status" ? "status" : "doctor"}`}
                           >
                             {command}
@@ -1710,7 +1792,7 @@ export default function MachineDetailPanel({
                   {/* last-seen — let the user judge if the machine is just
                       off; no offline-reason guessing (frontend can't tell). */}
                   {machine.lastHeartbeat && (
-                    <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/50">
+                    <p className={DETAIL_HELP_CLASS_NAME}>
                       {formatMessage(
                         { id: "machine.detail.lastSeen" },
                         { time: lastHeartbeatText },
@@ -1720,11 +1802,12 @@ export default function MachineDetailPanel({
 
                   {/* Secondary: an explicit command-not-found path exposes
                       install + setup without displacing the normal start path. */}
-                  <div className="border-t border-line-muted theme-brutal:border-black/10 pt-3">
+                  <div>
+                    <Separator className="mb-3" />
                     <button
                       type="button"
                       onClick={() => setShowRecoverySetup((v) => !v)}
-                      className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60 underline underline-offset-2"
+                      className={DETAIL_TEXT_BUTTON_CLASS_NAME}
                       aria-expanded={showRecoverySetup}
                       data-testid="computer-recovery-setup-toggle"
                     >
@@ -1734,7 +1817,7 @@ export default function MachineDetailPanel({
                     </button>
                     {showRecoverySetup && computerInstall && computerSetupCommand && (
                       <div className="mt-2 space-y-3">
-                        <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                        <p className={DETAIL_HELP_CLASS_NAME}>
                           {formatMessage({ id: "machine.detail.installSetupDescription" })}
                           {windowsMachine ? ` ${formatMessage({ id: "machine.detail.windowsInstallerX64Only" })}` : ""}
                         </p>
@@ -1743,10 +1826,10 @@ export default function MachineDetailPanel({
                           ["computer-setup", formatMessage({ id: "machine.detail.setupStep" }), computerSetupCommand],
                         ] as const).map(([target, label, command]) => (
                           <div key={target}>
-                            <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{label}</div>
+                            <div className={`mb-1 ${DETAIL_STEP_LABEL_CLASS_NAME}`}>{label}</div>
                             <CommandCopyRoot target={target} copied={copiedCommand === target} onCopy={handleCopy}>
                               <CopyableCode
-                                className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
+                                className={COMMAND_LINE_CLASS_NAME}
                                 data-testid={target === "computer-install" ? "computer-recovery-install" : "computer-recovery-setup"}
                               >
                                 {command}
@@ -1773,7 +1856,7 @@ export default function MachineDetailPanel({
                   </div>
                 </div>
               ) : (
-                <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/50">
+                <p className={DETAIL_HELP_CLASS_NAME}>
                   {formatMessage(
                     { id: "machine.detail.offlineAdminOnly" },
                     { time: lastHeartbeatParenthetical },
@@ -1788,14 +1871,16 @@ export default function MachineDetailPanel({
 
           {/* Agent Workspaces — only when machine is online */}
           {machine.status === "online" && (
-            <div className="mt-2 border-t border-line-muted theme-brutal:border-black/10 pt-4">
+            <div className="mt-2">
+              <Separator className="mb-4" />
               <WorkspacesSection machineId={machine.id} canManageMachines={canManageMachines} />
             </div>
           )}
 
           {/* Actions */}
           {canManageMachines && (
-            <div className="mt-2 border-t border-line-muted theme-brutal:border-black/10 pt-4">
+            <div className="mt-2">
+              <Separator className="mb-4" />
               <SectionEyebrow as="div" className="mb-3">
                 {formatMessage({ id: "machine.detail.actions" })}
               </SectionEyebrow>
@@ -1804,14 +1889,14 @@ export default function MachineDetailPanel({
                   offline recovery is the recovery card's job (task #247). */}
               {machine.isComputer && machine.status === "online" && (
                 <Card className="p-4 mb-3" data-testid="computer-service-actions">
-                  <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black mb-1">
+                  <div className="mb-1 text-subhead font-bold text-foreground">
                     {formatMessage({ id: "machine.detail.computer" })}
                   </div>
                   {computerOperationProgress ? (
                     /* Progress mode — show bar instead of buttons */
                     <div className="space-y-2">
                       {computerOperationProgress.done ? (
-                        <div className={`flex items-center gap-2 text-xs font-mono ${computerOperationProgress.error ? "text-brutal-red" : "text-foreground-muted theme-brutal:text-black/70"}`}>
+                        <div className={`flex items-center gap-2 font-mono text-mono-meta ${computerOperationProgress.error ? "text-warning-strong" : "text-foreground-muted"}`}>
                           {computerOperationProgress.error ? (
                             <AlertCircle size={14} className="shrink-0" />
                           ) : (
@@ -1913,7 +1998,7 @@ export default function MachineDetailPanel({
                           : null;
                       return (
                         <>
-                          <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/60 mb-3" data-testid="computer-upgrade-status">
+                          <p className={`mb-3 ${DETAIL_HELP_CLASS_NAME}`} data-testid="computer-upgrade-status">
                             {statusSentence}
                           </p>
                           <div className="flex flex-wrap items-center gap-2" data-testid="computer-upgrade-actions">
@@ -1922,9 +2007,8 @@ export default function MachineDetailPanel({
                               <Button size="sm"
                                 variant="outline"
                                 onClick={handleComputerRestartClick}
-                                className="px-3 py-2 text-sm font-bold flex items-center gap-1.5"
                               >
-                                <RotateCcw size={14} />
+                                <RotateCcw size={16} />
                                 {formatMessage({ id: "machine.detail.restart" })}
                               </Button>
                               </Tooltip>
@@ -1932,32 +2016,31 @@ export default function MachineDetailPanel({
                             {cardState.kind === "upToDate" && webUpgradeOn && (
                               <Tooltip content={formatMessage({ id: "machine.detail.computerAlreadyLatest" })}>
                               <Button size="sm"
-                                variant="accent"
+                                variant="outline"
                                 disabled
-                                className="px-3 py-2 text-sm font-bold flex items-center gap-1.5 disabled:opacity-40"
                               >
-                                <CheckCircle size={14} />
+                                <CheckCircle size={16} />
                                 {formatMessage({ id: "machine.detail.upToDate" })}
                               </Button>
                               </Tooltip>
                             )}
+                            {/* The one pink action on this page: the upgrade the
+                                computer is waiting for. */}
                             {cardState.kind === "oneClick" && (
                               <Tooltip content={formatMessage({ id: "machine.detail.upgradeToVersion" }, { version: cardState.version })}>
                               <Button size="sm"
                                 variant="accent"
                                 onClick={handleRemoteUpgradeV2Click}
-                                className="px-3 py-2 text-sm font-bold flex items-center gap-1.5"
                               >
-                                <Play size={14} />
+                                <Play size={16} />
                                 {formatMessage({ id: "machine.detail.upgradeToVersion" }, { version: cardState.version })}
                               </Button>
                               </Tooltip>
                             )}
                             {cardState.kind === "upgrading" && (
                               <Button size="sm"
-                                variant="accent"
+                                variant="outline"
                                 disabled
-                                className="px-3 py-2 text-sm font-bold flex items-center gap-1.5 disabled:opacity-40"
                               >
                                 <Spinner size="xs" aria-hidden="true" />
                                 {formatMessage({ id: "machine.detail.upgradeV2.inProgress" })}
@@ -1966,19 +2049,19 @@ export default function MachineDetailPanel({
                             {releaseNotesForUpdate && <ComputerReleaseNotesAffordance notes={releaseNotesForUpdate} />}
                           </div>
                           {outcomeLine && (
-                            <p className="mt-2 text-xs leading-5 text-warning-strong theme-brutal:text-brutal-orange" data-testid="computer-upgrade-request-outcome">
+                            <p className={`mt-2 ${DETAIL_PROBLEM_CLASS_NAME}`} data-testid="computer-upgrade-request-outcome">
                               {outcomeLine}
                             </p>
                           )}
                           {cardState.kind === "commands" && upgradeInstallCommand && upgradeRestartCommand && (
                             <ol className="mt-3 space-y-3" data-testid="computer-upgrade-commands">
                               <li>
-                                <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">
+                                <div className={`mb-1 ${DETAIL_STEP_LABEL_CLASS_NAME}`}>
                                   {formatMessage({ id: "machine.detail.upgradeCommands.installStep" })}
                                 </div>
                                 <CommandCopyRoot target="computer-install" copied={copiedCommand === "computer-install"} onCopy={handleCopy}>
                                   <CopyableCode
-                                    className="min-w-0 flex-1 break-all px-3 py-2 font-mono text-xs"
+                                    className={COMMAND_LINE_CLASS_NAME}
                                     data-testid="computer-upgrade-fresh-install"
                                   >
                                     {upgradeInstallCommand}
@@ -1992,12 +2075,12 @@ export default function MachineDetailPanel({
                                 </CommandCopyRoot>
                               </li>
                               <li>
-                                <div className="mb-1 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">
+                                <div className={`mb-1 ${DETAIL_STEP_LABEL_CLASS_NAME}`}>
                                   {formatMessage({ id: "machine.detail.upgradeCommands.restartStep" })}
                                 </div>
                                 <CommandCopyRoot target="computer-install-restart" copied={copiedCommand === "computer-install-restart"} onCopy={handleCopy}>
                                   <CopyableCode
-                                    className="min-w-0 flex-1 break-all px-3 py-2 font-mono text-xs"
+                                    className={COMMAND_LINE_CLASS_NAME}
                                     data-testid="computer-upgrade-fresh-restart"
                                   >
                                     {upgradeRestartCommand}
@@ -2016,20 +2099,21 @@ export default function MachineDetailPanel({
                       );
                     })()
                   )}
-                  <div className="mt-4 border-t border-line-muted theme-brutal:border-black/10 pt-4" data-testid="computer-terminal-verification">
+                  <div className="mt-4" data-testid="computer-terminal-verification">
+                    <Separator className="mb-4" />
                     <div className="mb-2 flex items-center gap-2">
-                      <Terminal size={16} className="text-foreground-strong theme-brutal:text-black" />
+                      <Terminal size={16} className="text-foreground-muted" aria-hidden="true" />
                       <SectionEyebrow as="div">
                         {formatMessage({ id: "machine.detail.verifyFromTerminal" })}
                       </SectionEyebrow>
                     </div>
-                    <p className="mb-2 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                    <p className={`mb-2 ${DETAIL_HELP_CLASS_NAME}`}>
                       {formatMessage({ id: "machine.detail.verifyFromTerminalDescription" })}
                     </p>
                     <div className="space-y-2">
                       {terminalStatusCommands.map(({ command, target }) => (
                         <CommandCopyRoot key={command} target={target} copied={copiedCommand === target} onCopy={handleCopy}>
-                          <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
+                          <CopyableCode className={COMMAND_LINE_CLASS_NAME}>
                             {command}
                           </CopyableCode>
                           <Tooltip content={formatMessage({ id: "machine.detail.copyCommand" })}>
@@ -2043,11 +2127,11 @@ export default function MachineDetailPanel({
                     </div>
                     {terminalRestartCommand && (
                       <>
-                        <p className="mb-2 mt-3 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                        <p className={`mb-2 mt-3 ${DETAIL_HELP_CLASS_NAME}`}>
                           {formatMessage({ id: "machine.detail.webButtonsNotResponding" })}
                         </p>
                         <CommandCopyRoot target="terminal-restart" copied={copiedCommand === "terminal-restart"} onCopy={handleCopy}>
-                          <CopyableCode className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all">
+                          <CopyableCode className={COMMAND_LINE_CLASS_NAME}>
                             {terminalRestartCommand}
                           </CopyableCode>
                           <Tooltip content={formatMessage({ id: "machine.detail.copyCommand" })}>
@@ -2079,38 +2163,39 @@ export default function MachineDetailPanel({
                     onClick={() => setRecoveryGuideDisclosure(!showRecoveryGuide)}
                   >
                     <span className="flex items-center gap-2">
-                      <Terminal size={16} className="text-foreground-strong theme-brutal:text-black" />
+                      <Terminal size={16} className="text-foreground-muted" aria-hidden="true" />
                       <SectionEyebrow>{formatMessage({ id: "machine.detail.recoveryGuide" })}</SectionEyebrow>
                     </span>
                     <ChevronRight
                       size={16}
                       aria-hidden="true"
-                      className={`shrink-0 text-foreground-muted theme-brutal:text-black/60 transition-transform ${showRecoveryGuide ? "rotate-90" : ""}`}
+                      className={`shrink-0 text-foreground-muted transition-transform motion-reduce:transition-none ${showRecoveryGuide ? "rotate-90" : ""}`}
                       data-testid="computer-recovery-guide-chevron"
                     />
                   </button>
                   {showRecoveryGuide && (
                     <div
                       id={recoveryGuideContentId}
-                      className="mt-3 border-t border-line-muted theme-brutal:border-black/10 pt-3"
+                      className="mt-3"
                       data-testid="computer-recovery-guide-content"
                     >
-                      <p className="mb-4 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                      <Separator className="mb-3" />
+                      <p className={`mb-4 ${DETAIL_HELP_CLASS_NAME}`}>
                         {formatMessage({ id: "machine.detail.recoveryGuideDescription" })}
                       </p>
                       <ol className="space-y-4">
                         <li>
                           <div className="mb-2">
-                            <div className="text-xs font-bold text-foreground-strong theme-brutal:text-black">
+                            <div className={DETAIL_STEP_LABEL_CLASS_NAME}>
                               {formatMessage({ id: "machine.detail.restartStep" })}
                             </div>
-                            <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                            <p className={DETAIL_HELP_CLASS_NAME}>
                               {formatMessage({ id: "machine.detail.restartStepDescription" })}
                             </p>
                           </div>
                           <CommandCopyRoot target="terminal-restart" copied={copiedCommand === "terminal-restart"} onCopy={handleCopy}>
                             <CopyableCode
-                              className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
+                              className={COMMAND_LINE_CLASS_NAME}
                               data-testid="computer-recovery-guide-restart"
                             >
                               {terminalRestartCommand}
@@ -2125,19 +2210,19 @@ export default function MachineDetailPanel({
                         </li>
                         <li>
                           <div className="mb-2">
-                            <div className="text-xs font-bold text-foreground-strong theme-brutal:text-black">
+                            <div className={DETAIL_STEP_LABEL_CLASS_NAME}>
                               {formatMessage(
                                 { id: "machine.detail.freshInstallStep" },
                                 { platform: windowsMachine ? formatMessage({ id: "machine.detail.windowsX64Suffix" }) : "" },
                               )}
                             </div>
-                            <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                            <p className={DETAIL_HELP_CLASS_NAME}>
                               {formatMessage({ id: "machine.computer.recovery.freshInstallDescription" })}
                             </p>
                           </div>
                           <CommandCopyRoot target="computer-install" copied={copiedCommand === "computer-install"} onCopy={handleCopy}>
                             <CopyableCode
-                              className="min-w-0 flex-1 px-3 py-2 font-mono text-xs break-all"
+                              className={COMMAND_LINE_CLASS_NAME}
                               data-testid="computer-recovery-guide-install"
                             >
                               {computerFreshInstall}
@@ -2152,16 +2237,16 @@ export default function MachineDetailPanel({
                         </li>
                         <li>
                           <div className="mb-2">
-                            <div className="text-xs font-bold text-foreground-strong theme-brutal:text-black">
+                            <div className={DETAIL_STEP_LABEL_CLASS_NAME}>
                               {formatMessage({ id: "machine.computer.recovery.restartAfterInstallStep" })}
                             </div>
-                            <p className="text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+                            <p className={DETAIL_HELP_CLASS_NAME}>
                               {formatMessage({ id: "machine.computer.recovery.restartAfterInstallDescription" })}
                             </p>
                           </div>
                           <CommandCopyRoot target="computer-install-restart" copied={copiedCommand === "computer-install-restart"} onCopy={handleCopy}>
                             <CopyableCode
-                              className="min-w-0 flex-1 break-all px-3 py-2 font-mono text-xs"
+                              className={COMMAND_LINE_CLASS_NAME}
                               data-testid="computer-recovery-guide-restart-after-install"
                             >
                               {computerInstallRestartCommand}
@@ -2182,19 +2267,19 @@ export default function MachineDetailPanel({
               <Card className="p-4">
                 <div className="flex items-center justify-between">
                   <div>
-                    <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+                    <div className="text-subhead font-bold text-foreground">
                       {formatMessage({ id: "machine.detail.deleteComputer" })}
                     </div>
-                    <p className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+                    <p className={`mt-0.5 ${DETAIL_HELP_CLASS_NAME}`}>
                       {formatMessage({ id: "machine.detail.deleteComputerDescription" })}
                     </p>
                   </div>
                   <Button size="sm"
                     variant="danger"
                     onClick={openDeleteConfirm}
-                    className="px-4 py-2 text-sm font-bold flex items-center gap-1.5 shrink-0 ml-4"
+                    className="ml-4 shrink-0"
                   >
-                    <Trash2 size={14} />
+                    <Trash2 size={16} />
                     {formatMessage({ id: "machine.detail.deleteComputer" })}
                   </Button>
                 </div>

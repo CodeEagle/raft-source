@@ -2,8 +2,10 @@ import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { eq, and, isNull, ne } from "drizzle-orm";
 import { getDb } from "../db/index";
+import { isPilotServer } from "../raftbench/contract";
+import { resolveProviderConfig } from "../services/agentRuntimeProviderService";
 import { UUID_RE } from "../lib/messageId";
-import { users, serverMembers, servers, sessionFamilies } from "../db/schema";
+import { users, serverMembers, servers, sessionFamilies, agents, appBotBindings, oauthClientInstalls, raftbenchServiceAgents, agentRuntimeProvisions } from "../db/schema";
 import { findMachineByApiKey, getMachine } from "../services/machineService";
 import {
   findAgentCredentialByApiKey,
@@ -18,7 +20,6 @@ import {
   recordComputerUse,
 } from "../services/computerCredentialService";
 import { accountNeedsIdentitySetup, asServerId, isExternalAgentRuntime, asMachineId, isOwnerRole, type ServerId, type MachineId } from "@botiverse/raft-shared";
-import { agents } from "../db/schema";
 import { rememberTraceUserId } from "../tracing/traceUserId";
 
 const JWT_SECRET = () => {
@@ -50,6 +51,7 @@ declare global {
       actingAgentId?: string;
       agentCredentialId?: string;
       agentCredentialScopes?: readonly string[];
+      raftbenchServiceAgent?: boolean;
       // True when the credential's bound agent runs on the `external` runtime
       // (no daemon). Drives the `agent:seen` presence push.
       actingAgentIsExternal?: boolean;
@@ -629,7 +631,7 @@ async function authenticateAgentCredential(
   // but verify again so semantics stay correct if the JOIN is removed.
   const agentLivenessStart = Date.now();
   const [agentRow] = await db
-    .select({ id: agents.id, runtime: agents.runtime })
+    .select({ id: agents.id, runtime: agents.runtime, managedByAppInstallId: agents.managedByAppInstallId })
     .from(agents)
     .where(and(eq(agents.id, credential.agentId), isNull(agents.deletedAt)));
   addTraceEvent("agent_credential_auth.agent_liveness.checked", {
@@ -640,11 +642,76 @@ async function authenticateAgentCredential(
     return { ok: false, status: 401, body: { error: "Agent no longer exists" } };
   }
 
+  // Managed app bot: verify the binding + install grant are still live.
+  // Without this, a revoked install's bot key would stay valid until the
+  // per-request binding check catches it — too late.
+  if (agentRow.managedByAppInstallId) {
+    const botCheckStart = Date.now();
+    const [bindingRow] = await db
+      .select({
+        state: appBotBindings.state,
+        installStatus: oauthClientInstalls.status,
+        botGrant: oauthClientInstalls.botGrant,
+      })
+      .from(appBotBindings)
+      .innerJoin(oauthClientInstalls, eq(appBotBindings.installId, oauthClientInstalls.id))
+      .where(and(
+        eq(appBotBindings.agentId, agentRow.id),
+        eq(appBotBindings.installId, agentRow.managedByAppInstallId),
+      ))
+      .limit(1);
+    addTraceEvent("agent_credential_auth.app_bot_binding.checked", {
+      duration_ms: Date.now() - botCheckStart,
+      outcome: bindingRow ? "found" : "missing",
+    });
+    const bindingLive = bindingRow
+      && bindingRow.state === "active"
+      && bindingRow.installStatus === "active"
+      && bindingRow.botGrant === "granted";
+    if (!bindingLive) {
+      return { ok: false, status: 401, body: { error: "App bot binding not active" } };
+    }
+  }
+
   req.principalKind = "agent_credential";
   req.agentCredentialId = credential.credentialId;
   req.agentCredentialScopes = credential.scopes;
   req.actingAgentId = credential.agentId;
   req.serverId = asServerId(credential.serverId);
+
+  // Bind read-only service restrictions to identity, including alternate credentials.
+  const [raftbenchBinding] = await getDb().select({ agentId: raftbenchServiceAgents.agentId })
+    .from(raftbenchServiceAgents).where(and(eq(raftbenchServiceAgents.serverId, credential.serverId),
+      eq(raftbenchServiceAgents.agentId, credential.agentId))).limit(1);
+  if (raftbenchBinding || credential.scopes.includes("raftbench")) {
+    req.raftbenchServiceAgent = true;
+    if (!isPilotServer(credential.serverId, process.env.DEPLOYMENT_ENV)) {
+      return { ok: false, status: 403, body: { error: "RaftBench is unavailable on this server or deployment.", code: "raftbench_server_not_allowed", suggestedNextAction: "Use an enrolled staging server. Production is not enrolled." } };
+    }
+    const path = req.originalUrl.split("?")[0].replace(/\/$/, "");
+    const webhookPath = path === "/internal/agent-api/push-webhook";
+    let providerWebhook = false;
+    if (webhookPath && req.method === "PUT" && typeof req.body?.url === "string") {
+      try {
+        const endpoint = new URL(req.body.url);
+        const [provision] = await getDb().select({ provider: agentRuntimeProvisions.provider, target: agentRuntimeProvisions.providerTarget })
+          .from(agentRuntimeProvisions).where(and(eq(agentRuntimeProvisions.agentId, credential.agentId), eq(agentRuntimeProvisions.serverId, credential.serverId))).limit(1);
+        const provider = provision ? resolveProviderConfig(provision.provider, process.env, provision.target) : null;
+        providerWebhook = !!provider && endpoint.origin === new URL(provider.baseUrl).origin
+          && endpoint.pathname.startsWith("/hooks/") && endpoint.pathname.length > "/hooks/".length
+          && !endpoint.search && !endpoint.hash && !endpoint.username && !endpoint.password;
+      } catch { /* Malformed or non-provider destinations remain refused. */ }
+    }
+    if (webhookPath && req.method === "PUT" && !providerWebhook) {
+      return { ok: false, status: 403, body: { error: "Inbox delivery for this service agent must use the configured staging provider origin with a /hooks/<id> path and no query, fragment or credentials; this URL was refused.", code: "raftbench_read_only", suggestedNextAction: "Use the configured Antiproton provider hook URL. If provider configuration is unavailable, ask the deployment owner to restore it; do not try another destination." } };
+    }
+    const allowed = (req.method === "GET" && ["/internal/agent-api", "/internal/agent-api/events", "/internal/agent-api/context", "/internal/agent-api/raftbench/context"].includes(path)) ||
+      (webhookPath && ["GET", "DELETE"].includes(req.method)) || providerWebhook ||
+      (req.method === "POST" && path === "/internal/agent-api/raftbench/submit");
+    if (!allowed) {
+      return { ok: false, status: 403, body: { error: "This service agent can only check its identity, configure inbox delivery on its staging provider, receive run assignments, read its RaftBench context and submit its result.", code: "raftbench_read_only", suggestedNextAction: "Use the assigned RaftBench run to read context and submit a result. Do not send messages, edit tasks or try other operations; retrying will not help." } };
+    }
+  }
 
   req.actingAgentIsExternal = isExternalAgentRuntime(agentRow.runtime);
 

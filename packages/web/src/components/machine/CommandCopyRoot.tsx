@@ -1,4 +1,4 @@
-import { CopyableCodeRoot } from "raft-ui";
+import { CopyableCodeRoot } from "@botiverse/raft-ui";
 import { useCallback } from "react";
 import type { ReactNode } from "react";
 import type { CommandCopyTarget } from "./MachineDetailPanel";

@@ -1,3 +1,4 @@
+import { ambientProcessEnv } from "../processEnvPatch";
 import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { execFileSync, spawn } from "node:child_process";
 import { spawnRuntimeChild } from "./runtimeChild";
@@ -28,11 +29,14 @@ import {
 import {
   classifyProbeExecFailure,
   lookupCommandOnPath,
+  lookupCommandOnPathAsync,
   resolveCommandOnPath,
   withWindowsUserEnvironment,
+  withWindowsUserEnvironmentAsync,
   type ProbeDeps,
 } from "./probe";
-import { resolveWindowsDirectLaunch, type DirectLaunch } from "./windowsLaunch";
+import { resolveWindowsDirectLaunch, resolveWindowsDirectLaunchAsync, type DirectLaunch } from "./windowsLaunch";
+import { killProbeTreeAndSettle, ProbeChildError } from "./probeChild";
 import type {
   ParsedEvent,
   RuntimeBusyDeliveryReadiness,
@@ -151,7 +155,7 @@ function readGrokVersion(command: string, deps: ProbeDeps): string | null {
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
   try {
     const launch = grokDirectLaunch(command, ["--version"], deps);
-    const env = withWindowsUserEnvironment(launch.env ?? deps.env ?? process.env, deps);
+    const env = withWindowsUserEnvironment(launch.env ?? deps.env ?? ambientProcessEnv(), deps);
     const output = execFileSyncFn(launch.command, launch.args, {
       stdio: ["ignore", "pipe", "pipe"],
       env,
@@ -197,6 +201,27 @@ export function resolveGrokSpawn(args: string[], deps: ProbeDeps = {}): GrokLaun
   return grokDirectLaunch(command, args, deps);
 }
 
+/** task #1277 — an aborted probe child, which the async resolvers rethrow unchanged. */
+function isProbeAbort(error: unknown): boolean {
+  return error instanceof ProbeChildError && error.code === "ABORT_ERR";
+}
+
+/**
+ * task #1277 — {@link resolveGrokSpawn} off the event loop: the same single
+ * lookup and the same verdict on the error, with the PATH lookup (and, on
+ * Windows, the environment read and the `node` lookup behind a shim) run as
+ * bounded probe children instead of execFileSync.
+ */
+export async function resolveGrokSpawnAsync(args: string[], deps: ProbeDeps = {}): Promise<GrokLaunch> {
+  const { command, missReason } = await lookupCommandOnPathAsync("grok", deps);
+  if (!command) {
+    throw new RuntimeExecutableNotFoundError({ runtimeId: "grok", message: grokNotResolvedMessage(missReason), reason: missReason });
+  }
+  const platform = deps.platform ?? process.platform;
+  if (platform !== "win32") return { command, args, shell: false };
+  return resolveWindowsDirectLaunchAsync("grok", command, args, deps);
+}
+
 export function probeGrok(deps: ProbeDeps = {}): RuntimeProbeResult {
   const { command, missReason } = lookupCommandOnPath("grok", deps);
   if (!command) {
@@ -205,7 +230,7 @@ export function probeGrok(deps: ProbeDeps = {}): RuntimeProbeResult {
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
   try {
     const launch = grokDirectLaunch(command, [...GROK_AGENT_PROBE_ARGS], deps);
-    const env = withWindowsUserEnvironment(launch.env ?? deps.env ?? process.env, deps);
+    const env = withWindowsUserEnvironment(launch.env ?? deps.env ?? ambientProcessEnv(), deps);
     execFileSyncFn(launch.command, launch.args, {
       stdio: ["ignore", "pipe", "pipe"],
       env,
@@ -472,9 +497,14 @@ export class GrokDriver implements RuntimeDriver {
         }
       : { method: "session/new" as const, params: this.freshSessionParams };
 
-    const launch = resolveGrokSpawn([...GROK_AGENT_ARGS], { env: spawnEnv });
+    // task #1277: the PATH lookup (and on Windows the environment read and the
+    // node-behind-shim lookup) run as bounded probe children under this start
+    // attempt's signal; a cancelled lookup is rethrown, never a verdict.
+    const launch = await resolveGrokSpawnAsync([...GROK_AGENT_ARGS], { env: spawnEnv, signal: ctx.launchSignal });
     // task #365: after the last await, right before the child exists.
     ctx.assertLaunchCurrent?.();
+    // A start stopped while the lookup ran must not create a child.
+    if (ctx.launchSignal?.aborted) throw new ProbeChildError("grok launch cancelled before the child was created", { code: "ABORT_ERR" });
     const proc = spawnRuntimeChild(launch.command, launch.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],
@@ -783,11 +813,19 @@ interface GrokModelDetectionOptions {
 export async function detectGrokModelsFromAcp(
   options: GrokModelDetectionOptions = {},
 ): Promise<RuntimeModelSourceOutcome> {
-  const env = withWindowsUserEnvironment(options.env ?? process.env, { env: options.env ?? process.env });
+  // task #1277: a form request must not block the daemon; the environment read
+  // and the PATH lookup run as bounded probe children (the ACP child below was
+  // already asynchronous).
+  const baseEnv = options.env ?? ambientProcessEnv();
+  const env = await withWindowsUserEnvironmentAsync(baseEnv, { ...options.deps, env: baseEnv });
+  const signal = options.deps?.signal;
   let launch: GrokLaunch;
   try {
-    launch = resolveGrokSpawn([...GROK_AGENT_ARGS], { ...options.deps, env });
+    launch = await resolveGrokSpawnAsync([...GROK_AGENT_ARGS], { ...options.deps, env });
   } catch (error) {
+    // A cancelled detection is not a verdict: the abort travels up unchanged,
+    // and nothing below (no fallback, no ACP child) runs on its behalf.
+    if (isProbeAbort(error)) throw error;
     if (error instanceof RuntimeExecutableNotFoundError) {
       // task #1242: the verdict of the lookup that just failed, nothing newer.
       return {
@@ -797,24 +835,40 @@ export async function detectGrokModelsFromAcp(
     }
     return { kind: "error", retryable: true, code: "detect_failed" };
   }
+  if (signal?.aborted) throw new ProbeChildError("grok model detection aborted before the ACP child started", { code: "ABORT_ERR" });
 
-  return await new Promise<RuntimeModelSourceOutcome>((resolve) => {
+  return await new Promise<RuntimeModelSourceOutcome>((resolve, reject) => {
     const proc = spawn(launch.command, launch.args, {
       cwd: options.cwd ?? process.cwd(),
       stdio: ["pipe", "pipe", "ignore"],
       env: launch.env ?? env,
       shell: false,
+      // task #1277: its own process group, so a cancel can end the whole ACP
+      // tree (grok may start helpers), not only the direct child.
+      detached: process.platform !== "win32",
     });
     let settled = false;
     let buffer = "";
     const initializeRequestId = 1;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearClockTimeout(timer);
+      // Cancel ends the ACP tree, not only the direct child, and the rejection
+      // says whether the tree was seen to end (never "kill sent" alone).
+      void killProbeTreeAndSettle(proc).then((cleanup) => {
+        reject(new ProbeChildError("grok model detection aborted", { code: "ABORT_ERR", cleanup }));
+      });
+    };
     const finish = (result: RuntimeModelSourceOutcome) => {
       if (settled) return;
       settled = true;
       clearClockTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       proc.kill();
       resolve(result);
     };
+    signal?.addEventListener("abort", onAbort, { once: true });
     // Server and cross-replica relay allow additional time for result transport.
     const timer = setClockTimeout(() => finish({ kind: "error", retryable: true, code: "detect_timeout" }), options.timeoutMs ?? GROK_MODEL_DETECTION_TIMEOUT_MS);
 

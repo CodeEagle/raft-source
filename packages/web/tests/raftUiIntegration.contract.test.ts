@@ -10,8 +10,8 @@ function read(path: string): string {
 
 test("web app installs raft-ui global CSS and providers", () => {
   const css = read("src/index.css");
-  assert.match(css, /@import "raft-ui\/styles\.css";/);
-  assert.match(css, /@source "\.\.\/node_modules\/raft-ui\/dist";/);
+  assert.match(css, /@import "@botiverse\/raft-ui\/styles\.css";/);
+  assert.match(css, /@source "\.\.\/node_modules\/@botiverse\/raft-ui\/dist";/);
 
   // PR #8269 made AppProviders the single source of truth for the root provider
   // tree (the desktop entry mounts the same component; 0.1.29 crashed because
@@ -21,7 +21,7 @@ test("web app installs raft-ui global CSS and providers", () => {
   const providers = read("src/AppProviders.tsx");
   // Staging replaced raft-ui's ToastProvider with the app-local
   // LocalizedToastProvider; the theme contract still pins TooltipProvider.
-  assert.match(providers, /import \{[^}]*\bTooltipProvider\b[^}]*\} from "raft-ui";/);
+  assert.match(providers, /import \{[^}]*\bTooltipProvider\b[^}]*\} from "@botiverse\/raft-ui";/);
   assert.match(providers, /import \{ AppThemeProvider \} from "\.\/theme\/AppThemeProvider";/);
   assert.match(providers, /<AppThemeProvider>/);
   assert.match(providers, /<TooltipProvider(?:\s+[^>]*)?>/);
@@ -35,12 +35,15 @@ test("web app installs raft-ui global CSS and providers", () => {
 test("web typography follows raft-ui/fonts.css font definition contract", () => {
   const css = read("src/index.css");
 
-  assert.match(css, /@import "raft-ui\/fonts\.css";/);
+  assert.match(css, /@import "@botiverse\/raft-ui\/fonts\.css";/);
   assert.doesNotMatch(css, /@import[^;]*assets\/fonts\/fonts\.css/);
   assert.doesNotMatch(css, /family=Space\+Grotesk/);
 
   assert.match(css, /--font-display:\s*var\(--font-heading/);
-  assert.match(css, /--font-mono:\s*var\(--mono-font/);
+  // raft-ui's theme owns `--font-sans` / `--font-mono` (var(--sans-font) /
+  // var(--mono-font), set per family by raft-ui/fonts.css); the web must not
+  // redefine them with fallbacks of its own.
+  assert.doesNotMatch(css, /--font-(?:sans|mono):/);
   assert.match(css, /font-family:\s*var\(--font-sans/);
   assert.doesNotMatch(css, /--(font-[a-z]+):\s*var\(--\1(?![\w-])/, "font variables must not self-reference");
 
@@ -61,7 +64,7 @@ test("segmented controls use raft-ui directly at callsites", () => {
     "src/components/thread/ThreadsInbox.tsx",
   ]) {
     const source = read(file);
-    assert.match(source, /from "raft-ui";/, `${file} should import raft-ui directly`);
+    assert.match(source, /from "@botiverse\/raft-ui";/, `${file} should import raft-ui directly`);
     assert.doesNotMatch(
       source,
       /from "\.\.\/ui\/SegmentedControl";/,
@@ -74,7 +77,7 @@ test("segmented controls use raft-ui directly at callsites", () => {
     "src/components/message/ThreadPanel.tsx",
   ]) {
     const source = read(file);
-    assert.match(source, /import\s*\{[^}]*\btoast\b[^}]*\}\s*from\s*"raft-ui";/, `${file} should import raft-ui toast directly`);
+    assert.match(source, /import\s*\{[^}]*\btoast\b[^}]*\}\s*from\s*"@botiverse\/raft-ui";/, `${file} should import raft-ui toast directly`);
     assert.match(source, /SELECTION_TOAST_OPTIONS\s*=\s*\{\s*icon:\s*false,\s*dismissible:\s*false,?\s*\}\s*as const;/);
     assert.doesNotMatch(source, /showSelectionToast/, `${file} should call raft-ui toast APIs directly`);
     assert.doesNotMatch(source, /data-testid="(?:thread-)?forward-toast"/, `${file} should not render local forward toast wrappers`);
@@ -93,7 +96,7 @@ test("select fields use raft-ui directly at business callsites", () => {
     "src/pages/IntegrationInvitePage.tsx",
   ]) {
     const source = read(file);
-    assert.match(source, /from "raft-ui";/, `${file} should import raft-ui directly`);
+    assert.match(source, /from "@botiverse\/raft-ui";/, `${file} should import raft-ui directly`);
     assert.match(source, /<Select[\s>]/, `${file} should render raft-ui Select at the callsite`);
     assert.doesNotMatch(source, /SelectItemLeading/, `${file} should not reserve an empty leading slot for text-only options`);
     assert.doesNotMatch(
@@ -104,7 +107,7 @@ test("select fields use raft-ui directly at business callsites", () => {
   }
 
   const migrationDialog = read("src/components/agentMigration/AgentMigrationDialog.tsx");
-  assert.match(migrationDialog, /from "raft-ui\/wip";/);
+  assert.match(migrationDialog, /from "@botiverse\/raft-ui\/wip";/);
   assert.match(migrationDialog, /<ComboboxSelect[\s>]/, "agent migration picks the target with the raft-ui ComboboxSelect");
   assert.doesNotMatch(
     migrationDialog,

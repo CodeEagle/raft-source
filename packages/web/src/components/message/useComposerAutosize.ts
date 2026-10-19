@@ -19,7 +19,9 @@ const cssGlobal = (globalThis as { CSS?: { supports?: (property: string, value: 
 export const SUPPORTS_FIELD_SIZING =
   typeof cssGlobal?.supports === "function" && cssGlobal.supports("field-sizing", "content");
 
-export const COMPOSER_MAX_HEIGHT_PX = 160;
+// raft-ui's composer input caps at max-h-32 (128px, five 24px lines and the
+// padding); the script path stops at the same height.
+export const COMPOSER_MAX_HEIGHT_PX = 128;
 
 export function useComposerAutosize(
   textareaRef: RefObject<HTMLTextAreaElement | null>,

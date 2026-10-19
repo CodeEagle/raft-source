@@ -32,6 +32,9 @@ export const EXPECTED_MIGRATED_IDS: readonly string[] = [
   "billing.canceling",
   "billing.capacity",
   "billing.channels",
+  "billing.checkoutPromotionHint",
+  "billing.checkoutPromotionReview",
+  "billing.checkoutPromotionUnavailable",
   "billing.checkoutSummary",
   "billing.currentPlan",
   "billing.everythingInFree",
@@ -245,6 +248,10 @@ const GENUINELY_NEW = new Set([
   "billing.confirmAndUpdateSeats",
   "billing.opening2",
   "billing.updating2",
+  // #9896: the Agent migration plan row is a new benefit, not migrated copy, so
+  // the legacy catalog never had it. Plan wiring and both locales are pinned in
+  // tests/billingPlanPresentation.i18n.test.ts.
+  "billing.agentMigration",
 ]);
 
 test("the genuinely-new ids are new for a REASON, not because I retranslated", () => {

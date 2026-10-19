@@ -2,6 +2,56 @@
 
 export const AGENT_API_ROUTE_MANIFEST = [
   {
+    "key": "raftbenchContext",
+    "method": "GET",
+    "path": "/raftbench/context",
+    "fullPath": "/internal/agent-api/raftbench/context",
+    "client": {
+      "resource": "raftbench",
+      "method": "context"
+    },
+    "capability": "raftbench",
+    "description": "Read a bounded source page for the current staging RaftBench run, with server-owned coverage.",
+    "sideEffect": "read",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "external",
+    "request": {
+      "params": false,
+      "query": true,
+      "body": false
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
+    "key": "raftbenchSubmit",
+    "method": "POST",
+    "path": "/raftbench/submit",
+    "fullPath": "/internal/agent-api/raftbench/submit",
+    "client": {
+      "resource": "raftbench",
+      "method": "submit"
+    },
+    "capability": "raftbench",
+    "description": "Submit one complete or incomplete result for a bound run and revision; identical replays return the same receipt.",
+    "sideEffect": "write",
+    "idempotency": "natural",
+    "destructive": false,
+    "audience": "external",
+    "request": {
+      "params": false,
+      "query": false,
+      "body": true
+    },
+    "response": {
+      "kind": "json",
+      "body": true
+    }
+  },
+  {
     "key": "feedbackLocatorIngest",
     "method": "POST",
     "path": "/feedback-locators",
@@ -2254,4 +2304,4 @@ export const AGENT_API_ROUTE_MANIFEST = [
 ] as const;
 
 /** Content hash of AGENT_API_ROUTE_MANIFEST; see computeAgentApiManifestVersion. */
-export const AGENT_API_MANIFEST_VERSION = "1f425c1bf59cd214";
+export const AGENT_API_MANIFEST_VERSION = "6cddd50f870f2c51";

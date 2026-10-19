@@ -5,7 +5,7 @@ import api from "../../api/client";
 import { useServerStore } from "../../store/serverStore";
 import { useMobileBack } from "../../hooks/useAppNavigate";
 import type { MessageId } from "../../i18n/messages/en";
-import { Badge, Button, Card } from "raft-ui";
+import { Badge, Button, Card } from "@botiverse/raft-ui";
 import Banner from "../ui/Banner";
 import PanelHeader from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
@@ -195,26 +195,24 @@ export default function ReleaseNotesPanel() {
     <div className="flex min-h-0 flex-1 flex-col">
       <PanelHeader
         title={formatMessage({ id: "settings.releaseNotes.title" })}
-        icon={<FileText size={18} />}
-        iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
         onMobileBack={onMobileBack}
       />
 
-      <div className="flex-1 overflow-y-auto bg-layer-panel px-5 py-4 text-foreground-strong theme-brutal:bg-white theme-brutal:text-black">
-        <div className="mb-4 flex items-center gap-2">
-          <FileText size={16} className="text-foreground-muted theme-brutal:text-black/60" />
+      <div className="flex-1 overflow-y-auto bg-layer-canvas px-4 py-4 text-foreground md:px-5">
+        <div className="mb-3 flex items-center gap-2">
+          <FileText size={16} className="text-foreground-hint" />
           <SectionEyebrow>{formatMessage({ id: "settings.releaseNotes.whatsNew" })}</SectionEyebrow>
         </div>
 
         {state.status === "loading" ? (
-          <p className="text-sm text-foreground-muted theme-brutal:text-black/60" role="status">
+          <p className="text-callout text-foreground-muted" role="status">
             {formatMessage({ id: "settings.releaseNotes.loading" })}
           </p>
         ) : null}
 
         {state.status === "error" ? (
           <Banner
-            intent="destructive"
+            intent="warning"
             withIcon
             role="alert"
             actions={(
@@ -239,19 +237,21 @@ export default function ReleaseNotesPanel() {
                 <Card
                   key={release.releaseId}
                   data-testid="release-entry"
-                  className={`p-4 ${isCurrentRelease ? "bg-primary-soft theme-brutal:bg-soft-signal/35" : ""}`}
+                  className="p-4"
                 >
+                  {/* The release you are running is marked with the yellow
+                      "you" sticker; versions and dates are machine text. */}
                   <div className="mb-4 flex flex-wrap items-center gap-2">
-                    <Badge appearance="solid" variant="primary" uppercase={false}>
+                    <span className="font-mono text-mono-meta text-foreground">
                       {release.version ? `${release.version} (${release.date})` : release.date}
-                    </Badge>
+                    </span>
                     {isCurrentRelease ? (
-                      <Badge appearance="solid" variant="success" uppercase={false}>
+                      <Badge appearance="solid" variant="primary">
                         {formatMessage({ id: "settings.releaseNotes.current" })}
                       </Badge>
                     ) : null}
                     {release.state === "retracted" ? (
-                      <Badge appearance="solid" variant="default" uppercase={false}>
+                      <Badge appearance="soft" variant="muted">
                         {formatMessage({ id: "settings.releaseNotes.retracted" })}
                       </Badge>
                     ) : null}
@@ -264,12 +264,12 @@ export default function ReleaseNotesPanel() {
                       const config = RELEASE_TYPE_CONFIG[type];
                       return (
                         <div key={type}>
-                          <Badge appearance="soft" variant={config.badgeVariant} uppercase>
+                          <Badge appearance="soft" variant={config.badgeVariant}>
                             {formatMessage({ id: config.labelId })}
                           </Badge>
-                          <ul className="mt-1.5 list-disc space-y-1.5 pl-5 marker:text-foreground-muted theme-brutal:marker:text-black/70">
+                          <ul className="mt-2 list-disc space-y-1.5 pl-5 marker:text-foreground-hint">
                             {entries.map((entry) => (
-                              <li key={entry.entryId} className={`text-sm ${entry.emphasis ? "font-bold text-foreground-strong theme-brutal:text-black" : "text-foreground-muted theme-brutal:text-black/80"}`}>
+                              <li key={entry.entryId} className={`text-subhead text-foreground ${entry.emphasis ? "font-semibold" : ""}`}>
                                 {entry.text}
                               </li>
                             ))}

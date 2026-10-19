@@ -6,6 +6,7 @@
 // is resolved first through `POST /resolve-channel`, exactly as the CLI does.
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import type { AgentApiAttachmentCommentsResponse, AgentApiAttachmentDownloadUrlResponse, AgentApiAttachmentUploadResponse } from "../agentApiContract";
@@ -15,14 +16,14 @@ import { formatHint, hintStep, RAFT_HINTS, type RaftHintOptions } from "./hint";
 import { failureFromClientResult, failureOutcome, opError, opErrorFromClientError, validateOpRequest, type RaftNextStep, type RaftOutcome } from "./outcome";
 import { requestSchema } from "./requestSchema";
 
-export const attachmentCommentsRequestSchema = requestSchema<{ attachmentId: string; limit?: number }>()(z.object({
+export const attachmentCommentsRequestSchema = lazySchema("attachmentCommentsRequestSchema", () => requestSchema<{ attachmentId: string; limit?: number }>()(z.object({
   attachmentId: z.string().describe("The attachment id."),
   limit: z.number().int().positive().optional().describe("Maximum comments to return."),
-}));
+})));
 
-export const downloadAttachmentUrlRequestSchema = requestSchema<{ attachmentId: string }>()(z.object({
+export const downloadAttachmentUrlRequestSchema = lazySchema("downloadAttachmentUrlRequestSchema", () => requestSchema<{ attachmentId: string }>()(z.object({
   attachmentId: z.string().describe("The attachment id, as message lines show it (`id:…`)."),
-}));
+})));
 
 /** Compatibility fallback for Servers that predate the capability endpoint (the CLI's constant). */
 export const AGENT_ATTACHMENT_UPLOAD_FALLBACK_MAX_BYTES = 50 * 1024 * 1024;

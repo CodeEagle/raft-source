@@ -3,7 +3,7 @@
 
 import type { Command } from "commander";
 
-import { asMessageId } from "@botiverse/raft-shared";
+import { asMessageId } from "@botiverse/raft-shared/src/agentCliSurface";
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";

@@ -5,15 +5,19 @@ import { applyDmPeerKind, PEER_KIND_OPTION } from "../_target";
 import { randomUUID } from "node:crypto";
 import type { Readable } from "node:stream";
 import type { Command } from "commander";
+import type {
+  AgentApiHeldFreshnessResponse,
+  AgentApiSendCommittedResponse,
+  AgentApiSendV2Body,
+  AgentApiSendSentResponse,
+  AgentApiStructuredMention,
+} from "@botiverse/raft-shared";
 import {
   currentTimeMs,
+  formatAgentThreadTargetCheck,
   structuredRaftMentionStillAppears,
-  type AgentApiHeldFreshnessResponse,
-  type AgentApiSendCommittedResponse,
-  type AgentApiSendV2Body,
-  type AgentApiSendSentResponse,
-  type AgentApiStructuredMention,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
+import { detectThreadTargetMismatch, type ThreadTargetMismatch } from "@botiverse/raft-shared/src/agentOps/seenPolicy/index";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import {
@@ -29,6 +33,9 @@ import {
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandContext, CommandRuntimeOptions } from "../../core/context";
 import { incrementMetaCounter } from "../../state/agentLedger";
+import { channelCardForSend, recordChannelCardShown } from "../../ax/channelCard";
+import { peerCardForSend, recordPeerCardShown } from "../../ax/peerCard";
+import { attachOnEverySend, fetchSendAttachment } from "../../ax/sendAttachment";
 import { CliError, cliError } from "../../core/errors";
 import { adoptCliReplyText, writeDiagnostic, writeJson, writeText, NL, type CliReplyText } from "../../core/renderer";
 import { elideSeenSenders } from "./_senderElision";
@@ -64,6 +71,9 @@ import {
   formatDraftReplacedWarning,
   formatMessages,
   formatSendDraftStdinDeadlineDiagnostic,
+  formatSentChannelCard,
+  formatSentPeerCard,
+  formatSendAttachment,
 } from "./_format";
 import { archiveReplacedDraft } from "./_replacedDraftHistory";
 
@@ -109,6 +119,41 @@ export class SendContentError extends Error {
     super(message);
     this.name = "SendContentError";
   }
+}
+
+const ATTACHMENT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function attachmentIdError(problem: string, target: string | undefined): SendContentError {
+  return new SendContentError(
+    "ATTACHMENT_ID_INVALID",
+    `Not sent: --attachment-id entry ${problem}. `
+      + "Use the full ID from the \"Attachment ID:\" line that `raft attachment upload` printed, "
+      + "not a file path, a file name, or the whole upload output. "
+      + `Not uploaded yet? Run: raft attachment upload --path <file> --target ${JSON.stringify(target ?? "<target>")}`,
+  );
+}
+
+/**
+ * Agents often put several IDs in one flag (`--attachment-id "id1 id2"`), which
+ * the server rejects. Split each value on whitespace and commas and drop
+ * repeats (the server rejects an ID given twice). A value that yields nothing
+ * (an empty variable) or a piece that is not one attachment ID fails before
+ * anything is sent, naming the entry by position and never echoing it
+ * (task #20, wording reviewed by Sage).
+ */
+export function normalizeAttachmentIdFlags(values: readonly string[], target?: string): string[] {
+  const ids: string[] = [];
+  let entry = 0;
+  for (const value of values) {
+    const pieces = value.split(/[\s,]+/).filter((piece) => piece.length > 0);
+    if (pieces.length === 0) throw attachmentIdError(`${entry + 1} is empty`, target);
+    for (const piece of pieces) {
+      entry += 1;
+      if (!ATTACHMENT_ID_PATTERN.test(piece)) throw attachmentIdError(`${entry} is not an attachment ID`, target);
+      if (!ids.includes(piece)) ids.push(piece);
+    }
+  }
+  return ids;
 }
 
 export function parseMentionSelector(value: string): AgentApiStructuredMention {
@@ -411,44 +456,34 @@ export function formatDriveByJoinedToPostTip(target: string, data: AgentApiSendS
   ].join("\n");
 }
 
-interface ThreadContextTargetConfirmation {
-  parentTarget: string;
-  threadTarget: string;
-  threadSeq: number;
-}
-
+/** The shared thread-target check (glimpse G2-5) over this agent's consumed-seq ledger. */
 export function detectThreadContextParentSend(
   agentId: string,
   target: string,
-): ThreadContextTargetConfirmation | null {
+): ThreadTargetMismatch | null {
   if (getParentTargetForThread(target) !== null) return null;
-  const latestThread = getMostRecentConsumedThreadForParent(agentId, target);
-  if (!latestThread) return null;
-  const parentReadOrder = getConsumedReadOrder(agentId, target);
-  if (parentReadOrder !== undefined && parentReadOrder >= latestThread.readOrder) return null;
-  return {
-    parentTarget: target,
-    threadTarget: latestThread.target,
-    threadSeq: latestThread.seq,
-  };
+  return detectThreadTargetMismatch(
+    target,
+    getMostRecentConsumedThreadForParent(agentId, target),
+    getConsumedReadOrder(agentId, target),
+  );
 }
 
 export function formatThreadContextParentSendMessage(
   target: string,
   latestThread: Pick<ConsumedThreadTarget, "target" | "seq">,
 ): string {
-  return [
-    `Possible thread target mismatch: your latest read context under ${target} is ${latestThread.target}, but this send targets ${target} top-level.`,
-    "This guard is intentionally narrow: moving a thread conclusion to the parent channel can be correct, but it is uncommon enough to confirm once.",
-    "",
-    "If this reply belongs in the thread, send the message to the thread target instead:",
-    `  raft message send --target "${latestThread.target}" <<'${MESSAGE_HEREDOC_DELIMITER}'`,
-    "  message body",
-    `  ${MESSAGE_HEREDOC_DELIMITER}`,
-    "",
-    "If the top-level channel message is intentional, send the saved draft unchanged:",
-    `  raft message send --send-draft --target "${target}"`,
-  ].join("\n");
+  return formatAgentThreadTargetCheck(target, latestThread.target, {
+    toThread: [
+      `  raft message send --target "${latestThread.target}" <<'${MESSAGE_HEREDOC_DELIMITER}'`,
+      "  message body",
+      `  ${MESSAGE_HEREDOC_DELIMITER}`,
+    ],
+    confirm: {
+      label: "If the top-level channel message is intentional, send the saved draft unchanged:",
+      lines: [`  raft message send --send-draft --target "${target}"`],
+    },
+  });
 }
 
 export function markSendFailureDraftSaved(
@@ -672,13 +707,14 @@ async function handleMessageSend(
     }
   } else {
     try {
+      // Checked before stdin is consumed, so a bad id costs no message body.
+      outgoingAttachmentIds = normalizeAttachmentIdFlags(opts.attachmentId ?? [], target);
       content = await resolveSendContent(ctx.io.stdin ?? process.stdin);
     } catch (err) {
       if (err instanceof SendContentError) throw cliError(err.code, err.message, { cause: err });
       throw err;
     }
     outgoingContent = content;
-    outgoingAttachmentIds = opts.attachmentId && opts.attachmentId.length > 0 ? opts.attachmentId : [];
   }
 
   const agentContext = ctx.loadAgentContext();
@@ -853,6 +889,17 @@ async function handleMessageSend(
   if (reviewerIsolation) {
     body.freshnessContextMode = "withheld";
   }
+  // The channel card version this context has (RFC 072 `channel`; glimpse
+  // G1): never seen here holds the send once, an older one comes back with
+  // the reply. Reviewer isolation sends no new context, so it says nothing.
+  const cardForSend = reviewerIsolation ? undefined : channelCardForSend(agentContext.agentId, target);
+  const peerForSend = reviewerIsolation ? undefined : peerCardForSend(agentContext.agentId, target);
+  if (cardForSend || peerForSend) {
+    body.seenCards = {
+      ...(cardForSend ? cardForSend.seenCards : {}),
+      ...(peerForSend ? { peer: peerForSend.seen } : {}),
+    };
+  }
   if (seenUpToSeq !== undefined) {
     body.seenUpToSeq = seenUpToSeq;
   }
@@ -999,12 +1046,16 @@ async function handleMessageSend(
     // RFC 072 §7.10 observability: a hold because this context has not read
     // the thread (evidence from another context withheld) vs. a hold that
     // came with evidence (there really were newer messages).
-    if (seenUpToSeq !== undefined) {
+    const data = outcome.data;
+    const holdReasons = data.holdReasons ?? [];
+    const heldForCardOnly = (holdReasons.includes("channel_card") || holdReasons.includes("peer_card")) && !holdReasons.includes("unread_messages");
+    if (heldForCardOnly) {
+      incrementMetaCounter(agentContext.agentId, "channelCardHold");
+    } else if (seenUpToSeq !== undefined) {
       incrementMetaCounter(agentContext.agentId, "freshnessHold.withEvidence");
     } else if (wasConsumedEvidenceWithheldForContext(agentContext.agentId, target)) {
       incrementMetaCounter(agentContext.agentId, "freshnessHold.contextSwitch");
     }
-    const data = outcome.data;
     const contextWasWithheld = reviewerIsolation || data.freshnessContextMode === "withheld";
     // The held bounded context was just rendered to the agent — that
     // boundary is consumed too; record it so even an abandoned draft
@@ -1021,8 +1072,9 @@ async function handleMessageSend(
         mentions: outgoingMentions,
         savedAt: currentTimeMs(),
         reholdCount: previousDraftReholdCount + 1,
-        seenUpToSeq: contextWasWithheld ? seenUpToSeq : data.seenUpToSeq,
-        seenExactSeqs: contextWasWithheld ? seenExactSeqs : [],
+        // A hold for the card alone showed no messages: keep what was attested.
+        seenUpToSeq: contextWasWithheld || heldForCardOnly ? seenUpToSeq : data.seenUpToSeq,
+        seenExactSeqs: contextWasWithheld || heldForCardOnly ? seenExactSeqs : [],
       });
     } catch {
       heldDraftSaved = false;
@@ -1031,6 +1083,14 @@ async function handleMessageSend(
     const heldDetails = contextWasWithheld ? redactFreshnessHoldForReviewerIsolation(data) : data;
     if (!opts.json) {
       writeText(ctx.io, formatHeldSendOutput(target, data, contextWasWithheld, heldDraftSaved));
+    }
+    // A card in the JSON error details is shown too: not recording it would
+    // hold every JSON-mode send again, `--send-draft` included.
+    if (data.channelCard && cardForSend && !contextWasWithheld) {
+      await recordChannelCardShown(agentContext.agentId, data.channelCard, cardForSend.contextId, target, ctx.io);
+    }
+    if (data.peerCard && peerForSend && !contextWasWithheld) {
+      await recordPeerCardShown(agentContext.agentId, data.peerCard, peerForSend.contextId, target, ctx.io);
     }
     if (!heldDraftSaved) {
       throw cliError("SEND_HELD", "Message held; no target delivery occurred and no draft was kept.", {
@@ -1182,6 +1242,12 @@ async function handleMessageSend(
           },
         }
       : data);
+    if (data.channelCard && cardForSend) {
+      await recordChannelCardShown(agentContext.agentId, data.channelCard, cardForSend.contextId, target, ctx.io);
+    }
+    if (data.peerCard && peerForSend) {
+      await recordPeerCardShown(agentContext.agentId, data.peerCard, peerForSend.contextId, target, ctx.io);
+    }
     return;
   }
 
@@ -1196,6 +1262,25 @@ async function handleMessageSend(
     ),
     NL,
   );
+  if (data.channelCard && cardForSend) {
+    writeText(ctx.io, formatSentChannelCard(data.channelCard, data.channelCardChanged === true));
+    await recordChannelCardShown(agentContext.agentId, data.channelCard, cardForSend.contextId, target, ctx.io);
+  }
+  if (data.peerCard && peerForSend) {
+    writeText(ctx.io, formatSentPeerCard(data.peerCard));
+    await recordPeerCardShown(agentContext.agentId, data.peerCard, peerForSend.contextId, target, ctx.io);
+  }
+  if (!reviewerIsolation && data.messageId && attachOnEverySend(agentContext.agentId, target)) {
+    const attachment = await fetchSendAttachment(agentApi, target, data.messageId);
+    // The message is committed: rendering trouble must not fail the command.
+    let attached: CliReplyText | null = null;
+    try {
+      attached = attachment ? formatSendAttachment(attachment) : null;
+    } catch {
+      attached = null;
+    }
+    if (attached) writeText(ctx.io, attached);
+  }
   await settleSenders(ctx.io);
   if (mentionDeliveryError) throw mentionDeliveryError;
 }
@@ -1206,7 +1291,7 @@ export const messageSendCommand = defineCommand(
     description: "Send a message to a channel, DM, or thread",
     arguments: ["[content...]"],
     options: [
-      { flags: "--target <target>", description: "Target: '#channel', 'dm:@peer', '#channel:threadId', 'dm:@peer:threadId'" },
+      { flags: "--target <target>", description: "Target: '#channel', 'dm:@peer', '#channel:shortid', 'dm:@peer:shortid' (a thread: shortid is its root message's msg=, as in replyTarget)" },
       PEER_KIND_OPTION,
       {
         flags: "--send-draft",
@@ -1232,7 +1317,7 @@ export const messageSendCommand = defineCommand(
       { flags: "--content <content>", description: "Unsupported. Pipe message content to stdin instead." },
       {
         flags: "--attachment-id <id>",
-        description: "Attachment id to link (repeatable). Get one from `raft attachment upload`.",
+        description: "Attachment ID to link (repeatable). Get one from `raft attachment upload`. Several IDs in one value, separated by spaces or commas, are split.",
         parse: (value, prev: string[] = []) => prev.concat(value),
       },
       {

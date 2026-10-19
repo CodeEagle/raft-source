@@ -182,11 +182,11 @@ const CONFIRMS: Array<{
   flagOn?: boolean;
 }> = [
   { what: "archive", channel: {}, trigger: "归档频道", expect: "成员仍可阅读", action: "归档" },
-  { what: "make private", channel: {}, trigger: "设为私密", expect: "未加入的服务器成员", action: "私密" },
-  { what: "make public", channel: { type: "private" }, trigger: "设为公开", expect: "所有服务器成员将恢复", action: "公开" },
+  { what: "make private", channel: {}, trigger: "设为私密", expect: "未加入的服务器成员", action: "设为私密" },
+  { what: "make public", channel: { type: "private" }, trigger: "设为公开", expect: "所有服务器成员将恢复", action: "设为公开" },
   { what: "hide #all", channel: { name: "all" }, trigger: "隐藏 #all", expect: "#all 将从频道列表中消失", action: "隐藏 #all" },
   { what: "restore #all", channel: { name: "all", type: "private" }, trigger: "恢复 #all", expect: "#all 将重新作为面向服务器成员", action: "恢复 #all" },
-  { what: "leave", channel: {}, trigger: "退出频道", expect: "你将停止接收", action: "离开" },
+  { what: "leave", channel: {}, trigger: "离开频道", expect: "你将停止接收", action: "离开" },
   { what: "delete", channel: {}, trigger: "删除频道", expect: "都会被永久删除", action: "删除" },
   {
     what: "disconnect joint",

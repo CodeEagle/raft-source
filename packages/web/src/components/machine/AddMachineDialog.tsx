@@ -1,8 +1,7 @@
-import CloseButton from "../ui/CloseButton";
-import { Input, Card, Checkbox, Button, Status } from "raft-ui";
+import { Input, Checkbox, Button, Status } from "@botiverse/raft-ui";
 import { useState, useEffect, useRef, useCallback } from "react";
 import type { ChangeEvent } from "react";
-import { X, CheckCircle, Monitor, Cloud } from "lucide-react";
+import { CheckCircle, Monitor, Cloud } from "lucide-react";
 import { useIntl } from "react-intl";
 import { useMachineStore } from "../../store/machineStore";
 import { useComputerConnectionWatch } from "../../hooks/useComputerConnectionWatch";
@@ -14,16 +13,22 @@ import { getServerUrl } from "../../utils/server";
 import { getComputerCommands } from "../../utils/computerSetupCommand";
 import { PLAN_CONFIG, getEffectiveLimits } from "@botiverse/raft-shared";
 import type { ServerPlan } from "@botiverse/raft-shared";
-import Modal from "../Modal";
+import DialogCard from "../ui/DialogCard";
 import FormField from "../ui/FormField";
 import Banner from "../ui/Banner";
 import ComputerCommandGuide from "./ComputerCommandGuide";
+
+/** A link-like action inside a banner sentence (Raft DS UI text link: ink,
+ *  1.5px underline, 600). */
+const INLINE_TEXT_BUTTON_CLASS_NAME =
+  "rounded-sticker font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none hover:bg-fill-pressed focus-visible:shadow-focus";
 
 function isQuotaError(error: string): boolean {
   return error.includes("limit reached");
 }
 
 type DialogStep = "type" | "waiting" | "connected";
+export const WAITING_HINT_DELAY_MS = 45_000;
 type MachineType = "local" | "cloud";
 
 export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
@@ -67,6 +72,16 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
     active: connectWatchActive,
     pendingMachineId: connectWatchPendingId,
   });
+
+  // The browser cannot see the terminal, so a failed install or setup looks
+  // like endless waiting. After a while, point the user at the terminal and at
+  // the connect-only command (bug-triage task #22).
+  const [waitingStalled, setWaitingStalled] = useState(false);
+  useEffect(() => {
+    if (step !== "waiting") return;
+    const timer = setTimeout(() => setWaitingStalled(true), WAITING_HINT_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [step]);
   const connectedMachine = connectionProgress.state === "connected" ? connectionProgress.machine : null;
   const connectedRequiresConfirmation = connectionProgress.state === "connected" &&
     connectionProgress.requiresConfirmation;
@@ -200,27 +215,23 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
   const windowsComputerSetupCommand = windowsComputerCommands?.setup ?? null;
   const windowsComputerInstall = windowsComputerCommands?.install ?? null;
 
+  const dialogTitle = step === "type"
+    ? formatMessage({ id: "machine.add.title.add" })
+    : step === "waiting"
+      ? formatMessage({ id: "machine.add.title.connect" })
+      : formatMessage({ id: "machine.add.title.connected" });
+
+  // The shared product dialog shell (Raft DS Dialog): backdrop, Escape and the
+  // close button all run the same handler the hand-rolled header used.
   return (
-    <Modal onClose={canFinishConnectedStep ? handleDone : handleCancel}>
-      <Card className="w-full max-w-lg p-6">
-        {/* Header */}
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-bold uppercase">
-            {step === "type" && formatMessage({ id: "machine.add.title.add" })}
-            {step === "waiting" && formatMessage({ id: "machine.add.title.connect" })}
-            {step === "connected" && formatMessage({ id: "machine.add.title.connected" })}
-          </h2>
-          <CloseButton
-            aria-label={formatMessage({ id: "common.close" })}
-            onClick={canFinishConnectedStep ? handleDone : handleCancel}
-            className="p-1"
-          >
-            <X size={20} />
-          </CloseButton>
-        </div>
+    <DialogCard
+      title={dialogTitle}
+      onClose={canFinishConnectedStep ? handleDone : handleCancel}
+      maxWidthClass="max-w-lg"
+    >
 
         {atLimit && step === "type" && (
-          <Banner intent="warning" className="mb-4 font-bold">
+          <Banner intent="warning" className="mb-4">
             {formatMessage(
               { id: "machine.add.limitReached" },
               { count: machines.length, max: maxMachines, plan: PLAN_CONFIG[plan].displayName },
@@ -231,14 +242,14 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
                 onClose();
                 nav.toSettings("billing");
               }}
-              className="font-bold text-foreground-strong theme-brutal:text-black underline"
+              className={INLINE_TEXT_BUTTON_CLASS_NAME}
             >
               {formatMessage({ id: "machine.add.upgradeForMore" })}
             </button>
           </Banner>
         )}
         {error && !atLimit && (
-          <Banner intent="warning" className="mb-4 font-bold">
+          <Banner intent="warning" className="mb-4">
             {error}
             {isQuotaError(error) && (
               <>
@@ -249,7 +260,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
                     onClose();
                     nav.toSettings("billing");
                   }}
-                  className="font-bold text-foreground-strong theme-brutal:text-black underline"
+                  className={INLINE_TEXT_BUTTON_CLASS_NAME}
                 >
                   {formatMessage({ id: "machine.add.viewPlans" })}
                 </button>
@@ -261,54 +272,56 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
         {/* Step 1: Choose machine type */}
         {step === "type" && (
           <div>
+            {/* Two option cards (control plane, 1.5px field line): the picked one
+                is the selection in content — cyan-soft. The cloud option is the
+                DS disabled surface (sunken, disabled ink), not a dimmed copy. */}
             <div className="mb-4 flex gap-2">
               <button
                 type="button"
                 aria-pressed={machineType === "local"}
                 onClick={() => setMachineType("local")}
-                className={`flex-1 flex items-center gap-2 border p-3 text-left transition-colors rounded-md theme-brutal:rounded-none theme-brutal:border-2 ${
+                className={`flex flex-1 items-center gap-3 rounded-control border-[1.5px] border-line-strong p-3 text-left text-foreground outline-none transition-colors focus-visible:shadow-focus ${
                   machineType === "local"
-                    ? "border-line-muted theme-brutal:border-black bg-primary-soft text-primary-strong font-bold shadow-[0_0_0_1px_var(--primary-edge)] theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm"
-                    : "border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white hover:border-line-strong theme-brutal:hover:border-black"
+                    ? "bg-info-soft"
+                    : "bg-layer-card hover:press-overlay"
                 }`}
               >
-                <Monitor size={18} className={`shrink-0 ${machineType === "local" ? "text-primary-strong theme-brutal:text-black" : "text-foreground-strong theme-brutal:text-black"}`} />
-                <div>
-                  <div className="text-sm font-bold uppercase">
+                <Monitor size={20} className="shrink-0 text-foreground-muted" aria-hidden="true" />
+                <div className="min-w-0">
+                  <div className="text-callout font-semibold">
                     {formatMessage({ id: "machine.add.yourComputer" })}
                   </div>
-                  <div className={`text-xs font-normal normal-case ${machineType === "local" ? "text-primary-strong/70 theme-brutal:text-black/50" : "text-foreground-muted theme-brutal:text-black/50"}`}>
+                  <div className="text-footnote text-foreground-muted">
                     {formatMessage({ id: "machine.add.yourComputerDescription" })}
                   </div>
                 </div>
               </button>
               <div
-                className="flex-1 flex items-center gap-2 border border-dashed border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white p-3 text-left cursor-not-allowed rounded-md theme-brutal:rounded-none"
+                className="flex flex-1 cursor-not-allowed items-center gap-3 rounded-control border border-line-hairline bg-fill-muted p-3 text-left text-foreground-disabled"
               >
-                <Cloud size={18} className="text-foreground-muted theme-brutal:text-black/25 shrink-0" />
-                <div>
-                  <div className="text-sm font-bold uppercase text-foreground-muted theme-brutal:text-black/30">{formatMessage({ id: "machine.add.cloudComputer" })}</div>
-                  <div className="text-xs text-foreground-muted theme-brutal:text-black/25 font-normal normal-case">{formatMessage({ id: "machine.add.comingSoon" })}</div>
+                <Cloud size={20} className="shrink-0" aria-hidden="true" />
+                <div className="min-w-0">
+                  <div className="text-callout font-semibold">{formatMessage({ id: "machine.add.cloudComputer" })}</div>
+                  <div className="text-footnote">{formatMessage({ id: "machine.add.comingSoon" })}</div>
                 </div>
               </div>
             </div>
 
-            <div className="flex justify-end gap-3">
+            <div className="flex justify-end gap-2">
               <Button
-                size="md"
-                variant="outline"
+                size="lg"
+                variant="ghost"
                 type="button"
                 onClick={handleCancel}
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
               <Button
-                size="md"
+                size="lg"
                 variant="accent"
                 type="button"
                 onClick={handleSelectType}
                 disabled={registering || atLimit}
-                className="disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {registering
                   ? formatMessage({ id: "machine.add.settingUp" })
@@ -337,29 +350,34 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
               // rui Banner only lays out a leading indicator that is an <svg> or a
               // `data-slot="status"` element (its own Status). The old custom
               // StatusDot was a plain <span>, so the grid put the text in row 1 and
-              // the dot underneath it (task #665).
-              icon={<Status variant="warning" pulse />}
+              // the dot underneath it (task #665). Raft DS: status lights never
+              // blink — the not-yet-connected computer is the static offline pixel.
+              icon={<Status variant="default" />}
             >
-              <span className="font-bold text-foreground-strong theme-brutal:text-black">
+              <span className="font-bold text-foreground">
                 {formatMessage({ id: "machine.add.waitingForConnect" })}
               </span>
             </Banner>
+            {step === "waiting" && waitingStalled && (
+              <p className="-mt-2 mb-4 text-footnote text-foreground-muted" data-testid="add-machine-still-waiting">
+                {formatMessage({ id: "machine.add.stillWaitingHint" })}
+              </p>
+            )}
 
-            <div className="flex justify-end gap-3">
+            <div className="flex justify-end gap-2">
               <Button
-                size="md"
-                variant="outline"
+                size="lg"
+                variant="ghost"
                 type="button"
                 onClick={handleCancel}
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
               <Button
-                size="md"
-                variant="success"
+                size="lg"
+                variant="accent"
                 type="button"
                 disabled
-                className="disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {formatMessage({ id: "machine.add.done" })}
               </Button>
@@ -370,19 +388,21 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
         {/* Step 3: Connected — name the machine */}
         {step === "connected" && (
           <div>
-            <div className="mb-4 flex items-center gap-3 rounded-md border border-line-muted bg-success-soft p-4 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black">
-              <CheckCircle size={24} className="text-foreground-strong theme-brutal:text-black shrink-0" />
-              <div>
-                <div className="font-bold text-sm text-foreground-strong theme-brutal:text-black">
-                  {formatMessage({ id: "machine.add.connectedSuccessfully" })}
-                </div>
-                {pendingMachine?.hostname && (
-                  <div className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono mt-0.5">
-                    {pendingMachine.hostname} — {pendingMachine.os || formatMessage({ id: "machine.add.unknownOs" })}
-                  </div>
-                )}
-              </div>
-            </div>
+            {/* Done: the Raft DS success Banner, part of this step rather than
+                news, so it does not announce itself. */}
+            <Banner
+              intent="success"
+              live={false}
+              className="mb-4"
+              icon={<CheckCircle size={20} aria-hidden="true" />}
+              title={formatMessage({ id: "machine.add.connectedSuccessfully" })}
+            >
+              {pendingMachine?.hostname ? (
+                <span className="font-mono text-mono-meta">
+                  {pendingMachine.hostname} — {pendingMachine.os || formatMessage({ id: "machine.add.unknownOs" })}
+                </span>
+              ) : null}
+            </Banner>
 
             <FormField
               label={formatMessage({ id: "machine.add.computerName" })}
@@ -393,14 +413,14 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
                 type="text"
                 value={name}
                 onChange={handleNameChange}
-                className="w-full text-sm"
+                className="w-full"
                 placeholder={pendingMachine?.hostname || formatMessage({ id: "machine.add.computerNamePlaceholder" })}
                 autoFocus
               />
             </FormField>
 
             {needsComputerMatchConfirmation && (
-              <label className="mb-4 flex items-start gap-2 border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white p-3 text-sm font-bold">
+              <label className="mb-4 flex items-start gap-3 rounded-control border-[1.5px] border-line-strong bg-layer-card p-3 text-callout font-semibold text-foreground">
                 <Checkbox
                   checked={confirmedComputerMatch}
                   onCheckedChange={setConfirmedComputerMatch}
@@ -418,12 +438,11 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
 
             <div className="flex justify-end">
               <Button
-                size="md"
-                variant="success"
+                size="lg"
+                variant="accent"
                 type="button"
                 onClick={handleDone}
                 disabled={saving || (needsComputerMatchConfirmation && !confirmedComputerMatch)}
-                className="disabled:opacity-50"
               >
                 {saving
                   ? formatMessage({ id: "machine.add.saving" })
@@ -432,7 +451,6 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         )}
-      </Card>
-    </Modal>
+    </DialogCard>
   );
 }

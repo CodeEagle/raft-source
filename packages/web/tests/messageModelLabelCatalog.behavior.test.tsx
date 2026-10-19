@@ -122,3 +122,29 @@ test("an agent row picks up the shared catalog name arriving after first paint",
   );
   assert.equal(view.queryByText("GPT-6-Astra"), null, "the fallback name is replaced");
 });
+
+test("a hosted agent's row names the hosting, not the External agent placeholder", async () => {
+  seedStores();
+  useAgentStore.setState({
+    agents: [{
+      id: AGENT_ID,
+      name: "cindy",
+      displayName: "Cindy",
+      runtime: "external",
+      model: "external",
+      machineId: null,
+      type: "agent",
+      hostedRuntime: { provider: "antiproton", state: "active" },
+    }],
+    agentActivities: {},
+  } as never);
+  const view = render(
+    <TestIntlProvider>
+      <MemoryRouter>
+        <MessageItem message={agentMessage()} mentionMap={{}} channels={[]} parentChannelId={CHANNEL_ID} />
+      </MemoryRouter>
+    </TestIntlProvider>,
+  );
+  await waitFor(() => assert.ok(view.queryByText("Cloud agent · Free for a limited time")));
+  assert.equal(view.queryByText("External agent"), null);
+});

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
-import { asServerId } from "@botiverse/raft-shared";
+import { asServerId, EXTERNAL_AGENT_RUNTIME_ID } from "@botiverse/raft-shared";
 import { getDb } from "../db/index";
 import {
   agentMigrationReceiptChannels,
@@ -850,6 +850,21 @@ test("outbox skips rows whose computer is offline without spending attempts", as
   assert.equal(deliveries, 1);
 });
 
+test("outbox delivers to an agent that moved to the cloud without a computer or queue receipt", async ({ db }) => {
+  const { fixture, row } = await seedPendingCompletedReceipt();
+  await db.update(agents).set({ machineId: null, runtime: EXTERNAL_AGENT_RUNTIME_ID }).where(eq(agents.id, fixture.agent.id));
+  const statusChecks: string[] = [];
+  const orchestrator = fakeOrchestrator(async () => ({ status: "dropped", reason: "cross_replica_receipt_unavailable" }), (machineId) => {
+    statusChecks.push(machineId);
+    return "offline";
+  });
+  const result = await drainAgentMigrationReceiptOutbox({ io: fakeIo(), orchestrator, now: new Date(row.updatedAt.getTime() + 1_000) });
+  assert.equal(result.attempted, 1);
+  assert.equal(result.sent, 1);
+  assert.deepEqual(statusChecks, [], "a cloud agent has no computer to check");
+  assert.equal((await outboxRow(row.id)).status, "sent");
+});
+
 test("outbox backs off exponentially, parks after the cap with one report, and revives after the computer returns", async ({ db }) => {
   const { row } = await seedPendingCompletedReceipt();
   let online = true;
@@ -1129,13 +1144,14 @@ test("failed receipt states the measured workspace size for size-limit failures 
     detail: "MIGRATION_OBJECT_STORE_ENTRY_COUNT_LIMIT_EXCEEDED:entryCount=1060088:maxEntries=250000:topPathCounts=worktrees%2F,565351;repos%2F,293174;bad%0A,1",
   });
   assert.match(entries, /The workspace has 1060088 files and folders; the limit is 250000\. Largest: worktrees\/ \(565351\), repos\/ \(293174\)\./);
-  assert.match(entries, /Paths listed in \.raftmigrateignore are not moved\./);
+  assert.match(entries, /To move it, delete what you no longer need or list it in \.raftmigrateignore \(listed paths are not moved\), then ask for the migration to be retried\./);
 
   const bytes = formatAgentMigrationTerminalReceipt({
     ...base,
     detail: "MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE:actualBytes=12884901888:maxBytes=10737418240:topEntries=data%2F,8589934592",
   });
-  assert.match(bytes, /The workspace is 12 GB; the limit is 10 GB\. Largest: data\/ \(8 GB\)\./);
+  assert.match(bytes, /The workspace is over the 10 GB limit\. Largest, before compression: data\/ \(8 GB\)\./);
+  assert.match(bytes, /list it in \.raftmigrateignore/);
 
   for (const detail of [null, "MIGRATION_TRANSPORT_LOST", "MIGRATION_OBJECT_STORE_ENTRY_COUNT_LIMIT_EXCEEDED:entryCount=x"]) {
     assert.doesNotMatch(formatAgentMigrationTerminalReceipt({ ...base, detail }), /raftmigrateignore/);

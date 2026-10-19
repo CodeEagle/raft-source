@@ -84,6 +84,7 @@ test("real Redis: every episode field written through the store reads back equal
     retryAfterMs: 1_700_000_004_000,
     startFailureOwnedLaunchId: "launch-owned",
     blockedByLaunchId: "launch-blocker",
+    actionRequiredNotifiedFingerprint: "0123456789abcdef",
   };
   assert.equal(await compareAndSetWakeCrashLoopState(agentId, 0, state), true);
   assert.deepEqual(await getWakeCrashLoopState(agentId), { state, version: 1 });

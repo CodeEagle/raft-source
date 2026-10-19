@@ -1,8 +1,8 @@
 import type { ReactElement } from "react";
 import { useCallback, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useIntl } from "react-intl";
-import { ChevronRight, CircleStop, Search, Settings } from "lucide-react";
-import { Badge, TooltipProvider, Button, Skeleton } from "raft-ui";
+import { ChevronRight, CircleStop, Plus, Search, Settings } from "lucide-react";
+import { Badge, TooltipProvider, Button, DialogSurface, Skeleton } from "@botiverse/raft-ui";
 import EditChannelDialog from "./EditChannelDialog";
 import { ChannelPreferencesSection } from "./ChannelPreferencesSection";
 import Modal from "../Modal";
@@ -15,6 +15,7 @@ import { useChannelStore } from "../../store/channelStore";
 import { useServerStore } from "../../store/serverStore";
 import { canUseChannelMemberAction } from "../../utils/channelMemberPermissions";
 import AvatarSlot from "../ui/AvatarSlot";
+import SectionEyebrow from "../ui/SectionEyebrow";
 import {
   OverflowActionRow,
   OverflowMenuTrigger,
@@ -31,9 +32,13 @@ import Tooltip from "../ui/Tooltip";
  *  into the add flow (one hop fewer). Artea 2026-08-10: the preview may
  *  wrap to at most three rows; overflow and add always keep their slots. */
 const STRIP_MAX_ROWS = 3;
-const STRIP_TILE_SIZE_PX = 36;
+// DS md identity: 35px (8n + two 1.5px edges).
+const STRIP_TILE_SIZE_PX = 35;
 const STRIP_TILE_GAP_PX = 8;
 const STRIP_FALLBACK_COLUMNS = 7;
+// Every strip tile is a square identity button: sticker radius and the shared
+// keyboard focus ring; the avatar inside draws its own frame.
+const STRIP_TILE_BUTTON_CLASS = "shrink-0 rounded-sticker outline-none focus-visible:shadow-focus";
 const STRIP_PRELOAD_LIMIT = STRIP_MAX_ROWS * STRIP_FALLBACK_COLUMNS;
 export const MEMBERS_STRIP_TOOLTIP_DELAY_MS = 250;
 const NO_CHANNEL_AGENTS: ChannelAgent[] = [];
@@ -138,24 +143,28 @@ function MembersStrip({
     Math.max(0, visibleMemberLimit - humans.length - agents.length),
   );
   const overflow = totalMembers - humans.length - agents.length - externalMembers.length;
+  // Machine text (the remaining count), kept out of JSX as a protocol literal.
+  const overflowLabel = `+${overflow}`;
 
   return (
     <div className="px-4 pb-3 pt-3" data-testid="channel-overflow-members-strip">
+      {/* DS drawer section: a 13/18 700 ink-2 heading; the entry into the
+          full member page is the whole heading row, with its count in ink-3. */}
       <button
         type="button"
         onClick={onOpen}
-        className="flex w-full items-center justify-between gap-2 text-left"
+        className="-mx-2 flex w-[calc(100%+1rem)] items-center justify-between gap-2 rounded-control px-2 py-1 text-left outline-none hover:bg-fill-pressed focus-visible:shadow-focus"
         data-testid="channel-overflow-members-entry"
       >
-        <span
+        <SectionEyebrow
+          tone="muted"
           role="heading"
           aria-level={3}
           data-testid="channel-overflow-members-heading"
-          className="text-base font-bold text-foreground-strong theme-brutal:text-black"
         >
           {formatMessage({ id: "message.chatPanel.overflow.members" })}
-        </span>
-        <span className="inline-flex min-w-0 items-center gap-1 text-xs font-bold text-foreground-muted theme-brutal:text-black">
+        </SectionEyebrow>
+        <span className="inline-flex min-w-0 items-center gap-1 text-caption text-foreground-hint">
           {loading
             ? formatMessage({ id: "message.chatPanel.overflow.membersLoading" })
             : channelExternalMembers.length > 0
@@ -171,7 +180,7 @@ function MembersStrip({
                 { id: "message.chatPanel.overflow.membersSummary" },
                 { humans: channelHumans.length, agents: channelAgents.length },
               )}
-          <ChevronRight size={14} />
+          <ChevronRight size={16} aria-hidden="true" />
         </span>
       </button>
       <TooltipProvider delay={MEMBERS_STRIP_TOOLTIP_DELAY_MS}>
@@ -186,8 +195,8 @@ function MembersStrip({
           {loading && Array.from({ length: 3 }, (_, index) => (
             <Skeleton
               key={index}
-              variant="circle"
-              className="size-9 shrink-0"
+              variant="block"
+              className="size-[35px] shrink-0"
               data-testid="channel-overflow-member-skeleton"
             />
           ))}
@@ -200,7 +209,7 @@ function MembersStrip({
                   onClick={onOpen}
                   aria-label={label}
                   data-kind="human"
-                  className="shrink-0 transition-colors hover:brightness-90"
+                  className={STRIP_TILE_BUTTON_CLASS}
                 >
                   <AvatarSlot
                     context="panel-header"
@@ -221,7 +230,7 @@ function MembersStrip({
                   onClick={onOpen}
                   aria-label={label}
                   data-kind="agent"
-                  className="shrink-0 transition-colors hover:brightness-90"
+                  className={STRIP_TILE_BUTTON_CLASS}
                 >
                   <AvatarSlot
                     context="panel-header"
@@ -250,7 +259,7 @@ function MembersStrip({
                   onClick={onOpen}
                   aria-label={label}
                   data-kind="external"
-                  className="shrink-0 transition-colors hover:brightness-90"
+                  className={STRIP_TILE_BUTTON_CLASS}
                 >
                   <AvatarSlot context="panel-header" type="human" humanAvatarUrl={member.avatarUrl} />
                 </button>
@@ -258,26 +267,30 @@ function MembersStrip({
             );
           })}
           {!loading && overflow > 0 && (
+            /* DS avatar stack overflow (`rf-avatars__more`): a sunken tile
+               with the remaining count in machine type. */
             <button
               type="button"
               onClick={onOpen}
-              className="shrink-0 transition-colors hover:brightness-90"
+              className={`${STRIP_TILE_BUTTON_CLASS} flex h-[35px] min-w-[35px] items-center justify-center bg-fill-muted px-1 font-mono text-mono-meta font-bold text-foreground-muted hover:press-overlay`}
               data-testid="channel-overflow-members-more"
             >
-              <AvatarSlot context="panel-header" type="human">+{overflow}</AvatarSlot>
+              {overflowLabel}
             </button>
           )}
           {onAdd && (
             <Tooltip content={formatMessage({ id: "agent.channelMembers.addMember" })}>
+              {/* DS empty identity (`rf-avatar--empty`): a dashed ink-3 square
+                  with a plus — the place a new member would take. */}
               <button
                 type="button"
                 onClick={onAdd}
                 disabled={loading}
                 aria-label={formatMessage({ id: "agent.channelMembers.addMember" })}
-                className="shrink-0 transition-colors hover:brightness-90 disabled:cursor-wait disabled:opacity-40"
+                className={`${STRIP_TILE_BUTTON_CLASS} flex size-[35px] items-center justify-center border-[1.5px] border-dashed border-foreground-hint text-foreground-hint hover:bg-fill-pressed disabled:cursor-wait disabled:border-line-hairline disabled:text-foreground-disabled`}
                 data-testid="channel-overflow-members-add-tile"
               >
-                <AvatarSlot context="panel-header" type="human" className="border-dashed text-lg">+</AvatarSlot>
+                <Plus size={20} aria-hidden="true" />
               </button>
             </Tooltip>
           )}
@@ -561,13 +574,13 @@ export default function ChannelOverflowMenu({
       <OverflowMenuTrigger
         labelId="message.chatPanel.searchChannel"
         onClick={handleSearch}
-        icon={<Search size={14} />}
+        icon={<Search size={22} />}
         testId="channel-topbar-search"
       />
       <OverflowMenuTrigger
         labelId="message.chatPanel.overflow.open"
         onClick={handleOpen}
-        icon={<Settings size={14} />}
+        icon={<Settings size={22} />}
         testId="channel-overflow-trigger"
       />
       {showMembers && members && (
@@ -593,9 +606,10 @@ export default function ChannelOverflowMenu({
                 : formatMessage({ id: "message.chatPanel.overflow.channelName" }, { name: channelName })}
             </span>
             {channel && (
+              /* Visibility is a fact about the place, not a status: a neutral
+                 machine label (DS `rf-tag`), never a colour. */
               <Badge
-                appearance="soft"
-                variant={isDmChannel ? "muted" : "success"}
+                appearance="outline"
                 className="shrink-0"
                 data-testid="channel-overflow-visibility-badge"
               >
@@ -611,7 +625,7 @@ export default function ChannelOverflowMenu({
           </span>
         )}
         subtitle={settings?.initialDescription ? (
-          <p className="truncate font-mono text-xs text-inherit opacity-85" data-testid="channel-overflow-identity-desc">
+          <p className="truncate text-caption text-foreground-hint" data-testid="channel-overflow-identity-desc">
             {settings.initialDescription}
           </p>
         ) : undefined}
@@ -655,7 +669,7 @@ export default function ChannelOverflowMenu({
                    plain row (reversible — agents can be restarted), NOT
                    a danger-red separate group. */
                 <OverflowActionRow
-                  icon={<CircleStop size={14} />}
+                  icon={<CircleStop size={16} />}
                   label={formatMessage({ id: "message.chatPanel.overflow.stopAgents" })}
                   ariaLabel={formatMessage({ id: "message.chatPanel.stopAllAgents" })}
                   onClick={onStopAllAgents}
@@ -703,38 +717,39 @@ export default function ChannelOverflowMenu({
           onClose={handleUnsavedPromptClose}
           layer={1}
         >
-          <div
-            className="w-full max-w-sm card-brutal p-6"
+          {/* DS Dialog surface (raft-ui's DialogSurface draws the frame), 20
+              padding; title 17/22 700, body 15/20 ink-2; Keep is ghost,
+              Discard (loses the draft, reversible) orange, Save pink. */}
+          <DialogSurface
+            className="w-full max-w-[400px] p-5"
             role="dialog"
             aria-modal="true"
             data-testid="channel-overflow-unsaved-prompt"
           >
-            <h2 className="mb-4 text-lg font-bold">
+            <h2 className="text-headline">
               {formatMessage({ id: "message.chatPanel.overflow.unsavedTitle" })}
             </h2>
-            <p className="mb-5 text-sm text-black/70">
+            <p className="mt-1.5 text-subhead text-foreground-muted">
               {formatMessage({
                 id: unsavedCanSave
                   ? "message.chatPanel.overflow.unsavedMessage"
                   : "message.chatPanel.overflow.unsavedInvitationMessage",
               })}
             </p>
-            <div className="flex justify-end gap-3">
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
               <Button
                 onClick={handleKeepEditing}
                 disabled={unsavedBusy}
-                size="sm"
-                variant="outline"
-                className="disabled:opacity-50"
+                size="lg"
+                variant="ghost"
               >
                 {formatMessage({ id: "message.chatPanel.overflow.keepEditing" })}
               </Button>
               <Button
                 onClick={handleDiscardAndClose}
                 disabled={unsavedBusy}
-                size="sm"
+                size="lg"
                 variant="warning"
-                className="disabled:opacity-50"
                 data-testid="channel-overflow-unsaved-discard"
               >
                 {formatMessage({ id: "message.chatPanel.overflow.discardChanges" })}
@@ -743,9 +758,8 @@ export default function ChannelOverflowMenu({
                 <Button
                   onClick={handleSaveAndClose}
                   disabled={unsavedBusy}
-                  size="sm"
+                  size="lg"
                   variant="accent"
-                  className="disabled:opacity-50"
                   data-testid="channel-overflow-unsaved-save"
                 >
                   {unsavedBusy
@@ -754,7 +768,7 @@ export default function ChannelOverflowMenu({
                 </Button>
               )}
             </div>
-          </div>
+          </DialogSurface>
         </Modal>
       )}
     </>

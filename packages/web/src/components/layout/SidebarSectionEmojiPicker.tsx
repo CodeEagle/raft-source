@@ -1,4 +1,4 @@
-import { Button, Popover, PopoverTrigger, PopoverContent } from "raft-ui";
+import { Button, Popover, PopoverTrigger, PopoverContent } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useOptionalAppTheme } from "../../hooks/useAppTheme";
 import { useCallback, useEffect, useState } from "react";
@@ -50,13 +50,13 @@ export default function SidebarSectionEmojiPicker({
       <Tooltip content={formatMessage({ id: value ? "layout.sidebar.changeEmoji" : "layout.sidebar.chooseEmoji" })}>
         <PopoverTrigger
           render={(
-            <Button type="button" variant="ghost" size="icon-md"
+            <Button type="button" variant="ghost" size="icon-sm"
               aria-label={value
                 ? formatMessage({ id: "layout.sidebar.changeSectionEmojiAria" }, { emoji: value })
                 : formatMessage({ id: "layout.sidebar.chooseSectionEmoji" })}
               className="text-xl"
             >
-              {value || <SmilePlus size={18} aria-hidden />}
+              {value || <SmilePlus size={18} aria-hidden className="text-foreground-muted" />}
             </Button>
           )}
         />
@@ -75,7 +75,7 @@ export default function SidebarSectionEmojiPicker({
                 onChange("");
                 setOpen(false);
               }}
-              className="flex h-9 w-full items-center justify-center gap-2 border-b border-line-muted bg-layer-panel px-3 text-xs font-bold hover:bg-fill-muted"
+              className="flex h-9 w-full items-center justify-center gap-2 border-b border-line-hairline bg-layer-popover px-3 font-sans text-callout font-medium text-foreground outline-none transition-colors hover:bg-brand-soft focus-visible:bg-brand-soft"
             >
               <X size={14} aria-hidden />
               {formatMessage({ id: "layout.sidebar.noEmoji" })}
@@ -91,7 +91,7 @@ export default function SidebarSectionEmojiPicker({
               onEmojiClick={handleEmojiClick}
             />
           ) : (
-            <div role="status" className="flex h-24 w-[min(340px,calc(100vw-48px))] items-center justify-center text-sm text-foreground-muted">
+            <div role="status" className="flex h-24 w-[min(340px,calc(100vw-48px))] items-center justify-center font-sans text-callout text-foreground-hint">
               {formatMessage({ id: "layout.sidebar.loadingEmoji" })}
             </div>
           )}

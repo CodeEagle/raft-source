@@ -11,7 +11,7 @@ import { risingWaveUnavailableResponsesTotal } from "../metrics";
 /** Seconds a client should wait before retrying a RisingWave-overloaded read. */
 export const RISINGWAVE_OVERLOAD_RETRY_AFTER_SECONDS = 2;
 
-function findRisingWaveOverload(err: unknown): RisingWaveOverloadedError | null {
+export function findRisingWaveOverload(err: unknown): RisingWaveOverloadedError | null {
   for (let current = err, depth = 0; current && depth < 5; depth += 1) {
     if (current instanceof RisingWaveOverloadedError) return current;
     current = (current as { cause?: unknown }).cause;

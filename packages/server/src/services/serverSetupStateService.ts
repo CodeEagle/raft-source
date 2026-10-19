@@ -1,10 +1,11 @@
-import { currentDate, type RuntimeSelectionOption, type ServerRole } from "@botiverse/raft-shared";
+import { currentDate, isExternalAgentRuntime, type RuntimeSelectionOption, type ServerRole } from "@botiverse/raft-shared";
 import { and, eq, isNull } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../db/index";
 import { agents, computers, machines, serverAgentMembers, serverMembers, servers, users } from "../db/schema";
 import { lockActorMembershipRow, ServerMembershipRevokedError } from "../lib/actorMembershipFence";
 import { getActorServerRoleInServer } from "../lib/actorPermissions";
 import type { AgentOrchestrator } from "./agentOrchestrator";
+import { resolveHostedCindySetupState, type HostedCindySetupState } from "./hostedCindyService";
 import { hasOfficialOnboardingAgentIdentity } from "./officialOnboardingAgentIdentity";
 import { withAgentCreateLock } from "./planService";
 import {
@@ -125,6 +126,12 @@ export interface ServerSetupLiveFacts {
   runtimeOptions?: RuntimeSelectionOption[];
   officialOnboardingAgent: OfficialOnboardingAgentState;
   /**
+   * The onboarding agent is a hosted (Antiproton) Cindy under `antiproton_cindy`:
+   * `usable` skips "connect a computer" (she needs none); `failed` sends setup down
+   * the computer path, where Create Cindy converts her in place. Absent otherwise.
+   */
+  hostedOnboardingAgent?: HostedCindySetupState | null;
+  /**
    * The two steps that follow Create Cindy. They are derived from persisted state,
    * not held in the browser, so closing the tab mid-flow and coming back lands you
    * on the same screen instead of dumping you into the app with an unbriefed agent.
@@ -163,6 +170,7 @@ export type ServerSetupGateReason =
   | "official_onboarding_agent_unusable"
   | "official_onboarding_agent_status_unknown"
   | "completion_pending"
+  | "hosted_onboarding_agent_ready"
   | "setup_complete"
   | "resolver_error"
   | null;
@@ -424,6 +432,18 @@ export function projectServerSetup(
     // uniform and callers never have to null-check it.
     postSetup,
   };
+
+  // A hosted Cindy needs no computer: setup is ready to complete as soon as she is
+  // usable, and connecting a computer is something she helps with afterwards.
+  if (live.hostedOnboardingAgent === "usable" && live.officialOnboardingAgent === "usable") {
+    return {
+      ...base,
+      surface: "create_agent",
+      currentStep: "create_agent",
+      sideEffectState: { transitions: "enabled", completion: "enabled" },
+      gateReason: "hosted_onboarding_agent_ready",
+    };
+  }
 
   if (live.computer !== "online") {
     return {
@@ -724,13 +744,14 @@ export class DrizzleServerSetupStateRepository implements ServerSetupStateReposi
   }
 }
 
-async function resolveOfficialOnboardingAgentState(serverId: string): Promise<OfficialOnboardingAgentState> {
+async function resolveOnboardingAgentFacts(serverId: string): Promise<Pick<ServerSetupLiveFacts, "officialOnboardingAgent" | "hostedOnboardingAgent">> {
   const [server] = await getDb()
     .select({ onboardingAgentId: servers.onboardingAgentId })
     .from(servers)
     .where(and(eq(servers.id, serverId), isNull(servers.deletedAt)));
 
   let officialOnboardingAgent: OfficialOnboardingAgentState = "unknown";
+  let hostedOnboardingAgent: HostedCindySetupState | null = null;
   if (server) {
     if (!server.onboardingAgentId) {
       officialOnboardingAgent = "missing";
@@ -759,8 +780,12 @@ async function resolveOfficialOnboardingAgentState(serverId: string): Promise<Of
           isNull(agents.deletedAt),
         ));
 
+      // A hosted Cindy has no machine; she is usable by her hosted state instead.
+      hostedOnboardingAgent = agent && !agent.machineId && isExternalAgentRuntime(agent.runtime)
+        ? await resolveHostedCindySetupState({ serverId, agentId: server.onboardingAgentId })
+        : null;
       officialOnboardingAgent = agent
-        && agent.machineId
+        && (agent.machineId || hostedOnboardingAgent === "usable")
         && agent.runtime.trim()
         && hasOfficialOnboardingAgentIdentity(agent, agent.serverRole)
         ? "usable"
@@ -768,7 +793,7 @@ async function resolveOfficialOnboardingAgentState(serverId: string): Promise<Of
     }
   }
 
-  return officialOnboardingAgent;
+  return { officialOnboardingAgent, hostedOnboardingAgent };
 }
 
 /**
@@ -834,7 +859,7 @@ async function resolvePersistedCompletionFacts(serverId: string, actorUserId: st
     everHadAgent: true,
     runtime: "unknown",
     runtimeOptions: [],
-    officialOnboardingAgent: await resolveOfficialOnboardingAgentState(serverId),
+    ...(await resolveOnboardingAgentFacts(serverId)),
   };
 }
 
@@ -961,7 +986,7 @@ export async function resolveServerSetupLiveFacts(
     everHadAgent: !!server?.onboardingAgentId,
     runtime,
     runtimeOptions,
-    officialOnboardingAgent: await resolveOfficialOnboardingAgentState(serverId),
+    ...(await resolveOnboardingAgentFacts(serverId)),
   };
 }
 

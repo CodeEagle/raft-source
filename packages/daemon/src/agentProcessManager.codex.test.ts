@@ -39,6 +39,7 @@ import {
 } from "./launchPhaseTransition";
 import type { RuntimeDriver, RuntimeSendResult, RuntimeSession, SpawnContext, SpawnResult, ParsedEvent } from "./drivers/index";
 import { buildCliTransportSystemPrompt } from "./drivers/cliTransport";
+import { readContextGeneration } from "./contextGeneration";
 import {
   createPiSdkEventMappingState,
   mapPiSdkEventToParsedEvents,
@@ -536,6 +537,37 @@ test("tracked mention accepted while busy drains exactly once at turn end", asyn
   });
 });
 
+test("turn span records the trigger kind, its age, and the local wait for a mention held while busy", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }), undefined, undefined, undefined, "launch-1");
+    driver.parsedLines.set("busy-turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("busy-turn-end\n"));
+    await flush();
+
+    const createdAt = Date.now() - 60_000;
+    const plain = makeMessage("older plain message", { message_id: "trigger-plain", timestamp: new Date(createdAt).toISOString() });
+    const mention = makeMessage("newer mention", { message_id: "trigger-mention", mentioned: true, timestamp: new Date(createdAt + 30_000).toISOString() });
+    assert.equal(manager.deliverMessage("agent-1", plain), true);
+    await flush();
+    driver.processes[0].stdout.emit("data", Buffer.from("busy-turn-end\n"));
+    await flush();
+    const idleTurn = traceRows(sink).find((span) => span.name === "daemon.runtime.turn" && span.attrs?.trigger_kind !== "other");
+    assert.equal(idleTurn?.attrs?.trigger_kind, "message");
+    assert.ok((idleTurn?.attrs?.trigger_age_ms as number) >= 60_000);
+    assert.equal(typeof idleTurn?.attrs?.local_wait_ms, "number");
+    assert.ok((idleTurn?.attrs?.local_wait_ms as number) < 60_000, "local wait is measured from receipt, not creation");
+
+    assert.equal(manager.deliverMessage("agent-1", mention), true);
+    driver.processes[0].stdout.emit("data", Buffer.from("busy-turn-end\n"));
+    await flush();
+    const turns = traceRows(sink).filter((span) => span.name === "daemon.runtime.turn");
+    const mentionTurn = turns.find((span) => span.attrs?.trigger_kind === "mention");
+    assert.ok(mentionTurn, `a turn started by the mention, got ${JSON.stringify(turns.map((t) => t.attrs?.trigger_kind))}`);
+    assert.ok((mentionTurn.attrs?.trigger_age_ms as number) >= 30_000);
+  }, { tracer });
+});
+
 test("duplicate tracked push coalesces one pending row and never double-delivers", async () => {
   await withManager(async ({ driver, manager }) => {
     await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }), undefined, undefined, undefined, "launch-1");
@@ -690,8 +722,9 @@ async function readTranscriptFixture(name: string): Promise<string> {
 }
 
 async function waitFor(condition: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 1_000;
-  while (Date.now() < deadline) {
+  // Stale-runtime tests freeze Date.now; the test deadline must still advance.
+  const deadline = performance.now() + 1_000;
+  while (performance.now() < deadline) {
     if (condition()) return;
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
@@ -1153,6 +1186,46 @@ test("busy App Inbox write failures trace the first failure and the final outcom
   }, { driver, tracer, appInboxForAgent: () => store });
 });
 
+test("a busy wait ends with its item: an item the agent acknowledged itself is not charged to the next notice", async () => {
+  // Production (DailyReporter, Devin, 2026-10-12/13): a reminder hit a busy
+  // turn, the agent read and acknowledged it inside that turn, and the next
+  // unrelated reminder hours later was traced with the old wait start and
+  // attempt count (busy_wait_ms of 14-17 hours).
+  const store = createAgentAppInboxStore({ registry: REMINDER_AGENT_INBOX_REGISTRY });
+  const driver = new FakeCodexDriver({
+    supportsStdinNotification: true,
+    busyDeliveryMode: "direct",
+    failEncodeModes: ["busy"],
+  });
+  const { sink, tracer } = makeDeterministicTracer();
+
+  await withManager(async ({ manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    driver.hasLiveTurn = true;
+
+    const first = mintReminderAppItem(store, "1");
+    assert.equal(await manager.notifyAgentAppInbox("agent-1", first), false);
+    assert.equal(await manager.notifyAgentAppInbox("agent-1", first), false);
+    // The agent reads its Inbox during the turn and acknowledges the item.
+    assert.equal(store.ack(first.itemId), true);
+
+    driver.hasLiveTurn = false;
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.processes[0]!.stdout.emit("data", Buffer.from("turn-end\n"));
+    await flush();
+
+    const second = mintReminderAppItem(store, "2");
+    assert.equal(await manager.notifyAgentAppInbox("agent-1", second), true);
+    const written = traceRows(sink).filter(
+      (span) => span.name === "daemon.agent.app_inbox_notice" && span.attrs?.item_id === second.itemId,
+    );
+    assert.deepEqual(written.map((span) => span.attrs?.outcome), ["written"]);
+    assert.equal(written[0]?.attrs?.busy_retry_attempts, undefined, "no wait to report");
+    assert.equal(written[0]?.attrs?.busy_wait_ms, undefined, "no wait to report");
+  }, { driver, tracer, appInboxForAgent: () => store });
+});
+
 test("an idle App Inbox write with no observed turn start returns the agent to idle", async () => {
   const realSetTimeout = globalThis.setTimeout;
   const watches: Array<() => void> = [];
@@ -1190,6 +1263,10 @@ test("an idle App Inbox write with no observed turn start returns the agent to i
         traceRows(sink).some((span) => span.name === "daemon.runtime.turn" && span.attrs?.reason === "app-inbox-notice"),
         "a notice-started turn must have a turn span",
       );
+      const noticeTurn = traceRows(sink).find((span) => span.name === "daemon.runtime.turn" && span.attrs?.reason === "app-inbox-notice");
+      assert.equal(noticeTurn?.attrs?.trigger_kind, "reminder");
+      assert.ok((noticeTurn?.attrs?.trigger_age_ms as number) >= 0);
+      assert.equal(noticeTurn?.attrs?.local_wait_ms, noticeTurn?.attrs?.trigger_age_ms);
 
       // Idle again: the next notice is written the idle way, not refused as busy.
       const second = mintReminderAppItem(store, "2", "22222222-2222-4222-8222-222222222222");
@@ -1397,6 +1474,7 @@ async function withManager(fn: (ctx: {
   driver?: FakeCodexDriver;
   defaultAgentEnvVarsProvider?: (config: Pick<AgentConfig, "runtime" | "model" | "envVars">) => Promise<Record<string, string> | null> | Record<string, string> | null;
   tracer?: Tracer;
+  cancelledStartCleanup?: { sigtermGraceMs?: number; verifyMs?: number };
   daemonVersion?: string | null;
   daemonInstanceId?: string | null;
   computerVersion?: string | null;
@@ -1442,6 +1520,7 @@ async function withManager(fn: (ctx: {
       driverResolver: () => driver,
       defaultAgentEnvVarsProvider: options.defaultAgentEnvVarsProvider,
       tracer: options.tracer,
+      cancelledStartCleanup: options.cancelledStartCleanup,
       daemonVersion: options.daemonVersion,
       daemonInstanceId: options.daemonInstanceId,
       computerVersion: options.computerVersion,
@@ -5324,8 +5403,8 @@ test("runtime telemetry records Codex missing-rollout recovery signal", async ()
       source: "codex_resume_missing_rollout",
       resumeErrorClass: "missing_rollout",
       recoveryAction: "fallback_fresh_thread",
-      message: "Codex could not resume its previous thread; Slock started a fresh Codex thread.",
-      details: "Use Slock conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
+      message: "Codex could not resume its previous thread; Raft started a fresh Codex thread.",
+      details: "Use Raft conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
       requestedSessionId: "missing-thread-1",
     }]);
     driver.processes[0].stdout.emit("data", Buffer.from("recovery\n"));
@@ -5345,7 +5424,7 @@ test("runtime telemetry records Codex missing-rollout recovery signal", async ()
     assert.deepEqual(recoveryActivity.entries, [{
       kind: "system",
       title: "Codex resume recovery",
-      text: "Codex could not resume its previous thread; Slock started a fresh Codex thread.\nUse Slock conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
+      text: "Codex could not resume its previous thread; Raft started a fresh Codex thread.\nUse Raft conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
     }]);
 
     const recoverySpan = traceRows(sink, traceId)
@@ -5405,8 +5484,8 @@ test("runtime telemetry records Codex active-writer recovery signal", async () =
       source: "codex_resume_thread_writer_busy",
       resumeErrorClass: "thread_writer_busy",
       recoveryAction: "fallback_fresh_thread",
-      message: "Codex could not resume its previous thread because another writer is active; Slock started a fresh Codex thread.",
-      details: "Use Slock conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
+      message: "Codex could not resume its previous thread because another writer is active; Raft started a fresh Codex thread.",
+      details: "Use Raft conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
       requestedSessionId: "busy-thread-1",
     }]);
     driver.processes[0].stdout.emit("data", Buffer.from("recovery\n"));
@@ -5426,7 +5505,7 @@ test("runtime telemetry records Codex active-writer recovery signal", async () =
     assert.deepEqual(recoveryActivity.entries, [{
       kind: "system",
       title: "Codex resume recovery",
-      text: "Codex could not resume its previous thread because another writer is active; Slock started a fresh Codex thread.\nUse Slock conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
+      text: "Codex could not resume its previous thread because another writer is active; Raft started a fresh Codex thread.\nUse Raft conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.",
     }]);
 
     const recoverySpan = traceRows(sink, traceId)
@@ -5724,6 +5803,41 @@ test("runtime tracing records normal tool continuation through turn completion",
     const span = traceRows(sink, traceId).find((candidate) => candidate.name === "daemon.runtime.turn");
     assert.equal(span?.status, "ok");
     assert.equal(span?.attrs?.outcome, "turn-completed");
+  }, { tracer });
+});
+
+test("the turn span carries the turn's tokens and the sends the Raft proxy saw", async () => {
+  const { sink, tracer, traceId } = makeDeterministicTracer();
+
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    const proxy = (manager as any).createAgentProxyInboxCoordinator("agent-1");
+
+    driver.parsedLines.set("usage", [{
+      kind: "telemetry",
+      name: "token_usage",
+      source: "codex_thread_token_usage_updated",
+      usageKind: "cumulative_session",
+      attrs: { inputTokens: 13_000, cachedInputTokens: 10_500, outputTokens: 600, lastInputTokens: 3_000, lastCachedInputTokens: 2_500, lastOutputTokens: 100 },
+    }]);
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("usage\n"));
+    await flush();
+    // Neither send is a recognizable tool call, as with cursor's tool events.
+    proxy.recordSendOutcome({ state: "sent", messageId: "reply" });
+    proxy.recordSendOutcome({ state: "held" });
+    driver.processes[0].stdout.emit("data", Buffer.from("turn-end\n"));
+    await flush();
+
+    const span = traceRows(sink, traceId).find((candidate) => candidate.name === "daemon.runtime.turn");
+    assert.equal(span?.attrs?.outcome, "turn-completed");
+    assert.equal(span?.attrs?.runtime_raft_message_send_attempts_count, 0);
+    assert.equal(span?.attrs?.runtime_raft_messages_sent_count, 1);
+    assert.equal(span?.attrs?.runtime_raft_message_sends_held_count, 1);
+    assert.equal(span?.attrs?.input_tokens, 500);
+    assert.equal(span?.attrs?.cache_read_tokens, 2_500);
+    assert.equal(span?.attrs?.output_tokens, 100);
+    assert.equal(Object.hasOwn(span?.attrs ?? {}, "cache_write_tokens"), false, "codex reports no cache writes");
   }, { tracer });
 });
 
@@ -6085,7 +6199,7 @@ test("non-stdin stale busy runtimes terminate and restart for queued messages", 
   }
 });
 
-test("non-stdin stale recovery traces and force-kills when SIGTERM does not exit", async () => {
+test.each([0, 100])("non-stdin stale recovery traces and force-kills when SIGTERM does not exit (%i ms restart delay)", async (restartDelayMs) => {
   // A restart strips the runner credential and mints a new one; answer the
   // mint here so the restart under test does not reach the network.
   onTestFinished(installManagedRunnerCredentialFetch());
@@ -6114,9 +6228,7 @@ test("non-stdin stale recovery traces and force-kills when SIGTERM does not exit
       const ap = (manager as any).agents.get("agent-1");
       ap.runtimeProgress.markStale(now - 60_000);
       manager.deliverMessage("agent-1", makeMessage("follow-up after unresponsive SIGTERM"));
-      for (let i = 0; i < 10 && driver.spawnCalls.length < 2; i++) {
-        await flush();
-      }
+      await waitFor(() => driver.spawnCalls.length >= 2, "non-stdin restart after SIGTERM timeout");
 
       assert.deepEqual(driver.processes[0].killedSignals, ["SIGTERM", "SIGKILL"]);
       assert.equal(driver.spawnCalls.length, 2);
@@ -6145,7 +6257,17 @@ test("non-stdin stale recovery traces and force-kills when SIGTERM does not exit
 
       driver.processes[1].exit(0);
       driver.processes[1].close(0);
-    }, { driver, tracer });
+    }, {
+      driver,
+      tracer,
+      defaultAgentEnvVarsProvider: async () => {
+        // Exercise asynchronous restart setup after the old child has exited.
+        if (driver.spawnCalls.length === 1 && restartDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, restartDelayMs));
+        }
+        return null;
+      },
+    });
   } finally {
     (Date as any).now = realDateNow;
     if (previousTimeout === undefined) {
@@ -10947,6 +11069,65 @@ test("visible delivery consume records id-only messages as model-seen without tr
   });
 });
 
+// glimpse G0: under passive AX the daemon scopes freshness evidence exactly like
+// the CLI, by the context id it plans before the spawn and replaces at every
+// compaction. The thread package rendered into the start input is evidence in
+// that context (it is booked before the spawn publishes the id); after a
+// compaction it no longer vouches for a send or a claim, though delivery
+// suppression still knows it was delivered. Without passive AX nothing is
+// context-scoped, CLI or daemon.
+for (const passiveAx of [true, false]) {
+  test(`freshness evidence from the start input ${passiveAx ? "resets" : "is kept"} at compaction (passive AX ${passiveAx ? "on" : "off"})`, async () => {
+    const driver = new FakeCodexDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct" });
+    await withManager(async ({ manager }) => {
+      const thread = "#general:abcd1234";
+      const wakeMessage = makeMessage("reply in the thread", {
+        message_id: "trigger-30",
+        seq: 30,
+        channel_type: "thread",
+        channel_name: "abcd1234",
+        parent_channel_name: "general",
+        parent_channel_type: "channel",
+        thread_join_context: {
+          reason: "mentioned",
+          parent_target: "#general",
+          thread_target: thread,
+          suggested_read_history_target: thread,
+          parent_message: { message_id: "parent-10", sender_name: "alice", sender_type: "human", content: "parent", timestamp: "2026-05-13T08:00:00.000Z", seq: 10 },
+          recent_messages: [{ message_id: "recent-20", sender_name: "bob", sender_type: "agent", content: "recent", timestamp: "2026-05-13T08:01:00.000Z", seq: 20 }],
+          history_truncated: false,
+        },
+      });
+      await manager.startAgent("agent-1", makeConfig({ runtime: "codex", sessionId: "session-1", passiveAx }), wakeMessage);
+      const ap = (manager as any).agents.get("agent-1");
+      assert.equal(ap.passiveAx, passiveAx, "fixture: the launch gate");
+      assert.ok(ap.contextId, "the spawn's context id is planned before the start input is booked");
+      assert.equal(driver.spawnCalls[0]?.contextGeneration?.contextId, ap.contextId, "the transport publishes the planned id");
+
+      const coordinator = (manager as any).createAgentProxyInboxCoordinator("agent-1");
+      assert.equal(coordinator.getBoundary(thread), 20, "the rendered start package counts in this context");
+      assert.equal(coordinator.isMessageModelSeen({ target: thread, message: { message_id: "trigger-30", seq: 30 } }), true);
+
+      await mkdir(ap.cliTransportDir, { recursive: true });
+      const startContext = ap.contextId;
+      driver.parsedLines.set("compact-start", [{ kind: "compaction_started" }]);
+      driver.processes[0].stdout.emit("data", Buffer.from("compact-start\n"));
+      await flush();
+      assert.notEqual(ap.contextId, startContext, "precondition: compaction replaced the context id");
+      assert.equal(readContextGeneration(ap.cliTransportDir)?.contextId, ap.contextId, "and published it for the CLI");
+      assert.equal((manager as any).isVisibleMessageModelSeen("agent-1", thread, { message_id: "trigger-30", seq: 30 }), true, "delivery suppression keeps the facts");
+
+      if (!passiveAx) {
+        assert.equal(coordinator.getBoundary(thread), 20, "no context signal: process-wide, as before");
+        return;
+      }
+      assert.equal(coordinator.getBoundary(thread), undefined, "pre-compaction content no longer counts as seen");
+      assert.deepEqual(coordinator.getExactSeenSeqs(thread), []);
+      assert.equal(coordinator.isMessageModelSeen({ target: thread, message: { message_id: "trigger-30", seq: 30 } }), false);
+    }, { driver });
+  });
+}
+
 test("Agent API pending projection retains seq-less stable-id inbox rows and excludes runtime controls", async () => {
   await withManager(async ({ manager }) => {
     await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
@@ -14016,4 +14197,293 @@ test("shutdown reaper never signals the pid of a child already reaped during sto
     }
     assert.deepEqual(signalled.filter((pid) => Math.abs(pid) === childPid), [], "a reaped child's pid is never probed or killed");
   }, { driver });
+});
+
+// ── task #1277, PR 4: a stop that lands while the driver is spawning ─────────
+
+/** A driver whose spawn waits on a gate, like a slow PATH lookup; `cancelAware` mirrors grok (no child once the launch signal is aborted). */
+class GatedSpawnDriver extends FakeCodexDriver {
+  gate: Promise<void> = Promise.resolve();
+  release: () => void = () => {};
+  entered = 0;
+  cancelAware = true;
+  arm(): void {
+    this.gate = new Promise<void>((resolve) => { this.release = resolve; });
+  }
+  // @ts-expect-error the base returns a SpawnResult synchronously; this driver resolves after its gate, as real drivers do.
+  override async spawn(ctx: SpawnContext): Promise<SpawnResult> {
+    this.entered += 1;
+    await this.gate;
+    if (this.cancelAware && ctx.launchSignal?.aborted) {
+      throw Object.assign(new Error("launch cancelled before the child was created"), { code: "ABORT_ERR" });
+    }
+    return super.spawn(ctx);
+  }
+}
+
+function frameSummary(sent: MachineToServerMessage[], agentId = "agent-1"): string[] {
+  return sent.flatMap((msg) => {
+    if (msg.type === "agent:status" && msg.agentId === agentId) return [`status:${msg.status}`];
+    if (msg.type === "agent:process_spawned" && msg.agentId === agentId) return ["process_spawned"];
+    if (msg.type === "agent:start:outcome" && msg.agentId === agentId) return [`start:${msg.result.kind}${"reason" in msg.result ? `:${msg.result.reason}` : ""}`];
+    return [];
+  });
+}
+
+test("task #1277: a stop that lands while the driver is spawning is not committed, and the server sees the stop-before-start frames", async () => {
+  // Reference: the frames a stop before any spawn produces (a start held on
+  // the capability gate, RFC 071, then stopped).
+  let referenceFrames: string[] = [];
+  {
+    const { outbox, gate, cleanup } = await unreliableGate();
+    outbox.onDisconnected();
+    try {
+      await withManager(async ({ manager, sent }) => {
+        manager.noteServerStartAccepted("agent-1", "launch-ref");
+        const held = manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }), undefined, undefined, undefined, "launch-ref");
+        await waitFor(() => outbox.heldCapabilityWaits() === 1, "the start is held");
+        await manager.stopAgent("agent-1");
+        await held;
+        await flush();
+        referenceFrames = frameSummary(sent);
+      }, { daemonInstanceId: "daemon-rfc071", runtimeProcessGate: gate });
+    } finally {
+      await cleanup();
+    }
+  }
+
+  const driver = new GatedSpawnDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct" });
+  driver.arm();
+  await withManager(async ({ manager, sent }) => {
+    const start = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-1");
+    await waitFor(() => driver.entered === 1, "driver spawn entered");
+    const stop = manager.stopAgent("agent-1");
+    await flush();
+    const ctx = (driver as unknown as { spawnCalls: SpawnContext[] }).spawnCalls;
+    driver.release();
+    await start;
+    await stop;
+    await flush();
+    await flush();
+
+    assert.equal(driver.processes.length, 0, "no child was created for a cancelled start");
+    const frames = frameSummary(sent);
+    assert.ok(frames.includes("status:inactive"), `the stop's own confirmation is sent: ${frames.join(",")}`);
+    assert.ok(!frames.includes("status:active"), `never active: ${frames.join(",")}`);
+    assert.ok(!frames.includes("process_spawned"), `never process_spawned: ${frames.join(",")}`);
+    assert.deepEqual(launchResults(sent).get("launch-1"), "not_spawned:cancelled", "the launch is settled like a stop before the start");
+    // The stop's own `inactive` is the one addition: stopAgent sends it whenever a
+    // process record exists (it does, from before the spawn), and it is the
+    // confirmation the server needs; a held start has no record yet, so the
+    // reference carries none. Everything else must be identical.
+    assert.deepEqual(frames.filter((f) => f !== "status:inactive"), referenceFrames, `same frame sequence as a stop before any spawn: got [${frames.join(",")}] vs reference [${referenceFrames.join(",")}]`);
+    assert.equal(((manager as any).agents as Map<string, unknown>).has("agent-1"), false, "no runtime is registered");
+    assert.equal(startSlots(manager).starting, false, "the start slot is released");
+    assert.equal(ctx.length, 0, "the cancel-aware driver recorded no spawn (it threw before creating a child)");
+
+    // A later start is unaffected by the cancelled one.
+    driver.arm();
+    const again = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-2");
+    await waitFor(() => driver.entered === 2, "second spawn entered");
+    driver.release();
+    await again;
+    await flush();
+    assert.ok(frameSummary(sent).includes("status:active"), "the next start commits normally");
+    assert.equal(driver.processes.length, 1);
+  }, { driver: driver as unknown as FakeCodexDriver, daemonInstanceId: "daemon-1277" });
+});
+
+test("task #1277: a child created by a start that was stopped meanwhile is reported spawned and ended by that attempt, never activated", async () => {
+  const driver = new GatedSpawnDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct" });
+  driver.cancelAware = false; // a driver that cannot observe the signal still returns its child
+  driver.arm();
+  await withManager(async ({ manager, sent }) => {
+    const start = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-1");
+    await waitFor(() => driver.entered === 1, "driver spawn entered");
+    const stop = manager.stopAgent("agent-1");
+    await flush();
+    driver.release();
+    await start;
+    await stop;
+    await flush();
+    assert.equal(driver.processes.length, 1, "precondition: a child was created");
+    const child = driver.processes[0]!;
+    await waitFor(() => child.killedSignals.length > 0, "the attempt ends the child it created");
+    child.exit(null, "SIGTERM");
+    await flush();
+    await flush();
+    const frames = frameSummary(sent);
+    assert.ok(frames.includes("process_spawned"), `a created child is reported spawned (RFC 071): ${frames.join(",")}`);
+    assert.ok(!frames.includes("status:active"), `never active: ${frames.join(",")}`);
+    assert.equal(processExitedFrames(sent).length, 1, "its exit follows, giving the server a terminal state");
+    // Exact status sequence (archer): only the stop's own `inactive`, and it
+    // carries no exit evidence, so the server's wake crash-loop breaker
+    // (which counts only exit-bearing `inactive` frames for the current
+    // launch) never sees this stop as an early exit.
+    assert.deepEqual(
+      statusFrames(sent).map((f) => ({ status: f.status, exit: "exit" in f && f.exit !== undefined ? "present" : "absent", launchId: f.launchId ?? null })),
+      [{ status: "inactive", exit: "absent", launchId: "launch-1" }],
+      "the child's later exit adds no second inactive and no exit evidence",
+    );
+    assert.equal(((manager as any).agents as Map<string, unknown>).has("agent-1"), false);
+  }, { driver: driver as unknown as FakeCodexDriver, daemonInstanceId: "daemon-1277" });
+});
+
+test("task #1277: an old attempt whose spawn returns after a newer attempt started cleans up only its own child and never touches the new instance", async () => {
+  const driver = new GatedSpawnDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct" });
+  driver.cancelAware = false;
+  driver.arm();
+  await withManager(async ({ manager, sent }) => {
+    const first = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-1");
+    await waitFor(() => driver.entered === 1, "first spawn entered");
+    const oldGateRelease = driver.release;
+    await manager.stopAgent("agent-1");
+    await flush();
+    // The new attempt starts and completes while the old spawn is still held.
+    driver.arm();
+    const second = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-2");
+    await waitFor(() => driver.entered === 2, "second spawn entered");
+    driver.release();
+    await second;
+    await flush();
+    assert.equal(driver.processes.length, 1, "the new attempt's child exists");
+    const newChild = driver.processes[0]!;
+    // Now the old spawn returns.
+    oldGateRelease();
+    await first;
+    await flush();
+    await flush();
+    assert.equal(driver.processes.length, 2, "the old attempt's child was created late");
+    const oldChild = driver.processes[1]!;
+    await waitFor(() => oldChild.killedSignals.length > 0, "the old attempt ends its own child");
+    assert.equal(newChild.killedSignals.length, 0, "the new instance is never touched");
+    const active = statusFrames(sent).filter((f) => f.status === "active");
+    assert.deepEqual(active.map((f) => f.launchId), ["launch-2"], "only the new attempt activated");
+    assert.deepEqual(
+      statusFrames(sent).map((f) => ({ status: f.status, exit: "exit" in f && f.exit !== undefined ? "present" : "absent", launchId: f.launchId ?? null })),
+      [{ status: "inactive", exit: "absent", launchId: "launch-1" }, { status: "active", exit: "absent", launchId: "launch-2" }],
+      "the old child's late exit adds no exit-bearing inactive against either launch",
+    );
+    const ap = ((manager as any).agents as Map<string, { runtime: unknown }>).get("agent-1");
+    assert.ok(ap, "the new instance is still registered");
+  }, { driver: driver as unknown as FakeCodexDriver, daemonInstanceId: "daemon-1277" });
+});
+
+test("task #1277 (review): an old attempt returning while the NEW attempt is still inside its spawn settles only its own launch (no child) and the new launch keeps its own later outcome", async () => {
+  const driver = new GatedSpawnDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct" });
+  driver.arm();
+  await withManager(async ({ manager, sent }) => {
+    const first = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-1");
+    await waitFor(() => driver.entered === 1, "first spawn entered");
+    const releaseOld = driver.release;
+    await manager.stopAgent("agent-1");
+    await flush();
+    // The new attempt is accepted and held inside its own spawn.
+    driver.arm();
+    const second = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-2");
+    await waitFor(() => driver.entered === 2, "second spawn entered");
+    const releaseNew = driver.release;
+    // The old spawn returns first (cancel-aware: no child).
+    releaseOld();
+    await first;
+    await flush();
+    assert.deepEqual(startOutcomesFor(sent, "launch-1"), [{ kind: "not_spawned", reason: "cancelled" }], "the old launch is settled cancelled");
+    assert.deepEqual(startOutcomesFor(sent, "launch-2"), [], "the new launch is still pending: it was never the old attempt's to settle");
+    assert.equal(processSpawnedFrames(sent).length, 0);
+    releaseNew();
+    await second;
+    await flush();
+    const spawned = processSpawnedFrames(sent);
+    assert.equal(spawned.length, 1, "the new attempt reports its own child");
+    assert.equal(spawned[0]!.launchId, "launch-2");
+    assert.equal(spawned[0]!.supersededLaunchIds, undefined, "nothing folded");
+    assert.deepEqual(startOutcomesFor(sent, "launch-2"), [], "spawned launches get no start:outcome");
+    assert.deepEqual(statusFrames(sent).filter((f) => f.status === "active").map((f) => f.launchId), ["launch-2"]);
+  }, { driver: driver as unknown as FakeCodexDriver, daemonInstanceId: "daemon-1277" });
+});
+
+test("task #1277 (review): an old attempt whose late child is created while the NEW attempt is still inside its spawn reports only its own launch and never binds the new launch as superseded", async () => {
+  const driver = new GatedSpawnDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct" });
+  driver.cancelAware = false;
+  driver.arm();
+  await withManager(async ({ manager, sent }) => {
+    const first = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-1");
+    await waitFor(() => driver.entered === 1, "first spawn entered");
+    const releaseOld = driver.release;
+    await manager.stopAgent("agent-1");
+    await flush();
+    driver.arm();
+    const second = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-2");
+    await waitFor(() => driver.entered === 2, "second spawn entered");
+    const releaseNew = driver.release;
+    releaseOld();
+    await first;
+    await flush();
+    await flush();
+    const oldSpawned = processSpawnedFrames(sent);
+    assert.equal(oldSpawned.length, 1, "the old attempt's created child is reported");
+    assert.equal(oldSpawned[0]!.launchId, "launch-1");
+    assert.equal(oldSpawned[0]!.supersededLaunchIds, undefined, "the new launch is not folded into the old process");
+    assert.deepEqual(startOutcomesFor(sent, "launch-2"), [], "the new launch is still pending");
+    assert.equal(driver.processes.length, 1);
+    await waitFor(() => driver.processes[0]!.killedSignals.length > 0, "the old attempt ends its own child");
+    releaseNew();
+    await second;
+    await flush();
+    const spawned = processSpawnedFrames(sent);
+    assert.equal(spawned.length, 2);
+    assert.equal(spawned[1]!.launchId, "launch-2");
+    assert.equal(spawned[1]!.supersededLaunchIds, undefined);
+    assert.equal(driver.processes[1]!.killedSignals.length, 0, "the new instance is untouched");
+    assert.deepEqual(statusFrames(sent).filter((f) => f.status === "active").map((f) => f.launchId), ["launch-2"]);
+  }, { driver: driver as unknown as FakeCodexDriver, daemonInstanceId: "daemon-1277" });
+});
+
+test("task #1277 (review): a cancelled start's child that ignores SIGTERM is ended by the SIGKILL escalation and its exit is observed", async () => {
+  const driver = new GatedSpawnDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct", ignoredKillSignals: ["SIGTERM"] });
+  driver.cancelAware = false;
+  driver.arm();
+  await withManager(async ({ manager, sent }) => {
+    const start = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-1");
+    await waitFor(() => driver.entered === 1, "spawn entered");
+    const stop = manager.stopAgent("agent-1");
+    await flush();
+    driver.release();
+    await start;
+    await stop;
+    await flush();
+    const child = driver.processes[0]!;
+    assert.deepEqual(child.killedSignals, ["SIGTERM", "SIGKILL"], "SIGTERM was ignored; the attempt escalated to SIGKILL");
+    assert.equal(processExitedFrames(sent).length, 1, "the exit was observed and reported once");
+    assert.ok(!statusFrames(sent).some((f) => f.status === "active"));
+  }, { driver: driver as unknown as FakeCodexDriver, daemonInstanceId: "daemon-1277", cancelledStartCleanup: { sigtermGraceMs: 50, verifyMs: 300 } });
+});
+
+test("task #1277 (review): a cancelled start's child that survives SIGKILL is reported as unconfirmed cleanup, never as exited", async () => {
+  const driver = new GatedSpawnDriver({ id: "codex", supportsStdinNotification: true, busyDeliveryMode: "direct", ignoredKillSignals: ["SIGTERM", "SIGKILL"] });
+  driver.cancelAware = false;
+  driver.arm();
+  const logs: string[] = [];
+  const unsubscribe = subscribeDaemonLogs((entry) => { logs.push(String((entry as { message?: unknown }).message ?? entry)); });
+  try {
+    await withManager(async ({ manager, sent }) => {
+      const start = serverStart(manager, "agent-1", makeConfig({ sessionId: "session-1" }), "launch-1");
+      await waitFor(() => driver.entered === 1, "spawn entered");
+      const stop = manager.stopAgent("agent-1");
+      await flush();
+      driver.release();
+      const startedAt = Date.now();
+      await start;
+      await stop;
+      const child = driver.processes[0]!;
+      assert.deepEqual(child.killedSignals, ["SIGTERM", "SIGKILL"]);
+      assert.equal(processExitedFrames(sent).length, 0, "no exit was observed, so none is reported");
+      assert.ok(Date.now() - startedAt >= 50 + 300 - 5, "the attempt waited the bounded grace + verification window");
+      assert.ok(logs.some((l) => l.includes("Cleanup of a cancelled start's child is unconfirmed")), `unconfirmed cleanup is surfaced: ${logs.filter((l) => l.includes("cancelled")).join(" | ")}`);
+      // The fixture is ended by the test, not by the daemon.
+      child.exit(null, "SIGKILL");
+    }, { driver: driver as unknown as FakeCodexDriver, daemonInstanceId: "daemon-1277", cancelledStartCleanup: { sigtermGraceMs: 50, verifyMs: 300 } });
+  } finally {
+    unsubscribe();
+  }
 });

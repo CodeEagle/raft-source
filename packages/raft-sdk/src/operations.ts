@@ -202,7 +202,7 @@ const OPERATION_DEFS = [
   },
   {
     name: "messages.send",
-    description: "Send a message to a channel, DM, or thread. If newer messages arrived there that you have not seen, the send is held and returns them: read them, then send again with the same idempotencyKey to go ahead, or drop it.",
+    description: "Send a message to a channel, DM, or thread. If newer messages arrived there that you have not seen (or, with conversation cards on, the conversation's description is new to your context), the send is held and returns them: read them, then send again with the same idempotencyKey to go ahead, or drop it.",
     schema: sendMessageRequestSchema,
     hiddenFields: ["seen"],
     routes: ["messageSendV2"],
@@ -213,7 +213,7 @@ const OPERATION_DEFS = [
   },
   {
     name: "messages.reply",
-    description: "Reply where a received message came from (its conversation or thread). Held like messages.send when newer messages arrived there.",
+    description: "Reply where a received message came from (its conversation or thread). Held like messages.send when newer messages arrived there or its description is new to your context.",
     schema: replyToRequestSchema,
     hiddenFields: ["seen"],
     routes: ["messageSendV2"],

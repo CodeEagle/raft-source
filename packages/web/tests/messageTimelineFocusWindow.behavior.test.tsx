@@ -1355,12 +1355,8 @@ test("keyed bounded context blocks every sentinel path until the next user scrol
     fireEvent.scroll(scroller);
     await flushAnimationFrames();
   });
-  await act(async () => {
-    intersectionCallback?.([
-      { target: topSentinel, isIntersecting: true } as IntersectionObserverEntry,
-      { target: bottomSentinel, isIntersecting: true } as IntersectionObserverEntry,
-    ], {} as IntersectionObserver);
-  });
+  // The sentinel was already intersecting while blocked; IO does not repeat
+  // that unchanged record. Releasing must recheck geometry itself.
   assert.equal(loadOlderCalls, 1);
   assert.equal(loadNewerCalls, 1);
 
@@ -1391,6 +1387,45 @@ test("keyed bounded context blocks every sentinel path until the next user scrol
   });
   assert.equal(loadOlderCalls, 1);
   assert.equal(loadNewerCalls, 1);
+});
+
+test("bounded context accepts native scroll keys but not descendant controls or shortcuts", SERIAL, async () => {
+  let calls = 0;
+  const messages = [makeMessage("key-a", 1), makeMessage("key-b", 2)];
+  Object.defineProperty(HTMLElement.prototype, "scrollHeight", { configurable: true, get() { return 2000; } });
+  Object.defineProperty(HTMLElement.prototype, "clientHeight", { configurable: true, get() { return 500; } });
+  Element.prototype.scrollIntoView = function scrollIntoView() {};
+  Element.prototype.scrollTo = function scrollTo() {};
+  const source = (key: string) => makeSource(messages, null, {
+    hasOlder: true, loadOlder: () => { calls += 1; }, sentinelAutoLoadBlockKey: key,
+  });
+  const view = render(renderTimeline(source("blocked")));
+  const scroller = view.getByTestId("focus-window-scroller");
+  const sample = async () => {
+    await act(async () => {
+      fireEvent.scroll(scroller);
+      await flushAnimationFrames();
+    });
+  };
+  await settleProgrammaticScroll();
+  for (const tag of ["input", "textarea", "button"]) {
+    const control = document.createElement(tag);
+    scroller.append(control);
+    fireEvent.keyDown(control, { key: "Home" });
+    await sample();
+    control.remove();
+  }
+  fireEvent.keyDown(scroller, { key: "f", ctrlKey: true });
+  fireEvent.keyDown(scroller, { key: "Home", metaKey: true });
+  fireEvent.keyDown(scroller, { key: "Enter" });
+  await sample();
+  assert.equal(calls, 0, "controls and non-scroll shortcuts must not authorize subsequent programmatic scrolling");
+  for (const [index, key] of ["Home", "End", "PageUp", "PageDown", "ArrowUp", "ArrowDown", " "].entries()) {
+    await act(async () => { view.rerender(renderTimeline(source(`key-${index}`))); });
+    fireEvent.keyDown(scroller, { key });
+    await sample();
+    assert.equal(calls, index + 1, `${key} navigation must release the current barrier`);
+  }
 });
 
 test("bounded-context keys preserve one-shot gesture semantics across rerenders", SERIAL, async () => {
@@ -1435,9 +1470,6 @@ test("bounded-context keys preserve one-shot gesture semantics across rerenders"
   });
   await act(async () => {
     view.rerender(renderTimeline(source("initial-context")));
-    intersectionCallback?.([
-      { target: topSentinel, isIntersecting: true } as IntersectionObserverEntry,
-    ], {} as IntersectionObserver);
   });
   assert.equal(loadOlderCalls, 1, "a stable key must not re-arm after the user releases it");
 
@@ -1470,9 +1502,6 @@ test("bounded-context keys preserve one-shot gesture semantics across rerenders"
     fireEvent.wheel(scroller);
     fireEvent.scroll(scroller);
     await flushAnimationFrames();
-    intersectionCallback?.([
-      { target: topSentinel, isIntersecting: true } as IntersectionObserverEntry,
-    ], {} as IntersectionObserver);
   });
   assert.equal(loadOlderCalls, 3, "a fresh post-arm gesture must release the barrier");
 });

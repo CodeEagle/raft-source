@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import type { ReactNode } from "react";
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 
 export function ExternalSetupCopyButton({
   text,
@@ -18,7 +18,6 @@ export function ExternalSetupCopyButton({
     <Button variant="outline" size="sm"
       type="button"
       onClick={handleClick}
-      className=""
     >
       {children}
     </Button>

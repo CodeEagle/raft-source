@@ -1,4 +1,6 @@
+import { Fragment } from "react";
 import { useIntl } from "react-intl";
+import { Card, Separator } from "@botiverse/raft-ui";
 
 import {
   IDENTITY_SCOPE_GROUP_SUMMARY_ID,
@@ -49,7 +51,7 @@ export default function RequestedScopeConsent({
     // Stryker disable next-line ConditionalExpression,EqualityOperator: covered by DOM tests; generated mutants hang tsx.
     if (visibleScopes.length !== 0) return null;
     return (
-      <div className="rounded-md border border-line-hairline bg-layer-panel p-2 text-xs font-bold text-foreground-muted theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-white theme-brutal:text-black/55">
+      <div className="rounded-control bg-fill-muted px-3 py-2 text-footnote font-semibold text-foreground-muted">
         {formatMessage({ id: "oauth.consent.noRecognizedScopes" })}
       </div>
     );
@@ -60,25 +62,28 @@ export default function RequestedScopeConsent({
     // Stryker disable next-line ConditionalExpression: covered by DOM tests; generated mutants hang tsx.
     if (tierScopes.length === 0) return null;
     return (
-      <details key={tier} open={tier !== "identity"} className="rounded-md border border-line-hairline bg-layer-inset p-2 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-brutal-cream">
-        <summary className="text-xs font-black text-foreground-strong">
+      <details key={tier} open={tier !== "identity"} className="rounded-control border border-line-hairline px-3 py-2">
+        <summary className="rounded-sticker text-callout font-bold text-foreground outline-none focus-visible:shadow-focus">
           <span>{formatMessage({ id: scopeGroupLabelId(tier) })}</span>
           {tier === "identity" ? (
-            <span className="font-medium text-foreground-muted">
+            <span className="font-normal text-foreground-muted">
               {formatMessage({ id: IDENTITY_SCOPE_GROUP_SUMMARY_ID })}
             </span>
           ) : null}
         </summary>
-        <div className="mt-2 divide-y divide-line-hairline border-t border-line-hairline">
+        <div className="mt-2">
           {tierScopes.map((scope) => {
             const detail = OAUTH_SCOPE_PRESENTATION[scope];
             return (
-              <div key={scope} data-oauth-scope-row={scope} className="py-2">
+              <Fragment key={scope}>
+              <Separator />
+              <div data-oauth-scope-row={scope} className="py-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <code className="break-all text-[11px] font-bold text-foreground-muted">{scope}</code>
+                  <code className="break-all font-mono text-mono-meta font-bold text-foreground">{scope}</code>
                 </div>
-                <div className="mt-1 text-xs leading-relaxed text-foreground-muted">{formatMessage({ id: detail.copyId })}</div>
+                <div className="mt-1 text-footnote text-foreground-muted">{formatMessage({ id: detail.copyId })}</div>
               </div>
+              </Fragment>
             );
           })}
         </div>
@@ -90,7 +95,7 @@ export default function RequestedScopeConsent({
     // Stryker disable next-line BooleanLiteral,ConditionalExpression: covered by DOM tests; generated mutants hang tsx.
     if (!hasAgentInboundRequest) return null;
     return (
-      <div className="text-xs font-bold leading-relaxed text-foreground-muted">
+      <div className="text-footnote font-semibold text-foreground-muted">
         {/* ONE message. This was two English sentences concatenated in JSX, so a
             translation could not reorder them or merge them into the single
             sentence Chinese wants. */}
@@ -103,11 +108,11 @@ export default function RequestedScopeConsent({
     // Stryker disable next-line ConditionalExpression,EqualityOperator: covered by DOM tests; generated mutants hang tsx.
     if (unpresentedScopes.length === 0) return null;
     return (
-      <div className="text-xs font-bold leading-relaxed text-foreground-muted">
+      <div className="text-footnote font-semibold text-foreground-muted">
         <span>{formatMessage({ id: "oauth.consent.unrecognizedScopes" })} </span>
         <span className="inline-flex flex-wrap gap-1.5">
           {unpresentedScopes.map((scope) => (
-            <code key={scope} className="break-all rounded-sm border border-line-muted bg-layer-panel px-1.5 py-0.5 text-[11px] text-foreground-muted theme-brutal:rounded-none theme-brutal:border-black/20 theme-brutal:bg-white">
+            <code key={scope} className="break-all rounded-sticker bg-fill-muted px-1 font-mono text-mono-meta font-normal text-foreground">
               {scope}
             </code>
           ))}
@@ -118,18 +123,18 @@ export default function RequestedScopeConsent({
 
   return (
     <div className={className} data-testid="login-with-raft-requested-scopes">
-      <div className="text-xs font-black uppercase tracking-widest">
+      <div className="text-footnote font-bold text-foreground">
         {formatMessage({ id: "oauth.consent.requestedAccess" })}
       </div>
-      <div className="mt-1 text-xs leading-5 text-foreground-muted">
+      <div className="mt-1 text-callout text-foreground-muted">
         {requestedAccessCopy}
       </div>
-      <div className="mt-3 space-y-3 rounded-md border border-line-muted bg-layer-panel p-3 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
+      <Card className="mt-3 space-y-3 p-3">
         {renderEmptyRecognizedScopes()}
         {(["identity", "agent_directory", "agent_messaging"] as OAuthScopeTier[]).map(renderTierScopes)}
         {renderAgentInboundNotice()}
         {renderUnpresentedScopes()}
-      </div>
+      </Card>
     </div>
   );
 }

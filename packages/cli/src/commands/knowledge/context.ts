@@ -1,4 +1,4 @@
-import { MANUAL_INDEX_COMMAND, validateKnowledgeContext } from "@botiverse/raft-shared";
+import { MANUAL_INDEX_COMMAND, validateKnowledgeContext } from "@botiverse/raft-shared/src/agentCliSurface";
 import { CliError, type CliErrorCode } from "../../core/errors";
 
 const INTENT_GUIDANCE =

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import { Archive, GitBranch, Hash, Lock } from "lucide-react";
+import { Card, IconTile } from "@botiverse/raft-ui";
 
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
@@ -10,7 +11,6 @@ import type { Channel } from "../../store/channelStore";
 import { useServerStore } from "../../store/serverStore";
 import Banner from "../ui/Banner";
 import SectionHeader from "../ui/SectionHeader";
-import SurfaceListItem from "../ui/SurfaceListItem";
 import Tooltip from "../ui/Tooltip";
 import { UnarchiveChannelButton } from "./UnarchiveChannelButton";
 
@@ -99,7 +99,7 @@ function ArchivedChannelsSectionContent() {
         </Banner>
       ) : null}
 
-      <div className="space-y-2">
+      <Card className="divide-y divide-line-hairline">
         {archivedChannels.map((channel) => {
           const busy = busyChannelId === channel.id;
           const typeLabel = formatMessage({ id: channelTypeMessageId(channel.type) });
@@ -108,25 +108,21 @@ function ArchivedChannelsSectionContent() {
             { name: channel.name },
           );
           return (
-            <SurfaceListItem
+            <div
               key={channel.id}
-              interactive={false}
-              className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between"
+              className="flex flex-col gap-3 px-4 py-3 sm:min-h-11 sm:flex-row sm:items-center sm:justify-between"
               data-testid={`archived-channel-row-${channel.id}`}
             >
               <div className="flex min-w-0 flex-1 items-center gap-3">
                 <Tooltip content={typeLabel}>
-                <span
-                  className="flex size-8 shrink-0 items-center justify-center border border-line-muted bg-fill-muted text-foreground-muted theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-brutal-stone theme-brutal:text-black/65"
-                  aria-label={typeLabel}
-                >
+                <IconTile size="sm" role="img" aria-label={typeLabel}>
                   {channelTypeIcon(channel.type)}
-                </span>
+                </IconTile>
                 </Tooltip>
                 <div className="min-w-0 flex-1">
                   <button
                     type="button"
-                    className="block max-w-full truncate text-left text-sm font-bold text-foreground-strong underline decoration-2 underline-offset-2 hover:text-foreground-muted theme-brutal:text-black theme-brutal:hover:text-black/65"
+                    className="block max-w-full truncate rounded-sticker text-left text-subhead font-semibold text-foreground-muted underline decoration-[1.5px] underline-offset-[3px] outline-none hover:text-foreground focus-visible:shadow-focus"
                     aria-label={formatMessage(
                       { id: "settings.archivedChannels.openAriaLabel" },
                       { name: channel.name },
@@ -135,7 +131,7 @@ function ArchivedChannelsSectionContent() {
                   >
                     {channelName}
                   </button>
-                  <div className="mt-0.5 truncate text-xs text-foreground-muted theme-brutal:text-black/55">
+                  <div className="mt-0.5 truncate text-footnote text-foreground-muted">
                     {formatMessage(
                       { id: "settings.archivedChannels.metadata" },
                       {
@@ -152,10 +148,10 @@ function ArchivedChannelsSectionContent() {
                 disabled={busyChannelId !== null}
                 onUnarchive={handleUnarchive}
               />
-            </SurfaceListItem>
+            </div>
           );
         })}
-      </div>
+      </Card>
     </section>
   );
 }

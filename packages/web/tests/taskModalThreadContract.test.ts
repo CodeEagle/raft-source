@@ -47,6 +47,11 @@ test("tasks route opens task threads in a centered modal instead of the side pan
   // in MainLayout, not on ThreadPanel — page-object stays column-agnostic per
   // stdrc 2026-05-28 #proj-uiux msg=138867ba.
   assert.match(layoutSource, /presentation === "modal"[\s\S]*h-\[min\(86vh,900px\)\][\s\S]*w-\[min\(960px,calc\(100vw-2rem\)\)\][\s\S]*data-testid="task-thread-modal"[\s\S]*<ThreadPanel[\s\S]*presentation="modal"/);
+  assert.doesNotMatch(
+    layoutSource,
+    /data-testid="task-thread-modal"[^>]*theme-brutal:shadow-brutal/,
+    "task modal uses standard shadow-float and must not have an extra theme-brutal:shadow-brutal override (task #757)",
+  );
 });
 
 test("tasks route opens legacy tasks in the same centered modal pattern", () => {
@@ -84,10 +89,10 @@ test("tasks route uses rail-visible (md) breakpoint and mobile-modal at <md (no 
   // Lives on the ThreadPanelWrapper in MainLayout post-2026-05-28 column /
   // surface split; LegacyTaskPanel still owns its own per-presentation
   // panelClassName ternary (parallel refactor not in this PR's scope).
-  assert.match(layoutSource, /presentation === "mobile-modal"[\s\S]*"absolute inset-0 z-30 flex flex-col bg-layer-panel theme-brutal:bg-white"[\s\S]*data-testid="task-thread-modal"[\s\S]*<TaskModalBar task=\{hostTask\} onClose=\{mobileTaskBack\} mobile \/>[\s\S]*<ThreadPanel[\s\S]*presentation="mobile-modal"/);
+  assert.match(layoutSource, /presentation === "mobile-modal"[\s\S]*"absolute inset-0 z-30 flex flex-col bg-layer-canvas"[\s\S]*data-testid="task-thread-modal"[\s\S]*<TaskModalBar task=\{hostTask\} onClose=\{mobileTaskBack\}[^>]* mobile \/>[\s\S]*<ThreadPanel[\s\S]*presentation="mobile-modal"/);
   assert.match(layoutSource, /const mobileTaskBack = useMobileBack\(closeSurface, closeSurface\)/,
     "mobile task Back must close synchronously before consuming its history PUSH");
-  assert.match(layoutSource, /data-testid="task-modal-mobile-back"[\s\S]*<ArrowLeft size=\{14\}/,
+  assert.match(layoutSource, /data-testid="task-modal-mobile-back"[\s\S]*<ArrowLeft \/>/,
     "the full-height task sheet needs an explicit visible back affordance");
   assert.match(legacyTaskSource, /presentation === "mobile-modal"\s*\?\s*"absolute inset-0 z-30 flex flex-col bg-layer-canvas"/);
 });
@@ -105,12 +110,14 @@ test("X close visibility is modal-only / non-mobile-modal", () => {
   // X close button skipped only in mobile-modal — modal and side both render it.
   // Click handler is `handleClose` (= onClose ?? closeThread) so embedding
   // hosts (e.g. /search col-3) can layer extra teardown on top of closeThread.
-  assert.match(threadSource, /const showCloseButton = presentation !== "mobile-modal";[\s\S]*\{showCloseButton && \(\s*<Tooltip[\s\S]*?<CloseButton[\s\S]*onClick=\{handleClose\}[\s\S]*<X size=\{14\}/);
-  assert.match(legacyTaskSource, /\{presentation !== "mobile-modal" && \([\s\S]*onClick=\{handleClose\}[\s\S]*<X size=\{14\}/);
+  // The X is the panel-head icon action (raft-ui PanelAction), which sizes
+  // its own glyph.
+  assert.match(threadSource, /const showCloseButton = presentation !== "mobile-modal";[\s\S]*\{showCloseButton && \(\s*<Tooltip[\s\S]*?<PanelAction[\s\S]*onClick=\{handleClose\}[\s\S]*<X \/>/);
+  assert.match(legacyTaskSource, /\{presentation !== "mobile-modal" && \([\s\S]*onClick=\{handleClose\}[\s\S]*<X \/>/);
 
   // closeButtonClassName: modal → always flex; side → hidden lg:flex.
-  assert.match(threadSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex size-7 items-center justify-center"\s*:\s*"hidden size-7 items-center justify-center lg:flex"/);
-  assert.match(legacyTaskSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex size-7 items-center justify-center"\s*:\s*"hidden size-7 items-center justify-center lg:flex"/);
+  assert.match(threadSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex"\s*:\s*"hidden lg:flex"/);
+  assert.match(legacyTaskSource, /const closeButtonClassName = presentation === "modal"\s*\?\s*"flex"\s*:\s*"hidden lg:flex"/);
 
 
   // Back chevron breakpoint: side → lg, modal / mobile-modal → md.

@@ -1,44 +1,40 @@
 import type { ReactNode } from "react";
-import { ThemeProvider, TooltipProvider } from "raft-ui";
+import { ThemeProvider, TooltipProvider } from "@botiverse/raft-ui";
 import { BrowserRouter } from "react-router-dom";
 
 import { IntlProviderWrapper } from "../src/i18n/IntlProviderWrapper";
 import { LocaleProvider } from "../src/i18n/LocaleProvider";
 import { AppThemeContext } from "../src/hooks/useAppTheme";
 import type { AppThemeContextValue } from "../src/hooks/useAppTheme";
-import { preferencesFromPreset } from "../src/theme/appTheme";
-import type { AppThemePreset } from "../src/theme/appTheme";
+import type { AppResolvedMode } from "../src/theme/appTheme";
 
-// The visual-testing root pins the theme; setters are inert.
+// The visual-testing root pins the appearance; the setter is inert.
 function ignoreThemeChange() {}
 
-function fixedThemeContext(preset: AppThemePreset): AppThemeContextValue {
+function fixedThemeContext(mode: AppResolvedMode): AppThemeContextValue {
   return {
-    preset,
-    preferences: preferencesFromPreset(preset),
-    resolvedMode: "light",
-    setPreferences: ignoreThemeChange,
+    preferences: { mode },
+    mode,
+    resolvedMode: mode,
     setMode: ignoreThemeChange,
-    setThemeForMode: ignoreThemeChange,
-    setPreset: ignoreThemeChange,
   };
 }
 
-const FIXED_THEME_CONTEXTS = {
-  brutal: fixedThemeContext("brutal"),
-  elegant: fixedThemeContext("elegant-light"),
+const FIXED_THEME_CONTEXTS: Record<AppResolvedMode, AppThemeContextValue> = {
+  light: fixedThemeContext("light"),
+  dark: fixedThemeContext("dark"),
 };
 
 export function VisualTestingRoot({
   children,
-  defaultTheme,
+  mode,
 }: {
   children: ReactNode;
-  defaultTheme: "brutal" | "elegant";
+  mode: AppResolvedMode;
 }) {
   return (
-    <ThemeProvider defaultTheme={defaultTheme} defaultMode="light">
-      <AppThemeContext.Provider value={FIXED_THEME_CONTEXTS[defaultTheme]}>
+    <ThemeProvider mode={mode}>
+      <AppThemeContext.Provider value={FIXED_THEME_CONTEXTS[mode]}>
         <TooltipProvider>
           <BrowserRouter>
             <LocaleProvider>

@@ -122,7 +122,7 @@ function canonicalInput(surface: Awaited<ReturnType<typeof seedExternalProjectio
   };
 }
 
-test("canonical external message freezes human attribution, replays idempotently, and projects inert Agent provenance", async () => {
+test("canonical external message freezes human attribution, replays idempotently, and projects Agent provenance without authority", async () => {
   const surface = await seedExternalProjectionSurface();
   const input = canonicalInput(surface);
 
@@ -186,9 +186,10 @@ test("canonical external message freezes human attribution, replays idempotently
   assert.equal(delivered[0].mentioned, false);
   assert.equal(delivered[0].external_message.schema, "external-message-provenance.v1");
   assert.equal(delivered[0].external_message.message_id, input.externalMessageId);
-  assert.match(delivered[0].content, /&lt;result&gt;/);
-  assert.match(delivered[0].content, /user:owner/);
-  assert.doesNotMatch(delivered[0].content, /@owner/);
+  // Slack-bridged content renders like an ordinary Raft message (product
+  // decision); task/action authority is still stripped below.
+  assert.equal(delivered[0].content, input.content);
+  assert.doesNotMatch(delivered[0].content, /user:owner|&lt;result&gt;/);
   assert.equal("task_status" in delivered[0], false);
   assert.equal("task_number" in delivered[0], false);
   assert.equal("actionMetadata" in delivered[0], false);
@@ -313,7 +314,6 @@ test("Human search, saved, and thread projections preserve immutable external at
   const activityRow = normalizeRowForTest({
     kind: "thread",
     firstMentionMessageId: null,
-    hasMention: false,
     ...followedThread,
   }, new Map());
   assert.equal(activityRow.type, "thread");

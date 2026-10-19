@@ -1,4 +1,5 @@
 import { RuntimeModelNotFoundError } from "../spawnFailureErrors";
+import { withProcessEnvPatch } from "../processEnvPatch";
 import type { ProviderRequestObserver } from "../providerRequestFetch";
 import "../bundledPiOAuth";
 import { randomUUID } from "node:crypto";
@@ -23,6 +24,7 @@ import {
   isContextOverflow,
   type Model,
   type ModelThinkingLevel,
+  type ThinkingLevel,
 } from "@earendil-works/pi-ai";
 import {
   buildLaunchPlan,
@@ -460,53 +462,7 @@ export function buildPiSessionCreateEnvPatch(
   return Object.keys(filtered).length > 0 ? filtered : null;
 }
 
-let processEnvPatchTail: Promise<void> = Promise.resolve();
-
-async function runWithProcessEnvPatchLock<T>(fn: () => Promise<T>): Promise<T> {
-  const previous = processEnvPatchTail;
-  let release!: () => void;
-  processEnvPatchTail = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-
-  await previous;
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
-
-export async function withProcessEnvPatch<T>(
-  patch: Record<string, string> | null | undefined,
-  fn: () => Promise<T>,
-  opts: { removeFirst?: readonly string[] } = {},
-): Promise<T> {
-  const keys = new Set([...(opts.removeFirst ?? []), ...Object.keys(patch ?? {})]);
-  if (keys.size === 0) return fn();
-
-  return runWithProcessEnvPatchLock(async () => {
-    const previous: Record<string, string | undefined> = {};
-    for (const key of keys) {
-      previous[key] = process.env[key];
-      delete process.env[key];
-    }
-    for (const [key, value] of Object.entries(patch ?? {})) {
-      process.env[key] = value;
-    }
-    try {
-      return await fn();
-    } finally {
-      for (const [key, value] of Object.entries(previous)) {
-        if (value === undefined) {
-          delete process.env[key];
-        } else {
-          process.env[key] = value;
-        }
-      }
-    }
-  });
-}
+export { withProcessEnvPatch } from "../processEnvPatch";
 
 /** The model-registry provider a built-in gateway custom model is registered
  * under. Registration and selection must use this one mapping. */
@@ -563,6 +519,123 @@ function findMatchingOpenAICompatibleModel(
   );
 }
 
+/**
+ * The SDK catalog entry for an Anthropic-compatible gateway, when the exact
+ * endpoint and model id are a pair the SDK knows (for example MiniMax's own
+ * hosts). Same rule as the OpenAI-compatible lookup: endpoint AND id, never
+ * the id alone, so an unknown endpoint inherits nothing.
+ */
+function findMatchingAnthropicCompatibleModel(
+  modelRegistry: ModelRegistry,
+  baseUrl: string,
+  modelId: string,
+): Model<"anthropic-messages"> | undefined {
+  const normalizedBaseUrl = normalizeGatewayBaseUrl(baseUrl);
+  return modelRegistry.getAll().find(
+    (model): model is Model<"anthropic-messages"> =>
+      model.api === "anthropic-messages"
+      && model.id === modelId
+      && normalizeGatewayBaseUrl(model.baseUrl) === normalizedBaseUrl,
+  );
+}
+
+/**
+ * Thinking contract of an Anthropic-compatible gateway model that the SDK
+ * catalog does not describe yet, keyed by the exact endpoint (origin + base
+ * path, compared case-insensitively on the host) and the full model id.
+ *
+ * Each entry states the upstream contract it encodes and where that contract
+ * is documented. Nothing here applies to other endpoints or other ids, and a
+ * later SDK catalog entry for the same pair (findMatchingAnthropicCompatibleModel)
+ * takes precedence over this table.
+ */
+export interface AnthropicGatewayThinkingContract {
+  /** `thinking.type: "adaptive"` + `output_config.effort`; the upstream rejects `disabled` and budget thinking. */
+  forceAdaptiveThinking: true;
+  /** `off: null` marks "no thinking" as unsupported (never send `disabled`); the rest map 1:1 to `output_config.effort`. */
+  thinkingLevelMap: Model<"anthropic-messages">["thinkingLevelMap"];
+  /**
+   * The level Raft selects when the agent's reasoning effort is unset. The
+   * SDK would otherwise clamp an unset level to the first supported one
+   * (`minimal`), which is nobody's choice; this is the upstream's own default
+   * for an omitted effort, so an agent that chose nothing gets what the API
+   * gives a request that chose nothing.
+   */
+  defaultThinkingLevel: ThinkingLevel;
+  /** Where the upstream contract is written down. */
+  source: string;
+}
+
+const MINIMAX_M31_FLASH_PREVIEW_CONTRACT: AnthropicGatewayThinkingContract = {
+  forceAdaptiveThinking: true,
+  thinkingLevelMap: { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" },
+  // "MiniMax-M3.1-Flash-Preview always thinks and returns 400 if `disabled` is
+  // sent"; "omitting `effort` defaults to `max`"; effort accepts
+  // low|medium|high|xhigh|max — platform.minimax.io/docs/api-reference/text-anthropic-api
+  // (Built-in Pi × MiniMax M3.1 report, 2026-10-13).
+  defaultThinkingLevel: "max",
+  source: "https://platform.minimax.io/docs/api-reference/text-anthropic-api",
+};
+
+/**
+ * Exact (endpoint, model id) pairs with a known thinking contract. Hosts are
+ * listed only with upstream documentation for that host and model; the user
+ * report's own host is the first entry.
+ */
+const ANTHROPIC_GATEWAY_THINKING_CONTRACTS: ReadonlyArray<{ endpoint: string; modelId: string; contract: AnthropicGatewayThinkingContract }> = [
+  // China site: platform.minimax.cn/docs/api-reference/text-anthropic-api lists this base URL and the model with the same rule.
+  { endpoint: "https://api.minimax.cn/anthropic", modelId: "MiniMax-M3.1-Flash-Preview", contract: MINIMAX_M31_FLASH_PREVIEW_CONTRACT },
+  // International site: platform.minimax.io/docs/api-reference/text-anthropic-api.
+  { endpoint: "https://api.minimax.io/anthropic", modelId: "MiniMax-M3.1-Flash-Preview", contract: MINIMAX_M31_FLASH_PREVIEW_CONTRACT },
+];
+
+function normalizeGatewayEndpointForContract(baseUrl: string): string | null {
+  try {
+    const url = new URL(baseUrl);
+    return `${url.protocol}//${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, "")}`;
+  } catch {
+    return null;
+  }
+}
+
+/** Test seam: the contract table to consult (defaults to the built-in one). */
+export interface AnthropicGatewayContractDeps {
+  thinkingContracts?: ReadonlyArray<{ endpoint: string; modelId: string; contract: AnthropicGatewayThinkingContract }>;
+}
+
+/** The thinking contract for this exact endpoint and model id, if one is on record. */
+export function findAnthropicGatewayThinkingContract(
+  baseUrl: string,
+  modelId: string,
+  deps: AnthropicGatewayContractDeps = {},
+): AnthropicGatewayThinkingContract | undefined {
+  const endpoint = normalizeGatewayEndpointForContract(baseUrl);
+  if (!endpoint) return undefined;
+  const table = deps.thinkingContracts ?? ANTHROPIC_GATEWAY_THINKING_CONTRACTS;
+  return table.find((entry) => normalizeGatewayEndpointForContract(entry.endpoint) === endpoint && entry.modelId === modelId)?.contract;
+}
+
+/**
+ * The thinking level a built-in session starts with. An explicit reasoning
+ * effort is passed through (the SDK clamps it to the model's declared levels,
+ * which is why a contract declares xhigh/max). Unset effort on a model whose
+ * contract forbids "off" takes the contract's documented default instead of
+ * the SDK's clamp of "unset" to the first supported level. Every other model
+ * gets exactly what it got before: the unset value itself (`null` from the
+ * launch fields), which the SDK clamps to its first supported level, "off" —
+ * i.e. `thinking: disabled` — for a model that allows it. Verified by the
+ * real-chain control test; a `null` → `undefined` change here would switch
+ * every built-in agent without a chosen effort to the SDK's "medium" default.
+ */
+export function resolveBuiltInThinkingLevel(
+  reasoningEffort: string | null | undefined,
+  contract: AnthropicGatewayThinkingContract | null | undefined,
+): ModelThinkingLevel | undefined {
+  if (reasoningEffort) return reasoningEffort as ModelThinkingLevel;
+  if (contract) return contract.defaultThinkingLevel;
+  return reasoningEffort as ModelThinkingLevel | undefined;
+}
+
 export function resolveBuiltInGatewayModelInput(
   registryInput: Model<"openai-completions">["input"] | undefined,
   supportsImageInput: boolean | undefined,
@@ -599,21 +672,39 @@ export function resolveBuiltInGatewayLaunch(
   return null;
 }
 
+/** What the gateway registration decided for the model's thinking contract. */
+export interface BuiltInGatewayRegistration {
+  /** The on-record contract applied to this (endpoint, id) pair; null when the SDK catalog knew the pair or nothing was on record. */
+  thinkingContract: AnthropicGatewayThinkingContract | null;
+}
+
 export function configureBuiltInGatewayCustomModel(
   modelRegistry: ModelRegistry,
   runtimeConfig: RuntimeConfig,
   providerConnection: ProviderConnectionLaunchProjection | null,
-): void {
+  deps: AnthropicGatewayContractDeps = {},
+): BuiltInGatewayRegistration {
   const gateway = resolveBuiltInGatewayLaunch(runtimeConfig, providerConnection);
-  if (!gateway || runtimeConfig.runtime !== "builtin" || runtimeConfig.model.kind !== "custom") return;
+  if (!gateway || runtimeConfig.runtime !== "builtin" || runtimeConfig.model.kind !== "custom") return { thinkingContract: null };
 
   const provider = builtInGatewayRegistryProvider(gateway.providerId);
-  const matchingModel = provider.api === "openai-completions"
+  const matchingModel: Model<"openai-completions"> | Model<"anthropic-messages"> | undefined = provider.api === "openai-completions"
     ? findMatchingOpenAICompatibleModel(
         modelRegistry,
         gateway.baseUrl,
         runtimeConfig.model.name,
       )
+    : findMatchingAnthropicCompatibleModel(
+        modelRegistry,
+        gateway.baseUrl,
+        runtimeConfig.model.name,
+      );
+  // An Anthropic-compatible pair the SDK catalog does not know but whose
+  // thinking contract is on record (exact endpoint + full model id). A catalog
+  // match wins; every other pair keeps the SDK's defaults, so an unknown
+  // endpoint inherits nothing from either source.
+  const anthropicContract = provider.api === "anthropic-messages" && !matchingModel
+    ? findAnthropicGatewayThinkingContract(gateway.baseUrl, runtimeConfig.model.name, deps)
     : undefined;
   const input = resolveBuiltInGatewayModelInput(
     matchingModel?.input,
@@ -629,7 +720,7 @@ export function configureBuiltInGatewayCustomModel(
       id: runtimeConfig.model.name,
       name: matchingModel?.name ?? runtimeConfig.model.name,
       reasoning: matchingModel?.reasoning ?? true,
-      thinkingLevelMap: matchingModel?.thinkingLevelMap,
+      thinkingLevelMap: matchingModel?.thinkingLevelMap ?? anthropicContract?.thinkingLevelMap,
       input,
       cost: matchingModel?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: matchingModel?.contextWindow ?? 200_000,
@@ -640,14 +731,19 @@ export function configureBuiltInGatewayCustomModel(
             // native OpenAI. Keep unknown payloads portable, while preserving
             // exact SDK metadata when endpoint + model match a known provider
             // (for example Qwen Token Plan).
-            compat: matchingModel?.compat ?? {
+            compat: (matchingModel as Model<"openai-completions"> | undefined)?.compat ?? {
               supportsDeveloperRole: false,
               supportsStore: false,
             },
           }
-        : {}),
+        : matchingModel?.compat
+          ? { compat: matchingModel.compat }
+          : anthropicContract
+            ? { compat: { forceAdaptiveThinking: anthropicContract.forceAdaptiveThinking } }
+            : {}),
     }],
   });
+  return { thinkingContract: anthropicContract ?? null };
 }
 
 function findPiSessionFile(sessionDir: string, sessionId: string): string | null {
@@ -1157,6 +1253,21 @@ function piTerminalCausePhaseForSdkEvent(event: AgentSessionEvent): RuntimeTermi
   }
 }
 
+/**
+ * Pi's bash tool reports a command that exited non-zero as `isError: true`
+ * with `structuredContent.exit_code`: the command ran, so the tool call is ok
+ * and the exit code is recorded. Any other error result is a failed call.
+ * `durationMs` is Pi's own monotonic measurement of `execute()`.
+ */
+export function piToolEndOutcome(event: { isError?: boolean; durationMs?: number; result?: unknown }): { ok?: boolean; durationMs?: number; exitCode?: number } {
+  const exit = (event.result as { structuredContent?: { exit_code?: unknown } } | undefined)?.structuredContent?.exit_code;
+  const exitCode = typeof exit === "number" && Number.isInteger(exit) ? exit : undefined;
+  return {
+    ...(exitCode !== undefined ? { ok: true, exitCode } : typeof event.isError === "boolean" ? { ok: !event.isError } : {}),
+    ...(typeof event.durationMs === "number" ? { durationMs: event.durationMs } : {}),
+  };
+}
+
 export function mapPiSdkEventToParsedEvents(
   event: AgentSessionEvent,
   state: PiSdkEventMappingState,
@@ -1229,10 +1340,16 @@ export function mapPiSdkEventToParsedEvents(
         kind: "tool_call",
         name: event.toolName || "unknown_tool",
         input: event.args ?? {},
+        ...(event.toolCallId ? { callId: event.toolCallId } : {}),
       });
       return events;
     case "tool_execution_end":
-      events.push({ kind: "tool_output", name: event.toolName || "unknown_tool" });
+      events.push({
+        kind: "tool_output",
+        name: event.toolName || "unknown_tool",
+        ...(event.toolCallId ? { callId: event.toolCallId } : {}),
+        ...piToolEndOutcome(event),
+      });
       return events;
     case "compaction_start":
       if (state.compactionTerminal) return events;
@@ -1351,7 +1468,7 @@ function installProviderHttpClient(
 export async function createPiAgentSessionForContext(
   ctx: SpawnContext,
   sessionId: string,
-  opts: { agentDir?: string; sessionDir?: string; traceName?: string; traceEventPrefix?: string; logPrefix?: string; exposeLaunchEnvToTools?: boolean; isolateHostProviderEnv?: boolean; agentDirSource?: "default" | "spawn_env" | "managed_builtin"; exposeLaunchTraceEvidence?: boolean } = {},
+  opts: { agentDir?: string; thinkingContracts?: AnthropicGatewayContractDeps["thinkingContracts"]; sessionDir?: string; traceName?: string; traceEventPrefix?: string; logPrefix?: string; exposeLaunchEnvToTools?: boolean; isolateHostProviderEnv?: boolean; agentDirSource?: "default" | "spawn_env" | "managed_builtin"; exposeLaunchTraceEvidence?: boolean } = {},
   toolExecutionObserver?: PiToolExecutionObserver,
   providerObserver?: ProviderRequestObserver,
 ): Promise<AgentSession> {
@@ -1501,7 +1618,8 @@ export async function createPiAgentSessionForContext(
     const { services } = sessionServices;
     providerHttpClient = sessionServices.providerHttpClient;
     const modelRegistry = new ModelRegistry(services.modelRuntime);
-    configureBuiltInGatewayCustomModel(modelRegistry, runtimeConfig, managedProviderConnection);
+    const contractDeps: AnthropicGatewayContractDeps = opts.thinkingContracts ? { thinkingContracts: opts.thinkingContracts } : {};
+    const gatewayRegistration = configureBuiltInGatewayCustomModel(modelRegistry, runtimeConfig, managedProviderConnection, contractDeps);
     applyPiDaemonSettingsOverrides(services.settingsManager);
     logPiServiceDiagnostics("create_session", services);
     addPiServiceTraceEvent(traceSpan, `${traceEventPrefix}.services_ready`, services, {
@@ -1623,7 +1741,7 @@ export async function createPiAgentSessionForContext(
         services,
         sessionManager,
         model,
-        thinkingLevel: launchRuntimeFields.reasoningEffort as ModelThinkingLevel | undefined,
+        thinkingLevel: resolveBuiltInThinkingLevel(launchRuntimeFields.reasoningEffort, gatewayRegistration.thinkingContract),
         customTools: [
           createPiCommandTool(ctx.workingDirectory, toolSpawnEnv, {
             observer: toolExecutionObserver,

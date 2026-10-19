@@ -5,7 +5,7 @@ import ConfirmDialog from "../ConfirmDialog";
 import type { Machine } from "../../store/machineStore";
 import { migrationSupportRef, migrationTargetLabel } from "./presentation";
 import type { AgentMigrationNotice, AgentMigrationStatusResponse } from "./realtime";
-import { canCancelMigration } from "./state";
+import { canCancelMigration, isHostedMigration } from "./state";
 import { MigrationReference } from "./MigrationReference";
 
 // A running migration bumps its revision at every step, so the revision the
@@ -35,6 +35,8 @@ export function AgentMigrationCancelDialog({
   const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
   const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
   const ref = migrationSupportRef(notice);
+  // A move to the cloud is canceled only before the switch, and only the source computer has to confirm.
+  const hosted = isHostedMigration(notice);
 
   const submit = useCallback(async () => {
     if (!canCancelMigration(notice)) return;
@@ -82,14 +84,20 @@ export function AgentMigrationCancelDialog({
       onClose={onClose}
       onConfirm={submit}
       message={
-        <div className="space-y-3 text-sm leading-relaxed text-foreground-strong">
+        <div className="space-y-3">
           <div>
-            <p className="font-bold">{formatMessage({ id: "agent.migration.cancelDialogSafetyTitle" })}</p>
-            <p>{formatMessage({ id: "agent.migration.cancelDialogSafeMessage" }, { source, target })}</p>
+            <p className="font-semibold text-foreground">{formatMessage({ id: "agent.migration.cancelDialogSafetyTitle" })}</p>
+            <p>
+              {hosted
+                ? formatMessage({ id: "agent.migration.hosted.cancelDialogSafeMessage" }, { source })
+                : formatMessage({ id: "agent.migration.cancelDialogSafeMessage" }, { source, target })}
+            </p>
           </div>
           <MigrationReference notice={notice} />
-          <p className="text-foreground-muted">
-            {formatMessage({ id: "agent.migration.cancelDialogExplanation" })}
+          <p className="text-callout">
+            {hosted
+              ? formatMessage({ id: "agent.migration.hosted.cancelDialogExplanation" }, { source })
+              : formatMessage({ id: "agent.migration.cancelDialogExplanation" })}
           </p>
         </div>
       }

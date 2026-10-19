@@ -4,7 +4,7 @@
 // escape hatch to every Agent API route. Runtime-neutral core: `fetch` and
 // WebCrypto only, no filesystem, no `node:` imports.
 
-import { createAgentApiClient, type AgentApiClient } from "@botiverse/raft-shared/src/agentApiClient";
+import { createAgentApiClient, type AgentApiClient, type AgentApiClientError } from "@botiverse/raft-shared/src/agentApiClient";
 import {
   listLabs,
   setLabEnrollment,
@@ -78,8 +78,25 @@ import {
   webhookStatus,
   drainedInboxOutcome,
   failureOutcome,
+  getAppConfig,
+  callMcpTool,
+  listMcpTools,
+  readAllRaftbenchContext,
+  readRaftbenchContext,
+  raftbenchFailedReport,
+  submitRaftbenchReport,
+  type ReadRaftbenchContextRequest,
+  type RaftbenchMaterial,
+  type RaftbenchSubmitted,
+  type CallMcpToolRequest,
+  type RaftMcpCatalog,
+  type RaftMcpResult,
   opError,
+  opErrorFromClientError,
+  patchAppConfig,
   restyleDefaultNextAction,
+  type AppConfigRequest,
+  type PatchAppConfigRequest,
   validateOpRequest,
   type RaftAttachmentDownloadUrl,
   type RaftHintStyle,
@@ -128,7 +145,7 @@ import {
   type RaftOutcome,
   type RaftWebhookStatus,
   type ReadHistoryRequest,
-  type RaftStateSaveErrorHandler,
+  type RaftStateErrorHandler,
   type RaftStateStore,
   type SeenFrontierSnapshot,
   type SendMessageOutcome,
@@ -148,6 +165,7 @@ import type {
   AgentApiKnowledgeSearchResponse,
   AgentApiSenderMentionDeliveriesResponse,
   AgentApiProfileUpdateBody,
+  AgentApiAppConfigResponse,
   AgentApiProfileView,
   AgentApiTaskAmendSuccessResponse,
   AgentApiTaskCreateResponse,
@@ -156,8 +174,11 @@ import type {
   AgentApiThreadListItem,
 } from "@botiverse/raft-shared/src/agentApiContract";
 
+import type { RaftbenchContextResponse, RaftbenchReport } from "@botiverse/raft-shared/src/agentOps/index";
 import { requireAgentCredential, requireServerUrl, type CreateRaftClientOptions } from "./client";
 import { getRaftContext, type RaftContextData, type RaftContextResult } from "./context";
+import { uploadRaftAvatar, type RaftApiResult, type RaftAvatarUpload } from "./manage";
+import { formatAgentProfile } from "@botiverse/raft-shared/src/agentText/index";
 import { createRaftRouteClient, raftRoutesFromClient, type RaftRoutes } from "./routes";
 import { lookupRaftOperation, type RaftOperationName } from "./operations";
 
@@ -188,8 +209,10 @@ export interface CreateRaftOptions {
    * that changed the state (one attempt, never fails the operation).
    */
   state?: RaftStateStore;
-  /** Called when loading or saving the state fails or is rejected as stale. */
-  onStateSaveError?: RaftStateSaveErrorHandler;
+  /** Called when loading or saving the state fails or is rejected as stale (`context.phase` says which). */
+  onStateError?: RaftStateErrorHandler;
+  /** @deprecated Use `onStateError` (same handler; the name covers loads too). Ignored when `onStateError` is set. Removed in 1.0. */
+  onStateSaveError?: RaftStateErrorHandler;
   /**
    * How "do this next" hints render in every outcome's `text` and
    * `next.command`. `cli` (default): the `raft …` command, exactly as the CLI
@@ -199,6 +222,24 @@ export interface CreateRaftOptions {
    * `next.operation` carries the structured call.
    */
   hints?: RaftHintStyle;
+  /**
+   * Conversation cards (default off), the same rules the `raft` CLI follows:
+   * - `messages.read` starts with the channel's card (name, visibility,
+   *   description) the first time in the frontier's context and after it
+   *   changed, and with a DM peer's card when the context has seen nothing of
+   *   them; a sender's description shows once per context.
+   * - `messages.send` / `messages.reply` say which card versions the context
+   *   has: a send whose context never saw the card is held once
+   *   (`interrupt.reason` `"unseen_card"`, the card in `interrupt.context`
+   *   and `interrupt.cards`; `frontier.recordHeld(interrupt)` books it under
+   *   `interrupt.contextId`, then resume with the same idempotencyKey); a
+   *   changed channel card comes back after the receipt.
+   * - With no context (no `frontier.setContext` and no `invoke` contextId),
+   *   nothing is held for a card: every read shows the channel card (and the
+   *   peer card unless a message from the peer is in the window), and every
+   *   send is followed by the conversation's cards and latest messages.
+   */
+  conversationCards?: boolean;
 }
 
 export interface RaftInboxCommitResult {
@@ -290,7 +331,7 @@ export interface Raft {
     /** Reply where a received message came from. */
     reply(message: Pick<RaftMessage, "target">, request: Omit<SendMessageRequest, "target">): Promise<SendMessageOutcome>;
     /** Find a specific message (`raft message search`); previews neutralise @handles and #channels. */
-    search(request: SearchMessagesRequest): Promise<RaftOutcome<RaftSearchPage, "results" | "empty">>;
+    search(request: SearchMessagesRequest): Promise<RaftOutcome<RaftSearchPage, "results" | "empty" | "incomplete">>;
     /** Resolve one message id to its canonical form and reply target. */
     resolve(request: { messageId: string }): Promise<RaftOutcome<RaftMessage, "message">>;
     react(request: ReactRequest): Promise<RaftOutcome<ReactRequest, "added" | "removed">>;
@@ -401,6 +442,63 @@ export interface Raft {
   profile: {
     show(request?: { target?: string }): Promise<RaftOutcome<AgentApiProfileView, "profile">>;
     update(request: AgentApiProfileUpdateBody): Promise<RaftOutcome<AgentApiProfileView, "updated">>;
+    /** Upload an avatar image (JPEG, PNG, GIF or WebP, at most 5 MB). Needs `send`. */
+    updateAvatar(upload: RaftAvatarUpload): Promise<RaftOutcome<AgentApiProfileView, "updated">>;
+  };
+  apps: {
+    /** A built-in app's configuration for this agent (`raft app config`). Needs `read`. */
+    getConfig(request: AppConfigRequest): Promise<RaftOutcome<AgentApiAppConfigResponse, "config">>;
+    /** Change a built-in app's configuration atomically. Needs `tasks`. */
+    patchConfig(request: PatchAppConfigRequest): Promise<RaftOutcome<AgentApiAppConfigResponse, "updated">>;
+  };
+  /**
+   * Managed MCP: connectors Raft holds the credentials for (Notion, …). Mount
+   * each `tools()` entry as its own model tool (`runtimeName`, `inputSchema`,
+   * `description`), as Computer agents get them; put
+   * `formatMcpReconnectRequired(name)` in the model's context for each
+   * `reconnectRequired` entry. Not an `invoke` operation. Needs `mcp`.
+   */
+  mcp: {
+    /** The catalog for this agent, and the connectors that need reconnecting. */
+    tools(): Promise<RaftOutcome<RaftMcpCatalog, "tools" | "empty">>;
+    /**
+     * Call one catalog tool. Never held for unread messages and never retried
+     * automatically. On a failure, `mcpFailureKind(outcome)` says whether to
+     * refetch `tools()` (`stale`), tell the user (`reconnect_required`), or
+     * try later (`unavailable`); the model reads `error.nextAction`.
+     */
+    call(request: CallMcpToolRequest): Promise<RaftOutcome<RaftMcpResult, "result" | "tool_error">>;
+  };
+  /**
+   * RaftBench (staging pilot), for the hosted harness of the read-only
+   * service agent: the harness reads its assigned run's material, gives it to
+   * the model (which has no tools), and submits the model's result. Not an
+   * `invoke` operation. Needs `raftbench`. On a failure,
+   * `raftbenchFailureKind(outcome)` says whether to read again (`reread`),
+   * end the run (`stop`) or repeat the same request later (`retry_identical`).
+   */
+  raftbench: {
+    /** One page of the run's material (`nextCursor` for the next one). */
+    context(request?: ReadRaftbenchContextRequest): Promise<RaftOutcome<RaftbenchContextResponse, "page" | "last_page">>;
+    /**
+     * Every page of the run, with the one Coverage block on top
+     * (`formatRaftbenchCoverage`). `empty`: no messages were read — do not call
+     * the model; submit `raftbenchEmptyWindowReport(data)`.
+     */
+    readAll(request?: { runId?: string; maxPages?: number }): Promise<RaftOutcome<RaftbenchMaterial, "complete" | "partial" | "empty">>;
+    /**
+     * Submit the result. `accepted`: saved; an identical replay returns the
+     * same receipt, so a lost response is resent automatically. `invalid`:
+     * nothing saved; `text` lists every problem for the model's one fix.
+     */
+    submit(report: RaftbenchReport): Promise<RaftOutcome<RaftbenchSubmitted, "accepted" | "invalid">>;
+    /**
+     * Submit a run the harness could not finish (read, model or fix failed;
+     * cancelled or timed out): `incomplete` with `failure: true`, so the
+     * Server retries the material (`raftbenchFailedReport`). Never for the
+     * model's own result.
+     */
+    submitFailure(run: { runId: string; revision: number }, reason: string): Promise<RaftOutcome<RaftbenchSubmitted, "accepted" | "invalid">>;
   };
   /**
    * What this process has shown its model, per target; export it to survive
@@ -420,20 +518,47 @@ export interface Raft {
   routes: RaftRoutes;
 }
 
-export function createRaft(options: CreateRaftOptions): Raft {
+/** The avatar upload is multipart, outside the JSON route client: map its result onto an outcome. */
+function avatarOutcome(result: RaftApiResult<AgentApiProfileView>): RaftOutcome<AgentApiProfileView, "updated"> {
+  if (result.ok) return { ok: true, state: "updated", data: result.data, next: null, text: formatAgentProfile(result.data) };
+  const { code, errorCode } = result.error;
+  if (code === "HTTP_ERROR") {
+    const httpError: AgentApiClientError = {
+      kind: "http",
+      reason: "http_error",
+      message: result.error.message,
+      status: result.status ?? 0,
+      errorCode: errorCode ?? null,
+    };
+    return failureOutcome(opErrorFromClientError(httpError, result.status));
+  }
+  return failureOutcome(opError(code));
+}
+
+/** Options of `createRaftAgent`. */
+export type CreateRaftAgentOptions = CreateRaftOptions;
+/** The agent-layer client `createRaftAgent` returns. */
+export type RaftAgent = Raft;
+
+/**
+ * Create the agent-layer client (`@botiverse/raft-sdk/agent`): identity,
+ * inbox, read, reply, tasks, interrupts, next steps and model-readable `text`,
+ * built on the program-layer client (`raft.routes`).
+ */
+export function createRaftAgent(options: CreateRaftAgentOptions): RaftAgent {
   const serverUrl = requireServerUrl(options.serverUrl);
   const credential = requireAgentCredential(options.credential);
   const authorization = `Bearer ${credential}`;
   const frontier = SeenFrontier.fromSnapshot(options.frontier);
   if (options.hints !== undefined && options.hints !== "cli" && options.hints !== "tool") {
-    throw new TypeError('createRaft: hints must be "cli" or "tool".');
+    throw new TypeError('createRaftAgent: hints must be "cli" or "tool".');
   }
   const hints: RaftHintStyle = options.hints ?? "cli";
   /** How every operation renders its hints. */
-  const style = { hints };
+  const style = { hints, conversationCards: options.conversationCards === true };
   /** The SDK's default NOT_FOUND next action names a command; render it in the configured style. */
   const styled = <T>(outcome: T): T => restyleDefaultNextAction(outcome, hints);
-  const session = new RaftStateSession(options.state, frontier, options.onStateSaveError);
+  const session = new RaftStateSession(options.state, frontier, options.onStateError ?? options.onStateSaveError);
   /** Load before, run, then save if the operation succeeded and changed the state. */
   const withState = async <T extends { ok: boolean }>(run: () => Promise<T>): Promise<T> => {
     await session.ensureLoaded();
@@ -469,15 +594,21 @@ export function createRaft(options: CreateRaftOptions): Raft {
    * (same target, content, attachments) reuses the held send's idempotency key;
    * a hold is remembered; a successful send clears it.
    */
-  const sendWithState = (request: SendMessageRequest, seen: SeenFrontier) => withState(async () => {
+  /**
+   * `fromModel`: the model made this send (`invoke` with origin "model"), so
+   * the thread-target check runs; direct method calls and origin "code" skip it.
+   */
+  const sendWithState = (request: SendMessageRequest, seen: SeenFrontier, fromModel = false) => withState(async () => {
     const contentHash = await hashRaftSendContent(request.target, request.content ?? "", request.attachmentIds ?? []);
     const pending = request.idempotencyKey ? undefined : session.findContinuation(request.target, contentHash);
-    const outcome = await sendMessage(api, pending ? { ...request, idempotencyKey: pending.idempotencyKey } : request, seen, style);
+    const outcome = await sendMessage(api, pending ? { ...request, idempotencyKey: pending.idempotencyKey } : request, seen, { ...style, threadTargetCheck: fromModel });
     if (outcome.ok && outcome.state === "interrupted" && outcome.interrupt.resume.idempotencyKey) {
       session.rememberContinuation({ target: request.target, idempotencyKey: outcome.interrupt.resume.idempotencyKey, contentHash, heldAt: new Date().toISOString() });
     } else if (outcome.ok && outcome.state === "sent") {
       session.forgetContinuation(request.target, contentHash);
     }
+    // A card shown after the receipt was booked on the frontier: save it.
+    if (outcome.ok && style.conversationCards) session.markDirty();
     return outcome;
   });
 
@@ -570,14 +701,14 @@ export function createRaft(options: CreateRaftOptions): Raft {
       search: (request) => searchManual(api, request, style).then(styled),
     },
     tasks: {
-      claim: (request) => claimTasks(api, request, style).then(styled),
+      claim: (request) => withState(() => claimTasks(api, request, frontier, style)),
       list: (request) => listTasks(api, request, style).then(styled),
       create: (request) => createTasks(api, request, style).then(styled),
       unclaim: (request) => unclaimTask(api, request).then(styled),
       assign: (request) => assignTask(api, request).then(styled),
       unassign: (request) => unassignTask(api, request).then(styled),
-      updateStatus: (request) => updateTaskStatus(api, request, style).then(styled),
-      amend: (request) => amendTask(api, request, style).then(styled),
+      updateStatus: (request) => withState(() => updateTaskStatus(api, request, frontier, style)),
+      amend: (request) => withState(() => amendTask(api, request, frontier, style)),
       history: (request) => taskHistory(api, request).then(styled),
       show: (request) => showTask(api, request, style).then(styled),
       convert: (request) => convertMessageToTask(api, request, style).then(styled),
@@ -616,6 +747,27 @@ export function createRaft(options: CreateRaftOptions): Raft {
     profile: {
       show: (request) => showProfile(api, request).then(styled),
       update: (request) => updateProfile(api, request).then(styled),
+      updateAvatar: async (upload) => avatarOutcome(await uploadRaftAvatar({
+        serverUrl,
+        fetch: options.fetch ?? fetch,
+        headers: Object.fromEntries(new Headers(options.headers)),
+        authorization,
+        beforeRequest: options.throttle?.beforeRequest,
+      }, upload)),
+    },
+    apps: {
+      getConfig: (request) => getAppConfig(api, request).then(styled),
+      patchConfig: (request) => patchAppConfig(api, request).then(styled),
+    },
+    mcp: {
+      tools: () => listMcpTools(api).then(styled),
+      call: (request) => callMcpTool(api, request).then(styled),
+    },
+    raftbench: {
+      context: (request) => readRaftbenchContext(api, request).then(styled),
+      readAll: (request) => readAllRaftbenchContext(api, request).then(styled),
+      submit: (report) => submitRaftbenchReport(api, report).then(styled),
+      submitFailure: (run, reason) => submitRaftbenchReport(api, raftbenchFailedReport(run, reason)).then(styled),
     },
     frontier,
     state: {
@@ -664,8 +816,8 @@ export function createRaft(options: CreateRaftOptions): Raft {
     "messages.read": (args: ReadHistoryRequest, call) => call.origin === "code"
       ? readWithState({ ...args, consume: false }, undefined)
       : readWithState(args, call.seen),
-    "messages.send": (args: SendMessageRequest, call) => sendWithState(args, call.seen),
-    "messages.reply": ({ message, ...request }: ReplyToRequest, call) => sendWithState({ ...request, target: message.target }, call.seen),
+    "messages.send": (args: SendMessageRequest, call) => sendWithState(args, call.seen, call.origin === "model"),
+    "messages.reply": ({ message, ...request }: ReplyToRequest, call) => sendWithState({ ...request, target: message.target }, call.seen, call.origin === "model"),
     "messages.search": (args: SearchMessagesRequest) => raft.messages.search(args),
     "messages.resolve": (args: { messageId: string }) => raft.messages.resolve(args),
     "messages.react": (args: ReactRequest) => raft.messages.react(args),
@@ -679,14 +831,15 @@ export function createRaft(options: CreateRaftOptions): Raft {
     "actions.prepare": (args: PrepareActionCardRequest) => raft.actions.prepare(args),
     "manual.get": (args: { topic: string } & ManualContext) => raft.manual.get(args),
     "manual.search": (args: { query: string; scope?: string } & ManualContext) => raft.manual.search(args),
-    "tasks.claim": (args: ClaimTasksRequest) => raft.tasks.claim(args),
+    // Task writes attest what the context saw (G2-2): load the saved state first, as a send does.
+    "tasks.claim": (args: ClaimTasksRequest, call) => withState(() => claimTasks(api, args, call.seen, style)),
     "tasks.list": (args: ListTasksRequest) => raft.tasks.list(args),
     "tasks.create": (args: CreateTasksRequest) => raft.tasks.create(args),
     "tasks.unclaim": (args: TaskRef) => raft.tasks.unclaim(args),
     "tasks.assign": (args: AssignTaskRequest) => raft.tasks.assign(args),
     "tasks.unassign": (args: UnassignTaskRequest) => raft.tasks.unassign(args),
-    "tasks.updateStatus": (args: UpdateTaskStatusRequest) => raft.tasks.updateStatus(args),
-    "tasks.amend": (args: AmendTaskRequest) => raft.tasks.amend(args),
+    "tasks.updateStatus": (args: UpdateTaskStatusRequest, call) => withState(() => updateTaskStatus(api, args, call.seen, style)),
+    "tasks.amend": (args: AmendTaskRequest, call) => withState(() => amendTask(api, args, call.seen, style)),
     "tasks.history": (args: TaskRef) => raft.tasks.history(args),
     "tasks.show": (args: TaskRef) => raft.tasks.show(args),
     "tasks.convert": (args: { target: string; messageId: string }) => raft.tasks.convert(args),
@@ -753,4 +906,12 @@ function whoamiOutcome(result: RaftContextResult): RaftOutcome<RaftContextData, 
   const { agent, server, capabilities, guide } = result.data;
   const head = `You are @${agent.name}${agent.displayName ? ` (${agent.displayName})` : ""} on ${server.name}. Credential capabilities: ${capabilities.join(", ") || "none"}.`;
   return { ok: true, state: "identity", data: result.data, next: null, text: guide ? `${head}\n\n${guide}` : head };
+}
+
+/**
+ * @deprecated Renamed `createRaftAgent`; import it from `@botiverse/raft-sdk/agent`.
+ * Same options and client. Removed in 1.0. See MIGRATING.md.
+ */
+export function createRaft(options: CreateRaftOptions): Raft {
+  return createRaftAgent(options);
 }

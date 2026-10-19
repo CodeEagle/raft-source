@@ -16,6 +16,7 @@ import {
   trackActivityItemOpen,
   trackActivityMark,
 } from "../src/analytics/activity";
+import { summarizeBulkModelChangeResults } from "../src/analytics/bulkModelChange";
 
 type Call = { url: string; init?: RequestInit };
 
@@ -159,4 +160,22 @@ test("page_viewed carries only a route name for tracked in-server pages", () => 
 
 test("the registry's settings tabs match the settings navigation", () => {
   assert.deepEqual([...SETTINGS_PAGE_TABS].sort(), SETTINGS_TABS.map((tab) => tab.id).sort());
+});
+
+test("bulk_model_change_finished keeps unconfirmed results apart from failures", () => {
+  assert.deepEqual(summarizeBulkModelChangeResults(["succeeded", "succeeded"]), {
+    outcome: "all_succeeded",
+    succeeded_count: 2,
+    restart_pending_count: 0,
+    save_failed_count: 0,
+    unconfirmed_count: 0,
+  });
+  assert.deepEqual(summarizeBulkModelChangeResults(["succeeded", "restart_pending", "save_failed", "unconfirmed"]), {
+    outcome: "partial",
+    succeeded_count: 1,
+    restart_pending_count: 1,
+    save_failed_count: 1,
+    unconfirmed_count: 1,
+  });
+  assert.equal(summarizeBulkModelChangeResults(["unconfirmed", "save_failed"]).outcome, "none_succeeded");
 });

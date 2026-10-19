@@ -27,3 +27,7 @@ export type {
  * every compile-time guarantee a consumer thinks it is getting. (@赵梓淇 P1.)
  */
 export type { ActivityRow as ActivityContractRow } from "../contracts/activity-v1/generated/bindings/activity-sync";
+export {
+  ACTIVITY_SYNC_CONTRACT,
+  ACTIVITY_SYNC_CONTRACT_REVISION,
+} from "../contracts/activity-v1/generated/bindings/activity-sync";

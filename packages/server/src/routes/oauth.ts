@@ -1,3 +1,5 @@
+import { getAppInstallationSetup, updateAppInstallationSetup, AppSetupConflictError } from "../services/appSetupService";
+import { asAppSetupInstallationId, AppSetupValidationError } from "@botiverse/raft-shared";
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { Router, type Request, type Response, type Router as RouterType } from "express";
@@ -526,6 +528,7 @@ oauthRouter.post("/installations/lookup", async (req, res) => {
     res.json({
       installation_id: installation.installationId,
       server_id: installation.serverId,
+      setup: await getAppInstallationSetup({ clientId: client.id, serverId: installation.serverId }),
     });
   } catch (error) {
     sendJsonServerError(req, res, {
@@ -533,6 +536,29 @@ oauthRouter.post("/installations/lookup", async (req, res) => {
       logPrefix: "Discover app installation error:",
       err: error,
     });
+  }
+});
+
+// Completion comes from the authenticated App backend, never from a browser
+// return URL. Installation IDs are identifiers and cannot authenticate a user.
+oauthRouter.put("/installations/:installationId/setup", async (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  try {
+    const client = await requireOAuthClient(req, res);
+    if (!client) return;
+    const installationId = asAppSetupInstallationId(req.params.installationId);
+    const { revision, status } = req.body ?? {};
+    if (!Number.isSafeInteger(revision) || revision < 1 || revision > 2147483647
+      || (status !== "pending" && status !== "complete")) {
+      res.status(400).json({ error: "revision and status (pending or complete) are required" }); return;
+    }
+    const setup = await updateAppInstallationSetup({ clientId: client.id, installationId, revision, status });
+    if (!setup) { res.status(404).json({ error: "Active installation not found" }); return; }
+    res.json(setup);
+  } catch (err) {
+    if (err instanceof AppSetupValidationError) { res.status(400).json({ error: err.message }); return; }
+    if (err instanceof AppSetupConflictError) { res.status(409).json({ error: err.message }); return; }
+    sendJsonServerError(req, res, { error: "Failed to update App setup", logPrefix: "Update App setup error:", err });
   }
 });
 
@@ -626,6 +652,8 @@ oauthRouter.get("/clients/lookup", requireAuth, async (req, res) => {
         homepageUrl: marketplaceClient.homepageUrl,
         returnUrl: marketplaceClient.returnUrl,
         logoUrl: marketplaceClient.logoUrl,
+        setupUrl: marketplaceClient.setupUrl,
+        setupDescription: marketplaceClient.setupDescription,
         allowedScopes: marketplaceClient.allowedScopes,
         marketplace: true,
         availability: "install_required",
@@ -650,6 +678,8 @@ oauthRouter.get("/clients/lookup", requireAuth, async (req, res) => {
       homepageUrl: client.homepageUrl,
       returnUrl: client.returnUrl,
       logoUrl: client.logoUrl,
+      setupUrl: client.setupUrl,
+      setupDescription: client.setupDescription,
       allowedScopes: client.allowedScopes,
       marketplace: marketplaceClient ? true : undefined,
       availability: "ready",

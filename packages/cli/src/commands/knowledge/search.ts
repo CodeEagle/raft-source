@@ -2,7 +2,7 @@
 
 import type { Command } from "commander";
 
-import { formatAgentKnowledgeSearchResults } from "@botiverse/raft-shared";
+import { formatAgentKnowledgeSearchResults } from "@botiverse/raft-shared/src/agentCliSurface";
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";

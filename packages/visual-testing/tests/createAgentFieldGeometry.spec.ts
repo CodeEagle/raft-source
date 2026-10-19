@@ -13,7 +13,10 @@ import { expect, test } from "@playwright/test";
  *  - the dialog's height does not change when a message appears, which is the
  *    property the reserved message row exists to provide
  *  - selects and inputs share one field contract, so a select does not render
- *    as a button (32px / 14px / 700) next to an input (44px / 16px / 400)
+ *    with button type (15/20 700) next to an input (44px, DS input text 16/24
+ *    400). The DS's own Select is 44px too but types its value 15/20 600
+ *    (`rf-select`); this dialog keeps selects on the input's type — a known
+ *    divergence for the DS to settle, see createAgentFieldMetrics.spec.ts.
  */
 
 const CASE = (id: string) => `/visual-testing.html?case=components.members.create-agent.${id}`;
@@ -39,7 +42,8 @@ async function fieldGaps(page: import("@playwright/test").Page) {
       // A searchable model field has a padded outer control around its input.
       // Spacing follows that visible border, not the inner text line.
       const prevControl = fields[i - 1].querySelector('[data-slot="combobox-control"]')
-        ?? fields[i - 1].querySelector("input,textarea,button[data-slot]");
+        ?? [...fields[i - 1].querySelectorAll("input,textarea,button[data-slot]")]
+          .find((el) => !el.closest('[data-slot="field-label-accessory"]'));
       const nextLabel = fields[i].querySelector('[data-slot="field-label"]');
       if (!prevControl || !nextLabel) continue;
       const a = prevControl.getBoundingClientRect();
@@ -63,7 +67,8 @@ test("field spacing is uniform regardless of a field's internal shape", async ({
   // The Description field carries a character counter and the others do not;
   // before the reserved row, that alone made its gap 36 where the rest were 16.
   expect(new Set(gaps).size, `gaps should all be equal, got ${gaps.join("/")}`).toBe(1);
-  // 16px between fields plus the reserved message row each field carries.
+  // The field gap plus the reserved message row each field carries; the exact
+  // number is createAgentFieldSpacing.spec.ts's.
   expect(gaps[0]).toBeGreaterThan(0);
 });
 
@@ -87,7 +92,9 @@ test("selects and inputs share one field contract, not button metrics", async ({
   await settle(page);
   const metrics = await page.evaluate(() =>
     [...document.querySelectorAll('[data-slot="field"]')].map((f) => {
-      const c = f.querySelector("input,textarea,button[data-slot]") as HTMLElement | null;
+      // The field's control, not an action in the label row (refresh, edit, random name).
+      const c = ([...f.querySelectorAll("input,textarea,button[data-slot]")]
+        .find((el) => !el.closest('[data-slot="field-label-accessory"]')) ?? null) as HTMLElement | null;
       if (!c) return null;
       const frame = c.closest('[data-slot="combobox-control"]') ?? c;
       const s = getComputedStyle(c);
@@ -114,7 +121,9 @@ test("every field's control is wired for assistive technology", async ({ page })
   const wiring = await page.evaluate(() =>
     [...document.querySelectorAll('[data-slot="field"]')].map((f) => {
       const label = f.querySelector('[data-slot="field-label"]');
-      const c = f.querySelector("input,textarea,button[data-slot]") as HTMLElement | null;
+      // The field's control, not an action in the label row (refresh, edit, random name).
+      const c = ([...f.querySelectorAll("input,textarea,button[data-slot]")]
+        .find((el) => !el.closest('[data-slot="field-label-accessory"]')) ?? null) as HTMLElement | null;
       return {
         field: (label?.textContent ?? "").trim().slice(0, 16),
         id: Boolean(c?.id),

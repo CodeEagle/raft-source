@@ -766,3 +766,33 @@ test("agent inbox state machine trace captures continue-anyway bypass before pen
     },
   ]);
 });
+
+// Glimpse G2-3: the Server holds task writes by the model-seen boundary, as it
+// holds sends, so every gated write forwards it (before, only sends did).
+test("task writes forward the model-seen boundary like a send", () => {
+  for (const action of ["task_claim", "task_update", "task_amend"] as const) {
+    const insideBoundary = planAgentInboxSideEffect({
+      agentId: "agent-1",
+      action,
+      target: "#board",
+      continueAnyway: false,
+      modelSeenSeq: 46,
+      pendingMessages: [message(45, { sender_id: "agent-1" }), message(46, { sender_id: "agent-1" })],
+      recentMessages: [],
+    });
+    assert.equal(insideBoundary.outcome, "forward", action);
+    assert.equal(insideBoundary.forwardSeenUpToSeq, 46, action);
+
+    const boundaryOnly = planAgentInboxSideEffect({
+      agentId: "agent-1",
+      action,
+      target: "#board",
+      continueAnyway: false,
+      modelSeenSeq: 30,
+      pendingMessages: [],
+      recentMessages: [],
+    });
+    assert.equal(boundaryOnly.outcome, "forward", action);
+    assert.equal(boundaryOnly.forwardSeenUpToSeq, 30, action);
+  }
+});

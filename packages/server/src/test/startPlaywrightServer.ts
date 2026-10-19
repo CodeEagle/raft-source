@@ -30,6 +30,7 @@ async function main() {
     beforeApp: playwrightScenarios(scenarioCapability),
     observeHttpServer,
     humanActivityMuteFlagDefaultEnabled: true,
+    sidebarMarkAllReadFlagDefaultEnabled: true,
     onboardingOpenerFlagDefaultEnabled: false,
     // Browser workers share this server/IP; rate limits have server tests.
     skipAuthRateLimit: true,

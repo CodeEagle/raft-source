@@ -20,7 +20,7 @@ test("channel identity carries provider-neutral bridge metadata without duplicat
   assert.doesNotMatch(settings, /channel\.edit\.slackBridgeTitle|providerConversationId/);
   assert.match(create, /ChannelSlackBridgeField[\s\S]*bridgeEditor\.apply\(channel\.id\)/);
   assert.match(settings, /ChannelSlackBridgeField[\s\S]*bridgeEditor\.apply\(channelId\)/);
-  assert.match(bridgeField, /from "raft-ui"[\s\S]*<Select[\s\S]*items=\{selectOptions\}[\s\S]*<SelectTrigger className="w-full"/);
+  assert.match(bridgeField, /from "@botiverse\/raft-ui"[\s\S]*<Select[\s\S]*items=\{selectOptions\}[\s\S]*<SelectTrigger className="w-full"/);
   assert.match(bridgeField, /pairedBySlackId[\s\S]*disabled:\s*occupied[\s\S]*<SelectItem[\s\S]*disabled=\{option\.disabled\}/);
   assert.doesNotMatch(bridgeField, /<select\b|<option\b/);
 });

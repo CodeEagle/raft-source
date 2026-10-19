@@ -251,7 +251,7 @@ export function agentChannelRef(name: string, type?: string | null): string {
 
 // A joint channel is shared with members of other servers and is
 // membership-gated like a private one; calling it "public" hid that.
-function channelVisibility(channel: AgentChannelInfo): string {
+export function channelVisibility(channel: Pick<AgentChannelInfo, "type">): string {
   const type = channel.type?.trim();
   if (type === "joint") return "joint";
   return type === "private" || type === "dm" ? "private" : "public";

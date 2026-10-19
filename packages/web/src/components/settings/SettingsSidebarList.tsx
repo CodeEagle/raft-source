@@ -1,6 +1,6 @@
 import FeedbackUnreadDot from "../../feedback/FeedbackUnreadDot";
 import type { ReactNode } from "react";
-import { SidebarItem } from "raft-ui";
+import { SidebarGroupLabel, SidebarItem, SidebarItemContent, SidebarItemTitle } from "@botiverse/raft-ui";
 
 export interface SettingsSidebarItem {
   id: string;
@@ -16,10 +16,11 @@ export interface SettingsSidebarGroup {
   items: SettingsSidebarItem[];
 }
 
-/** The shared settings rows used inside the canonical AppShell sidebar.
- *  Rows are RUI SidebarItem so selected/hover geometry follows the theme
- *  recipe (elegant rounded borderless, brutal hard pink block). External
- *  links keep anchor semantics via `render`. */
+/** The shared settings rows used inside the canonical AppShell sidebar:
+ *  Personal / Workspace / Resources groups, each under the DS section title
+ *  (RUI SidebarGroupLabel). Rows are RUI SidebarItem, so the selected row is
+ *  the yellow "you are here" sticker the sidebar recipe draws. External links
+ *  keep anchor semantics via `render`. */
 export default function SettingsSidebarList({
   groups,
   activeId,
@@ -28,18 +29,15 @@ export default function SettingsSidebarList({
   activeId: string | null;
 }) {
   return (
-    <div className="space-y-3" data-testid="settings-sidebar-list">
+    <div data-testid="settings-sidebar-list">
       {groups.filter((group) => group.items.length > 0).map((group) => (
         <div key={group.label}>
-          <div className="mb-1 px-2 text-[10px] font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/40">
-            {group.label}
-          </div>
+          <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
           {group.items.map((item) => {
             const selected = activeId === item.id;
             return (
               <SidebarItem
                 key={item.id}
-                variant="accent"
                 active={selected}
                 render={item.href ? (
                   // The render literal is empty by design: SidebarItem merges
@@ -51,8 +49,13 @@ export default function SettingsSidebarList({
                 )}
                 data-testid={item.testId}
               >
+                {/* The same parts as every sidebar row: the glyph in its 19px
+                    icon box (the caller's SidebarItemIcon), the label on one
+                    line with an ellipsis. */}
                 {item.icon}
-                {item.label}
+                <SidebarItemContent className="items-center">
+                  <SidebarItemTitle>{item.label}</SidebarItemTitle>
+                </SidebarItemContent>
                 {item.id === "feedback" && <FeedbackUnreadDot className="ml-auto" />}
               </SidebarItem>
             );

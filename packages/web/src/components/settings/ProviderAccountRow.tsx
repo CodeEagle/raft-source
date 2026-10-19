@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Button, Card, IconTile } from "@botiverse/raft-ui";
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
 import type { AuthProvider } from "../../hooks/useAuthProviders";
@@ -22,17 +22,17 @@ export function ProviderAccountRow({
   const handleRequestDisconnect = useCallback(() => onRequestDisconnect(provider), [onRequestDisconnect, provider]);
 
   return (
-    <div
+    <Card
       role="group"
       aria-label={formatMessage({ id: "settings.account.providerAccountAria" }, { label: provider.label })}
-      className="relative flex items-start justify-between gap-3 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white p-3 text-left transition-colors hover:border-line-strong hover:shadow-raft-sm theme-brutal:hover:border-black theme-brutal:hover:shadow-brutal-sm"
+      className="min-h-11 flex-row items-center gap-3 px-4 py-3 text-left"
     >
+      <IconTile>
+        <SocialProviderIcon providerId={provider.id} />
+      </IconTile>
       <div className="min-w-0 flex-1">
-        <div className="mb-1 flex items-center gap-2 text-xs">
-          <SocialProviderIcon providerId={provider.id} />
-          <span className="font-bold text-foreground-strong theme-brutal:text-black">{provider.label}</span>
-        </div>
-        <div className="truncate text-xs text-foreground-muted theme-brutal:text-black/50">
+        <div className="truncate text-subhead font-semibold text-foreground">{provider.label}</div>
+        <div className="truncate text-footnote text-foreground-muted">
           {identity?.providerEmail
             ? formatMessage({ id: "settings.account.connectedAs" }, { email: identity.providerEmail })
             : formatMessage({ id: "settings.account.notConnected" })}
@@ -60,6 +60,6 @@ export function ProviderAccountRow({
           {formatMessage({ id: "settings.account.disconnect" })}
         </Button>
       )}
-    </div>
+    </Card>
   );
 }

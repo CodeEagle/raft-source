@@ -52,7 +52,7 @@ test("Server MCP configuration lives in global Settings while Agent MCP shows re
   assert.match(englishMessages, /"agent\.mcp\.add": "Add"/u);
   assert.match(mcpPanel, /max-h-80 overflow-y-auto/u);
   assert.match(mcpPanel, /grid grid-cols-1 sm:grid-cols-2/u);
-  assert.match(mcpPanel, /line-clamp-2 text-xs leading-4/u);
+  assert.match(mcpPanel, /line-clamp-2 text-caption/u);
   assert.match(mcpPanel, /aria-label=\{formatMessage\(\{ id: "agent\.mcp\.aboutTool" \}, \{ name: label \}\)\}/u);
   assert.match(englishMessages, /"agent\.mcp\.aboutTool": "About \{name\}"/u);
   assert.match(mcpPanel, /normalizeManagedMcpToolDescription\(tool\.description\)/u);

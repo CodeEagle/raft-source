@@ -216,12 +216,21 @@ export async function readLastRemoteUpgradeReceipt(slockHome: string): Promise<C
   try {
     const marker = JSON.parse(await readFile(join(computerDir(slockHome), "installer", LAST_REMOTE_UPGRADE_MARKER), "utf8"));
     if (typeof marker?.requestId !== "string") return null;
-    const name = createHash("sha256").update(marker.requestId).digest("hex");
+    return await readRemoteUpgradeReceipt(slockHome, marker.requestId, typeof marker.targetVersion === "string" ? marker.targetVersion : undefined);
+  } catch {
+    return null;
+  }
+}
+
+/** The installer's receipt for one request, reduced to what the server consumes; null until it exists. */
+async function readRemoteUpgradeReceipt(slockHome: string, requestId: string, fallbackTargetVersion?: string): Promise<ComputerLastUpgradeReceipt | null> {
+  try {
+    const name = createHash("sha256").update(requestId).digest("hex");
     const raw = await readFile(join(computerDir(slockHome), "installer", "receipts", `${name}.json`), "utf8");
     if (raw.length > 65_536) return null;
     const receipt = JSON.parse(raw);
-    if (receipt.protocol !== "raft-computer-installer/v3" || receipt.id !== marker.requestId || receipt.operation !== "upgrade") return null;
-    const targetVersion = typeof receipt.targetVersion === "string" ? receipt.targetVersion : marker.targetVersion;
+    if (receipt.protocol !== "raft-computer-installer/v3" || receipt.id !== requestId || receipt.operation !== "upgrade") return null;
+    const targetVersion = typeof receipt.targetVersion === "string" ? receipt.targetVersion : fallbackTargetVersion;
     if (typeof targetVersion !== "string") return null;
     const outcome: ComputerLastUpgradeReceipt["outcome"] = receipt.outcome === "promoted"
       ? "promoted"
@@ -243,3 +252,37 @@ export async function readLastRemoteUpgradeReceipt(slockHome: string): Promise<C
     return null;
   }
 }
+
+/** Matches the server's request deadline (UPGRADE_REQUEST_DEADLINE_MS); a later report settles nothing. */
+export const REMOTE_UPGRADE_FAILURE_WATCH_MS = 30 * 60 * 1000;
+
+/**
+ * Remote upgrade v2 readback while the launching runner is still alive. A
+ * promoted or rolled-back installer has already stopped this service, so the
+ * successor's `ready` relays the receipt. An installer that gives up before
+ * stopping it (held, preflight or download failure) leaves the service up and
+ * connected: no reconnect ever comes, and without this the request waits out
+ * its whole deadline as `no_response` (task #873 follow-up, 2026-10-19).
+ * Resolves with that receipt, or null once it is promoted or the wait ends.
+ */
+export async function waitForRemoteUpgradeFailureReceipt(slockHome: string, requestId: string, options: {
+  targetVersion?: string;
+  timeoutMs?: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
+} = {}): Promise<ComputerLastUpgradeReceipt | null> {
+  const timeoutMs = options.timeoutMs ?? REMOTE_UPGRADE_FAILURE_WATCH_MS;
+  const pollMs = options.pollMs ?? 5_000;
+  const now = options.now ?? Date.now;
+  // unref: a runner shutting down for the upgrade must not wait on this poll.
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms).unref(); }));
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    const receipt = await readRemoteUpgradeReceipt(slockHome, requestId, options.targetVersion);
+    if (receipt) return receipt.outcome === "promoted" ? null : receipt;
+    if (now() >= deadline) return null;
+    await sleep(pollMs);
+  }
+}
+

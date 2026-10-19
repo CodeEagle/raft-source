@@ -36,6 +36,7 @@ import {
 import { REMINDER_FIRE_REQUEST_CAPABILITY } from "@botiverse/raft-shared/src/apps/reminder/protocol";
 import { AgentProcessManager } from "./agentProcessManager";
 import { lookupCommandOnPath } from "./drivers/probe";
+import { OpenCodeDriver } from "./drivers/opencode";
 import { isRuntimeModelDetectionLookupReason } from "@botiverse/raft-shared";
 import { OUTBOX_NORMAL_CAP, RuntimeOutcomeOutbox, nodeOutboxFs, type OutboxFrame } from "./runtimeOutcomeOutbox";
 import { installDaemonFetchMockForTests } from "./daemonFetch";
@@ -62,6 +63,7 @@ import type { RuntimeDriver, ParsedEvent, SpawnContext, SpawnResult } from "./dr
 import type { ConnectionOptions, WebSocketLike } from "./connection";
 import { FakeClock } from "./testing/fakeClock";
 import { traceRows } from "./testing/traceRows";
+import { hostIdHashForServer, readHardwareId } from "./hostIdentity";
 import { makeDeterministicTracer } from "./testing/deterministicTracer";
 
 
@@ -634,6 +636,62 @@ test("task #1242: a runtime_models:detect for a runtime this computer does not h
     );
     assert.equal(wire.error, "error", "the legacy field is unchanged");
   } finally {
+    await core.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("a form's runtime_models:detect is served from the daemon's model cache; force runs a fresh detection", async () => {
+  // Real entry (server frame) → DaemonCore cache → driver detection, with the
+  // OpenCode driver's detection replaced by a counter.
+  let detections = 0;
+  const detectSpy = vi.spyOn(OpenCodeDriver.prototype, "detectModels").mockImplementation(async () => {
+    detections += 1;
+    return { kind: "live", value: { models: [{ id: `opencode/m${detections}`, label: `m${detections}`, verified: "launchable" }] } };
+  });
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-model-cache-test-"));
+  const sockets: FakeWebSocket[] = [];
+  const core = new DaemonCore({
+    serverUrl: "https://daemon.example.com",
+    apiKey: "sk_machine_test",
+    dataDir,
+    runtimeDetector: () => ({ ids: ["opencode"], versions: {} }),
+    connectionOptions: {
+      wsFactory: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    },
+  });
+  const modelIdOf = async (socket: FakeWebSocket, requestId: string, force?: boolean) => {
+    socket.emitServerMessage({ type: "machine:runtime_models:detect", requestId, runtime: "opencode", ...(force ? { force } : {}) });
+    const result = () => socket.sent.find((message): message is Extract<MachineToServerMessage, { type: "machine:runtime_models:result" }> =>
+      typeof message === "object" && message !== null
+      && (message as { type?: string }).type === "machine:runtime_models:result"
+      && (message as { requestId?: string }).requestId === requestId);
+    await waitFor(() => result() !== undefined, `runtime_models:result ${requestId}`);
+    const outcome = result()!.outcome!;
+    assert.equal(outcome.kind, "live");
+    return outcome.kind === "live" ? outcome.value.models[0]!.id : "";
+  };
+  try {
+    core.start();
+    const socket = sockets[0];
+    assert.ok(socket);
+    socket.emitOpen();
+    // The connect-time catalog push detects once and warms the cache.
+    await waitFor(() => socket.sent.some((message) => (message as { type?: string }).type === "machine:runtime_models:catalog"), "catalog push");
+    assert.equal(detections, 1);
+    assert.equal(await modelIdOf(socket, "first"), "opencode/m1", "the first form open is answered from the pushed list");
+    assert.equal(await modelIdOf(socket, "second"), "opencode/m1", "a second form open inside the fresh window reuses the list");
+    assert.equal(detections, 1);
+    assert.equal(await modelIdOf(socket, "refresh", true), "opencode/m2", "the refresh action detects afresh");
+    assert.equal(detections, 2);
+    assert.equal(await modelIdOf(socket, "after-refresh"), "opencode/m2", "the forced result replaces the cached list");
+    assert.equal(detections, 2);
+  } finally {
+    detectSpy.mockRestore();
     await core.stop();
     await rm(dataDir, { recursive: true, force: true });
   }
@@ -1356,6 +1414,10 @@ test("daemon credential-proxy trace contract preserves only typed cutover eviden
       http_status: 503,
       normalized_code: "server_5xx",
       response_started: true,
+      body_size_bucket: "10-50MiB",
+      response_complete: false,
+      failure_class: "mid_response_transport",
+      cause_code: "ECONNRESET",
       raw_error: "secret body",
     },
   });
@@ -1370,8 +1432,30 @@ test("daemon credential-proxy trace contract preserves only typed cutover eviden
   assert.equal(recorded.attrs?.http_status, 503);
   assert.equal(recorded.attrs?.normalized_code, "server_5xx");
   assert.equal(recorded.attrs?.response_started, true);
+  assert.equal(recorded.attrs?.body_size_bucket, "10-50MiB");
+  assert.equal(recorded.attrs?.response_complete, false);
+  assert.equal(recorded.attrs?.failure_class, "mid_response_transport");
+  assert.equal(recorded.attrs?.cause_code, "ECONNRESET");
   assert.equal(recorded.attrs?.raw_url, undefined);
   assert.equal(recorded.attrs?.raw_error, undefined);
+});
+
+test("daemon model detection trace keeps how the read was answered", () => {
+  const { sink, tracer, traceId } = makeDeterministicTracer();
+  const scopedTracer = createTraceScopeTracer(tracer, {}, {
+    spanAttrContracts: DAEMON_CORE_TRACE_ATTR_CONTRACTS,
+  });
+  const span = scopedTracer.startSpan("daemon.runtime_models.detect", {
+    surface: "daemon",
+    kind: "internal",
+    attrs: { runtime: "codex", request_id: "req-1", requestId: "dropped" },
+  });
+  span.end("ok", { attrs: { outcome: "models_returned", models_count: 3, cache: "stale", joined_in_flight: false } });
+  const [recorded] = traceRows(sink, traceId);
+  assert.equal(recorded.attrs?.request_id, "req-1");
+  assert.equal(recorded.attrs?.cache, "stale");
+  assert.equal(recorded.attrs?.joined_in_flight, false);
+  assert.equal(recorded.attrs?.requestId, undefined);
 });
 
 test("daemon start-dispatch receipt trace keeps only closed identity and queue evidence", () => {
@@ -3616,6 +3700,7 @@ test("task #917: every upgrade control failure settles the request, not only the
     const failures = [
       "CONTROL_BUSY: upgrade req-a is already in flight",
       "IPC_PROTOCOL_HANDSHAKE_FAILED: unable to connect to /home/x/.raft/computer/run/service.sock",
+      "UPGRADE_INSTALLER_FAILED: owned by another package manager",
     ];
     core = new DaemonCore({
       serverUrl: "https://daemon.example.com",
@@ -3638,8 +3723,14 @@ test("task #917: every upgrade control failure settles the request, not only the
     await new Promise<void>((resolve) => setImmediate(resolve));
     socket.emitServerMessage({ type: "computer:upgrade", requestId: "upgrade-ipc", operationId: "upgrade-ipc" });
     await new Promise<void>((resolve) => setImmediate(resolve));
+    socket.emitServerMessage({ type: "computer:upgrade", requestId: "upgrade-held", operationId: "upgrade-held" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
     const done = socket.sent.filter((message) => (message as { type?: string }).type === "computer:upgrade:done") as Array<{ requestId: string; ok: boolean; code?: string }>;
-    assert.deepEqual(done.map((m) => [m.requestId, m.ok, m.code]), [["upgrade-busy", false, "control_busy"], ["upgrade-ipc", false, "computer_control_failed"]]);
+    assert.deepEqual(done.map((m) => [m.requestId, m.ok, m.code]), [
+      ["upgrade-busy", false, "control_busy"],
+      ["upgrade-ipc", false, "computer_control_failed"],
+      ["upgrade-held", false, "upgrade_installer_failed"],
+    ]);
   } finally {
     if (core) await core.stop();
     await rm(dataDir, { recursive: true, force: true });
@@ -6006,6 +6097,85 @@ test("DaemonCore acknowledges direct delivery using the embedded message seq whe
   }
 });
 
+
+test("DaemonCore answers a re-send of an already-acked plain delivery with the ack alone (task #1295)", async () => {
+  const dataDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-core-test-"));
+  const driver = new FakeDriver();
+  const sockets: FakeWebSocket[] = [];
+  let deliverCalls = 0;
+
+  const core = new DaemonCore({
+    serverUrl: "https://daemon.example.com",
+    apiKey: "sk_machine_test",
+    dataDir,
+    connectionOptions: {
+      wsFactory: (_url: string, _options?: Parameters<NonNullable<ConnectionOptions["wsFactory"]>>[1]) => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    },
+    agentManagerFactory: (sendToServer, daemonApiKey, options) => {
+      const manager = new AgentProcessManager(sendToServer, daemonApiKey, {
+        dataDir: options?.dataDir,
+        serverUrl: options?.serverUrl ?? "https://daemon.example.com",
+        driverResolver: () => driver,
+        defaultAgentEnvVarsProvider: options?.defaultAgentEnvVarsProvider,
+        tracer: options?.tracer,
+      });
+      const deliver = manager.deliverMessage.bind(manager);
+      manager.deliverMessage = ((...args: Parameters<typeof deliver>) => {
+        deliverCalls += 1;
+        return deliver(...args);
+      }) as typeof manager.deliverMessage;
+      return manager;
+    },
+  });
+
+  try {
+    core.start();
+    const socket = sockets[0];
+    assert.ok(socket, "wsFactory should create a websocket");
+    socket.emitOpen();
+    socket.emitServerMessage({ type: "agent:start", agentId: "agent-1", config: makeConfig() });
+    await waitFor(() => driver.spawnCalls.length === 1, "agent spawn before delivery");
+
+    const delivery = {
+      type: "agent:deliver" as const,
+      agentId: "agent-1",
+      seq: 43,
+      deliveryId: "delivery-43",
+      message: {
+        channel_id: "channel-1",
+        channel_name: "general",
+        channel_type: "channel" as const,
+        sender_id: "user-1",
+        sender_name: "tygg",
+        sender_type: "human" as const,
+        content: "acked once, re-sent by the server",
+        timestamp: new Date(0).toISOString(),
+        seq: 43,
+        message_id: "msg-43",
+      },
+    };
+    const acks = () => socket.sent.filter((msg: any) =>
+      msg.type === "agent:deliver:ack" && msg.deliveryId === "delivery-43" && msg.seq === 43).length;
+
+    socket.emitServerMessage(delivery);
+    await waitFor(() => acks() === 1, "first ack");
+    assert.equal(deliverCalls, 1);
+
+    socket.emitServerMessage(delivery);
+    await waitFor(() => acks() === 2, "the re-send is acked again");
+    assert.equal(deliverCalls, 1, "the re-send is not routed to the agent a second time");
+
+    socket.emitServerMessage({ ...delivery, deliveryId: "delivery-44", seq: 44, message: { ...delivery.message, seq: 44, message_id: "msg-44" } });
+    await waitFor(() => deliverCalls === 2, "a new delivery id still goes to the agent");
+  } finally {
+    await core.stop();
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
 test("DaemonCore exposes tracked busy transition receipts and ACKs only after turn-end drain", async () => {
   const dataDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-core-test-"));
   const driver = new FakeDriver({ supportsStdinNotification: true });
@@ -7877,5 +8047,81 @@ test("task #365: a launch that already has its process is never rewritten as not
     assert.equal(driver.spawnCalls.length, 1);
   } finally {
     await h.close();
+  }
+});
+
+test("DaemonCore stop span records who stopped it and how long it ran", async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-stop-source-test-"));
+  const { sink, tracer, traceId } = makeDeterministicTracer();
+  const core = new DaemonCore({
+    serverUrl: "https://daemon.example.com",
+    apiKey: "sk_machine_test",
+    dataDir: path.join(rootDir, "agents"),
+    slockHome: rootDir,
+    tracer,
+    runtimeDetector: () => ({ ids: [], versions: {} }),
+    connectionOptions: { wsFactory: () => new FakeWebSocket() },
+  });
+  try {
+    core.start();
+    await core.stop({ source: "service_unmanaged", signal: "SIGTERM" });
+    const stop = traceRows(sink, traceId).find((span) => span.name === "daemon.lifecycle.stop");
+    assert.equal(stop?.attrs?.stop_source, "service_unmanaged");
+    assert.equal(stop?.attrs?.stop_signal, "SIGTERM");
+    assert.equal(stop?.attrs?.shutdown_reason, "daemon_stop");
+    assert.equal(typeof stop?.attrs?.uptime_ms, "number");
+    assert.ok((stop?.attrs?.uptime_ms as number) >= 0);
+
+    // A second start/stop with no source names it rather than omitting it.
+    core.start();
+    await core.stop();
+    const stops = traceRows(sink, traceId).filter((span) => span.name === "daemon.lifecycle.stop");
+    assert.equal(stops.at(-1)?.attrs?.stop_source, "unspecified");
+    assert.equal(stops.at(-1)?.attrs?.stop_signal, undefined);
+  } finally {
+    await rm(rootDir, { recursive: true, force: true });
+  }
+});
+
+test("DaemonCore answers a host identity request with its per-server hash, and only after authenticated context", async () => {
+  const rootDir = await mkdtemp(path.join(os.tmpdir(), "slock-daemon-host-identity-"));
+  const sockets: FakeWebSocket[] = [];
+  const core = new DaemonCore({
+    serverUrl: "https://daemon.example.com",
+    apiKey: "sk_machine_test",
+    dataDir: path.join(rootDir, "agents"),
+    slockHome: rootDir,
+    runtimeDetector: () => ({ ids: [], versions: {} }),
+    connectionOptions: {
+      wsFactory: () => {
+        const socket = new FakeWebSocket();
+        sockets.push(socket);
+        return socket;
+      },
+    },
+  });
+  try {
+    core.start();
+    const socket = sockets[0]!;
+    socket.emitOpen({ machineContext: false });
+    const replies = () => socket.sent.filter((msg) => (msg as { type?: string }).type === "machine:host_identity") as Array<{ hostIdHash: string }>;
+
+    socket.emitServerMessage({ type: "machine:host_identity:request" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(replies(), [], "no reply before the server is authenticated");
+
+    socket.emitServerMessage({ type: "machine:context", machineId: "machine-1", serverId: "server-1" });
+    socket.emitServerMessage({ type: "machine:host_identity:request" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const hardwareId = await readHardwareId();
+    if (hardwareId === undefined) {
+      assert.deepEqual(replies(), [], "no readable hardware ID means no reply");
+    } else {
+      assert.deepEqual(replies().map((msg) => msg.hostIdHash), [hostIdHashForServer(hardwareId, "server-1")]);
+      assert.equal(JSON.stringify(socket.sent).includes(hardwareId), false, "the hardware ID itself is never sent");
+    }
+  } finally {
+    await core.stop();
+    await rm(rootDir, { recursive: true, force: true });
   }
 });

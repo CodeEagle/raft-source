@@ -2,6 +2,7 @@
 // from the inbox ("what needs me now").
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import type { AgentApiMessageSearchResponse } from "../agentApiContract";
@@ -26,9 +27,11 @@ export interface SearchMessagesRequest {
   /** 1..50; Server default 20. */
   limit?: number;
   offset?: number;
+  /** A previous page's nextCursor, unchanged (recent-sort text search). */
+  cursor?: string;
 }
 
-export const searchMessagesRequestSchema = requestSchema<SearchMessagesRequest>()(z.object({
+export const searchMessagesRequestSchema = lazySchema("searchMessagesRequestSchema", () => requestSchema<SearchMessagesRequest>()(z.object({
   query: z.string().optional().describe("Free-text query; may be omitted when filtering by target or sender."),
   target: z.string().optional().describe("Only this channel, DM, or thread."),
   sender: z.string().optional().describe("Only messages from this handle."),
@@ -37,29 +40,37 @@ export const searchMessagesRequestSchema = requestSchema<SearchMessagesRequest>(
   after: z.string().optional().describe("ISO timestamp; only messages at or after it."),
   limit: z.number().int().positive().optional().describe("Results per page, 1..50 (Server default 20)."),
   offset: z.number().int().nonnegative().optional().describe("Skip this many results (paging)."),
-}));
+  cursor: z.string().optional().describe("A previous page's nextCursor, unchanged; continues a recent-sort search exactly (use instead of offset)."),
+})));
 
-export const resolveMessageRequestSchema = requestSchema<{ messageId: string }>()(z.object({
+export const resolveMessageRequestSchema = lazySchema("resolveMessageRequestSchema", () => requestSchema<{ messageId: string }>()(z.object({
   messageId: z.string().describe("Full or short message id."),
-}));
+})));
 
-export const reactRequestSchema = requestSchema<ReactRequest>()(z.object({
+export const reactRequestSchema = lazySchema("reactRequestSchema", () => requestSchema<ReactRequest>()(z.object({
   messageId: z.string().describe("Full or short message id."),
   emoji: z.string().describe("One reaction emoji."),
-}));
+})));
 
 export interface RaftSearchPage {
   query: string;
   results: AgentApiMessageSearchResponse["results"];
   /** Server-reported; `null` when an older Server did not say. */
   hasMore: boolean | null;
+  /** The search stopped at its scan budget: these are not all the matches. Continue with `nextCursor`. */
+  incomplete: boolean;
+  nextCursor: string | null;
+  /** incomplete only: the oldest message time searched. */
+  searchedThrough: string | null;
+  /** incomplete only: how many messages were read before the search stopped. */
+  searchedMessages: number | null;
 }
 
 export async function searchMessages(
   client: Pick<AgentApiClient, "messages">,
   request: SearchMessagesRequest,
   options: RaftHintOptions = {},
-): Promise<RaftOutcome<RaftSearchPage, "results" | "empty">> {
+): Promise<RaftOutcome<RaftSearchPage, "results" | "empty" | "incomplete">> {
   const invalid = validateOpRequest(searchMessagesRequestSchema, request); if (invalid) return invalid;
   if (!request.query?.trim() && !request.target && !request.sender) {
     return failureOutcome(opError("INVALID_REQUEST", { message: "Pass a query, or filter by target or sender." }));
@@ -73,13 +84,43 @@ export async function searchMessages(
     ...(request.after ? { after: request.after } : {}),
     ...(request.limit === undefined ? {} : { limit: String(request.limit) }),
     ...(request.offset === undefined ? {} : { offset: String(request.offset) }),
+    ...(request.cursor ? { cursor: request.cursor } : {}),
   });
   if (!result.ok) return failureFromClientResult(result);
   const data = result.data;
   const hasMore = typeof data.hasMore === "boolean" ? data.hasMore : null;
-  const page: RaftSearchPage = { query: request.query?.trim() ?? "", results: data.results, hasMore };
-  const nextArgs = { ...request, offset: (request.offset ?? 0) + data.results.length };
-  const next: RaftNextStep | null = hasMore
+  const incomplete = data.incomplete === true;
+  const nextCursor = typeof data.nextCursor === "string" && data.nextCursor ? data.nextCursor : null;
+  const searchedThrough = typeof data.searchedThrough === "string" ? data.searchedThrough : null;
+  const searchedMessages = typeof data.searchedMessages === "number" ? data.searchedMessages : null;
+  const page: RaftSearchPage = { query: request.query?.trim() ?? "", results: data.results, hasMore, incomplete, nextCursor, searchedThrough, searchedMessages };
+  const { offset: _offset, ...requestWithoutOffset } = request;
+  const nextArgs = nextCursor
+    ? { ...requestWithoutOffset, sort: "recent" as const, cursor: nextCursor }
+    : { ...request, offset: (request.offset ?? 0) + data.results.length };
+  const query = request.query?.trim();
+  const continueHint = nextCursor && query
+    ? RAFT_HINTS.messageSearch({
+      query,
+      target: request.target,
+      sender: request.sender,
+      after: request.after,
+      before: request.before,
+      limit: request.limit,
+      cursor: nextCursor,
+    })
+    : null;
+  const next: RaftNextStep | null = continueHint && (incomplete || hasMore)
+    ? hintStep(
+      incomplete ? "continue_search" : "next_search_page",
+      continueHint,
+      incomplete
+        ? "The search stopped before reaching older messages; continue, or narrow it with a target or sender."
+        : "More results exist; this continues exactly after the page.",
+      options.hints,
+      nextArgs,
+    )
+    : hasMore
     ? {
         kind: "next_search_page",
         args: nextArgs,
@@ -89,10 +130,25 @@ export async function searchMessages(
     : null;
   return {
     ok: true,
-    state: data.results.length > 0 ? "results" : "empty",
+    // "empty" means everything was searched and nothing matched; a search that
+    // stopped before older messages with nothing found yet is "incomplete"
+    // (next is continue_search). A page with results stays "results".
+    state: data.results.length > 0 ? "results" : incomplete ? "incomplete" : "empty",
     data: page,
     next,
-    text: formatAgentSearchResults(page.query, { results: data.results as never, ...(hasMore === null ? {} : { hasMore }) }, request.offset, request.sort, request.limit, options.hints),
+    text: formatAgentSearchResults(page.query, {
+      results: data.results as never,
+      ...(hasMore === null ? {} : { hasMore }),
+      ...(incomplete ? { incomplete } : {}),
+      ...(nextCursor ? { nextCursor } : {}),
+      ...(searchedThrough ? { searchedThrough } : {}),
+      ...(searchedMessages === null ? {} : { searchedMessages }),
+    }, request.offset, request.sort, request.limit, options.hints, {
+      target: request.target,
+      sender: request.sender,
+      after: request.after,
+      before: request.before,
+    }),
   };
 }
 

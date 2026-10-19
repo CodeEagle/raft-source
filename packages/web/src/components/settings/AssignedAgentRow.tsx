@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Badge, Button } from "@botiverse/raft-ui";
 import { useCallback, useMemo } from "react";
 import { Link2Off } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -43,24 +43,25 @@ export function AssignedAgentRow({
   }, [formatMessage, label]);
 
   return (
-    <div data-testid={`provider-connection-assigned-agent-${agent.id}`}>
+    <li data-testid={`provider-connection-assigned-agent-${agent.id}`}>
       {agent.deleted ? (
         // Static row: the detach control lives in the primitive's
         // action slot, a sibling of the (absent) row button, so a
         // deleted Agent never nests one interactive target in another.
         <AvatarListRow
-          avatar={<AvatarSlot context="surface-list" type="agent" agentAvatarUrl={null} className="grayscale opacity-60" />}
+          avatar={<AvatarSlot context="list-row" type="agent" agentAvatarUrl={null} className="grayscale opacity-60" />}
           name={<span className="text-foreground-hint line-through">{label}</span>}
           subtitle={subtitle}
           rightContent={(
-            <span className="shrink-0 rounded-sm border border-line-muted px-1 text-[10px] font-black uppercase text-foreground-hint theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/30">
+            <Badge appearance="soft" variant="muted">
               {formatMessage({ id: "settings.providers.assignedAgentDeleted" })}
-            </span>
+            </Badge>
           )}
           actionContent={canManage ? (
             <Tooltip content={formatMessage({ id: "settings.providers.assignedAgentDeletedHint" })}>
             <Button
               type="button"
+              variant="outline"
               size="sm"
               data-slot="button"
               disabled={busy}
@@ -72,18 +73,18 @@ export function AssignedAgentRow({
             </Button>
             </Tooltip>
           ) : undefined}
-          className="bg-gray-100"
+          className="bg-fill-muted"
         />
       ) : (
         <AvatarListRow
-          avatar={<AvatarSlot context="surface-list" type="agent" agentAvatarUrl={null} />}
+          avatar={<AvatarSlot context="list-row" type="agent" agentAvatarUrl={null} />}
           name={label}
           subtitle={subtitle}
           rightContent={(
             <>
               <StatusDot activity={agent.status === "active" ? "online" : "offline"} title={statusText} />
               <span
-                className="hidden max-w-[min(32rem,42vw)] truncate align-middle text-xs font-mono text-foreground-hint sm:inline-block"
+                className="hidden max-w-[min(32rem,42vw)] truncate align-middle text-mono-meta font-mono text-foreground-hint sm:inline-block"
               >
                 {statusText}
               </span>
@@ -91,9 +92,8 @@ export function AssignedAgentRow({
           )}
           onClick={handleOpen}
           buttonProps={openButtonProps}
-          className="bg-fill-muted/50 hover:bg-fill-muted theme-brutal:bg-gray-100 theme-brutal:hover:bg-white"
         />
       )}
-    </div>
+    </li>
   );
 }

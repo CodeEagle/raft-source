@@ -77,7 +77,7 @@ test("limit and joint-channel paywalls route users to billing", () => {
   assert.match(inviteDialog, /formatBillingCapacityLimitMessage\(\s*"human",\s*humanCapacityLimitState,\s*billing\.displayName,\s*formatMessage\(\{ id: "member\.invite\.upgradeForMore" \}\),\s*\)/);
   assert.match(inviteDialog, /getBillingUsage\(humanCount, 0\)/);
   assert.doesNotMatch(inviteDialog, /universalSeatUsage \+ 1/);
-  assert.match(inviteDialog, /emailInviteSeatLimitReached && \([\s\S]*<Banner intent="warning" className="font-bold">/);
+  assert.match(inviteDialog, /emailInviteSeatLimitReached && \([\s\S]*<Banner intent="warning"[^>]*>/);
   assert.match(inviteDialog, /invitee\.email\.trim\(\) !== "" && invitee\.role !== "guest"/);
   assert.match(inviteDialog, /disabled=\{sending \|\| emailInviteSeatLimitReached\}/);
   assert.match(inviteDialog, /nav\.toSettings\("billing"\)/);
@@ -92,13 +92,13 @@ test("limit and joint-channel paywalls route users to billing", () => {
   // migrated. The contract is about the paywall Banner existing, not its wording.
   const limitIdx = channelDialog.indexOf("channel.create.limitReached");
   assert.ok(limitIdx >= 0, "channel limit paywall anchor not found");
-  assert.match(channelDialog, /<Banner intent="warning" className="font-bold">[\s\S]*channel\.create\.limitReached/);
+  assert.match(channelDialog, /<Banner intent="warning"[^>]*>[\s\S]*channel\.create\.limitReached/);
   assert.match(channelDialog, /nav\.toSettings\("billing"\)/);
 
   const machineDialog = read("src/components/machine/AddMachineDialog.tsx");
   const machineLimitIdIndex = machineDialog.indexOf("machine.add.limitReached");
   assert.ok(machineLimitIdIndex >= 0, "AddMachineDialog should resolve its limit banner through the catalog");
-  assert.match(machineDialog, /<Banner intent="warning" className="mb-4 font-bold">[\s\S]*machine\.add\.limitReached/);
+  assert.match(machineDialog, /<Banner intent="warning"[^>]*>[\s\S]*machine\.add\.limitReached/);
   assert.match(machineDialog, /nav\.toSettings\("billing"\)/);
 
   const chatPanel = read("src/components/message/ChatPanel.tsx");

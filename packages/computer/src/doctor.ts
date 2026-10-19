@@ -11,7 +11,8 @@
 // into a check `detail` cannot leak it.
 import { buildStatusReport } from "./status";
 import { describeDuplicateKeyHolder, findDuplicateKeyHolder } from "./duplicateKeyGuard";
-import { describeRaftHomeConflict, findRaftHomeConflictFor } from "./paths";
+import { describeRaftHomeConflict, findRaftHomeConflictFor, serverRunnerMemoryPath, serviceMemoryPath } from "./paths";
+import { describeRunnerMemory, readRunnerMemorySample } from "./runnerMemory";
 import type { ServerStatusRow } from "./status";
 import {
   ComputerAttachClient,
@@ -175,6 +176,18 @@ export async function runDoctorChecks(
           detail: "stopped (run `raft-computer start` when you want background)",
         },
   );
+  if (report.service.running) {
+    checks.push({
+      name: "service memory",
+      ok: true,
+      detail: describeRunnerMemory(
+        await readRunnerMemorySample(serviceMemoryPath(slockHome)),
+        report.service.pid,
+        Date.now(),
+        "service",
+      ),
+    });
+  }
 
   // Per-server preflight loop (contract v4 §9): isolated per serverId,
   // uses THAT server's own sk_computer_*; never a shared key.
@@ -241,6 +254,15 @@ export async function runDoctorChecks(
         ok: runner.ok,
         detail: runner.detail,
       });
+      // Informational: memory never fails doctor.
+      if (statusRow.daemon.running) {
+        const sample = await readRunnerMemorySample(serverRunnerMemoryPath(slockHome, a.serverId));
+        checks.push({
+          name: `memory ${label}`,
+          ok: true,
+          detail: describeRunnerMemory(sample, statusRow.daemon.pid, Date.now()),
+        });
+      }
     }
     const migration = await legacyMigrationForDoctor(slockHome, a, opts);
     const setupBlocker = setupBlockingIdentityDetail(a, migration, runnerOk);

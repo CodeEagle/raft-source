@@ -856,6 +856,35 @@ test("a streamed bundle over the entry limit fails with the exact count before r
   }
 });
 
+test("a streamed bundle over the byte limit names the largest top-level paths in the whole workspace", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "migration-streamed-too-large-"));
+  try {
+    await mkdir(path.join(root, "a"), { recursive: true });
+    await mkdir(path.join(root, "z"), { recursive: true });
+    // Incompressible, so the limit trips inside a/ and z/ is never packed:
+    // the largest path is still reported, by its uncompressed size.
+    await writeFile(path.join(root, "a", "1.bin"), randomBytes(2_500_000));
+    await writeFile(path.join(root, "z", "1.bin"), randomBytes(2_500_000));
+    await writeFile(path.join(root, "z", "2.bin"), randomBytes(2_500_000));
+    await writeFile(path.join(root, "MEMORY.md"), "m");
+    await writeFile(path.join(root, ".env"), "SECRET=1");
+    await assert.rejects(
+      streamToMemory(root, { maxBytes: 2_000_000 }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error);
+        assert.match(
+          error.message,
+          /^MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE:actualBytes=\d+:maxBytes=2000000:topEntries=z%2F,5000000;a%2F,2500000;(MEMORY\.md|other%2F),\d+$/,
+        );
+        assert.doesNotMatch(error.message, /\.env/);
+        return true;
+      },
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a failed chunk upload fails the streamed bundle", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "migration-streamed-upload-failure-"));
   try {

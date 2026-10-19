@@ -1,20 +1,20 @@
-import { Card, Button } from "raft-ui";
+import { Card, Button, DialogHeader } from "@botiverse/raft-ui";
 import CloseButton from "../ui/CloseButton";
 import { useCallback, useEffect, useState } from "react";
 import type { SyntheticEvent } from "react";
 import { useIntl } from "react-intl";
 import { Check, Copy, Download, Share2, X } from "lucide-react";
-import { downloadDataUrl, resolveCapturePixelRatio } from "../../utils/selectScreenshot";
+import { downloadDataUrl } from "../../utils/selectScreenshot";
+import type { ValidatedScreenshot } from "../../utils/screenshotBudget";
 import {
   copyPngDataUrlToClipboard,
-  dataUrlToPngFile,
   resolvePngClipboardCapability,
 } from "../../utils/selectMarkdown";
 import Lightbox from "../ui/Lightbox";
 
 export interface SelectShareLightboxProps {
-  /** The captured PNG, as a data URL. */
-  dataUrl: string;
+  /** The captured PNG; only a validated capture can be previewed or sent on. */
+  image: ValidatedScreenshot;
   /** Suggested filename when the user clicks Download. */
   filename?: string;
   /** Called when the user dismisses the preview (Cancel, X, ESC, backdrop). Selection should be preserved. */
@@ -22,7 +22,7 @@ export interface SelectShareLightboxProps {
   /** Called after a successful Download. Selection mode should exit here. Defaults to onClose if omitted. */
   onSaved?: () => void;
   /** Optional platform share target. Runs only after the preview PNG already exists. */
-  onShareToX?: (dataUrl: string) => Promise<void>;
+  onShareToX?: (image: ValidatedScreenshot) => Promise<void>;
 }
 
 type FileShareNavigator = Navigator & {
@@ -35,13 +35,16 @@ function isMobileBrowser(): boolean {
   return window.innerWidth < 768 || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
-async function canSavePngViaNativeShare(dataUrl: string, filename: string): Promise<boolean> {
+function pngFile(image: ValidatedScreenshot, filename: string): File {
+  return new File([image.blob], filename, { type: "image/png" });
+}
+
+async function canSavePngViaNativeShare(image: ValidatedScreenshot, filename: string): Promise<boolean> {
   if (!isMobileBrowser()) return false;
   const nav = navigator as FileShareNavigator;
   if (typeof nav.share !== "function" || typeof nav.canShare !== "function") return false;
   try {
-    const file = await dataUrlToPngFile(dataUrl, filename);
-    return nav.canShare({ files: [file] });
+    return nav.canShare({ files: [pngFile(image, filename)] });
   } catch {
     return false;
   }
@@ -58,13 +61,14 @@ const stopClickPropagation = (event: React.MouseEvent) => {
 };
 
 export default function SelectShareLightbox({
-  dataUrl,
+  image,
   filename = "slock-export.png",
   onClose,
   onSaved,
   onShareToX,
 }: SelectShareLightboxProps) {
   const { formatMessage } = useIntl();
+  const { dataUrl } = image;
   const [sharingToX, setSharingToX] = useState(false);
   const [savingImage, setSavingImage] = useState(false);
   const [copyingImage, setCopyingImage] = useState(false);
@@ -78,11 +82,12 @@ export default function SelectShareLightbox({
     const { naturalWidth } = event.currentTarget;
     if (naturalWidth <= 0) return;
 
-    // The capture pipeline rasterizes at resolveCapturePixelRatio(). Keep the
+    // The capture records the ratio it rasterized at (lower than the screen's
+    // when the selection is long; task #1302). Keep the
     // lightbox from enlarging a narrow message-column export above the CSS
     // width it was captured at; that interpolation is what makes text look
     // soft while the downloaded PNG remains the correct aspect ratio.
-    setPreviewSourceWidth(naturalWidth / resolveCapturePixelRatio());
+    setPreviewSourceWidth(naturalWidth / image.pixelRatio);
   };
 
   // Async-loader probing native share capability. Reset-on-input + arrival.
@@ -92,13 +97,13 @@ export default function SelectShareLightbox({
     let cancelled = false;
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setCanNativeSaveImage(false);
-    void canSavePngViaNativeShare(dataUrl, filename).then((canSave) => {
+    void canSavePngViaNativeShare(image, filename).then((canSave) => {
       if (!cancelled) setCanNativeSaveImage(canSave);
     });
     return () => {
       cancelled = true;
     };
-  }, [dataUrl, filename]);
+  }, [image, filename]);
 
   useEffect(() => {
     let cancelled = false;
@@ -132,7 +137,7 @@ export default function SelectShareLightbox({
 
     setSavingImage(true);
     try {
-      const file = await dataUrlToPngFile(dataUrl, filename);
+      const file = pngFile(image, filename);
       const nav = navigator as FileShareNavigator;
       await nav.share?.({
         files: [file],
@@ -146,7 +151,7 @@ export default function SelectShareLightbox({
     } finally {
       setSavingImage(false);
     }
-  }, [sharingToX, savingImage, copyingImage, canNativeSaveImage, dataUrl, filename, onSaved, onClose, formatMessage]);
+  }, [sharingToX, savingImage, copyingImage, canNativeSaveImage, image, dataUrl, filename, onSaved, onClose, formatMessage]);
 
   const handleCopyImage = useCallback(async () => {
     if (sharingToX || savingImage || copyingImage) return;
@@ -175,51 +180,54 @@ export default function SelectShareLightbox({
     if (!onShareToX || sharingToX || savingImage || copyingImage) return;
     setSharingToX(true);
     try {
-      await onShareToX(dataUrl);
+      await onShareToX(image);
     } finally {
       setSharingToX(false);
     }
-  }, [onShareToX, sharingToX, savingImage, copyingImage, dataUrl]);
+  }, [onShareToX, sharingToX, savingImage, copyingImage, image]);
 
   return (
     <Lightbox
       onClose={onClose}
       zIndex={100}
-      backdropClass="bg-black/60"
+      backdropClass="bg-layer-backdrop"
       className="flex items-center justify-center p-4"
       data-testid="select-share-lightbox"
     >
       <Card
-        className=" flex max-h-[90vh] w-full max-w-3xl flex-col"
+        className="flex max-h-[90vh] w-full max-w-3xl flex-col"
         onClick={stopClickPropagation}
       >
-        <div className="flex h-panel-header shrink-0 items-center justify-between border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-5">
-          <h2 className="text-base font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "message.selectShare.title" })}</h2>
+        {/* The preview is a dialog with pinned bars: raft-ui's dialog bar head
+            (56, a seam under it, on the card's own surface). Its close is the
+            dialog close — the small ghost icon button whose glyph ends on the
+            head's 20 edge — drawn here because the card is not a raft Dialog. */}
+        <DialogHeader bar>
+          <h2 className="min-w-0 flex-1 truncate text-headline text-foreground">{formatMessage({ id: "message.selectShare.title" })}</h2>
           <CloseButton
             type="button"
             onClick={onClose}
-
-
             aria-label={formatMessage({ id: "common.close" })}
             data-testid="select-share-lightbox-close"
+            className="-mr-1.5"
           >
-            <X size={14} />
+            <X className="size-4.5" />
           </CloseButton>
-        </div>
-        <div className="flex-1 overflow-auto bg-layer-panel theme-brutal:bg-white p-4">
+        </DialogHeader>
+        <div className="flex-1 overflow-auto p-4">
           <img
             src={dataUrl}
             alt={formatMessage({ id: "message.selectShare.alt" })}
-            className="mx-auto block max-w-full border-2 border-line-muted theme-brutal:border-black shadow-raft-md theme-brutal:shadow-brutal"
+            className="mx-auto block max-w-full rounded-container border border-line-hairline"
             onLoad={handlePreviewImageLoad}
             style={previewSourceWidth ? { width: `${previewSourceWidth}px` } : undefined}
           />
         </div>
-        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-4 py-3 sm:px-5">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-line-hairline px-4 py-3 sm:px-5">
           {copyError && (
             <p
               role="alert"
-              className="mr-auto text-sm font-medium text-red-700"
+              className="mr-auto text-callout font-medium text-danger-strong"
               data-testid="select-share-lightbox-copy-error"
             >
               {copyError}
@@ -229,7 +237,7 @@ export default function SelectShareLightbox({
             {canCopyImage && (
               <Button
                 type="button"
-                size="sm"
+                size="lg"
                 variant="outline"
                 onClick={handleCopyImage}
                 disabled={sharingToX || savingImage || copyingImage}
@@ -245,7 +253,7 @@ export default function SelectShareLightbox({
             )}
             <Button
               type="button"
-              size="sm"
+              size="lg"
               variant="outline"
               onClick={handleDownload}
               disabled={sharingToX || savingImage || copyingImage}
@@ -261,7 +269,7 @@ export default function SelectShareLightbox({
             {onShareToX && (
               <Button
                 type="button"
-                size="sm"
+                size="lg"
                 variant="accent"
                 onClick={handleShareToX}
                 disabled={sharingToX || savingImage || copyingImage}

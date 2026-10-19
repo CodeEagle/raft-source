@@ -34,9 +34,15 @@ export type RouteClassification = { route: string; bucket: RouteAuthorityBucket;
 /** The adjudicated #91a / #93 lists (#wg-rbac:c18cdc5f). Changing one of these counts is a scope decision. */
 export const PINNED_BUCKET_COUNTS: Readonly<Record<string, number>> = {
   // +1: POST /api/agents/:id/hosted-runtime/retry (fenced editAgents/creator provisioning-row write).
-  pure: 9,
+  // +1: POST /api/agents/:id/migration/confirm-hosted (migrateAgents/creator re-checked under the
+  // actor fence inside the switch transaction; task #16).
+  pure: 10,
   // Retired POST /api/wiki/setup (cat1) and POST /api/wiki/refresh (cat3).
-  cat1: 10,
+  // +1: POST /api/agents/:id/archive/workspace (agent archive; fenced deleteAgents/creator write on the
+  // archived agent).
+  // +3: PUT /api/raftbench and the dedicated RaftBench agent create/assignment routes use
+  // owner/admin and creator fences; provisioning and run delivery remain asynchronous.
+  cat1: 14,
   cat2: 3,
   // +3: POST/DELETE /api/agents/:id/connections/:provider and POST …/confirm (editAgents or creator, never
   // guest; no route-level DB write besides the audit row; the effect is a provider call).
@@ -50,7 +56,10 @@ export const PINNED_BUCKET_COUNTS: Readonly<Record<string, number>> = {
 };
 
 export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
-  { route: "DELETE /api/agents/:id", bucket: "cat1", reason: "deleteAgents or creator; deleteAgent fenced; stop-before-delete effect open in #93" },
+  { route: "PUT /api/raftbench", bucket: "cat1", reason: "human owner/admin locked at commit; dedicated member-agent creation uses createAgent actor fence; no Computer binding or model tools" },
+  { route: "POST /api/raftbench/agents", bucket: "cat1", reason: "human owner/admin locked at commit; dedicated agent creation uses createAgent actor fence; provider provisioning runs asynchronously" },
+  { route: "PUT /api/raftbench/assignment", bucket: "cat1", reason: "human owner/admin and server/config revision locked at commit; dedicated agent grant and prior credential revocation precede asynchronous run delivery" },
+  { route: "DELETE /api/agents/:id", bucket: "cat1", reason: "deleteAgents or creator; deleteAgent (archive) fenced; stop-before-delete and workspace-op dispatch effects open in #93" },
   { route: "DELETE /api/agents/:id/assistant-owner", bucket: "notAgentMachine", reason: "RFC 074 assistant link: the caller withdraws their OWN read consent (only the linked owner may); clearing can only narrow access, so no membership race to fence" },
   { route: "DELETE /api/agents/:id/connections/:provider", bucket: "cat3", reason: "editAgents or creator, never guest; no Raft authority write (audit row only); the provider detaches the agent from its connector" },
   { route: "DELETE /api/agents/:id/connections/:provider/connectors/:connectorId", bucket: "cat3", reason: "editAgents or creator of the agent AND creator or owner/admin of the connector, never guest; no Raft authority write (audit row only); the provider disconnects the tenant connector" },
@@ -109,6 +118,7 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "PATCH /api/servers/:id/notification-settings", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
   { route: "PATCH /api/servers/:id/onboarding-settings", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
   { route: "PATCH /api/servers/:id/public-guest-join", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
+  { route: "PATCH /api/servers/:id/public-search", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
   { route: "PATCH /api/servers/:id/public-visibility", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
   { route: "PATCH /api/servers/:id/sidebar-order", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
   { route: "PATCH /api/servers/:id/product-analytics-settings", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
@@ -141,7 +151,9 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /api/agents/:id/avatar", bucket: "cat1", reason: "editAgents or creator; avatar row write fenced; cache/runtime effect open in #93" },
   { route: "POST /api/agents/:id/bootstrap-tokens", bucket: "pure", reason: "issueAgentCredentials or creator; bootstrap token mint" },
   { route: "POST /api/agents/:id/credentials", bucket: "pure", reason: "issueAgentCredentials or creator; agent credential mint" },
+  { route: "POST /api/agents/:id/archive/workspace", bucket: "cat1", reason: "deleteAgents or creator of the archived agent (plus controlComputers or Computer creator for a named Computer); op request fenced; Computer dispatch effect open in #93" },
   { route: "POST /api/agents/:id/migrate", bucket: "cat2", reason: "migration admission and effect both not linearized; #93 line C" },
+  { route: "POST /api/agents/:id/migration/confirm-hosted", bucket: "pure", reason: "migrateAgents or creator re-checked under the actor membership fence inside the hosted switch transaction (runtime -> external, provisioning row); provider call runs later in the provisioning worker" },
   { route: "POST /api/agents/:id/migration/cancel", bucket: "cat2", reason: "migration cancellation admission and effect both not linearized; #93 line C" },
   { route: "POST /api/agents/:id/onboarding-identity-adoption", bucket: "pure", reason: "editAgents or creator; official onboarding identity adoption write" },
   { route: "POST /api/agents/:id/reset", bucket: "cat3", reason: "controlAgentRuntime or creator; orchestrator reset only; #93 runtime command chain" },
@@ -177,6 +189,7 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /api/auth/mobile/oauth/apple/native/start", bucket: "notAgentMachine", reason: "caller's own account, session or device login" },
   { route: "POST /api/auth/mobile/oauth/complete", bucket: "notAgentMachine", reason: "caller's own account, session or device login" },
   { route: "POST /api/auth/mobile/oauth/start", bucket: "notAgentMachine", reason: "caller's own account, session or device login" },
+  { route: "POST /api/auth/pending-link/cancel", bucket: "notAgentMachine", reason: "caller's own account, session or device login" },
   { route: "POST /api/auth/refresh", bucket: "notAgentMachine", reason: "caller's own account, session or device login" },
   { route: "POST /api/auth/register", bucket: "notAgentMachine", reason: "caller's own account, session or device login" },
   { route: "POST /api/auth/resend-verification", bucket: "notAgentMachine", reason: "caller's own account, session or device login" },
@@ -188,7 +201,6 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /api/billing/pack-quantity", bucket: "notAgentMachine", reason: "Server billing" },
   { route: "POST /api/billing/pack-quantity/preview", bucket: "notAgentMachine", reason: "Server billing" },
   { route: "POST /api/billing/portal", bucket: "notAgentMachine", reason: "Server billing" },
-  { route: "POST /api/billing/referral-discount/preview", bucket: "notAgentMachine", reason: "Server billing referral preview" },
   { route: "POST /api/billing/seat-pack-quantity", bucket: "notAgentMachine", reason: "Server billing" },
   { route: "POST /api/billing/seat-pack-quantity/preview", bucket: "notAgentMachine", reason: "Server billing" },
   { route: "POST /api/channels", bucket: "notAgentMachine", reason: "channel / thread / inbox state" },
@@ -212,6 +224,7 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /api/channels/conversion-jobs/:jobId/retry", bucket: "notAgentMachine", reason: "channel / thread / inbox state" },
   { route: "POST /api/channels/dm", bucket: "notAgentMachine", reason: "channel / thread / inbox state" },
   { route: "POST /api/channels/inbox/done", bucket: "notAgentMachine", reason: "channel / thread / inbox state" },
+  { route: "POST /api/channels/:id/conversation-read-all", bucket: "notAgentMachine", reason: "authenticated human self read state only; no Agent receiver or relationship authority" },
   { route: "POST /api/channels/inbox/read-all", bucket: "notAgentMachine", reason: "channel / thread / inbox state" },
   { route: "POST /api/channels/inbox/undone", bucket: "notAgentMachine", reason: "channel / thread / inbox state" },
   { route: "POST /api/channels/joint-invites/:inviteId/accept", bucket: "notAgentMachine", reason: "channel / thread / inbox state" },
@@ -241,6 +254,8 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /api/integrations/agents/:agentId/grants", bucket: "integrationLane", reason: "Grant an app access to an agent on its behalf. Predicate: server capability manageExternalAuth, or the agent's human creator (fresh role read, member required); app must already be usable on the server" },
   { route: "POST /api/integrations/grants/:grantId/revoke", bucket: "integrationLane", reason: "confirmed removal/demotion race, fix #proj-backend-general task #165, audit #164. Predicate: server capability manageExternalAuth, or the human creator of the agent the request/grant is about (fresh role read, member required)" },
   { route: "POST /api/integrations/marketplace/:clientId/install", bucket: "integrationLane", reason: "confirmed membership race, fix #proj-backend-general task #168 (owner Ark), audit #167. Predicate: server capability manageIntegrations; no Agent-relation authority" },
+  { route: "POST /api/integrations/clients/:clientId/install/bot", bucket: "integrationLane", reason: "App-owned Bot grant/revoke. Predicate: server capability manageIntegrations; writes app_bot_bindings + agents (managed) in one tx; no Agent-relation authority" },
+  { route: "POST /api/app-bot/token", bucket: "integrationLane", reason: "App exchanges its OAuth access token for the managed bot's sk_agent_* key (plaintext once, hash persisted; rotate revokes old credentials in same tx). Auth: verified oauth_access_tokens row (server derived from token's serverId, not request). Requires bot_grant='granted' + install.status='active'. Mounted outside /api/integrations (user-session surface) before requireMachineAuth; independent IP rate limiter." },
   { route: "POST /api/integrations/requests/:requestId/approve", bucket: "integrationLane", reason: "confirmed removal/demotion race, fix #proj-backend-general task #165, audit #164. Predicate: server capability manageExternalAuth, or the human creator of the agent the request/grant is about (fresh role read, member required)" },
   { route: "POST /api/integrations/requests/:requestId/deny", bucket: "integrationLane", reason: "confirmed removal/demotion race, fix #proj-backend-general task #165, audit #164. Predicate: server capability manageExternalAuth, or the human creator of the agent the request/grant is about (fresh role read, member required)" },
   { route: "POST /api/mcp/servers", bucket: "notAgentMachine", reason: "manageIntegrations capability; Server-level MCP server config, no Agent/Machine relationship" },
@@ -268,7 +283,10 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /api/provider-connections/:connectionId/credentials/rotate", bucket: "providerConnectionResidual", reason: "listed separately under rotateServerSecrets: removal/demotion race, fix #proj-backend-general task #165 (unified), audit task #167, owner Ark; no Agent-relation authority" },
   { route: "POST /api/provider-connections/:connectionId/probes", bucket: "providerConnectionResidual", reason: "confirmed removal/demotion race, fix #proj-backend-general task #165 (unified, owner Ark), audit #167. Predicate: server capability manageExternalAuth; provider connection config, no Agent-relation authority; the probe dispatch's final effect is a task #93 line A residual" },
   { route: "POST /api/provider-connections/:connectionId/test", bucket: "providerConnectionResidual", reason: "confirmed removal/demotion race, fix #proj-backend-general task #165 (unified, owner Ark), audit #167. Predicate: server capability manageExternalAuth; provider connection config, no Agent-relation authority; the legacy test's final effect is a task #93 line A residual" },
+  { route: "POST /^\\/api\\/public\\/servers\\/[^/]+\\/message-translations:batch$/", bucket: "notAgentMachine", reason: "public message translation rate limiter; no Agent/Machine relationship authority" },
+  { route: "POST /api/public-visits/:slug", bucket: "notAgentMachine", reason: "public page visit counts; unauthenticated, count-only telemetry, no Agent/Machine authority" },
   { route: "POST /api/public/servers/:slug/join-as-guest", bucket: "notAgentMachine", reason: "public guest join" },
+  { route: "POST /api/public/servers/:slug/message-translations:batch", bucket: "notAgentMachine", reason: "public message translation generation/cache write; no Agent/Machine relationship authority" },
   { route: "POST /api/push/family-revoke", bucket: "notAgentMachine", reason: "caller's own push / notification device registration" },
   { route: "POST /api/push/prompt-events", bucket: "notAgentMachine", reason: "caller's own push / notification device registration" },
   { route: "POST /api/push/registrations", bucket: "notAgentMachine", reason: "caller's own push / notification device registration" },
@@ -332,6 +350,7 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "POST /internal/agent-api/mcp/call", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
   { route: "POST /internal/agent-api/mention-actions/execute", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
   { route: "POST /internal/agent-api/messages/:msgId/reactions", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
+  { route: "POST /internal/agent-api/raftbench/submit", bucket: "nonHuman", reason: "sk_agent read-only service identity; run-bound derived report receipt, live human-admin/source checks" },
   { route: "POST /internal/agent-api/prepare-action", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
   { route: "POST /internal/agent-api/profile", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
   { route: "POST /internal/agent-api/profile/avatar", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
@@ -406,12 +425,13 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "PUT /api/agents/:id/hosted-runtime/model", bucket: "cat3", reason: "editAgents or creator, never guest; no Raft authority write; the provider stores the pick, effective from the agent's next turn" },
   { route: "PUT /api/agents/:id/connections/:provider", bucket: "cat3", reason: "editAgents or creator of the agent AND creator or owner/admin of the connector, never guest; no Raft authority write (audit row only); the provider points the agent's mount at the connector" },
   { route: "PUT /api/agents/:id/scopes", bucket: "pure", reason: "editAgents or creator; agent scope rows" },
-  { route: "PUT /api/integrations/clients/:clientId/agent-jwt", bucket: "integrationLane", reason: "membership race closed in the write transaction: setAppAgentJwtSettings re-reads the server_members row inside the policy transaction (#9114). Predicate: server capability manageIntegrations; no Agent-relation authority" },
+  { route: "PUT /api/integrations/clients/:clientId/agent-jwt", bucket: "notAgentMachine", reason: "always 410; no write (Agent JWT is built in; remove with the GET compat route next release)" },
   { route: "PUT /api/integrations/clients/:clientId/app-notifications/permissions", bucket: "integrationLane", reason: "confirmed membership race, fix #proj-backend-general task #168 (owner Ark), audit #167. Predicate: server capability manageIntegrations; no Agent-relation authority" },
   { route: "PUT /api/integrations/clients/:clientId/app-notifications/webhook", bucket: "integrationLane", reason: "confirmed membership race, fix #proj-backend-general task #168 (owner Ark), audit #167. Predicate: server capability manageIntegrations; no Agent-relation authority" },
   { route: "PUT /api/integrations/marketplace/:clientId/install/app-notifications/grant", bucket: "integrationLane", reason: "confirmed membership race, fix #proj-backend-general task #168 (owner Ark), audit #167. Predicate: server capability manageIntegrations; no Agent-relation authority" },
   { route: "PUT /api/mcp/agents/:agentId/assignments", bucket: "cat1", reason: "editAgents or creator; bulk managed MCP write fenced; resetAgent effect open in #93" },
   { route: "PUT /api/mcp/agents/:agentId/assignments/:mcpServerId", bucket: "pure", reason: "editAgents or creator; single managed MCP assignment upsert" },
+  { route: "PUT /api/oauth/installations/:installationId/setup", bucket: "nonHuman", reason: "App client credential authenticates own active installation; setup progress is not an Agent/Machine authority grant" },
   { route: "PUT /api/oauth/installations/:installationId/subscriptions", bucket: "nonHuman", reason: "OAuth protocol endpoint (client credentials, bearer token or integration consent); no Agent/Machine relationship authority" },
   { route: "POST /api/oauth/installations/lookup", bucket: "nonHuman", reason: "App client credentials resolve only that App's active installation on an exact Server" },
   { route: "PUT /api/servers/:id/agreement", bucket: "notAgentMachine", reason: "Server settings, invites, join links, ordering" },
@@ -419,6 +439,7 @@ export const ROUTE_AUTHORITY_CLASSIFICATION: readonly RouteClassification[] = [
   { route: "PUT /api/slack-bridge/provisioning/channel-pairs", bucket: "notAgentMachine", reason: "Slack bridge configuration / ingress" },
   { route: "PUT /internal/agent-api/labs/:labKey", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
   { route: "PUT /internal/agent-api/push-webhook", bucket: "nonHuman", reason: "sk_agent principal (routeAuthPolicy registry); no human Server authority" },
+  { route: "PUT /oidc/:server/api/oauth/installations/:installationId/setup", bucket: "nonHuman", reason: "App client credential authenticates own active installation; setup progress is not an Agent/Machine authority grant" },
   { route: "PUT /oidc/:server/api/oauth/installations/:installationId/subscriptions", bucket: "nonHuman", reason: "OAuth protocol endpoint (client credentials, bearer token or integration consent); no Agent/Machine relationship authority" },
 ];
 

@@ -104,7 +104,8 @@ test("stale agent profile overlay falls through to an unavailable panel instead 
   await waitFor(() => assert.deepEqual(requestedUrls, ["/agents/terminated-agent-1"]));
 });
 
-test("stale agent profile overlay treats a 200 deleted fallback response as unavailable", async () => {
+// Agent archive: an archived (deleted) agent keeps a read-only profile.
+test("stale agent profile overlay renders an archived agent from a 200 deleted fallback response", async () => {
   seedShell();
   useProfileStore.getState().openProfile("agent", "terminated-agent-1");
 
@@ -123,7 +124,8 @@ test("stale agent profile overlay treats a 200 deleted fallback response as unav
     </MemoryRouter>,
   );
 
-  assert.ok(await screen.findByTestId("agent-unavailable-panel"));
+  assert.ok((await screen.findAllByText("Archived")).length >= 1);
+  assert.ok(screen.queryByTestId("agent-unavailable-panel") === null);
   assert.equal(screen.queryByText("Something went wrong"), null);
   assert.equal(screen.queryByText(/Cannot read properties of undefined/), null);
 });
@@ -183,7 +185,7 @@ test("joint peer partial profile remains readable without querying the current s
   );
 
   assert.ok((await screen.findAllByText("Peer Agent")).length > 0);
-  assert.equal(screen.queryByTestId("agent-unavailable-panel"), null);
+  assert.ok(screen.queryByTestId("agent-unavailable-panel") === null);
   assert.equal(requestedUrls.includes(`/agents/${remotePartial.id}`), false);
   assert.equal(canRenderAgentDetail(remotePartial, "server-1"), true);
   assert.equal(canRenderAgentDetail(remotePartial, "server-2"), false);
@@ -203,7 +205,7 @@ test("joint peer partial profile remains readable without querying the current s
   assert.equal(canRenderAgentDetail({ ...channelSummary, profileProjection: undefined }, "server-1"), false);
 });
 
-test("store-retained deleted agent profile overlay renders unavailable instead of AgentDetailPanel", async () => {
+test("store-retained archived agent profile overlay renders the read-only AgentDetailPanel", async () => {
   seedShell();
   useAgentStore.setState({
     agents: [makeAgent({ id: "terminated-agent-1", deletedAt: "2026-08-12T00:00:00.000Z" })],
@@ -218,7 +220,8 @@ test("store-retained deleted agent profile overlay renders unavailable instead o
     </MemoryRouter>,
   );
 
-  assert.ok(await screen.findByTestId("agent-unavailable-panel"));
+  assert.ok((await screen.findAllByText("Archived")).length >= 1);
+  assert.ok(screen.queryByTestId("agent-unavailable-panel") === null);
   assert.equal(screen.queryByText("Something went wrong"), null);
   assert.equal(screen.queryByText(/Cannot read properties of undefined/), null);
 });
@@ -285,7 +288,7 @@ test("full-page route renders a peer-server agent from the viewer-scoped project
   assert.ok(shown.length >= 1, "the peer-server agent's profile must actually render");
 
   // Supporting, not load-bearing.
-  assert.equal(screen.queryByTestId("agent-unavailable-panel"), null);
+  assert.ok(screen.queryByTestId("agent-unavailable-panel") === null);
   assert.equal(screen.queryByText("This agent has been terminated or is no longer available in this server."), null);
   // The contract is specifically that this server is never asked to resolve a
   // FOREIGN agent id: `/agents/:id` 404s for it.
@@ -299,14 +302,15 @@ test("full-page route still shows unavailable for a direct hit with no bounded p
   assert.ok(await screen.findByTestId("agent-unavailable-panel"));
 });
 
-test("full-page route still shows unavailable for a same-server deleted agent", async () => {
+test("full-page route renders a same-server archived agent read-only", async () => {
   seedShell();
   useAgentStore.setState({
     agents: [makeAgent({ id: "gone-agent", deletedAt: "2026-08-12T00:00:00.000Z" })],
     activityLogs: {},
   } as never);
   renderRoute("gone-agent");
-  assert.ok(await screen.findByTestId("agent-unavailable-panel"));
+  assert.ok((await screen.findAllByText("Archived")).length >= 1);
+  assert.ok(screen.queryByTestId("agent-unavailable-panel") === null);
 });
 
 test("full-page route: a cached projection for a DIFFERENT viewer server does not leak in", async () => {

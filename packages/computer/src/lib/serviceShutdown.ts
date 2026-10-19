@@ -16,6 +16,8 @@ export function evaluateShutdownBarrier(
 
 export interface ShutdownServiceDeps {
   runners: Map<string, RunnerRecord>;
+  /** Runs just before a child gets SIGTERM, so the child can tell who stopped it. */
+  beforeSignal?: (rec: RunnerRecord, pid: number) => void;
   closeIpc: () => void | Promise<void> | undefined;
   isProcessAlive: (pid: number) => boolean;
   clearServicePidfile: () => Promise<void>;
@@ -35,6 +37,7 @@ export interface ShutdownServiceDeps {
 
 export async function shutdownService({
   runners,
+  beforeSignal,
   closeIpc,
   isProcessAlive,
   clearServicePidfile,
@@ -48,6 +51,7 @@ export async function shutdownService({
   for (const rec of runners.values()) {
     if (!rec.child) continue;
     rec.stopping = true;
+    if (rec.child.pid !== undefined) beforeSignal?.(rec, rec.child.pid);
     try {
       rec.child.kill("SIGTERM");
     } catch {

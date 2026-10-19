@@ -61,9 +61,10 @@ import {
   SelectList,
   SelectSeparator,
   SelectTrigger,
+  Skeleton,
   ThreadIcon,
-} from "raft-ui";
-import type { ComboboxProps } from "raft-ui";
+} from "@botiverse/raft-ui";
+import type { ComboboxProps } from "@botiverse/raft-ui";
 import { useLocation, useNavigate } from "react-router-dom";
 import api from "../../api/client";
 import { useAuthStore } from "../../store/authStore";
@@ -83,9 +84,10 @@ import { useRecentConversationEntities, useSearchEntityCatalog } from "./useRece
 import { useAppNavigate, useMobileBack } from "../../hooks/useAppNavigate";
 import { useLiveSearchParams } from "../../hooks/useLiveSearchParams";
 import PanelHeader from "../ui/PanelHeader";
-import Skeleton from "../ui/Skeleton";
-import SectionEyebrow from "../ui/SectionEyebrow";
 import AvatarSlot from "../ui/AvatarSlot";
+import AppBanner from "../ui/Banner";
+import AppEmptyState from "../ui/EmptyState";
+import TextLink from "../ui/TextLink";
 import DismissBackdrop from "../ui/DismissBackdrop";
 import MenuItem from "../ui/MenuItem";
 import { resolveMessageSenderMemberFromList } from "../../utils/messageSenderMember";
@@ -148,9 +150,9 @@ import { fullPageSearchHopState, resolveSearchOverlayBackground, SEARCH_PRESENTA
 // see ENTITY_RESULTS_SCROLL_CLASS) instead of silently dropping matches past 5.
 const MAX_ENTITY_RESULTS = 50;
 // ≈5.5 entity rows: the half row peeking at the bottom signals the list scrolls.
-// The padding/negative margin pair keeps rui's selected ring and brutal shadow
-// from being clipped by the scroll container.
-const ENTITY_RESULTS_SCROLL_CLASS = "-m-1.5 max-h-[24rem] overflow-y-auto overscroll-contain p-1.5";
+// Rows run edge to edge (DS ListRow) and draw their keyboard ring inside, so
+// the scroll container needs no padding to keep it from being clipped.
+const ENTITY_RESULTS_SCROLL_CLASS = "max-h-[24rem] overflow-y-auto overscroll-contain";
 // Desktop ⌘K overlay (task #102, Slack model): the overlay is a suggestion layer,
 // not the results page — it previews a handful of message hits and hands
 // "everything" to the full results page through the "view all results" row.
@@ -217,6 +219,29 @@ interface SearchResultsSnapshot {
   query: string;
   results: MessageSearchResult[];
   hasMore: boolean;
+  continuation: SearchContinuation;
+}
+
+/**
+ * Recent-sort text search can stop at the server's scan budget before a page
+ * fills (`incomplete`): the results so far are not all the matches, and the
+ * search continues from `nextCursor`. The cursor also pages a complete page.
+ */
+interface SearchContinuation {
+  nextCursor: string | null;
+  incomplete: boolean;
+  searchedThrough: string | null;
+}
+const NO_SEARCH_CONTINUATION: SearchContinuation = Object.freeze({ nextCursor: null, incomplete: false, searchedThrough: null });
+
+function readSearchContinuation(data: { nextCursor?: unknown; incomplete?: unknown; searchedThrough?: unknown }): SearchContinuation {
+  const nextCursor = typeof data.nextCursor === "string" && data.nextCursor ? data.nextCursor : null;
+  if (!nextCursor) return NO_SEARCH_CONTINUATION;
+  return {
+    nextCursor,
+    incomplete: data.incomplete === true,
+    searchedThrough: typeof data.searchedThrough === "string" ? data.searchedThrough : null,
+  };
 }
 let cachedSearchSnapshot: SearchResultsSnapshot | null = null;
 
@@ -248,9 +273,13 @@ function getScopeOptionLabelId(scope: SearchScope): "search.scopeMe" | "search.s
   }
 }
 
-function getScopeChipLabel(scopes: readonly SearchScope[], formatMessage: IntlShape["formatMessage"]): string {
+// An applied filter carries its count in machine type (DS `rf-filter__count`).
+function getScopeChipLabel(scopes: readonly SearchScope[], formatMessage: IntlShape["formatMessage"]): ReactNode {
   return scopes.length > 0
-    ? formatMessage({ id: "search.scopeChip" }, { count: scopes.length })
+    ? formatMessage(
+        { id: "search.scopeChip" },
+        { count: <span key="count" className="font-mono text-mono-meta font-bold">{scopes.length}</span> },
+      )
     : formatMessage({ id: "search.scope" });
 }
 
@@ -402,19 +431,22 @@ export function SearchHighlight({ text, query }: { text: string; query: string }
   );
 }
 
+// Loading keeps the hit layout (DS Loading: a known layout gets a skeleton):
+// the 27px identity column, the who/where/time line and two excerpt lines.
 function SearchSkeleton() {
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col">
       {Array.from({ length: 5 }, (_, index) => (
-        <div key={index} className="border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white">
+        <div key={index} className="grid grid-cols-[27px_minmax(0,1fr)] gap-x-3 px-4 py-3">
+          <Skeleton variant="block" className="row-span-2 size-[27px]" />
           <div className="mb-2 flex gap-2">
-            <Skeleton variant="line" className="w-24" />
-            <Skeleton variant="line" className="w-20" />
-            <Skeleton variant="line" className="w-16" />
+            <Skeleton variant="line" className="h-3 w-24" />
+            <Skeleton variant="line" className="h-3 w-20" />
+            <Skeleton variant="line" className="ml-auto h-3 w-12" />
           </div>
           <div className="space-y-2">
-            <Skeleton variant="line" className="w-full" />
-            <Skeleton variant="line" className="w-4/5" />
+            <Skeleton variant="line" className="h-3 w-full" />
+            <Skeleton variant="line" className="h-3 w-4/5" />
           </div>
         </div>
       ))}
@@ -437,21 +469,27 @@ interface SearchResultsBoundaryState {
 // (it mounts inside the app's IntlProvider like any other component).
 function SearchResultsBoundaryFallback({ onRetry }: { onRetry: () => void }) {
   const { formatMessage } = useIntl();
+  // A problem is orange (DS Banner warning): what broke, and the one way out.
   return (
-    <div className="border border-line-muted bg-layer-card p-4 text-left shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
-      <div className="mb-2 text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "search.boundaryTitle" })}</div>
-      <div className="mb-3 text-xs text-foreground-muted theme-brutal:text-black/70">
-        {formatMessage({ id: "search.boundaryBody" })}
-      </div>
-      <Button
-        variant="outline"
-        size="sm"
-        type="button"
-        onClick={onRetry}
-      >
-        {formatMessage({ id: "search.retry" })}
-      </Button>
-    </div>
+    <AppBanner
+      intent="warning"
+      live={false}
+      withIcon
+      className="mx-4 text-left"
+      title={formatMessage({ id: "search.boundaryTitle" })}
+      actions={(
+        <Button
+          variant="outline"
+          size="sm"
+          type="button"
+          onClick={onRetry}
+        >
+          {formatMessage({ id: "search.retry" })}
+        </Button>
+      )}
+    >
+      {formatMessage({ id: "search.boundaryBody" })}
+    </AppBanner>
   );
 }
 
@@ -602,6 +640,9 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState<boolean>(() => readSearchSnapshotForServer(serverId)?.hasMore ?? false);
+  const [continuation, setContinuation] = useState<SearchContinuation>(
+    () => readSearchSnapshotForServer(serverId)?.continuation ?? NO_SEARCH_CONTINUATION,
+  );
   const [searchError, setSearchError] = useState<SearchFailureKind | null>(null);
   const [loadMoreError, setLoadMoreError] = useState(false);
   const [searchNonce, setSearchNonce] = useState(0);
@@ -737,6 +778,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
   // instead; desktop keeps the hover affordance untouched.
   const isTouchSearchHome = useMediaQuery(SEARCH_HOME_TOUCH_QUERY);
   const [searchHistoryEditRequested, setSearchHistoryEditRequested] = useState(false);
+  const toggleSearchHistoryEdit = useCallback(() => setSearchHistoryEditRequested((editing) => !editing), []);
   // Edit mode only exists where it is reachable: a desktop viewport keeps the
   // hover affordance and never enters it, and an empty list has nothing to
   // edit. Both are derived here rather than synchronized by an Effect.
@@ -1133,6 +1175,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
       setLoading(false);
       setLoadingMore(false);
       setHasMore(false);
+      setContinuation(NO_SEARCH_CONTINUATION);
       setSearchError(null);
       setLoadMoreError(false);
       cachedSearchSnapshot = null;
@@ -1162,15 +1205,18 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
         if (!cancelled) {
           const nextResults: MessageSearchResult[] = Array.isArray(data.results) ? data.results : [];
           const nextHasMore = Boolean(data.hasMore);
+          const nextContinuation = readSearchContinuation(data);
           setResults(nextResults);
           setResultsSearchQuery(typeof params.q === "string" ? params.q : "");
           setHasMore(nextHasMore);
+          setContinuation(nextContinuation);
           cachedSearchSnapshot = {
             serverId: snapshotServerId,
             paramsKey,
             query: typeof params.q === "string" ? params.q : "",
             results: nextResults,
             hasMore: nextHasMore,
+            continuation: nextContinuation,
           };
         }
       } catch (error: any) {
@@ -1179,6 +1225,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
         }
         if (!cancelled) {
           setHasMore(false);
+          setContinuation(NO_SEARCH_CONTINUATION);
           setSearchError(classifySearchFailure(error));
         }
       } finally {
@@ -1197,8 +1244,15 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
 
   const loadMoreResults = useCallback(async () => {
     if (loadingMore) return;
-    const params = buildMessageSearchParams(results.length);
-    if (!params) return;
+    // A cursor continues exactly below what was shown; an offset would restart
+    // the server's scan from the newest message.
+    const base = buildMessageSearchParams(continuation.nextCursor ? 0 : results.length);
+    if (!base) return;
+    let params: Record<string, string | number> = base;
+    if (continuation.nextCursor) {
+      const { offset: _offset, ...rest } = base;
+      params = { ...rest, cursor: continuation.nextCursor };
+    }
     setLoadingMore(true);
     setLoadMoreError(false);
     try {
@@ -1206,6 +1260,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
       const nextResults = Array.isArray(data.results) ? data.results as MessageSearchResult[] : [];
       setResults((prev) => [...prev, ...nextResults]);
       setHasMore(Boolean(data.hasMore));
+      setContinuation(readSearchContinuation(data));
     } catch {
       // Preserve both the current page and the continuation state so the failed
       // page is visibly retryable instead of looking like the end of results.
@@ -1213,7 +1268,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
     } finally {
       setLoadingMore(false);
     }
-  }, [buildMessageSearchParams, loadingMore, results.length]);
+  }, [buildMessageSearchParams, continuation.nextCursor, loadingMore, results.length]);
 
   const handleBack = useMobileBack(searchShortcutSource ?? railSearchSource ?? (slug ? `/s/${slug}` : "/"));
   const handleSearchEscape = useCallback(() => {
@@ -1549,6 +1604,14 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
     () => groupMessageSearchResults(visibleMessageResults),
     [visibleMessageResults]
   );
+  // The server stopped at its scan budget: what is shown is not every match.
+  const searchIncomplete = continuation.incomplete && continuation.nextCursor !== null;
+  const incompleteSearchNote = continuation.searchedThrough
+    ? formatMessage(
+      { id: "search.incompleteSearchedThrough" },
+      { time: intl.formatDate(new Date(continuation.searchedThrough), { dateStyle: "medium", timeStyle: "short" }) },
+    )
+    : formatMessage({ id: "search.incompleteSearchedPart" });
   const retrySearch = useCallback(() => {
     // Retry must clear the last crashing result set before the debounced fetch starts,
     // otherwise the boundary can immediately trip again on the same data.
@@ -1561,6 +1624,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
     setLoading(reset.loading);
     setLoadingMore(reset.loadingMore);
     setHasMore(reset.hasMore);
+    setContinuation(NO_SEARCH_CONTINUATION);
     setSearchError(reset.searchError);
     setLoadMoreError(false);
     setSearchNonce((prev) => prev + 1);
@@ -1852,8 +1916,13 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
   const searchPlaceholder = overlayChrome
     ? formatMessage({ id: "search.overlay.placeholder" })
     : formatMessage({ id: "search.placeholder" }, { shortcutHint });
+  // DS Search field (`rf-search`): one 44px ink-bordered control with the
+  // search glyph inside it, the clear button and the Esc hint at its end.
   const searchFieldInner = (
     <InputGroup className="min-w-0 flex-1">
+      <InputGroupAddon align="inline-start">
+        <Search aria-hidden="true" />
+      </InputGroupAddon>
       <InputGroupInput
         ref={inputRef}
         value={query}
@@ -1862,20 +1931,21 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
         onCompositionEnd={handleQueryCompositionEnd}
         placeholder={searchPlaceholder}
         aria-label={searchPlaceholder}
+        data-testid="message-search-input"
       />
       <InputGroupAddon align="inline-end">
         {query ? (
           <Button
             type="button"
             variant="ghost"
-            size="icon-xs"
+            size="icon-sm"
             onClick={clearQuery}
             aria-label={formatMessage({ id: "search.clearSearch" })}
           >
-            <X aria-hidden size={12} />
+            <X aria-hidden size={18} />
           </Button>
         ) : null}
-        <Kbd className="hidden sm:inline text-[10px] font-bold uppercase text-foreground-muted">
+        <Kbd className="hidden sm:inline-flex">
           Esc
         </Kbd>
       </InputGroupAddon>
@@ -1996,17 +2066,19 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
     setChannelContextMenu(null);
   }, [channelContextMenu, openEntityResultInChat]);
 
-  const activeFilterClass =
-    "border-line-strong bg-primary-soft text-foreground-strong shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm";
+  // An applied filter is the cyan-soft filter chip (DS `rf-filter.is-applied`);
+  // PickerTriggerButton draws it from `data-has-value`. Comboboxes set the
+  // attribute from their own value; selects and the sort chip say it here.
+  const appliedFilterProps = (applied: boolean) => (applied ? { "data-has-value": "" } : {});
 
   const centeredEmptyState = (
-    <div className="flex h-full flex-col items-center justify-center text-center" data-testid="search-home">
-      <Search size={overlayChrome ? 32 : 48} className="mb-3 text-foreground-muted/30 theme-brutal:text-black/20" />
-      <p className="text-sm font-bold text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "search.emptyTitle" })}</p>
-      <p className="mt-1 text-xs text-foreground-muted/70 theme-brutal:text-black/40">
-        {formatMessage({ id: "search.emptyBody" })}
-      </p>
-    </div>
+    <AppEmptyState
+      className="h-full justify-center"
+      data-testid="search-home"
+      icon={<Search size={36} aria-hidden="true" />}
+      title={formatMessage({ id: "search.emptyTitle" })}
+      description={formatMessage({ id: "search.emptyBody" })}
+    />
   );
 
   return (
@@ -2015,24 +2087,17 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
         /* Slim command-palette header (desktop ⌘K overlay): the input IS the top
            bar with the search icon inline — no PanelHeader, mobile-back, or icon
            badge. */
-        <div className="shrink-0 border-b border-line-muted px-3 py-2.5 theme-brutal:border-b-2 theme-brutal:border-black">
-          <div className="flex min-w-0 items-center gap-2">
-            <Search size={16} className="shrink-0 text-foreground-muted theme-brutal:text-black/50" aria-hidden="true" />
-            {searchFieldInner}
-          </div>
+        <div className="flex shrink-0 items-center border-b border-line-seam px-3 py-3">
+          {searchFieldInner}
         </div>
       ) : (
         <PanelHeader
           onMobileBack={handleBack}
           mobileBackProps={mobileBackProps}
           titleSlot={
-            <div className="flex min-w-0 flex-1 items-center gap-3">
-              {/* Search icon — always visible on this surface (unlike other
-                  panel headers where icon is desktop-only) since search
-                  identity matters at every viewport. */}
-              <div className="flex size-icon-header shrink-0 items-center justify-center border border-line-muted bg-primary-soft text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
-                <Search size={18} />
-              </div>
+            /* The field carries the search glyph itself (DS Search), so the
+               header needs no separate icon tile at any viewport. */
+            <div className="flex min-w-0 flex-1 items-center">
               {searchFieldInner}
             </div>
           }
@@ -2040,7 +2105,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
       )}
 
       {overlayHome ? null : (
-      <SearchShellFilters ref={filtersPortalRef} className={overlayChrome ? "px-3 py-2" : undefined}>
+      <SearchShellFilters ref={filtersPortalRef} className={overlayChrome ? "px-3" : undefined}>
         <div className="flex flex-wrap items-center gap-2">
           <Combobox<string>
             autoHighlight
@@ -2049,13 +2114,13 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
             inputValue={senderFilterQuery}
             items={senderItemIds}
             itemToStringLabel={senderItemLabel}
-            value={senderIdParam ?? null}
+            value={senderIdParam || null}
             onInputValueChange={handleSenderInputChange}
             onValueChange={handleSenderChange}
           >
             <ComboboxTrigger
               aria-label={formatMessage({ id: "search.from" })}
-              render={<PickerTriggerButton className={senderIdParam ? activeFilterClass : undefined} />}
+              render={<PickerTriggerButton {...appliedFilterProps(Boolean(senderIdParam))} />}
             >
               <UserCircle2 aria-hidden size={14} />
               <span>
@@ -2126,7 +2191,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
           >
             <SelectTrigger
               aria-label={formatMessage({ id: "search.scope" })}
-              render={<PickerTriggerButton className={scopes.length > 0 ? activeFilterClass : undefined} />}
+              render={<PickerTriggerButton {...appliedFilterProps(scopes.length > 0)} />}
             >
               <AtSign aria-hidden size={14} />
               <span>{getScopeChipLabel(scopes, formatMessage)}</span>
@@ -2154,17 +2219,15 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
             const ch = channels.find((c) => c.id === channelIdParam) ?? dmChannels.find((c) => c.id === channelIdParam);
             const label = ch ? `#${ch.name}` : `#${formatMessage({ id: "search.channel" })}`;
             return (
-              <Button
+              <PickerTriggerButton
                 type="button"
-                variant="outline"
-                size="sm"
+                data-has-value=""
                 onClick={clearChannelFilter}
-                className={activeFilterClass}
               >
-                <Hash size={12} />
-                {label}
-                <X size={10} />
-              </Button>
+                <Hash aria-hidden size={14} />
+                <span>{label}</span>
+                <X aria-hidden size={14} />
+              </PickerTriggerButton>
             );
           })() : (
             <Combobox<string>
@@ -2230,7 +2293,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
           >
             <SelectTrigger
               aria-label={formatMessage({ id: "search.time" })}
-              render={<PickerTriggerButton className={timeRange !== "any" ? activeFilterClass : undefined} />}
+              render={<PickerTriggerButton {...appliedFilterProps(timeRange !== "any")} />}
             >
               <CalendarRange aria-hidden size={14} />
               <span>{formatMessage({ id: getTimeRangeLabelId(timeRange) })}</span>
@@ -2257,9 +2320,9 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
           {/* Sort chip — same shape as From / Channel / Time per stdrc
               #proj-uiux:c2313b1d msg=da1194bd (2026-05-26): replaces the
               prior Relevant/Recent segmented toggle with a Sort dropdown
-              positioned after the existing filter chips. Chip is "active"
-              (yellow) when sort != default (relevance), matching the
-              time-chip pattern (active when timeRange != "any"). Conceptually
+              positioned after the existing filter chips. Chip reads as
+              applied (cyan-soft) when sort != default (relevance), matching
+              the time-chip pattern (applied when timeRange != "any"). Conceptually
               sort isn't a filter, so it's NOT included in `hasActiveFilters`
               and `clearAllFilters` does NOT reset it — only the visual
               treatment matches. */}
@@ -2274,7 +2337,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
             <SelectTrigger
               aria-label={formatMessage({ id: "search.sort" })}
               data-testid="search-sort-chip"
-              render={<PickerTriggerButton className={sort !== "relevance" ? activeFilterClass : undefined} />}
+              render={<PickerTriggerButton {...appliedFilterProps(sort !== "relevance")} />}
             >
               <ArrowDownUp aria-hidden size={14} />
               <span>{sort === "recent" ? formatMessage({ id: "search.sortRecent" }) : formatMessage({ id: "search.sortRelevant" })}</span>
@@ -2302,7 +2365,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
             <Button
               type="button"
               variant="ghost"
-              size="xs"
+              size="sm"
               onClick={clearAllFilters}
             >
               {formatMessage({ id: "search.clearAll" })}
@@ -2317,62 +2380,63 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
           recentConversationEntities.length > 0 ? (
             /* Overlay empty state (task #113, Slack): the conversations you were
                in most recently, as the same destination rows the results use. */
-            <div className="p-3" data-testid="search-overlay-recent">
-              <SectionEyebrow as="div" className="mb-2 flex items-center gap-1.5 px-1">
-                <Clock3 size={12} aria-hidden="true" />
+            <div data-testid="search-overlay-recent">
+              <SearchResultsSectionHeading>
+                <Clock3 size={14} aria-hidden="true" />
                 <span>{formatMessage({ id: "search.overlay.recentConversations" })}</span>
-              </SectionEyebrow>
+              </SearchResultsSectionHeading>
               <SearchResultsList>
                 {recentConversationEntities.map((result) => renderEntityResultRow(result, { returnHint: true }))}
               </SearchResultsList>
             </div>
           ) : centeredEmptyState
         ) : !hasSearchHomeContent ? centeredEmptyState : (
-          <div className="p-4" data-testid="search-home">
+          <div data-testid="search-home">
             {searchHistory.length > 0 ? (
-              <section className="mb-6" aria-labelledby="search-history-heading">
-                <div className="mb-2 flex items-center justify-between gap-3 px-1">
-                  <SectionEyebrow as="div" className="flex items-center gap-1.5">
-                    <Clock3 size={12} aria-hidden="true" />
+              <section aria-labelledby="search-history-heading">
+                <div className="flex items-center justify-between gap-3 pr-4">
+                  <SearchResultsSectionHeading>
+                    <Clock3 size={14} aria-hidden="true" />
                     <span id="search-history-heading">{formatMessage({ id: "search.history" })}</span>
-                  </SectionEyebrow>
-                  <div className="flex items-center gap-3">
+                  </SearchResultsSectionHeading>
+                  {/* Section actions are underlined ink text buttons (DS rf-section__action). */}
+                  <div className="flex items-center gap-4 pt-5 pb-2">
                     {isTouchSearchHome ? (
-                      <button
-                        type="button"
-                        onClick={() => setSearchHistoryEditRequested((editing) => !editing)}
-                        className="text-[11px] font-bold text-foreground-muted hover:text-foreground-strong theme-brutal:text-black/45 theme-brutal:hover:text-black"
+                      <TextLink
+                        variant="primary"
+                        onClick={toggleSearchHistoryEdit}
+                        className="text-footnote"
                         data-testid="search-history-edit-toggle"
                       >
                         {formatMessage({
                           id: searchHistoryEditing ? "search.doneEditHistory" : "search.editHistory",
                         })}
-                      </button>
+                      </TextLink>
                     ) : null}
-                    <button
-                      type="button"
+                    <TextLink
+                      variant="primary"
                       onClick={clearSearchHistory}
-                      className="text-[11px] font-bold text-foreground-muted hover:text-foreground-strong theme-brutal:text-black/45 theme-brutal:hover:text-black"
+                      className="text-footnote"
                     >
                       {formatMessage({ id: "search.clearHistory" })}
-                    </button>
+                    </TextLink>
                   </div>
                 </div>
-                <div className="flex flex-wrap gap-2" data-testid="search-history-tags">
+                <div className="flex flex-wrap gap-1.5 px-4" data-testid="search-history-tags">
                   {searchHistory.map((historyQuery) => (
                     <Badge
                       key={historyQuery.toLocaleLowerCase()}
                       render={<div />}
-                      appearance="outline"
-                      className="group relative hover:bg-fill-muted focus-within:bg-fill-muted"
+                      appearance="soft"
+                      className="group relative hover:press-overlay focus-within:shadow-focus"
                       data-testid="search-history-tag"
                     >
                       <button
                         type="button"
                         onClick={() => chooseSearchHistoryEntry(historyQuery)}
-                        className="flex min-w-0 items-center gap-1 text-left after:absolute after:inset-0"
+                        className="flex min-w-0 items-center gap-1 text-left outline-none after:absolute after:inset-0"
                       >
-                        <Clock3 size={11} aria-hidden="true" />
+                        <Clock3 size={14} aria-hidden="true" />
                         <span className="truncate">{historyQuery}</span>
                       </button>
                       {shouldRenderSearchHistoryRemove({
@@ -2383,11 +2447,11 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                           type="button"
                           onClick={() => forgetSearchQuery(historyQuery)}
                           className={searchHistoryEditing
-                            ? "relative z-10 -my-1 -mr-1 flex shrink-0 items-center justify-center p-1"
-                            : "pointer-events-none relative z-10 -my-1 -mr-1 flex shrink-0 items-center justify-center p-1 opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus:pointer-events-auto focus:opacity-100"}
+                            ? "relative z-10 -my-1 -mr-1 flex size-5.5 shrink-0 items-center justify-center rounded-sticker text-foreground-hint hover:bg-fill-pressed"
+                            : "pointer-events-none relative z-10 -my-1 -mr-1 flex size-5.5 shrink-0 items-center justify-center rounded-sticker text-foreground-hint opacity-0 hover:bg-fill-pressed group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus:pointer-events-auto focus:opacity-100"}
                           aria-label={formatMessage({ id: "search.removeHistory" }, { query: historyQuery })}
                         >
-                          <X size={11} aria-hidden="true" />
+                          <X size={14} aria-hidden="true" />
                         </button>
                       ) : null}
                     </Badge>
@@ -2397,29 +2461,29 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
             ) : null}
 
             <section aria-labelledby="search-frequent-heading">
-              <SectionEyebrow as="div" className="mb-2 flex items-center gap-1.5 px-1">
-                <Star size={12} aria-hidden="true" />
+              <SearchResultsSectionHeading>
+                <Star size={14} aria-hidden="true" />
                 <span id="search-frequent-heading">{formatMessage({ id: "search.frequent" })}</span>
-              </SectionEyebrow>
+              </SearchResultsSectionHeading>
               {frequentSearchEntities.length > 0 ? (
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <SearchResultsList>
                   {frequentSearchEntities.map(renderSearchHomeEntity)}
-                </div>
+                </SearchResultsList>
               ) : (
-                <div className="border border-dashed border-line-muted px-3 py-4 text-xs text-foreground-muted theme-brutal:border-2 theme-brutal:border-black/20 theme-brutal:text-black/40">
+                <p className="px-4 py-2 text-callout text-foreground-hint">
                   {formatMessage({ id: "search.frequentEmpty" })}
-                </div>
+                </p>
               )}
             </section>
           </div>
         ))}
 
         {hasSearchIntent && (
-          <div className="p-4">
+          <div>
             {showAllResultsAction ? (
               /* Overlay head (task #102, Slack): exact destination first when the
                  query names one, then the "view all results" row. */
-              <div className="mb-3 flex flex-col gap-2" data-testid="search-overlay-head">
+              <SearchResultsList className="pt-2" data-testid="search-overlay-head">
                 {exactDestination ? renderEntityResultRow(exactDestination) : null}
                 <SearchEntityResult
                   type="button"
@@ -2430,7 +2494,7 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                 >
                   <SearchEntityResultLeading>
                     <SearchEntityResultIcon>
-                      <Search size={14} />
+                      <Search size={14} aria-hidden="true" />
                     </SearchEntityResultIcon>
                   </SearchEntityResultLeading>
                   <SearchEntityResultContent>
@@ -2447,31 +2511,44 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                   </SearchEntityResultContent>
                   <Kbd aria-hidden="true">{RETURN_KEY_GLYPH}</Kbd>
                 </SearchEntityResult>
-              </div>
+              </SearchResultsList>
             ) : (
-              <div className="mb-3 px-1">
-                <SearchResultsSummary>
-                  {loading ? formatMessage({ id: "search.searching" }) : formatMessage({ id: "search.resultsCount" }, { count: totalResults })}
-                </SearchResultsSummary>
-              </div>
+              <SearchResultsSummary>
+                {loading ? formatMessage({ id: "search.searching" }) : formatMessage({ id: "search.resultsCount" }, { count: totalResults })}
+              </SearchResultsSummary>
             )}
 
             {!loading && totalResults === 0 && !searchError ? (
-              <div className="flex flex-col items-center justify-center py-20 text-center">
-                <Search size={overlayChrome ? 32 : 48} className="mb-3 text-foreground-muted/30 theme-brutal:text-black/20" />
-                <p className="text-sm font-bold text-foreground-muted theme-brutal:text-black/50">
-                  {query.trim() ? formatMessage({ id: "search.noResultsForQuery" }, { query: query.trim() }) : formatMessage({ id: "search.noMatchingMessages" })}
-                </p>
-                <p className="mt-1 text-xs text-foreground-muted/70 theme-brutal:text-black/40">
-                  {query.trim() ? formatMessage({ id: "search.tryDifferentKeywords" }) : formatMessage({ id: "search.tryDifferentFilters" })}
-                </p>
-              </div>
+              /* DS EmptyState: say why it is empty and how to widen the search;
+                 at most one ink-bordered small button. */
+              <AppEmptyState
+                className="py-16"
+                icon={<Search size={36} aria-hidden="true" />}
+                title={searchIncomplete
+                  ? formatMessage({ id: "search.incompleteNoMatchesYet" })
+                  : query.trim() ? formatMessage({ id: "search.noResultsForQuery" }, { query: query.trim() }) : formatMessage({ id: "search.noMatchingMessages" })}
+                description={searchIncomplete
+                  ? incompleteSearchNote
+                  : query.trim() ? formatMessage({ id: "search.tryDifferentKeywords" }) : formatMessage({ id: "search.tryDifferentFilters" })}
+                action={searchIncomplete ? (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={loadMoreResults}
+                    disabled={loadingMore}
+                  >
+                    {loadingMore ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "search.continueSearching" })}
+                  </Button>
+                ) : undefined}
+              />
             ) : (
               <>
                 {remainingEntityResults.length > 0 && (
-                  <SearchResultsSection className="mb-3">
+                  <SearchResultsSection>
                     <SearchResultsSectionHeading>
                       {formatMessage({ id: "search.serverEntities" })}
+                      <span className="font-mono text-mono-meta font-normal">{remainingEntityResults.length}</span>
                     </SearchResultsSectionHeading>
                     <SearchResultsList
                       ref={entityResultsListRef}
@@ -2487,31 +2564,27 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                   {((loading && !searchError) || groupedMessageResults.length > 0) && (
                     <SearchResultsSectionHeading>
                       {formatMessage({ id: "search.messages" })}
+                      {!loading && totalResults > 0 ? (
+                        <span className="font-mono text-mono-meta font-normal">{totalResults}</span>
+                      ) : null}
                     </SearchResultsSectionHeading>
                   )}
                   {showInitialSkeleton ? (
                     <SearchSkeleton />
                   ) : searchError && totalResults === 0 ? (
-                    <div className="border border-line-muted bg-layer-card p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
-                      <div className="mb-2 text-sm font-bold text-foreground-strong theme-brutal:text-black">
-                        {formatMessage({
-                          id: searchError === "query_too_broad"
-                            ? "search.queryTooBroad"
-                            : searchError === "search_timeout"
-                              ? "search.searchTimedOut"
-                              : "search.searchFailed",
-                        })}
-                      </div>
-                      <div className="mb-3 text-xs text-foreground-muted theme-brutal:text-black/60">
-                        {formatMessage({
-                          id: searchError === "query_too_broad"
-                            ? "search.queryTooBroadBody"
-                            : searchError === "search_timeout"
-                              ? "search.searchTimedOutBody"
-                              : "search.searchFailedBody",
-                        })}
-                      </div>
-                      {searchError !== "query_too_broad" ? (
+                    <AppBanner
+                      intent="warning"
+                      live={false}
+                      withIcon
+                      className="mx-4"
+                      title={formatMessage({
+                        id: searchError === "query_too_broad"
+                          ? "search.queryTooBroad"
+                          : searchError === "search_timeout"
+                            ? "search.searchTimedOut"
+                            : "search.searchFailed",
+                      })}
+                      actions={searchError !== "query_too_broad" ? (
                         <Button
                           type="button"
                           variant="outline"
@@ -2530,8 +2603,16 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                         >
                           {formatMessage({ id: "search.queryTooBroadSortRecent" })}
                         </Button>
-                      ) : null}
-                    </div>
+                      ) : undefined}
+                    >
+                      {formatMessage({
+                        id: searchError === "query_too_broad"
+                          ? "search.queryTooBroadBody"
+                          : searchError === "search_timeout"
+                            ? "search.searchTimedOutBody"
+                            : "search.searchFailedBody",
+                      })}
+                    </AppBanner>
                   ) : (
                     <SearchResultsBoundary
                       resetKey={boundaryKey}
@@ -2553,13 +2634,13 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                               selected={groupHasSelected}
                             >
                               <SearchThreadResultHeader>
-                                <div className="mb-1 flex flex-wrap items-center gap-2 text-[11px] font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/70">
+                                <div className="mb-0.5 flex min-w-0 flex-wrap items-center gap-1.5">
                                   <Badge appearance="outline">
-                                    <ThreadIcon width={11} height={11} />
+                                    <ThreadIcon width={12} height={12} />
                                     {formatMessage({ id: "search.threadBadge" })}
                                   </Badge>
                                   <SearchThreadResultMeta>{sourceLabel}</SearchThreadResultMeta>
-                                  <span>{formatMessage({ id: "search.hitsCount" }, { count: group.hitCount })}</span>
+                                  <span className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "search.hitsCount" }, { count: group.hitCount })}</span>
                                   <SearchThreadResultTimestamp>{(() => {
                                     const parts = getSearchRelativeTimeParts(group.latestCreatedAt);
                                     return parts ? formatRelativeTimeParts(parts.value, parts.unit, intl.locale) : formatMessage({ id: "search.grpUnknownTime" });
@@ -2578,23 +2659,31 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                   )}
                 </SearchResultsSection>
 
-                {hasMore && !activateResultsInChat && (
-                  <div className="flex justify-center py-4">
+                {(hasMore || searchIncomplete) && !activateResultsInChat && (
+                  <div className="flex flex-col items-center gap-2 px-4 py-4">
+                    {searchIncomplete && !loadMoreError && (
+                      <p className="text-center text-caption text-foreground-hint">{incompleteSearchNote}</p>
+                    )}
                     {loadMoreError ? (
-                      <div role="alert" className="flex items-center gap-3 border border-line-muted bg-layer-card px-3 py-2 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
-                        <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">
-                          {formatMessage({ id: "search.loadMoreFailed" })}
-                        </span>
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={loadMoreResults}
-                          disabled={loadingMore}
-                        >
-                          {loadingMore ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "search.retry" })}
-                        </Button>
-                      </div>
+                      <AppBanner
+                        intent="warning"
+                        role="alert"
+                        withIcon
+                        className="w-full"
+                        actions={(
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={loadMoreResults}
+                            disabled={loadingMore}
+                          >
+                            {loadingMore ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "search.retry" })}
+                          </Button>
+                        )}
+                      >
+                        {formatMessage({ id: "search.loadMoreFailed" })}
+                      </AppBanner>
                     ) : (
                       <Button
                         type="button"
@@ -2603,7 +2692,9 @@ export default function MessageSearchPage({ activateResultsInChat = false, overl
                         onClick={loadMoreResults}
                         disabled={loadingMore}
                       >
-                        {loadingMore ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "search.loadMore" })}
+                        {loadingMore
+                          ? formatMessage({ id: "common.loading" })
+                          : formatMessage({ id: searchIncomplete ? "search.continueSearching" : "search.loadMore" })}
                       </Button>
                     )}
                   </div>

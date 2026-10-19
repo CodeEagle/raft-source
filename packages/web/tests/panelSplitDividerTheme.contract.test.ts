@@ -7,9 +7,8 @@ const css = readFileSync(resolve(webRoot, "src/index.css"), "utf8");
 
 // The two profile-split dividers used to be a hardcoded `2px solid #000`,
 // which leaked Brutal's border into Elegant (WAWQAQ report, task #668).
-// They must follow the theme: Elegant gets the standard hairline
-// (`--line-muted`, the same token as every other panel divider), Brutal keeps
-// its 2px black edge scoped behind [data-theme="brutal"].
+// Raft Design System: a split between two regions is the seam line
+// (`--line-seam`), the same in light and dark; no theme-scoped black edge.
 const COLLAPSE_CHANNEL =
   '.thread-layout-container:has(> .thread-profile-side-column[data-collapse-channel="true"]) > .thread-side-column';
 const COLLAPSE_THREAD =
@@ -31,23 +30,15 @@ test("profile split dividers are theme-aware, not a hardcoded black border", () 
   // pane on the right owns the seam, including Thread | Profile.
   for (const selector of [COLLAPSE_THREAD, COLLAPSE_CHANNEL_PROFILE]) {
     const rule = ruleBody(selector);
-    assert.match(rule, /border-left:\s*1px solid var\(--line-muted\)/, selector);
+    assert.match(rule, /border-left:\s*1px solid var\(--line-seam\)/, selector);
     assert.doesNotMatch(rule, /#000/, selector);
-    // Brutal keeps its black edge, but only inside the brutal theme scope.
-    assert.match(ruleBody(`[data-theme="brutal"] ${selector}`), /border-left:\s*2px solid #000/, selector);
   }
   // The folded-channel thread no longer draws a right edge next to the profile.
   assert.doesNotMatch(ruleBody(COLLAPSE_CHANNEL), /border-right/);
 
-  // No unscoped hardcoded black border may come back anywhere in index.css:
-  // every `2px solid #000` must sit in a rule whose selector is brutal-scoped.
-  const blackBorders = [...css.matchAll(/2px solid #000/g)];
-  assert.ok(blackBorders.length > 0, "the brutal edges themselves must still be present");
-  for (const match of blackBorders) {
-    const ruleStart = css.lastIndexOf("}", match.index) + 1;
-    const selector = css.slice(ruleStart, css.indexOf("{", ruleStart)).trim();
-    assert.match(selector, /^\[data-theme="brutal"\] /, `unscoped black border in: ${selector}`);
-  }
+  // No hardcoded black border, and no theme-scoped override, may come back.
+  assert.doesNotMatch(css, /solid #000/);
+  assert.doesNotMatch(css, /\[data-theme="brutal"\]/);
 });
 
 // Chat | Profile with no thread in the row (task #683). The divider used to be
@@ -58,9 +49,7 @@ const PLAIN_SPLIT =
 
 test("the plain chat | profile split draws its one divider on the profile pane", () => {
   const plain = ruleBody(PLAIN_SPLIT);
-  assert.match(plain, /border-left:\s*1px solid var\(--line-muted\)/);
-  const brutal = ruleBody(`[data-theme="brutal"] ${PLAIN_SPLIT}`);
-  assert.match(brutal, /border-left:\s*2px solid #000/);
+  assert.match(plain, /border-left:\s*1px solid var\(--line-seam\)/);
 });
 
 test("a profile beside a conversation never squeezes it below a readable width", () => {

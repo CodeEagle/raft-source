@@ -212,7 +212,8 @@ test("enforcement hides the legacy server-side test button", () => {
   assert.equal(screen.queryByRole("button", { name: "Test connection" }), null);
   const verifyBtn = screen.getByRole("button", { name: /Verify on Computer/ });
   assert.ok(verifyBtn);
-  assert.ok(verifyBtn.className.includes("size-7"));
+  // Row actions are the raft DS 32 icon button (`size="icon-sm"` → size-8).
+  assert.ok(verifyBtn.className.split(" ").includes("size-8"));
   assert.ok(verifyBtn.querySelector("svg.lucide-send"));
 });
 

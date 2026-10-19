@@ -98,7 +98,7 @@ test("the Appearance tab renders its migrated Chinese tab label + section copy",
 
   const activityToggle = screen.getByRole("switch", { name: /实时 Agent 动态/ });
   assert.equal(activityToggle.getAttribute("aria-checked"), "true");
-  assert.ok(screen.getByText("在侧栏底部和移动端标签栏上方显示最新的 Agent 状态。"));
+  assert.ok(screen.getByText("在窗口顶部和首页顶栏显示正在工作的 Agent 及其在做的事。"));
 
   fireEvent.click(activityToggle);
   assert.equal(useAppearanceStore.getState().showLiveAgentActivityBar, false);

@@ -2,7 +2,7 @@ import {
   formatAgentInboxAppItems as sharedFormatAgentInboxAppItems,
   isThirdPartyEventsTarget,
   THIRD_PARTY_EVENTS_LABEL,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 export type {
   AgentInboxTargetRow as InboxTargetRow,
   AgentInboxAppItem as InboxAppItem,

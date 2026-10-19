@@ -112,7 +112,7 @@ function renderAgentEn(
 
 test("catalog pins agent-detail residue MessageIds", () => {
   assert.equal(en["agent.detail.cancel"], "Cancel");
-  assert.equal(en["agent.detail.deleted"], "Deleted");
+  assert.equal(en["agent.detail.deleted"], "Archived");
   assert.equal(
     en["agent.detail.deprecatedRuntimeWarning"],
     "This agent uses a deprecated runtime. It can keep running, but new agents cannot select this runtime.",
@@ -257,7 +257,8 @@ test("mounted agent manager shares one copy lifecycle across every diagnostic tr
     assert.ok(screen.getByText(label));
   }
   assert.ok(screen.getAllByText(/manager-only diagnostic/).length >= 1);
-  assert.ok([...document.querySelectorAll('span.min-w-0.truncate.text-sm.font-mono')].find((el) => el.textContent?.includes('manager-only diagnostic')));
+  // The live activity detail rides the DS presence chip in a truncating lane.
+  assert.ok([...document.querySelectorAll('[data-slot="badge"] span.min-w-0.truncate')].find((el) => el.textContent?.includes('manager-only diagnostic')));
   const bannerCopy = screen.getByRole("button", { name: "Copy info" });
   const profileCopy = screen.getByRole("button", { name: "Copy Diagnostic Info" });
   fireEvent.click(bannerCopy);
@@ -294,10 +295,10 @@ test("mounted human creator keeps Agent management after server-role demotion", 
     assert.ok(screen.getByText(label));
   }
   assert.ok(screen.getAllByText(/creator-private diagnostic/).length >= 1);
-  assert.ok([...document.querySelectorAll('span.min-w-0.truncate.text-sm.font-mono')].find((el) => el.textContent?.includes('creator-private diagnostic')));
+  assert.ok([...document.querySelectorAll('[data-slot="badge"] span.min-w-0.truncate')].find((el) => el.textContent?.includes('creator-private diagnostic')));
   assert.ok(screen.getAllByRole("button", { name: "Restart / Reset" }).length >= 1);
   assert.ok(screen.getByRole("button", { name: "Edit display name" }));
-  assert.ok(screen.getByRole("button", { name: "Delete Agent" }));
+  assert.ok(screen.getByRole("button", { name: "Archive Agent" }));
 });
 
 test("mounted non-creator member gets public profile plus runtime controls without private management", () => {
@@ -321,7 +322,7 @@ test("mounted non-creator member gets public profile plus runtime controls witho
   assert.equal(screen.queryByRole("button", { name: "Copy Diagnostic Info" }), null);
   assert.ok(screen.getAllByRole("button", { name: "Restart / Reset" }).length >= 1);
   assert.equal(screen.queryByTitle("Edit display name"), null);
-  assert.equal(screen.queryByRole("button", { name: "Delete Agent" }), null);
+  assert.equal(screen.queryByRole("button", { name: "Archive Agent" }), null);
 });
 
 test("mounted agent runtime badge opens Computer account usage only across the existing usage boundary", async () => {
@@ -414,8 +415,12 @@ test("mounted agent runtime badge opens Computer account usage only across the e
     machines: [{ ...machine, computerAttachedByCurrentUser: false, creator: null }],
   });
 
-  const inertRuntimeBadge = await screen.findByText("Codex CLI");
-  assert.equal(inertRuntimeBadge.tagName, "SPAN");
+  // The profile hero repeats the runtime as a static DS runtime chip; the usage
+  // boundary lives on the Runtime property row's chip.
+  const inertRuntimeBadge = (await screen.findAllByText("Codex CLI"))
+    .find((el) => el.getAttribute("data-testid") !== "agent-profile-runtime-chip");
+  assert.ok(inertRuntimeBadge, "the Runtime property row keeps its runtime chip");
+  assert.equal(inertRuntimeBadge!.tagName, "SPAN");
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(usageReads, 0);
 });

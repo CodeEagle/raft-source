@@ -5,6 +5,17 @@
 
 import { T, UUID_A, UUID_B, UUID_C, sampleMessage, sampleMessageChannelThread, sampleMessageDm, sampleMessageDmThread } from "../_axExampleFixtures";
 import { axSurface } from "../../core/renderer";
+import type {
+  AgentMessageLike,
+  AgentMessageTaskCurrentProjectionLike,
+  AgentSearchContinueFilters,
+  AgentSearchData,
+  AgentSearchResultLike,
+  RaftTargetString,
+  ChannelCard,
+  PeerCard,
+  SendAttachment,
+} from "@botiverse/raft-shared";
 import {
   AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT,
   AGENT_API_MESSAGE_SEARCH_MAX_LIMIT,
@@ -22,12 +33,10 @@ import {
   indentAgentBodyContinuationLines,
   neutralizeAgentRaftRefLiterals,
   renderAgentSearchPreviewText,
-  type AgentMessageLike,
-  type AgentMessageTaskCurrentProjectionLike,
-  type AgentSearchData,
-  type AgentSearchResultLike,
-  type RaftTargetString,
-} from "@botiverse/raft-shared";
+  renderChannelCard,
+  renderPeerCard,
+  renderSendAttachment,
+} from "@botiverse/raft-shared/src/agentCliSurface";
 import type { AgentApiMessageSearchResponse } from "@botiverse/raft-shared";
 
 // The message-like shapes and the canonical header line live in
@@ -163,7 +172,10 @@ function formatHistoryMessageLine(channel: string, m: HistoryMessage, index: num
     `time=${createdAt ? formatUtcTimestamp(createdAt) : "-"}`,
   ];
   if (senderType) headerParts.push(`type=${senderType}`);
-  if (m.threadId) headerParts.push(`threadId=${m.threadId}`);
+  // No `threadId=`: the thread channel's own id is a second address for the
+  // same thread, and agents replied to it instead of `replyTarget` (the root
+  // message's short id), which the daemon then recorded as a different target
+  // (2026-10-14). `replyTarget` is the one address to use.
   if ((m.replyCount ?? 0) > 0) headerParts.push(`replyCount=${m.replyCount}`);
   const replyTarget = buildReplyTarget(channel, messageId);
   if (replyTarget) headerParts.push(`replyTarget=${replyTarget}`);
@@ -222,6 +234,67 @@ export function historyCursorText(
     : `--${flag} ${anchor}`;
   return `${label} exist: ${command}.`;
 }
+
+export const formatChannelCard = axSurface(
+  "Channel card printed before a read: the first read of the channel (or of a thread in it) in this model context, or the first after the card changed.",
+  (card: ChannelCard, changed: boolean): string => `${renderChannelCard(card, { changed }).join("\n")}\n\n`,
+  {
+    examples: [
+      { title: "first read in this context", args: [{ id: "c-1", name: "general", type: "channel", description: "Company-wide announcements. Post release notes here; questions go to #help." }, false] },
+      { title: "after the description changed", args: [{ id: "c-1", name: "general", type: "channel", description: "Company-wide announcements only." }, true] },
+      { title: "archived private channel without a description", args: [{ id: "c-2", name: "incident-42", type: "private", archived: true }, false] },
+    ],
+  },
+);
+
+export const formatSentChannelCard = axSurface(
+  "Channel card after a sent message: the send named a card version other than the channel's current one (changed since this context saw it, or sent with --anyway before seeing it).",
+  (card: ChannelCard, changed: boolean): string => `\n${renderChannelCard(card, { changed }).join("\n")}\n`,
+  {
+    examples: [
+      { title: "the card changed since this context saw it", args: [{ id: "c-1", name: "general", type: "channel", description: "Company-wide announcements only." }, true] },
+    ],
+  },
+);
+
+export const formatPeerCard = axSurface(
+  "DM peer card printed before a DM read: this model context has seen nothing of the peer yet (no card, no message from them).",
+  (card: PeerCard): string => `${renderPeerCard(card).join("\n")}\n\n`,
+  {
+    examples: [
+      { title: "a human peer", args: [{ kind: "human", name: "richard", description: "Founder. Prefers short updates.", timezone: "Asia/Shanghai" }] },
+      { title: "an agent peer", args: [{ kind: "agent", name: "Scout", description: "Bug triage worker." }] },
+    ],
+  },
+);
+
+export const formatSentPeerCard = axSurface(
+  "DM peer card after a sent message: sent with --anyway before this context saw the peer.",
+  (card: PeerCard): string => `\n${renderPeerCard(card).join("\n")}\n`,
+  {
+    examples: [{ args: [{ kind: "human", name: "richard", description: "Founder. Prefers short updates.", timezone: "Asia/Shanghai" }] }],
+  },
+);
+
+export const formatSendAttachment = axSurface(
+  "Context shown after every sent message for a runtime that does not report context compaction: not part of the message; the conversation's cards and latest messages before it, within 2000 characters.",
+  (attachment: SendAttachment): string | null => {
+    const lines = renderSendAttachment(attachment);
+    return lines.length > 0 ? `\n${lines.join("\n")}\n` : null;
+  },
+  {
+    examples: [{
+      args: [{
+        target: "#ops",
+        channelCard: { id: "c-ops", name: "ops", type: "channel", description: "Release coordination. Post go/no-go here." },
+        messages: [
+          { seq: 40, sender: "richard", timestamp: "2026-10-15T09:00:00.000Z", content: "deploy at 5?" },
+          { seq: 41, sender: "scout", timestamp: "2026-10-15T09:02:00.000Z", content: "canary is green" },
+        ],
+      }],
+    }],
+  },
+);
 
 export const formatHistory = axSurface(
   "Read window: header with seq range/cursors, numbered lines, end-of-window footer.",
@@ -347,8 +420,8 @@ export type { SearchResult, SearchData };
 
 export const formatSearchResults = axSurface(
   "Search results with <match>/<omit /> preview markup.",
-  (query: string, data: SearchData, offset?: number, sort?: string, limit?: number): string =>
-    formatAgentSearchResults(query, data, offset, sort, limit),
+  (query: string, data: SearchData, offset?: number, sort?: string, limit?: number, filters?: AgentSearchContinueFilters): string =>
+    formatAgentSearchResults(query, data, offset, sort, limit, "cli", filters),
   {
     // Results cover all four source shapes (@xxchan 8/31): channel, channel
     // thread, dm, dm thread — each renders a distinct Source: line.

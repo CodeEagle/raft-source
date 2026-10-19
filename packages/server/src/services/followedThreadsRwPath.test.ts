@@ -316,13 +316,17 @@ test("the RW read: one rw_followed_threads_v5 lookup on (server, user), traced a
   __testRisingWaveInbox.set({
     getPool: () => ({}) as never,
     query: (async (_pool: unknown, text: string, values?: unknown[]) => {
+      // hasMention reads the sidebar unread view alongside; no mentions here.
+      if (!text.includes("rw_followed_threads_v5")) {
+        return { result: { rows: [] }, acquireWaitMs: 0, poolState: { rw_pool_total: 1, rw_pool_idle: 0, rw_pool_waiting: 0 } };
+      }
       rwCalls.push({ text, values });
       return { result: { rows: referenceRows }, acquireWaitMs: 3, poolState: { rw_pool_total: 1, rw_pool_idle: 0, rw_pool_waiting: 0 } };
     }) as never,
   });
   const { result, events } = await traced((traceQuery) => getFollowedThreads(server.id, owner.id, undefined, { traceQuery }));
   assert.deepEqual(result, legacy);
-  assert.equal(rwCalls.length, 1);
+  assert.equal(rwCalls.length, 1, "one rw_followed_threads_v5 read");
   assert.equal(rwCalls[0]!.text, RISINGWAVE_FOLLOWED_THREADS_ROWS_SQL);
   assert.match(rwCalls[0]!.text, /FROM rw_followed_threads_v5 v\s+WHERE v\.server_id = \$1\s+AND v\.user_id = \$2/);
   assert.deepEqual(rwCalls[0]!.values, [server.id, owner.id]);

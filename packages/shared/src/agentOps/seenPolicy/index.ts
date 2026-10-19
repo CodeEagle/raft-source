@@ -11,3 +11,4 @@ export * from "./consumedSeqs";
 export * from "./historyRead";
 export * from "./drafts";
 export * from "./memoryStore";
+export * from "./threadTarget";

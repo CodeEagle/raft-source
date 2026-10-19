@@ -9,7 +9,7 @@ import {
   TaskCardNumber,
   TaskCardRow,
   TaskCardTitle,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import type { Task, TaskStatus } from "../../store/taskStore";
 import { useTaskStore } from "../../store/taskStore";
 import { useAuthStore } from "../../store/authStore";
@@ -68,7 +68,7 @@ function TaskCard({ task, onOpen, showChannelName = true }: {
 
   return (
     <RuiTaskCard className="w-full">
-      <button type="button" onClick={() => onOpen(task)} className="w-full text-left">
+      <button type="button" onClick={() => onOpen(task)} className="w-full rounded-control text-left outline-none focus-visible:shadow-focus">
         <TaskCardRow>
           <TaskCardBody>
             <TaskCardMeta>
@@ -93,9 +93,11 @@ function TaskCard({ task, onOpen, showChannelName = true }: {
           </TaskCardBody>
         </TaskCardRow>
       </button>
-      <div className="mt-2 flex justify-end">
+      {/* Raft DS TaskCard foot: the status chip is the only thing on the card
+          that edits in place. A pending write only blocks pointer input. */}
+      <div className="mt-2 flex min-w-0 items-center gap-2">
         {canEditStatus ? (
-          <div className={`relative shrink-0 ${busy ? "pointer-events-none opacity-60" : ""}`}>
+          <div className={`relative shrink-0 ${busy ? "pointer-events-none" : ""}`}>
             <InlineBadgeEditor
               badgeStatus={toRuiTaskStatus(task.status)}
               displayValue={formatMessage({ id: style.labelId })}
@@ -106,9 +108,8 @@ function TaskCard({ task, onOpen, showChannelName = true }: {
               onToggle={toggleStatusEditor}
               onRequestClose={closeStatusEditor}
               badgeClassName=""
-              uppercase={false}
               dropdownMinWidth="min-w-[140px]"
-              dropdownAlign="right"
+              dropdownAlign="left"
               dropdownTestId="task-status-menu"
               optionTestIdPrefix="task-status-option"
             />

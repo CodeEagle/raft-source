@@ -249,14 +249,15 @@ test("Members agent menu opens the Stop and Restart / Reset confirmation flows",
   assert.ok(await screen.findByRole("heading", { name: "Stop Agent" }));
   assert.ok(screen.getByText(/Are you sure you want to stop "Helper"/));
   const stopConfirm = screen.getByRole("button", { name: "Stop Agent" });
-  assert.match(stopConfirm.className, /bg-brutal-orange/);
+  // Stopping is recoverable, so the confirm is the raft orange `warning`.
+  assert.match(stopConfirm.className, /(?:^|\s)bg-warning(?=\s|$)/);
   fireEvent.click(screen.getByRole("button", { name: "Close dialog" }));
   await waitFor(() => assert.equal(screen.queryByRole("heading", { name: "Stop Agent" }), null));
 
   fireEvent.contextMenu(row, { clientX: 120, clientY: 160 });
   fireEvent.click(await screen.findByRole("menuitem", { name: "Restart / Reset" }));
   assert.equal(resetCalls, 0, "opening the chooser must not directly reset the agent");
-  assert.ok(await screen.findByRole("heading", { name: "Restart Helper" }));
+  assert.ok(await screen.findByRole("heading", { name: "Restart or reset Helper" }));
   assert.ok(screen.getAllByRole("radio", { name: /^Restart/ }).length >= 1);
   assert.ok(screen.getByRole("radio", { name: /^Reset Session & Restart/ }));
   assert.ok(screen.getByRole("radio", { name: /^Full Reset & Restart/ }));

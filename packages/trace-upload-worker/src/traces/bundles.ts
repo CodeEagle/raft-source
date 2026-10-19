@@ -34,6 +34,7 @@ import { validateMachineEvidenceObject } from "./machineEvidence";
 import { validateTranscriptOutcomeObject } from "./transcriptOutcome";
 import { validateAgentEventTailObject } from "./agentEventTail";
 import { ingestTraceBundleObject } from "./otlp";
+import { chargeTraceUploadBudget } from "./uploadRateLimit";
 import type { TraceProjectionSkipReasonClass } from "./traceEventProjector";
 import { initialV2ProjectorStatus, type V2ProjectorStatus } from "./v2Projection";
 
@@ -177,6 +178,14 @@ export async function createTraceBundleUpload(request: Request, env: TraceUpload
   if (readInteger(body.bundleSizeBytes, "bundleSizeBytes", maxBytes) !== bundleSizeBytes) {
     throw new HttpError(400, "bundleSizeBytes does not match signed metadata");
   }
+  // Charged once the request is valid, before the upload URL is handed out.
+  // Feedback attachments are small and bound to a report the feedback
+  // report limit already counts; only plain trace bundles use this budget.
+  if (!feedbackAttachmentKind) chargeTraceUploadBudget(env, {
+    serverId: claims.serverId,
+    subjectId: claims.machineId ? `machine:${claims.machineId}` : claims.sub,
+    bundleSizeBytes,
+  });
 
   const session: TraceUploadSessionClaims = {
     v: 1,
@@ -342,6 +351,8 @@ async function scheduleTraceBundleIngest(
         scopedb_status: "success",
         spans_ingested: result.spans_ingested,
         ...(result.events_ingested ? { events_ingested: result.events_ingested } : {}),
+        ...(result.spans_dropped_rate_cap ? { spans_dropped_rate_cap: result.spans_dropped_rate_cap } : {}),
+        ...(result.events_dropped_rate_cap ? { events_dropped_rate_cap: result.events_dropped_rate_cap } : {}),
         batches_sent: result.batches_sent,
         v2_projector_status: result.v2_projector_status,
         v2_spans_projected: result.v2_spans_projected,
@@ -373,6 +384,8 @@ export async function writeTraceUploadLedger(
     v2_projector_status?: "pending" | V2ProjectorStatus;
     spans_ingested?: number;
     events_ingested?: number;
+    spans_dropped_rate_cap?: number;
+    events_dropped_rate_cap?: number;
     batches_sent?: number;
     v2_spans_projected?: number;
     v2_rows_projected?: number;

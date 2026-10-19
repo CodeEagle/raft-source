@@ -34,6 +34,7 @@ const task1221Defaults = {
   retryAfterMs: null,
   startFailureOwnedLaunchId: null,
   blockedByLaunchId: null,
+  actionRequiredNotifiedFingerprint: null,
 };
 
 test("a whole record decodes unchanged with nothing repaired", () => {
@@ -73,6 +74,7 @@ const everyFieldSet: Required<WakeCrashLoopEpisodeState> = {
   retryAfterMs: 1_700_000_004_000,
   startFailureOwnedLaunchId: "launch-owned",
   blockedByLaunchId: "launch-blocker",
+  actionRequiredNotifiedFingerprint: "0123456789abcdef",
 };
 
 test("every field of the episode state round-trips through the Redis codec", () => {

@@ -138,7 +138,7 @@ test("App Notifications picker removes events whose required group is disabled",
 test("AvatarSlot renders app logos full-frame and deterministic app/server fallbacks", () => {
   const { rerender } = render(
     <AvatarSlot
-      context="surface-list"
+      context="list-row"
       type="app"
       appAvatarUrl="https://cdn.example.com/orbital.png"
       appInitials="ON"
@@ -154,8 +154,13 @@ test("AvatarSlot renders app logos full-frame and deterministic app/server fallb
   assert.equal(fallbackLayer?.classList.contains("z-0"), true);
   assert.equal(logo?.classList.contains("relative"), true);
   assert.equal(logo?.classList.contains("z-[1]"), true);
-  assert.equal(logo?.closest('[data-slot="avatar"]')?.classList.contains("theme-brutal:bg-soft-signal"), true);
-  assert.equal(logo?.closest('[data-slot="avatar"]')?.classList.contains("font-black"), true);
+  // Raft Design System › Avatar: initials are Grotesk 700 (raft-ui's fallback
+  // slot sets them); an app keeps the default identity sticker (only a
+  // workspace is the ink tile).
+  const appFallback = logo?.closest('[data-slot="avatar-fallback"]');
+  assert.equal(appFallback?.classList.contains("font-sans"), true);
+  assert.equal(appFallback?.classList.contains("font-bold"), true);
+  assert.equal(logo?.closest('[data-slot="avatar"]')?.classList.contains("bg-sticker-ink"), false);
   assert.equal(logo?.parentElement?.className.endsWith(" "), false);
   assert.equal(document.body.textContent?.trim(), "ON");
 
@@ -165,7 +170,7 @@ test("AvatarSlot renders app logos full-frame and deterministic app/server fallb
 
   rerender(
     <AvatarSlot
-      context="surface-list"
+      context="list-row"
       type="app"
       appAvatarUrl="https://cdn.example.com/orbital-v2.png"
       appInitials="ON"
@@ -175,19 +180,22 @@ test("AvatarSlot renders app logos full-frame and deterministic app/server fallb
   assert.equal(replacementLogo?.getAttribute("src"), "https://cdn.example.com/orbital-v2.png");
   assert.equal(replacementLogo?.hidden, false);
 
-  rerender(<AvatarSlot context="surface-list" type="app" appInitials=" orbital notes " />);
+  rerender(<AvatarSlot context="list-row" type="app" appInitials=" orbital notes " />);
   assert.equal(document.body.textContent?.trim(), "OR");
 
-  rerender(<AvatarSlot context="surface-list" type="app" />);
+  rerender(<AvatarSlot context="list-row" type="app" />);
   assert.equal(document.body.textContent?.trim(), "A");
 
-  rerender(<AvatarSlot context="surface-list" type="server" serverInitial=" beacon " />);
+  rerender(<AvatarSlot context="list-row" type="server" serverInitial=" beacon " />);
   assert.equal(document.body.textContent?.trim(), "B");
-  assert.ok(document.querySelector('[data-avatar-type="server"].font-bold'));
+  assert.ok(document.querySelector('[data-avatar-type="server"] [data-slot="avatar-fallback"].font-bold'));
+  // A workspace tile is the ink square with yellow initials.
+  assert.ok(document.querySelector('[data-avatar-type="server"].bg-sticker-ink'));
+  assert.ok(document.querySelector('[data-avatar-type="server"] [data-slot="avatar-fallback"].text-brand'));
 
   rerender(
     <AvatarSlot
-      context="surface-list"
+      context="list-row"
       type="server"
       serverAvatarUrl="https://cdn.example.com/broken-server.png"
       serverInitial="beacon"
@@ -198,7 +206,7 @@ test("AvatarSlot renders app logos full-frame and deterministic app/server fallb
   assert.equal(serverAvatar?.hidden, true);
   assert.equal(document.body.textContent?.trim(), "B");
 
-  rerender(<AvatarSlot context="surface-list" type="human" humanPlaceholder />);
+  rerender(<AvatarSlot context="list-row" type="human" humanPlaceholder />);
   assert.ok(document.querySelector('[data-avatar-type="human"] [data-slot="avatar-fallback"] svg.lucide-user'));
   assert.equal(document.body.textContent?.trim(), "");
 });
@@ -566,10 +574,11 @@ test("Connected Apps loads registered surfaces without depending on the retired 
   const categoryFilter = screen.getByRole("combobox", { name: "Filter connected apps by category" });
   const searchFilter = screen.getByTestId("connected-apps-search");
   const filters = screen.getByTestId("connected-apps-filters");
-  assert.ok(categoryFilter.classList.contains("h-10"));
-  assert.ok(categoryFilter.classList.contains("min-h-10"));
+  // The filter row's controls share the DS control height (44).
+  assert.ok(categoryFilter.classList.contains("h-11"));
+  assert.ok(categoryFilter.classList.contains("min-h-11"));
   assert.ok(searchFilter.classList.contains("box-border"));
-  assert.ok(searchFilter.classList.contains("h-10"));
+  assert.ok(searchFilter.classList.contains("h-11"));
   assert.ok(filters.classList.contains("items-stretch"));
   assert.ok(viewToggle.classList.contains("box-border"));
   assert.ok(within(viewToggle).getByRole("button", { name: "Grid view" }).classList.contains("h-8"));
@@ -647,10 +656,10 @@ test("Connected Apps loads registered surfaces without depending on the retired 
   assert.equal(within(myAppsTab).queryByText("Source-owned published marketplace listing."), null);
   assert.ok(within(myAppsTab).getByText("Offline Reports"));
   assert.ok(within(myAppsTab).getByText("Offline requested"));
-  assert.ok(within(myAppsTab).getByText("Marketplace offline review is pending. The app stays listed and installable until App Admin approves removal; approval revokes existing server installs and access."));
+  assert.ok(within(myAppsTab).getByText("Marketplace offline review is pending. The app stays listed and installable until App Admin approves removal. Approval preserves the source Server’s installation and access, but removes them on other Servers."));
   assert.equal(within(myAppsTab).getAllByRole("button", { name: "Edit" }).length, 3);
   assert.equal(within(myAppsTab).queryByRole("button", { name: "Delete" }), null);
-  assert.equal(within(myAppsTab).queryByRole("button", { name: "Request offline" }), null);
+  assert.equal(within(myAppsTab).queryByRole("button", { name: "Request Offline" }), null);
 
   fireEvent.click(listViewButton);
   assert.equal(within(myAppsTab).getByTestId("connected-apps-my-apps-collection").getAttribute("data-view"), "list");
@@ -669,87 +678,72 @@ test("Connected Apps loads registered surfaces without depending on the retired 
 
   fireEvent.click(within(myAppsTab).getAllByRole("button", { name: "Edit" })[0]);
   const editor = await screen.findByTestId("connected-app-editor");
-  const editorRail = within(editor).getByTestId("connected-app-editor-rail");
-  // The rail's App Notifications status resolves ASYNCHRONOUSLY, after the editor
-  // itself mounts. Reading it synchronously here raced that load and produced the
-  // intermittent "App NotificationsLoading" vs "WebhookOff" failure —
-  // rare when this file runs alone, much likelier in the full suite, where the
-  // node test runner runs files in parallel and the extra CPU pressure widens the
-  // window. `waitFor` retries until it settles; it is not a sleep, and it fails
-  // with the same diff if the value never becomes correct.
+  // A wide centred dialog: the section list beside the scrolling sections,
+  // each section's status a quiet tag beside its heading, and the commit in
+  // the footer (Cancel, then the one pink button), never in the head.
+  const editorNav = within(editor).getByTestId("connected-app-editor-nav");
+  assert.deepEqual(
+    within(editorNav).getAllByRole("button").map((button) => button.textContent),
+    ["Profile", "Login with Raft", "Installation setup", "App permissions", "Webhook", "Distribution", "Danger zone"],
+  );
+  assert.equal(within(editorNav).getByRole("button", { name: "Profile" }).getAttribute("aria-current"), "true");
+  fireEvent.click(within(editorNav).getByRole("button", { name: "Danger zone" }));
+  assert.equal(within(editorNav).getByRole("button", { name: "Danger zone" }).getAttribute("aria-current"), "true");
+  const sectionStatuses = () => Array.from(
+    within(editor).getByTestId("connected-app-editor-content").querySelectorAll('[data-testid^="connected-app-editor-section-"]'),
+  ).map((section) => [
+    section.querySelector("h3")?.textContent?.replace(/\s+/g, " ").trim(),
+    section.querySelector('[data-slot="form-section-status"]')?.textContent?.trim(),
+  ]);
+  // The Webhook status resolves ASYNCHRONOUSLY, after the editor itself
+  // mounts; `waitFor` retries until it settles (it is not a sleep, and it
+  // fails with the same diff if the value never becomes correct).
   await waitFor(() => {
-    assert.deepEqual(
-      within(editorRail).getAllByRole("button").map((button) => button.textContent?.replace(/\s+/g, " ").trim()),
-      [
-        "ProfileComplete",
-        "Login with RaftOAuth ready",
-        "App permissions0 permissions selected",
-        "WebhookOff",
-        "DistributionPrivate",
-        "Danger zoneRestricted",
-      ],
-    );
+    assert.deepEqual(sectionStatuses().map(([, status]) => status), [
+      "Complete",
+      "OAuth ready",
+      "No setup required",
+      "0 permissions selected",
+      "Off",
+      "Private",
+      "Restricted",
+    ]);
   });
-  assert.ok(within(editor).getByTestId("connected-app-editor-section-profile"));
-  assert.ok(within(editor).getByTestId("connected-app-editor-section-login"));
-  assert.ok(within(editor).getByTestId("connected-app-editor-section-notifications"));
-  assert.ok(within(editor).getByTestId("connected-app-editor-section-distribution"));
-  assert.ok(within(editor).getByTestId("connected-app-editor-section-danger"));
+  assert.deepEqual(
+    sectionStatuses().map(([heading]) => heading?.replace(/Experimental$/, "")),
+    ["Profile", "Login with Raft", "Installation setup", "App permissions", "Webhook", "Distribution", "Danger zone"],
+  );
   const editorContent = within(editor).getByTestId("connected-app-editor-content");
   assert.deepEqual(
     Array.from(editorContent.querySelectorAll('[data-testid^="connected-app-editor-section-"]')).map((section) => section.getAttribute("data-testid")?.replace("connected-app-editor-section-", "")),
-    ["profile", "login", "permissions", "notifications", "distribution", "danger"],
+    ["profile", "login", "setup", "permissions", "notifications", "distribution", "danger"],
   );
-  editorContent.getBoundingClientRect = () => ({ top: 100 } as DOMRect);
-  within(editor).getByTestId("connected-app-editor-section-profile").getBoundingClientRect = () => ({ top: -500 } as DOMRect);
-  within(editor).getByTestId("connected-app-editor-section-login").getBoundingClientRect = () => ({ top: -100 } as DOMRect);
-  within(editor).getByTestId("connected-app-editor-section-notifications").getBoundingClientRect = () => ({ top: 110 } as DOMRect);
-  within(editor).getByTestId("connected-app-editor-section-distribution").getBoundingClientRect = () => ({ top: 500 } as DOMRect);
-  within(editor).getByTestId("connected-app-editor-section-danger").getBoundingClientRect = () => ({ top: 900 } as DOMRect);
-  Object.defineProperties(editorContent, {
-    scrollHeight: { configurable: true, value: 2_000 },
-    clientHeight: { configurable: true, value: 600 },
-    scrollTop: { configurable: true, value: 700, writable: true },
-  });
-  const notificationsRailButton = within(editorRail).getByRole("button", { name: /^Webhook/ });
-  Object.defineProperties(editorRail, {
-    scrollWidth: { configurable: true, value: 900 },
-    clientWidth: { configurable: true, value: 300 },
-  });
-  Object.defineProperties(notificationsRailButton, {
-    offsetLeft: { configurable: true, value: 360 },
-    offsetWidth: { configurable: true, value: 155 },
-  });
-  let railScrollLeft: number | undefined;
-  editorRail.scrollTo = (options) => {
-    if (typeof options === "object") railScrollLeft = options.left;
-  };
-  fireEvent.scroll(editorContent);
-  assert.equal(notificationsRailButton.getAttribute("aria-current"), "true");
-  assert.ok(notificationsRailButton.classList.contains("bg-primary-soft"));
-  assert.ok((railScrollLeft ?? 0) > 0);
-  const dangerRailButton = within(editorRail).getByRole("button", { name: /^Danger zone/ });
-  fireEvent.click(dangerRailButton);
-  assert.equal(dangerRailButton.getAttribute("aria-current"), "true");
+  const editorFooter = within(editor).getByTestId("connected-app-editor-footer");
+  assert.deepEqual(
+    within(editorFooter).getAllByRole("button").map((button) => button.textContent),
+    ["Cancel", "Save"],
+  );
   const deleteCard = within(editor).getByTestId("connected-app-delete-card");
-  assert.ok(deleteCard.classList.contains("border-line-muted"));
-  assert.ok(deleteCard.classList.contains("bg-layer-panel"));
-  assert.ok(deleteCard.classList.contains("shadow-raft-sm"));
-  assert.ok(deleteCard.classList.contains("theme-brutal:border-black"));
-  assert.ok(deleteCard.classList.contains("theme-brutal:shadow-brutal-sm"));
+  // A plain row inside the Danger zone section, not a card inside a card.
+  assert.ok(!deleteCard.classList.contains("rounded-container"));
+  assert.ok(!deleteCard.classList.contains("bg-layer-card"));
   assert.ok(within(deleteCard).getByText("Delete app"));
   assert.ok(within(deleteCard).getByText("Permanently deletes this app registration and its current credentials."));
   const deleteButton = within(deleteCard).getByRole("button", { name: "Delete" });
-  assert.ok(deleteButton.classList.contains("bg-brutal-red"));
-  assert.ok(deleteButton.classList.contains("h-7"));
-  assert.ok(deleteButton.classList.contains("text-xs"));
-  assert.equal(deleteButton.classList.contains("border-brutal-red"), false);
+  // The raft danger sticker: red fill, ink edge (not a red border), at the DS
+  // small 32px row-action size.
+  assert.equal(deleteButton.getAttribute("data-slot"), "button");
+  assert.ok(deleteButton.classList.contains("bg-danger"));
+  assert.ok(deleteButton.classList.contains("border-sticker-ink"));
+  assert.ok(deleteButton.classList.contains("h-8"));
+  assert.ok(deleteButton.classList.contains("text-footnote"));
+  assert.equal(deleteButton.classList.contains("border-danger"), false);
   fireEvent.click(within(editor).getByRole("button", { name: "Close app form" }));
 
   fireEvent.click(screen.getByTestId("connected-apps-tab-marketplace"));
   fireEvent.click(await screen.findByText("Marketplace Notes"));
   const privateDetail = await screen.findByText("Requestable (declared)");
-  const privateModal = privateDetail.closest('[data-slot="card"]');
+  const privateModal = privateDetail.closest('[data-slot="dialog-surface"]');
   assert.ok(privateModal, "marketplace app detail should open in a modal card");
   assert.ok(within(privateModal as HTMLElement).getByText("100+ installs"));
   assert.ok(within(privateModal as HTMLElement).getByText("Profile"));
@@ -768,7 +762,8 @@ test("Connected Apps loads registered surfaces without depending on the retired 
   const notificationChip = within(privateModal as HTMLElement).getByText("agent:notification:write");
   assert.equal(notificationChip.getAttribute("title"), null);
   assert.ok(notificationChip.hasAttribute("data-base-ui-tooltip-trigger"), "scope chip description now rides the RUI tooltip trigger");
-  assert.ok(notificationChip.classList.contains("bg-accent-soft/30"));
+  // A scope that needs a resource is the cyan-soft (info) token chip.
+  assert.ok(notificationChip.classList.contains("bg-info-soft"));
   assert.ok(within(privateModal as HTMLElement).getByRole("button", { name: "Uninstall from this server" }));
   fireEvent.click(within(privateModal as HTMLElement).getByRole("button", { name: "Close app detail" }));
 
@@ -848,7 +843,7 @@ test("Connected Apps detail modal renders cataloged zh-cn headings and App Notif
   );
 
   fireEvent.click(await screen.findByText("Approved Notes"));
-  const approvedModal = (await screen.findByText("可请求（已声明）")).closest('[data-slot="card"]') as HTMLElement;
+  const approvedModal = (await screen.findByText("可请求（已声明）")).closest('[data-slot="dialog-surface"]') as HTMLElement;
   assert.ok(approvedModal, "approved marketplace app detail should open in a modal card");
   assert.ok(within(approvedModal).getByText("资料"));
   assert.ok(within(approvedModal).getByText("使用 Raft 登录"));
@@ -862,7 +857,7 @@ test("Connected Apps detail modal renders cataloged zh-cn headings and App Notif
   fireEvent.click(within(approvedModal).getByRole("button", { name: "关闭应用详情" }));
 
   fireEvent.click(await screen.findByText("Pending Notes"));
-  const pendingModal = (await screen.findByText("新增的应用权限正在等待审核，原有已批准的访问保持可用。")).closest('[data-slot="card"]') as HTMLElement;
+  const pendingModal = (await screen.findByText("新增的应用权限正在等待审核，原有已批准的访问保持可用。")).closest('[data-slot="dialog-surface"]') as HTMLElement;
   assert.ok(pendingModal, "pending marketplace app detail should open in a modal card");
   assert.ok(within(pendingModal).getByText("权限更新待审核"));
 });
@@ -951,11 +946,11 @@ test("Connected Apps gives members the full read surface without management acti
   assert.equal(within(marketplaceTab).queryByTestId("connected-apps-built-in-band"), null);
   assert.ok(within(marketplaceTab).getByText("Marketplace Notes"));
   assert.ok(within(marketplaceTab).getByText("Available"));
-  assert.equal(screen.queryByRole("button", { name: "Register app" }), null);
+  assert.equal(screen.queryByRole("button", { name: "Register App" }), null);
   assert.equal(within(marketplaceTab).queryByText("Install", { exact: true }), null);
 
   fireEvent.click(within(marketplaceTab).getByText("Marketplace Notes"));
-  const detail = (await screen.findByText("Profile")).closest('[data-slot="card"]');
+  const detail = (await screen.findByText("Profile")).closest('[data-slot="dialog-surface"]');
   assert.ok(detail);
   assert.ok(within(detail as HTMLElement).getByText("Login with Raft"));
   assert.ok(within(detail as HTMLElement).getByText("Distribution"));
@@ -974,7 +969,7 @@ test("Connected Apps gives members the full read surface without management acti
   assert.ok(within(myAppsTab).getByText("Server Reports"));
   assert.ok(within(myAppsTab).getByText("Apps registered by this server are shown here. Only server owners and admins can change them."));
   assert.equal(within(myAppsTab).queryByRole("button", { name: "Edit" }), null);
-  assert.equal(within(myAppsTab).queryByRole("button", { name: "Request offline" }), null);
+  assert.equal(within(myAppsTab).queryByRole("button", { name: "Request Offline" }), null);
   assert.equal(within(myAppsTab).queryByRole("button", { name: "Delete" }), null);
 });
 
@@ -1043,7 +1038,7 @@ test("Connected Apps edit drawer regenerates a client secret and reveals it once
   fireEvent.click(within(myAppsTab).getByRole("button", { name: "Edit" }));
 
   const regenerateButton = await screen.findByTestId("connected-app-regenerate-secret-button");
-  assert.equal(regenerateButton.textContent, "Regenerate client secret");
+  assert.equal(regenerateButton.textContent, "Regenerate Client Secret");
   fireEvent.click(regenerateButton);
 
   const confirmButton = await screen.findByTestId("connected-app-regenerate-secret-confirm-button");
@@ -1205,9 +1200,9 @@ test("Connected Apps renders reviewed App Notifications state for developers and
   fireEvent.click(await screen.findByTestId("connected-apps-tab-my-apps"));
   fireEvent.click(within(await screen.findByTestId("connected-apps-my-apps-tab")).getByRole("button", { name: "Edit" }));
   const editor = await screen.findByTestId("connected-app-editor");
-  const editorRail = within(editor).getByTestId("connected-app-editor-rail");
   const notificationsSection = within(editor).getByTestId("connected-app-editor-section-notifications");
-  const notificationsRailButton = within(editorRail).getByRole("button", { name: /^Webhook/ });
+  // The Webhook section's status tag (beside its heading).
+  const notificationsRailButton = notificationsSection.querySelector<HTMLElement>('[data-slot="form-section-status"]')!;
   const developerPanel = await screen.findByTestId("developer-app-notifications");
   const appPermissionsPanel = within(editor).getByTestId("developer-app-permissions");
   const sourceInstallation = within(appPermissionsPanel).getByTestId("app-notifications-source-installation");
@@ -1236,7 +1231,10 @@ test("Connected Apps renders reviewed App Notifications state for developers and
     target: { value: "https://alerts.example.com/raft/events" },
   });
   const saveEndpointButton = within(developerPanel).getByRole("button", { name: "Save endpoint" });
-  assert.ok(saveEndpointButton.classList.contains("h-9"));
+  // The button takes the large control size so it matches the endpoint field
+  // beside it (44px in the raft family; this harness renders the default
+  // family, whose large size is h-10).
+  assert.match(saveEndpointButton.className, /(?:^|\s)h-1[01](?:\s|$)/);
   fireEvent.click(saveEndpointButton);
   assert.ok(await within(developerPanel).findByText("raft_webhook_secret_shown_once"));
   assert.ok(within(developerPanel).getByText("Signing secret · shown once"));
@@ -1345,7 +1343,7 @@ test("Connected Apps saves category and declared scopes before requesting market
   assert.equal(screen.queryByText("Legacy free-text that must not be rendered or resubmitted."), null);
   assert.ok(screen.getByText("Category and data access come from the app metadata and declared scopes above. Requesting review saves those changes first."));
 
-  fireEvent.click(screen.getByRole("button", { name: "Request publish" }));
+  fireEvent.click(screen.getByRole("button", { name: "Request Publish" }));
   await waitFor(() => assert.equal(postCalls.length, 1));
   assert.deepEqual(patchBodies, [{
     name: "Storage Publisher",
@@ -1378,9 +1376,20 @@ test("Connected Apps register form locks identity scopes and toggles agent messa
     </TestIntlProvider>,
   );
 
-  fireEvent.click(await screen.findByRole("button", { name: "Register app" }));
-  const editorRail = within(screen.getByTestId("connected-app-editor")).getByTestId("connected-app-editor-rail");
-  assert.ok(within(editorRail).getByRole("button", { name: /Webhook.*Save app first/ }));
+  fireEvent.click(await screen.findByRole("button", { name: "Register App" }));
+  const newAppEditor = screen.getByTestId("connected-app-editor");
+  assert.equal(
+    within(newAppEditor).getByTestId("connected-app-editor-section-notifications").querySelector('[data-slot="form-section-status"]')?.textContent,
+    "Save app first",
+  );
+  // Sharing, publishing and lifecycle act on a saved app: a new app's form
+  // stops at what can be filled in now.
+  assert.ok(within(newAppEditor).queryByTestId("connected-app-editor-section-distribution") === null);
+  assert.ok(within(newAppEditor).queryByTestId("connected-app-editor-section-danger") === null);
+  assert.deepEqual(
+    within(within(newAppEditor).getByTestId("connected-app-editor-footer")).getAllByRole("button").map((button) => button.textContent),
+    ["Cancel", "Register App"],
+  );
   const picker = await screen.findByTestId("connected-app-declared-scopes");
   assert.ok(within(picker).getByText("Identity"));
   assert.ok(within(picker).getByText("openid"));
@@ -1482,7 +1491,7 @@ test("Connected Apps creates Agent read without webhook and retries permission f
     </TestIntlProvider>,
   );
 
-  fireEvent.click(await screen.findByRole("button", { name: "Register app" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Register App" }));
   fireEvent.change(screen.getByPlaceholderText("db9 Cloud Drive"), { target: { value: "Created Alerts" } });
   const registrationPanel = screen.getByTestId("developer-app-notifications");
   const unavailableSwitch = within(registrationPanel).getByRole("switch", { name: "Enable Webhook" });
@@ -1495,7 +1504,7 @@ test("Connected Apps creates Agent read without webhook and retries permission f
   fireEvent.click(screen.getByRole("option", { name: "Read-only" }));
   const registrationForm = registrationPanel.closest("form");
   assert.ok(registrationForm);
-  fireEvent.click(within(registrationForm).getByRole("button", { name: "Register app" }));
+  fireEvent.click(within(registrationForm).getByRole("button", { name: "Register App" }));
 
   assert.ok(await screen.findByText("permission write failed"));
   assert.ok(screen.getByText("raft_secret_create_once"));
@@ -1543,14 +1552,16 @@ test("Login with Raft setup page renders fetched app identity details", async ()
 
   assert.ok((await screen.findAllByText("Orbital Notes")).length >= 2);
   const description = screen.getByText("Review launch notes from Raft.");
-  assert.equal(description.getAttribute("class"), "text-xs text-foreground-muted");
+  assert.equal(description.getAttribute("class"), "text-footnote text-foreground-muted");
   assert.equal(screen.queryByText("https://orbital.example.com/docs"), null);
   const detailLink = screen.getByRole("link", { name: "Open Orbital Notes" });
   assert.equal(detailLink.getAttribute("href"), "https://orbital.example.com/docs");
   assert.equal(detailLink.getAttribute("target"), "_blank");
   assert.equal(detailLink.getAttribute("rel"), "noreferrer");
   assert.equal(detailLink.getAttribute("title"), null);
-  assert.equal(detailLink.classList.contains("hover:shadow-raft-md"), true);
+  // A clickable card: the pressed overlay on hover, no lift or shadow (DS).
+  assert.equal(detailLink.classList.contains("hover:press-overlay"), true);
+  assert.equal(detailLink.classList.contains("hover:shadow-raft-md"), false);
 
   const logo = document.querySelector('img[src="https://cdn.example.com/orbital-notes.png"]');
   assert.equal(logo?.getAttribute("class"), "relative z-[1] h-full w-full object-cover");
@@ -1558,14 +1569,18 @@ test("Login with Raft setup page renders fetched app identity details", async ()
   const loginButton = screen.getByRole("button", { name: "Login with Raft" }) as HTMLButtonElement;
   await waitFor(() => assert.equal(loginButton.disabled, false));
   assert.equal(loginButton.getAttribute("data-slot"), "button");
-  assert.ok(loginButton.className.includes("bg-brutal-pink"));
-  assert.equal(loginButton.classList.contains("bg-primary-soft"), false);
+  // The solid accent call to action (raft sticker), not a soft fill.
+  assert.ok(loginButton.classList.contains("bg-attention-400"));
+  assert.ok(loginButton.classList.contains("border-sticker-ink"));
+  assert.equal(loginButton.classList.contains("bg-brand-soft"), false);
   assert.equal(document.querySelector('button img[src="/brand/raft-logo.svg"]'), null);
   assert.equal(document.querySelector('button source[srcset="/brand/raft-logo-mono-light.svg"]'), null);
   assert.equal(loginButton.parentElement?.classList.contains("justify-end"), true);
 
   const backLink = screen.getByRole("link", { name: "Back" });
-  assert.equal(backLink.classList.contains("btn-flat-sm"), true);
+  // A real link drawn as the DS ghost button: no underline, no frame.
+  assert.equal(backLink.getAttribute("href"), "/");
+  assert.equal(backLink.classList.contains("hover:bg-fill-pressed"), true);
   assert.equal(backLink.classList.contains("underline"), false);
   const logoutButton = screen.getByRole("button", { name: "Log out" });
   assert.equal(logoutButton.getAttribute("data-slot"), "button");
@@ -1781,7 +1796,8 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   assert.ok(installed.hasAttribute("data-base-ui-tooltip-trigger"), "status hint now rides the RUI tooltip trigger");
   assert.equal(within(installed).queryByText("Installed"), null);
   assert.equal(installed.getAttribute("aria-label"), "Use this Server: Launch Server");
-  assert.equal(installed.closest('[data-selected="true"]') !== null, true);
+  // The picked server is the raft-ui ListRow selection (cyan-soft).
+  assert.equal(installed.hasAttribute("data-selected"), true);
   assert.match(screen.getByTestId("marketplace-login-commit-zone").textContent ?? "", /Selected Launch Server\./);
   assert.ok(screen.getByRole("button", { name: "Continue login" }));
   const installable = screen.getByTestId("login-server-status-server-2");
@@ -1789,8 +1805,8 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   assert.ok(installable.hasAttribute("data-base-ui-tooltip-trigger"), "status hint now rides the RUI tooltip trigger");
   assert.ok(within(installable).getByText("Not installed"));
   fireEvent.click(installable);
-  assert.equal(installed.closest('[data-selected="true"]') !== null, false);
-  assert.equal(installable.closest('[data-selected="true"]') !== null, true);
+  assert.equal(installed.hasAttribute("data-selected"), false);
+  assert.equal(installable.hasAttribute("data-selected"), true);
   assert.match(screen.getByTestId("marketplace-login-commit-zone").textContent ?? "", /Build Server has not installed Orbital Notes/);
   assert.ok(screen.getByText("Access granted: openid · profile"));
   fireEvent.click(screen.getByRole("button", { name: "Install and continue" }));
@@ -1806,8 +1822,8 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   assert.equal((installed as HTMLButtonElement).disabled, true);
   fireEvent.click(installed);
   fireEvent.click(pendingButton);
-  assert.equal(installed.closest('[data-selected="true"]') !== null, false);
-  assert.equal(installable.closest('[data-selected="true"]') !== null, true);
+  assert.equal(installed.hasAttribute("data-selected"), false);
+  assert.equal(installable.hasAttribute("data-selected"), true);
   assert.deepEqual(postUrls, ["/integrations/marketplace/app-1/install"]);
   await act(async () => {
     resolveInstall();
@@ -1829,9 +1845,10 @@ test("public Marketplace setup always lists installed and uninstalled Servers to
   assert.equal(screen.queryAllByRole("button", { name: "Continue login" }).length, 0);
   const findAdmin = screen.getByRole("link", { name: "Find a Server admin" });
   assert.equal(findAdmin.getAttribute("href"), "/s/member/members");
-  assert.ok(findAdmin.classList.contains("btn-brutal-sm"));
-  assert.ok(findAdmin.classList.contains("bg-layer-panel"));
-  assert.ok(findAdmin.classList.contains("shadow-raft-sm"));
+  // Still a link, drawn as the DS ink-line (paper) button.
+  assert.ok(findAdmin.classList.contains("border-line-strong"));
+  assert.ok(findAdmin.classList.contains("bg-layer-card"));
+  assert.ok(!findAdmin.classList.contains("bg-attention"));
   const unavailable = screen.getByTestId("login-server-status-server-4");
   assert.equal(unavailable.getAttribute("title"), null);
   assert.ok(unavailable.hasAttribute("data-base-ui-tooltip-trigger"), "status hint now rides the RUI tooltip trigger");
@@ -2062,5 +2079,28 @@ test("Login with Raft setup page shows failed authorization status only after su
 
   const status = await screen.findByText("Failed to continue with Raft.");
   assert.equal(status.tagName, "PRE");
-  assert.equal(status.getAttribute("class"), "mt-4 min-h-16 overflow-auto bg-black p-3 text-xs text-white");
+  assert.equal(status.getAttribute("class"), "mt-4 min-h-16 overflow-auto rounded-container border border-line-hairline bg-layer-code p-3 font-mono text-mono-code text-foreground");
+});
+
+
+test("registration persists setup URL and instructions through the real form submit path", async () => {
+  resetStores();
+  api.get = (async () => ({ data: [] })) as typeof api.get;
+  let submitted: { setupUrl?: string; setupDescription?: string } | undefined;
+  api.post = (async (url: string, body: typeof submitted) => {
+    assert.equal(url, "/integrations/clients");
+    submitted = body;
+    return { data: { client: { id: "setup-client", name: "Setup App", ...body }, clientSecret: "synthetic" } };
+  }) as typeof api.post;
+  render(<TestIntlProvider><MemoryRouter><SettingsPanel tab="integrations" /></MemoryRouter></TestIntlProvider>);
+  fireEvent.click(await screen.findByRole("button", { name: "Register App" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "App name" }), { target: { value: "Setup App" } });
+  fireEvent.click(screen.getByRole("checkbox", { name: "Requires configuration after installation" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Setup page URL*" }), { target: { value: "https://setup.example.test/configure" } });
+  fireEvent.change(screen.getByRole("textbox", { name: /Configuration instructions/ }), { target: { value: "Choose a repository" } });
+  const form = screen.getByRole("textbox", { name: "App name" }).closest("form");
+  assert.ok(form);
+  fireEvent.click(within(form).getByRole("button", { name: "Register App" }));
+  await waitFor(() => assert.equal(submitted?.setupUrl, "https://setup.example.test/configure"));
+  assert.equal(submitted?.setupDescription, "Choose a repository");
 });

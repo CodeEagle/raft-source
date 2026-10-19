@@ -434,8 +434,12 @@ test("connection row displays enabled checkmark regardless of test status unchec
   );
   const rowEl = screen.getByTestId("provider-connection-conn-1");
   const indicator = rowEl.querySelector("span");
-  assert.ok(indicator?.className.includes("bg-green-100"), "enabled connection must have green indicator");
+  // Raft Design System: the leading tile is a neutral square sticker; the
+  // enabled state is the check icon in ink-2, the test status is the chip.
+  assert.ok(indicator?.className.includes("rounded-sticker"), "the leading tile must be a square sticker");
+  assert.ok(indicator?.className.includes("text-foreground-muted"), "enabled connection must have an ink-2 indicator");
   assert.ok(indicator?.querySelector("svg.lucide-circle-check"), "enabled connection must have check icon");
+  assert.ok(within(rowEl).getByText("Needs test"), "the test status must still be shown");
   unmount();
 
   const disabledReady: ProviderConnectionSummary = {
@@ -462,7 +466,7 @@ test("connection row displays enabled checkmark regardless of test status unchec
   );
   const disabledRowEl = screen.getByTestId("provider-connection-conn-2");
   const disabledIndicator = disabledRowEl.querySelector("span");
-  assert.ok(disabledIndicator?.className.includes("bg-black/5"), "disabled connection must have dark/gray indicator");
+  assert.ok(disabledIndicator?.className.includes("text-foreground-hint"), "disabled connection must have an ink-3 indicator");
   assert.ok(disabledIndicator?.querySelector("svg.lucide-circle-x"), "disabled connection must have X icon");
 });
 

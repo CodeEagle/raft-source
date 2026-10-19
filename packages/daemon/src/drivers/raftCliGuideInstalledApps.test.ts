@@ -151,3 +151,15 @@ test("[description-newline] a newline in a DESCRIPTION cannot inject either", ()
   ]);
   assert.ok(!rendered.split("\n").some((line) => line.startsWith("  98. FAKE")));
 });
+
+test("[service] a delivered service id is printed on the app's line; a missing or malformed one is not", () => {
+  const out = buildInstalledAppDirectory([
+    { ...entry("Reminder", "Schedules follow-ups", "use for follow-ups"), service: "reminder-e2a966" },
+    entry("Older", null, "use for old things"),
+    { ...entry("Odd", null, "use for odd things"), service: "Not An Id`; rm" },
+  ]);
+  assert.match(out, /^   - Reminder \(service `reminder-e2a966`\) — Schedules follow-ups$/m);
+  assert.match(out, /^   - Older$/m);
+  assert.match(out, /^   - Odd$/m);
+  assert.doesNotMatch(out, /Not An Id/);
+});

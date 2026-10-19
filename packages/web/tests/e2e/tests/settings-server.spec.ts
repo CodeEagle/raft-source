@@ -48,7 +48,7 @@ async function openAsUser(
   // Settings member tests do not exercise the account-level announcement
   // contract. Keep this local to the browser context so it cannot consume the
   // extraHuman dismissal that announcement-modal.spec intentionally owns.
-  await page.route("**/api/announcements/active", async (route) => {
+  await page.route(/\/api\/announcements\/active(?:\?|$)/, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -261,7 +261,7 @@ test.describe.serial("Settings › Server tab", () => {
       try {
         await expect(page.getByTestId("connected-apps-v3-section")).toBeVisible();
         await expect(page.getByText("Only server owners and admins can install, edit, or remove apps.")).toBeVisible();
-        await expect(page.getByRole("button", { name: "Register app" })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Register App" })).toHaveCount(0);
 
         await page.getByTestId("connected-apps-tab-installed").click();
         const installedTab = page.getByTestId("connected-apps-installed-tab");
@@ -282,7 +282,7 @@ test.describe.serial("Settings › Server tab", () => {
         await expect(myAppsCollection).toHaveAttribute("data-view", "list");
         await expect(myAppsTab.getByText("Visible to every active server member.")).toBeVisible();
         await expect(myAppsTab.getByRole("button", { name: "Edit" })).toHaveCount(0);
-        await expect(myAppsTab.getByRole("button", { name: "Request offline" })).toHaveCount(0);
+        await expect(myAppsTab.getByRole("button", { name: "Request offline review" })).toHaveCount(0);
         await expect(myAppsTab.getByRole("button", { name: "Delete" })).toHaveCount(0);
       } finally {
         await context.close();

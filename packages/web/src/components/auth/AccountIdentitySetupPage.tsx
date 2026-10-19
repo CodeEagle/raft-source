@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useRef, useState } from "react";
-import { Input, Button } from "raft-ui";
+import { Input, InputGroup, InputGroupAddon, InputGroupInput, Button } from "@botiverse/raft-ui";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { validateNameReason } from "@botiverse/raft-shared";
@@ -17,6 +17,9 @@ import OnboardingCreateShell from "./OnboardingCreateShell";
 import { authServerErrorMessage } from "./authErrors";
 import { avatarUploadApiErrorMessage, isAvatarFileTooLarge, isAvatarTooLargeError, PROFILE_AVATAR_ACCEPT } from "../../utils/avatarUpload";
 import { formatNameValidationError } from "../../i18n/nameValidation";
+import { useOptionalAppTheme } from "../../hooks/useAppTheme";
+import { hasDeviceThemePreference } from "../../theme/appThemeCache";
+import { markOnboardingDisplayStylePending } from "../../utils/onboardingDisplayStyle";
 
 const DISPLAY_NAME_MAX_LENGTH = 64;
 
@@ -64,7 +67,7 @@ function PreviewAvatar({
   const src = !safeOnly && avatarPreviewUrl ? avatarPreviewUrl : persistedAvatarUrl;
   return (
     <AvatarSlot
-      context={size === 28 ? "members-row" : "account-tile"}
+      context={size === 28 ? "compact-row" : "account-tile"}
       type="human"
       humanAvatarUrl={src}
       gravatarHash={gravatarHash}
@@ -110,27 +113,27 @@ function IdentityImpactPreview({
         <div className="w-[min(100%,520px)]">
           <div className="relative pb-24" data-testid="identity-preview-cardzone">
             <section
-              className="onboarding-identity-card-enter relative z-10 w-[min(92%,480px)] rotate-[-1deg] overflow-hidden border-2 border-black bg-white shadow-brutal-lg [--identity-card-rotate:-1deg]"
+              className="onboarding-identity-card-enter relative z-10 w-[min(92%,480px)] rotate-[-1deg] overflow-hidden rounded-container border-[1.5px] border-line-strong bg-layer-canvas shadow-sticker [--identity-card-rotate:-1deg]"
               data-testid="identity-channel-preview"
             >
-              <header className="flex h-12 items-center gap-2 border-b-2 border-black bg-white px-4">
-                <span className="flex size-7 items-center justify-center border-2 border-black bg-soft-signal">
-                  <Hash size={15} />
+              <header className="flex h-12 items-center gap-2 border-b border-line-seam bg-layer-canvas px-4">
+                <span className="flex size-[27px] items-center justify-center rounded-sticker border-[1.5px] border-sticker-ink bg-brand text-sticker-ink">
+                  <Hash size={14} />
                 </span>
-                <span className="truncate text-sm font-black">
+                <span className="truncate text-headline text-foreground">
                   {formatMessage({ id: "pages.identitySetup.previewChannel" })}
                 </span>
               </header>
               <div className="space-y-4 p-4">
                 <div className="flex items-start gap-2.5">
-                  <div className="mt-px flex size-7 shrink-0 items-center justify-center border-2 border-black bg-brutal-lavender/70 text-[11px] font-black">
+                  <div className="mt-px flex size-[27px] shrink-0 items-center justify-center rounded-sticker border-[1.5px] border-sticker-ink bg-palette-lavender text-footnote font-bold text-sticker-ink shadow-[0_0_0_1.5px_var(--sticker-edge)]">
                     M
                   </div>
                   <div className="min-w-0">
-                    <div className="text-xs font-bold text-black">
+                    <div className="text-footnote font-bold text-foreground">
                       {formatMessage({ id: "pages.identitySetup.previewSenderName" })}
                     </div>
-                    <div className="mt-0.5 text-xs leading-5 text-black/80" data-testid="identity-seeded-message-copy">
+                    <div className="mt-0.5 text-callout text-foreground" data-testid="identity-seeded-message-copy">
                       {/* ONE message. The mention sits mid-sentence and zh puts it
                           elsewhere, so splitting this into "morning — can" +
                           mention + "take a look…" would bake English word order
@@ -148,7 +151,7 @@ function IdentityImpactPreview({
                             // behavior test catches it, no i18n guard would.
                             <span
                               key={previewHandle}
-                              className="onboarding-identity-pop inline-block rounded-sm bg-soft-signal px-1 font-bold text-black"
+                              className="onboarding-identity-pop inline-block rounded-sticker bg-brand px-[3px] font-semibold text-sticker-ink shadow-[inset_0_0_0_1.5px_var(--sticker-ink)]"
                               data-testid="identity-seeded-mention"
                             >
                               {chunks}
@@ -165,7 +168,7 @@ function IdentityImpactPreview({
                 >
                   <div
                     key={`${previewDisplayName}:${previewAvatarKey}:message-avatar`}
-                    className="onboarding-identity-pop mt-px size-7 shrink-0"
+                    className="onboarding-identity-pop mt-px size-[27px] shrink-0"
                     data-testid="identity-user-message-avatar"
                   >
                     <PreviewAvatar
@@ -182,16 +185,16 @@ function IdentityImpactPreview({
                     <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 gap-y-0.5">
                       <span
                         key={`${previewDisplayName}:message-name`}
-                        className="onboarding-identity-pop inline-block max-w-full truncate text-xs font-bold text-black"
+                        className="onboarding-identity-pop inline-block max-w-full truncate text-footnote font-bold text-foreground"
                         data-testid="identity-user-message-name"
                       >
                         {previewDisplayName}
                       </span>
-                      <span className="font-mono text-[9.5px] font-bold uppercase text-black/35">
+                      <span className="font-mono text-mono-meta text-foreground-hint">
                         {formatMessage({ id: "pages.identitySetup.previewTimestamp" })}
                       </span>
                     </div>
-                    <p className="mt-0.5 text-xs leading-5 text-black/80">
+                    <p className="mt-0.5 text-callout text-foreground">
                       {formatMessage({ id: "pages.identitySetup.previewReply" })}
                     </p>
                   </div>
@@ -200,13 +203,13 @@ function IdentityImpactPreview({
             </section>
 
             <section
-              className="onboarding-identity-card-enter absolute bottom-2 right-0 z-20 w-[min(78%,360px)] rotate-[2deg] border-2 border-black bg-white p-4 shadow-brutal-lg [--identity-card-delay:80ms] [--identity-card-rotate:2deg]"
+              className="onboarding-identity-card-enter absolute bottom-2 right-0 z-20 w-[min(78%,360px)] rotate-[2deg] rounded-container border-[1.5px] border-line-strong bg-layer-popover p-4 shadow-sticker [--identity-card-delay:80ms] [--identity-card-rotate:2deg]"
               data-testid="identity-profile-preview"
             >
               <div className="flex items-start gap-3">
                 <div
                   key={`${previewDisplayName}:${previewAvatarKey}:profile-avatar`}
-                  className="onboarding-identity-pop size-14 shrink-0"
+                  className="onboarding-identity-pop size-[51px] shrink-0"
                   data-testid="identity-profile-avatar"
                 >
                   <PreviewAvatar
@@ -222,12 +225,12 @@ function IdentityImpactPreview({
                 <div className="min-w-0 flex-1">
                   <div
                     key={`${previewDisplayName}:profile-name`}
-                    className="onboarding-identity-pop truncate text-base font-black"
+                    className="onboarding-identity-pop truncate text-headline text-foreground"
                     data-testid="identity-profile-name"
                   >
                     {previewDisplayName}
                   </div>
-                  <div className="font-mono text-xs font-bold text-black/50" data-testid="identity-profile-handle">
+                  <div className="font-mono text-mono-meta text-foreground-hint" data-testid="identity-profile-handle">
                     <span
                       key={`${previewHandle}:profile-handle`}
                       className="onboarding-identity-pop inline-block"
@@ -262,6 +265,17 @@ export default function AccountIdentitySetupPage({
   // The dev/fixture preview has no real session, so it opts out of the shell's
   // sign-out affordance.
   const previewMode = onPreviewComplete != null;
+  // Task #247: a new account sees light until it picks a style later in
+  // onboarding. Only when this browser has no choice yet; an existing choice
+  // is the user's and is left alone, and they are not asked again.
+  const appTheme = useOptionalAppTheme();
+  const setThemeMode = appTheme?.setMode;
+  useEffect(() => {
+    if (previewMode || !setThemeMode || hasDeviceThemePreference()) return;
+    // A brand-new account starts in light; onboarding offers the choice later.
+    setThemeMode("light");
+    markOnboardingDisplayStylePending();
+  }, [previewMode, setThemeMode]);
   const avatarInputId = useId();
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const [displayName, setDisplayName] = useState(user?.displayName ?? "");
@@ -456,31 +470,33 @@ export default function AccountIdentitySetupPage({
           />
         </div>
 
-        {error ? <Banner intent="warning" className="font-bold">{error}</Banner> : null}
+        {error ? <Banner intent="warning">{error}</Banner> : null}
 
         <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-              <FormField label={formatMessage({ id: "pages.identitySetup.usernameLabel" })} labelStyle="plain" error={fieldErrors.handle} htmlFor="identity-handle">
-                <div className="flex items-stretch overflow-hidden rounded-md border border-line-field bg-layer-panel transition-shadow duration-100 focus-within:border-line-field-hover theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm theme-brutal:focus-within:shadow-brutal">
-                  <span className="flex items-center border-r border-line-hairline bg-soft-signal px-3 font-mono text-base font-bold text-foreground-muted theme-brutal:border-r-2 theme-brutal:border-black theme-brutal:text-black/60">@</span>
-                  <Input
+              <FormField label={formatMessage({ id: "pages.identitySetup.usernameLabel" })} error={fieldErrors.handle} htmlFor="identity-handle">
+                {/* The `@` is a fixed prefix of the same control (DS rf-inputgroup),
+                    not a coloured block of its own. */}
+                <InputGroup className="w-full">
+                  <InputGroupAddon.Text variant="container">@</InputGroupAddon.Text>
+                  <InputGroupInput
                     id="identity-handle"
                     name="username"
                     type="text"
-                    className="min-w-0 flex-1 border-0 bg-transparent shadow-none focus-visible:ring-0 dark:bg-transparent dark:shadow-none"
                     value={handle}
                     onChange={handleHandleChange}
                     onBlur={handleUsernameBlur}
                     placeholder={formatMessage({ id: "pages.identitySetup.previewSampleHandle" })}
                     autoComplete="username"
+                    data-invalid={fieldErrors.handle ? true : undefined}
                     required
                   />
-                </div>
-                <p className="mt-1 text-xs text-foreground-muted">
+                </InputGroup>
+                <p className="mt-1.5 text-caption text-foreground-hint">
                   {formatMessage({ id: "pages.identitySetup.usernameHelper" })}
                 </p>
               </FormField>
 
-              <FormField label={formatMessage({ id: "pages.identitySetup.displayNameLabel" })} labelStyle="plain" error={fieldErrors.displayName} htmlFor="identity-display-name">
+              <FormField label={formatMessage({ id: "pages.identitySetup.displayNameLabel" })} error={fieldErrors.displayName} htmlFor="identity-display-name">
                 <Input
                   id="identity-display-name"
                   name="name"
@@ -493,18 +509,18 @@ export default function AccountIdentitySetupPage({
                   autoComplete="name"
                   required
                 />
-                <p className="mt-1 text-xs text-foreground-hint">
+                <p className="mt-1.5 text-caption text-foreground-hint">
                   {formatMessage({ id: "pages.identitySetup.displayNameHelper" })}
                 </p>
               </FormField>
 
               <div>
-                <div className="mb-1 text-sm font-bold text-foreground-strong">
+                <div className="mb-1.5 text-footnote font-semibold text-foreground-muted">
                   {formatMessage({ id: "pages.identitySetup.avatarLabel" })}
                 </div>
                 <div>
                   <div className="flex items-center gap-3">
-                    <div className="size-14 shrink-0 theme-brutal:shadow-brutal-sm">
+                    <div className="size-[51px] shrink-0">
                       <PreviewAvatar
                         avatarPreviewUrl={avatarPreviewUrl}
                         persistedAvatarUrl={user.avatarUrl}
@@ -518,7 +534,6 @@ export default function AccountIdentitySetupPage({
                     <div className="min-w-0 flex-1">
                       <Button size="sm"
                         variant="outline"
-                        className="gap-1.5"
                         disabled={loading}
                         // Stryker disable next-line OptionalChaining: the visible button and hidden file input mount together; this stays defensive for ref timing.
                         onClick={handleAvatarButtonClick}
@@ -538,7 +553,7 @@ export default function AccountIdentitySetupPage({
                         className="sr-only"
                         onChange={handleAvatarChange}
                       />
-                      <p className="mt-1 text-xs text-foreground-hint">
+                      <p className="mt-1.5 text-caption text-foreground-hint">
                         {formatMessage({
                           id: provider
                             ? "pages.identitySetup.avatarOauthHelper"
@@ -547,14 +562,14 @@ export default function AccountIdentitySetupPage({
                       </p>
                     </div>
                   </div>
-                  {avatarError ? <p className="mt-2 text-xs font-bold text-brutal-red" role="alert">{avatarError}</p> : null}
+                  {avatarError ? <p className="mt-2 text-caption font-semibold text-danger-strong" role="alert">{avatarError}</p> : null}
                 </div>
               </div>
 
               <Button
                 type="submit"
                 disabled={loading}
-                size="lg"
+                size="xl"
                 variant="accent"
                 className="w-full"
               >

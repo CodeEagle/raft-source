@@ -7,9 +7,15 @@ import { oidcIssuer, signAgentAccessJwt } from "./oidcService";
 import { recordIntegrationAuditEvent } from "./integrationAuditService";
 import { agentJwtIssuanceCounter } from "../metrics";
 
-import { AgentAudienceJwtError, appSupportsAgentJwt } from "./agentAudienceJwtPolicyService";
 import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
-export { AgentAudienceJwtError } from "./agentAudienceJwtPolicyService";
+
+export type AgentJwtDenialReason = "agent_unavailable" | "membership_missing" | "app_unavailable" | "installation_unavailable" | "grant_revoked";
+export class AgentAudienceJwtError extends Error {
+  readonly code = "AGENT_JWT_NOT_AUTHORIZED" as const;
+  constructor(readonly reason: AgentJwtDenialReason = "app_unavailable") {
+    super("AGENT_JWT_NOT_AUTHORIZED");
+  }
+}
 
 const scopes = ["openid", "profile"];
 
@@ -27,32 +33,30 @@ export async function issueAgentAudienceJwt(input: { serverId: string; agentId: 
         eq(serverAgentMembers.serverId, input.serverId), eq(serverAgentMembers.agentId, input.agentId),
       )).for("share");
       if (!server || !agent || agent.status === "stopped" || !membership) {
-        throw new AgentAudienceJwtError("AGENT_JWT_NOT_AUTHORIZED", !membership ? "membership_missing" : "agent_unavailable");
+        throw new AgentAudienceJwtError(!membership ? "membership_missing" : "agent_unavailable");
       }
       // Serialize first-use grant creation and client disable/scope contraction.
-      // Policy changes take the same client/installation locks before commit.
-      const [client] = await tx.select({ id: oauthClients.id, serverId: oauthClients.serverId, appType: oauthClients.appType, agentJwtEnabled: oauthClients.agentJwtEnabled, clientId: oauthClients.clientId, allowedScopes: oauthClients.allowedScopes, createdByUserId: oauthClients.createdByUserId }).from(oauthClients).where(and(
+      // App and installation changes take the same row locks before commit.
+      const [client] = await tx.select({ id: oauthClients.id, serverId: oauthClients.serverId, appType: oauthClients.appType, clientId: oauthClients.clientId, allowedScopes: oauthClients.allowedScopes, createdByUserId: oauthClients.createdByUserId }).from(oauthClients).where(and(
         eq(oauthClients.clientId, input.service), oauthClientIsUserManagedPredicate(), eq(oauthClients.enabled, true),
       )).for("update");
       if (!client || !scopes.every((scope) => client.allowedScopes?.includes(scope))) {
-        throw new AgentAudienceJwtError("AGENT_JWT_NOT_AUTHORIZED");
+        throw new AgentAudienceJwtError();
       }
       const source = client.serverId === server.id;
       const [installation] = await tx.select({
-        id: oauthClientInstalls.id, status: oauthClientInstalls.status, agentJwtEnabled: oauthClientInstalls.agentJwtEnabled,
+        id: oauthClientInstalls.id, status: oauthClientInstalls.status,
       }).from(oauthClientInstalls).where(and(
         eq(oauthClientInstalls.clientId, client.id), eq(oauthClientInstalls.serverId, server.id),
       )).for("share");
       if ((client.appType === "server_local" && !source)
         || (client.appType === "third_party_global" && (!installation || installation.status !== "active"))
         || (installation && installation.status !== "active")) {
-        throw new AgentAudienceJwtError("AGENT_JWT_NOT_AUTHORIZED", "installation_unavailable");
+        throw new AgentAudienceJwtError("installation_unavailable");
       }
-      // Unavailable private Apps share the unknown-App refusal. Check policy
-      // only after establishing this Server's existing App availability.
+      // Unavailable private Apps share the unknown-App refusal. JWT is a
+      // built-in Agent Login credential: no per-App or per-installation switch.
       metricClient = client.clientId;
-      if (!appSupportsAgentJwt(client)) throw new AgentAudienceJwtError("AGENT_JWT_DISABLED");
-      if (!source && !installation?.agentJwtEnabled) throw new AgentAudienceJwtError("AGENT_JWT_DISABLED", "installation_unapproved");
       const grants = await tx.select({ id: oauthGrants.id, scopes: oauthGrants.scopes, revokedAt: oauthGrants.revokedAt }).from(oauthGrants).where(and(
         eq(oauthGrants.serverId, server.id), eq(oauthGrants.agentId, agent.id), eq(oauthGrants.clientId, client.id),
       )).for("update");
@@ -67,10 +71,10 @@ export async function issueAgentAudienceJwt(input: { serverId: string; agentId: 
             eq(oauthAgentAutoGrantBlocks.serverId, server.id),
           )).limit(1).for("share");
         if (blocked || grants.some((candidate) => candidate.revokedAt !== null)) {
-          throw new AgentAudienceJwtError("AGENT_JWT_NOT_AUTHORIZED", "grant_revoked");
+          throw new AgentAudienceJwtError("grant_revoked");
         }
-        // The Agent explicitly requested this App, and its Server has approved
-        // JWT access. Reuse Agent Login consent without an unused OAuth code.
+        // The Agent explicitly requested this App, which its Server owns or
+        // installed. Same boundary as Agent Login, without an unused OAuth code.
         [grant] = await tx.insert(oauthGrants).values({
           serverId: server.id, agentId: agent.id, clientId: client.id,
           scopes, grantedByUserId: client.createdByUserId, grantSource: "agent_login",

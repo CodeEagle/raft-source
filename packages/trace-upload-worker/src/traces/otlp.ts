@@ -3,6 +3,15 @@ import type { TraceUploadWorkerEnv } from "../env";
 import { sha256Hex } from "../shared/auth";
 import { isJsonObject, maybeDecompressStream, readStreamWithLimit, type JsonObject } from "../shared/http";
 import type { TraceBundleMetadata } from "./bundles";
+import {
+  capRecordsPerMinute,
+  readIngestEventPerMinuteCap,
+  readIngestPerMinuteCap,
+  TRACE_INGEST_DROP_REASON,
+  TRACE_INGEST_DROPPED_EVENT_NAME,
+  type RateCapDrop,
+} from "./ingestRateCap";
+import { postOtlpJson, type OtlpSinkRoute } from "./otlpSink";
 import type { ProjectableTraceRecord, TraceProjectionSkipReasonClass } from "./traceEventProjector";
 import {
   daemonProjectionResource,
@@ -107,6 +116,8 @@ export async function ingestTraceBundleObject(
   v2_error_class?: string;
   spans_total?: number;
   events_skipped?: number;
+  spans_dropped_rate_cap?: number;
+  events_dropped_rate_cap?: number;
 }> {
   if (!env.TRACE_INGEST_OTLP_ENDPOINT) {
     const v2 = projectorDisabledByMissingCanonicalSink(env);
@@ -122,14 +133,43 @@ export async function ingestTraceBundleObject(
     };
   }
   const parsed = await readTraceBundleRecords(env, metadata);
-  const records = options?.recordFilter ? parsed.spans.filter(options.recordFilter) : parsed.spans;
+  // The cap runs before the replay filter, so a partial replay never brings
+  // back records the first ingest dropped. Feedback report bundles (runtime
+  // transcript, log tail) are evidence for one report and are never capped.
+  const caps = {
+    span: metadata.feedbackReportId ? 0 : readIngestPerMinuteCap(env),
+    event: metadata.feedbackReportId ? 0 : readIngestEventPerMinuteCap(env),
+  };
+  const cappedSpans = capRecordsPerMinute(parsed.spans, "span", (r) => ({ name: r.name, time: r.start_time }), caps.span);
+  const cappedEvents = capRecordsPerMinute(parsed.events, "event", (e) => ({ name: e.record.name, time: e.record.time }), caps.event);
+  const drops = [...cappedSpans.drops, ...cappedEvents.drops];
+  const records = options?.recordFilter ? cappedSpans.kept.filter(options.recordFilter) : cappedSpans.kept;
   // Replay dedup keys exist only for spans (slock.trace_ingest.span_key); events have no
   // dedup key, so a filtered (partial) replay skips events rather than risk duplicating them.
   // The skipped count is reported so the loss is visible in the run output.
-  const events = options?.recordFilter ? [] : parsed.events;
+  const events = options?.recordFilter
+    ? []
+    : [...cappedEvents.kept, ...rateCapSummaryEvents(drops, caps, metadata.bundleSha256)];
   const filterStats = options?.recordFilter
-    ? { spans_total: parsed.spans.length, events_skipped: parsed.events.length }
+    ? { spans_total: cappedSpans.kept.length, events_skipped: cappedEvents.kept.length }
     : {};
+  const droppedStats = drops.length > 0
+    ? {
+      spans_dropped_rate_cap: sum(cappedSpans.drops.map((d) => d.dropped)),
+      events_dropped_rate_cap: sum(cappedEvents.drops.map((d) => d.dropped)),
+    }
+    : {};
+  if (drops.length > 0) {
+    console.warn("[TraceUploadWorker] ingest rate cap dropped records", {
+      reason: TRACE_INGEST_DROP_REASON,
+      server_id: metadata.serverId,
+      machine_id: metadata.machineId,
+      span_cap: caps.span,
+      event_cap: caps.event,
+      ...droppedStats,
+      buckets: drops.length,
+    });
+  }
   const batchSize = getConfiguredIngestBatchSize(env);
   let batchesSent = 0;
   let v2Status: V2ProjectorStatus = projectorConfigured(env) ? "success" : "skipped";
@@ -158,7 +198,7 @@ export async function ingestTraceBundleObject(
 
   for (let idx = 0; idx < events.length; idx += batchSize) {
     const batch = events.slice(idx, idx + batchSize);
-    await postOtlpLogBatch(env, daemonResourceAttributes(env, records, metadata), "@slock-ai/daemon", batch);
+    await postOtlpLogBatch(env, daemonResourceAttributes(env, records, metadata), "@slock-ai/daemon", batch, "bundle_logs");
     batchesSent += 1;
   }
 
@@ -173,7 +213,36 @@ export async function ingestTraceBundleObject(
     v2_skip_reason_classes: [...v2SkipReasonClasses].sort(),
     ...(v2ErrorClass ? { v2_error_class: v2ErrorClass } : {}),
     ...filterStats,
+    ...droppedStats,
   };
+}
+
+// One log record per dropped (name, minute) bucket. The key is derived from the
+// bundle and bucket, so a replay produces the same key and can be deduped.
+function rateCapSummaryEvents(drops: readonly RateCapDrop[], caps: Record<RateCapDrop["recordType"], number>, bundleSha256: string): KeyedEventRecord[] {
+  return drops.map((drop) => ({
+    record: {
+      type: "event",
+      schema_version: 1,
+      name: TRACE_INGEST_DROPPED_EVENT_NAME,
+      surface: "trace_ingest",
+      time: `${drop.minute}:00.000Z`,
+      attrs: {
+        reason: TRACE_INGEST_DROP_REASON,
+        record_type: drop.recordType,
+        record_name: drop.name,
+        minute: drop.minute,
+        cap: caps[drop.recordType],
+        kept_count: drop.kept,
+        dropped_count: drop.dropped,
+      },
+    },
+    eventKey: `${bundleSha256}:rate_cap:${drop.recordType}:${drop.name}:${drop.minute}`,
+  }));
+}
+
+function sum(values: readonly number[]): number {
+  return values.reduce((total, value) => total + value, 0);
 }
 
 async function postOtlpTraceBatch(
@@ -182,20 +251,7 @@ async function postOtlpTraceBatch(
   metadata: TraceBundleMetadata,
 ): Promise<void> {
   const endpoint = normalizeOtlpTracesEndpoint(env.TRACE_INGEST_OTLP_ENDPOINT ?? "");
-  const fetchImpl = env.TRACE_INGEST_FETCH ?? fetch;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(env.TRACE_INGEST_OTLP_AUTHORIZATION ? { Authorization: env.TRACE_INGEST_OTLP_AUTHORIZATION } : {}),
-  };
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(toOtlpPayload(env, records, metadata)),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`OTLP HTTP ${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-  }
+  await postOtlpJson(env, "bundle", endpoint, toOtlpPayload(env, records, metadata), records.length);
 }
 
 export async function postOtlpLogBatch(
@@ -203,13 +259,9 @@ export async function postOtlpLogBatch(
   resourceAttributes: Array<{ key: string; value: OtlpAnyValue }>,
   scopeName: string,
   events: readonly KeyedEventRecord[],
+  route: Extract<OtlpSinkRoute, "web_events" | "bundle_logs">,
 ): Promise<void> {
   const endpoint = normalizeOtlpTracesEndpoint(env.TRACE_INGEST_OTLP_ENDPOINT ?? "").replace(/\/v1\/traces$/, "/v1/logs");
-  const fetchImpl = env.TRACE_INGEST_FETCH ?? fetch;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(env.TRACE_INGEST_OTLP_AUTHORIZATION ? { Authorization: env.TRACE_INGEST_OTLP_AUTHORIZATION } : {}),
-  };
   const payload = {
     resourceLogs: [
       {
@@ -223,15 +275,7 @@ export async function postOtlpLogBatch(
       },
     ],
   };
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`OTLP HTTP ${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-  }
+  await postOtlpJson(env, route, endpoint, payload, events.length);
 }
 
 // Telescope keeps the log body but drops `eventName`, so the event name is

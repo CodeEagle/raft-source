@@ -123,13 +123,13 @@ test("message body font size remains user-controlled after the RUI theme recipe"
   const body = row.querySelector<HTMLElement>("[data-message-font-size]");
   assert.ok(body, "the shared MessageItem body exposes its resolved preference");
   assert.equal(body.dataset.messageFontSize, "sm");
-  assert.equal(body.style.fontSize, "0.75rem");
+  assert.equal(body.style.fontSize, "0.875rem");
 
   act(() => {
     useAppearanceStore.getState().setMessageBodyFontSize("lg");
   });
   assert.equal(body.dataset.messageFontSize, "lg");
-  assert.equal(body.style.fontSize, "1rem");
+  assert.equal(body.style.fontSize, "1.125rem");
 });
 
 test("image attachments expose select-screenshot dataset attributes for protected byte fetches", async () => {

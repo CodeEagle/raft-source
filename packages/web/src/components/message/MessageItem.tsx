@@ -7,12 +7,12 @@ import type { IntlShape } from "react-intl";
 import { Copy, MessageCirclePlus, MessageCircleOff, Download, ClipboardCheck, Play, Pause, Volume2, CheckCircle, RotateCcw, Link, Bookmark, BookmarkMinus, Languages, AlertTriangle, Plus, Eye, Music } from "lucide-react";
 import {
   Badge,
+  Card,
   ContextMenuPopup,
   MessageAttachmentDiffAddition,
   MessageAttachmentDiffDeletion,
   MessageAttachmentDiffSummary,
   MessageAttachmentGroup,
-  MessageAttachmentMetaStart,
   MessageImageGallery,
   MessageItem,
   MessageItemAvatarSlot,
@@ -28,6 +28,7 @@ import {
   MessageItemSenderButton,
   MessageItemTime,
   MessageItemSavedIndicator,
+  MessageItemSearchMatch,
   MessageItemTranslationAction,
   MessageItemTranslationFailedStatus,
   MessageItemTranslationOriginal,
@@ -60,13 +61,10 @@ import {
   toast,
   buildMessageImageGalleryRows,
   MessageImageGalleryRow,
-} from "raft-ui";
-import rehypeRaw from "rehype-raw";
-import rehypeSanitize from "rehype-sanitize";
-import type { Components, Options } from "react-markdown";
+} from "@botiverse/raft-ui";
+import type { Components } from "react-markdown";
 
 // Shared across renders — never created inside a component (task #709).
-const MESSAGE_MARKDOWN_REHYPE_PLUGINS: NonNullable<Options["rehypePlugins"]> = [rehypeRaw, [rehypeSanitize, messageMarkdownSanitizeSchema]];
 import { useStore } from "zustand";
 import {
   createRaftBareTaskRefRegex,
@@ -83,7 +81,6 @@ import {
   messageRef as canonicalMessageRef,
   parseRaftPermalink,
   parseRaftRefTarget,
-  replaceOutsideMarkdownCode,
   resolveRaftMentionHandle,
 } from "@botiverse/raft-shared";
 import type {
@@ -111,8 +108,9 @@ import { useTaskStore } from "../../store/taskStore";
 import type { Task } from "../../store/taskStore";
 // Parked with its render site below — see the note there.
 // import TaskChipList from "../task/TaskChipList";
-import { useThreadStore } from "../../store/threadStore";
+import { isThreadFollowed, useThreadStore } from "../../store/threadStore";
 import type { OpenThreadRequest, ThreadSummary } from "../../store/threadStore";
+import type { ThreadRepliesScope } from "../../store/threadRepliesReadModel";
 import { hasInlineThreadReplySurface, InlineThreadReplies } from "./InlineThreadReplies";
 import { useSavedStore } from "../../store/savedStore";
 import { useSelectionStore } from "../../store/selectionStore";
@@ -144,12 +142,12 @@ import { PermalinkReferenceChip } from "./PermalinkReferenceChip";
 import ProfilePreviewCardContent from "./ProfilePreviewCardContent";
 import ExternalIdentityPreviewCard from "./ExternalIdentityPreviewCard";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
+import { useRefreshingMediaUrl } from "../../hooks/useRefreshingMediaUrl";
 import { agentModelLabel, useShowAgentModelName } from "../../utils/agentModelName";
 import { useCatalogModelLabel } from "../../store/modelLabelCatalogStore";
 import StatusDot from "../ui/StatusDot";
 import type { StatusDotProps } from "../ui/StatusDot";
 import { formatAgentDisplayStateText } from "../../utils/activity";
-import { formatFileSizeBytes } from "../../utils/fileSizePresentation";
 import AvatarSlot from "../ui/AvatarSlot";
 import ContextMenuDivider from "../ui/ContextMenuDivider";
 import MenuItem from "../ui/MenuItem";
@@ -189,6 +187,8 @@ import { shouldShowGroupedMessageHeader } from "./messageGrouping";
 import type { MessageGroupState } from "./messageGrouping";
 import { MessageHoverToolbar } from "./MessageHoverToolbar";
 import { AttachmentChip } from "./AttachmentChip";
+import { AttachmentMetaText } from "./AttachmentMetaText";
+import ReadOnlyMessageAttachments from "./ReadOnlyMessageAttachments";
 import { getHumanDepartureLabel } from "../member/humanMembershipStatus";
 import {
   buildImageInlineFallbackKey,
@@ -218,8 +218,18 @@ import type {
   ThreadRefIntent,
   ThreadRouteTarget,
 } from "../../utils/threadRefNavigation";
-import { escapeUserRawHtmlForMessageMarkdown, messageMarkdownSanitizeSchema } from "./messageMarkdownSecurity";
-import { highlightThreadSearchMarkdownFragments, normalizeThreadSearchQuery } from "./threadSearch";
+import { MESSAGE_MARKDOWN_REHYPE_PLUGINS, messageMarkdownRemarkPlugins } from "./messageMarkdownSecurity";
+import { highlightThreadSearchInTree, normalizeThreadSearchQuery } from "./threadSearch";
+import {
+  messageTokenNode,
+  plainTextOf,
+  replaceLinksInTree,
+  replaceTokensInTree,
+} from "./remarkMessageTokens";
+import type { TextTokenMatcher } from "./remarkMessageTokens";
+import { repairGeneratedMarkdown, unwrapDmKindStrikethrough } from "./repairGeneratedMarkdown";
+import type { Root as MdastRoot } from "mdast";
+import type { VFile } from "vfile";
 import { QUICK_REACTION_EMOJIS } from "./reactionConstants";
 import ReactionGlyph from "./ReactionGlyph";
 import { useFloatingOverlayPosition } from "../ui/useFloatingOverlayPosition";
@@ -242,17 +252,11 @@ const REACTION_PICKER_VIEWPORT_MARGIN = 8;
 const QUICK_REACTION_GLYPH_SIZE = 18;
 const SENDER_AVATAR_LONG_PRESS_MS = 500;
 const SENDER_AVATAR_LONG_PRESS_MOVE_TOLERANCE_PX = 10;
-const THREAD_SEARCH_FRAGMENT_HIGHLIGHT_CLASS =
-  "bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal/70 theme-brutal:text-inherit [font:inherit]";
-
 function ThreadSearchFragmentHighlight({ children }: { children?: ReactNode }) {
   return (
-    <mark
-      data-testid="thread-search-fragment-highlight"
-      className={THREAD_SEARCH_FRAGMENT_HIGHLIGHT_CLASS}
-    >
+    <MessageItemSearchMatch data-testid="thread-search-fragment-highlight">
       {children}
-    </mark>
+    </MessageItemSearchMatch>
   );
 }
 
@@ -406,7 +410,7 @@ function ReactionCount({ count }: { count: number }) {
   return (
     <span
       key={animationKey}
-      className={`font-mono tabular-nums ${animationKey > 0 ? "reaction-count-bump" : ""}`}
+      className={`font-mono text-mono-meta font-bold tabular-nums ${animationKey > 0 ? "reaction-count-bump" : ""}`}
     >
       {count}
     </span>
@@ -421,9 +425,11 @@ export interface MentionEntry {
   agent?: Agent;
 }
 
-// External-origin text has no Raft mention authority. Keep this shared empty
-// map referentially stable so MessageMarkdownBody remains memo-friendly while
-// raw provider handles such as `@owner` stay plain text in the Human UI.
+// External-origin text has no Raft mention authority of its own: free text such
+// as `@owner` stays plain in the Human UI. Only mention facts the server minted
+// for the message (Slack usergroup, linked identity, typed member name) are
+// highlighted, through the structured map. Keep this shared empty map
+// referentially stable so MessageMarkdownBody remains memo-friendly.
 const EXTERNAL_MESSAGE_MENTION_MAP = new Map<string, MentionEntry>();
 
 /** Build a lookup map of all mentionable names → display info */
@@ -465,7 +471,7 @@ function buildStructuredMentionMap(mentions: MessageMention[] | undefined): Map<
     const name = mention.name.trim();
     if (!name) continue;
     map.set(name, {
-      displayName: name,
+      displayName: mention.displayName?.trim() || name,
       type: mention.type,
       id: mention.id,
     });
@@ -486,180 +492,9 @@ function buildMentionIdentityMap(mentionMap: Map<string, MentionEntry>): Map<str
   return map;
 }
 
-function escapeMessageHtmlAttribute(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function escapeMessageHtmlText(value: string): string {
-  return value
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    // `~` would otherwise pair up as GFM strikethrough across two refs such as
-    // `dm:@Twin~agent` and `dm:@Twin~human` once placeholders are restored.
-    .replace(/~/g, "&#126;");
-}
-
-function makeRaftRefAnchor(target: RaftRefTarget, label: string): string {
-  const rawTarget = formatRaftRefTarget(target);
-  return `<a data-raft-ref-kind="${target.kind}" data-raft-ref-target="${escapeMessageHtmlAttribute(rawTarget)}">${escapeMessageHtmlText(label)}</a>`;
-}
-
-function replaceRaftRefMarkdownWithPlaceholders(source: string, placeholders: string[]): string {
-  return replaceOutsideMarkdownCode(source, (chunk) => {
-    let processed = chunk.replace(/\\<([^<>\n]+)>/g, (match, rawTarget: string) => {
-      if (!parseRaftRefTarget(rawTarget)) return match;
-      const index = placeholders.length;
-      placeholders.push(`&lt;${escapeMessageHtmlText(rawTarget)}&gt;`);
-      return `\x00RAFTREF${index}\x00`;
-    });
-
-    processed = processed.replace(
-      /\[((?:\\.|[^\]\\])*)\]\(<([^<>\n]+)>\)/g,
-      (match, label: string, rawTarget: string) => {
-        const target = parseRaftRefTarget(rawTarget);
-        if (!target) return match;
-        const index = placeholders.length;
-        placeholders.push(makeRaftRefAnchor(target, label.replace(/\\([[\]])/g, "$1")));
-        return `\x00RAFTREF${index}\x00`;
-      },
-    );
-
-    processed = processed.replace(/(^|[^\\])<([^<>\n]+)>/g, (match, prefix: string, rawTarget: string) => {
-      const target = parseRaftRefTarget(rawTarget);
-      if (!target) return match;
-      const index = placeholders.length;
-      const label = formatRaftRefTarget(target);
-      placeholders.push(makeRaftRefAnchor(target, label));
-      return `${prefix}\x00RAFTREF${index}\x00`;
-    });
-
-    processed = processed.replace(
-      createRaftMessageRefRegex(),
-      (match, channelName: string, threadParentShortId: string | undefined, messageId: string) => {
-        const target = parseRaftRefTarget(
-          threadParentShortId
-            ? `#${channelName}:${threadParentShortId} msg=${messageId}`
-            : `#${channelName} msg=${messageId}`,
-        );
-        if (!target) return match;
-        const index = placeholders.length;
-        placeholders.push(makeRaftRefAnchor(target, formatRaftRefTarget(target)));
-        return `\x00RAFTREF${index}\x00`;
-      },
-    );
-
-    return processed;
-  });
-}
-
-function restoreRaftRefPlaceholders(source: string, placeholders: string[]): string {
-  // oxlint-disable-next-line no-control-regex -- NUL (\u0000) is an intentional private sentinel wrapping placeholder tokens; it never appears in user markdown, so matching it is safe and deliberate
-  return source.replace(/\x00RAFTREF(\d+)\x00/g, (_match, idx) => placeholders[Number(idx)] ?? "");
-}
-
-function protectMarkdownInlineLinks(source: string, placeholders: string[]): string {
-  const parts: string[] = [];
-  let cursor = 0;
-  while (cursor < source.length) {
-    const labelStart = source.indexOf("[", cursor);
-    if (labelStart === -1) {
-      parts.push(source.slice(cursor));
-      break;
-    }
-
-    parts.push(source.slice(cursor, labelStart));
-    let labelEnd = labelStart + 1;
-    while (labelEnd < source.length) {
-      if (source[labelEnd] === "\\") {
-        labelEnd += 2;
-        continue;
-      }
-      if (source[labelEnd] === "]") break;
-      labelEnd += 1;
-    }
-
-    if (labelEnd >= source.length || source[labelEnd + 1] !== "(") {
-      parts.push(source[labelStart]);
-      cursor = labelStart + 1;
-      continue;
-    }
-
-    let destinationEnd = labelEnd + 2;
-    let depth = 1;
-    while (destinationEnd < source.length) {
-      const char = source[destinationEnd];
-      if (char === "\\") {
-        destinationEnd += 2;
-        continue;
-      }
-      if (char === "(") {
-        depth += 1;
-      } else if (char === ")") {
-        depth -= 1;
-        if (depth === 0) break;
-      }
-      destinationEnd += 1;
-    }
-
-    if (depth !== 0) {
-      parts.push(source[labelStart]);
-      cursor = labelStart + 1;
-      continue;
-    }
-
-    const linkStart = labelStart > 0 && source[labelStart - 1] === "!" ? labelStart - 1 : labelStart;
-    if (linkStart < labelStart) {
-      const previous = parts.pop() ?? "";
-      parts.push(previous.slice(0, -1));
-    }
-    const index = placeholders.length;
-    placeholders.push(source.slice(linkStart, destinationEnd + 1));
-    parts.push(`\x00LINK${index}\x00`);
-    cursor = destinationEnd + 1;
-  }
-  return parts.join("");
-}
-
-function protectMessageMarkdownLinks(source: string, placeholders: string[]): string {
-  const withMarkdownLinks = protectMarkdownInlineLinks(source, placeholders);
-  return withMarkdownLinks.replace(/https?:\/\/[^\s<>()]+(?:\([^\s<>()]*\)[^\s<>()]*)*/giu, (match) => {
-    const index = placeholders.length;
-    placeholders.push(match);
-    return `\x00LINK${index}\x00`;
-  });
-}
-
-function restoreMessageMarkdownLinkPlaceholders(source: string, placeholders: string[]): string {
-  // oxlint-disable-next-line no-control-regex -- NUL (\u0000) is an intentional private sentinel wrapping placeholder tokens; it never appears in user markdown, so matching it is safe and deliberate
-  return source.replace(/\x00LINK(\d+)\x00/g, (_match, idx) => placeholders[Number(idx)] ?? "");
-}
-
 function getRaftRefProp(node: any, prop: string): string | undefined {
   const value = node?.properties?.[prop] ?? node?.properties?.[`data-${prop.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`];
   return typeof value === "string" ? value : undefined;
-}
-
-/**
- * Repair a common generated-Markdown shape such as
- * `- **Registration: **203 users`.
- *
- * CommonMark does not allow the whitespace immediately before `**` to close
- * the strong span, so it renders both delimiter pairs literally. Move that
- * whitespace just outside the closing delimiter without changing the visible
- * text. Callers protect code spans/blocks before invoking this helper so code
- * samples remain byte-for-byte untouched.
- */
-function normalizeGeneratedStrongClosingWhitespace(source: string): string {
-  return source.replace(
-    /(^|[^\\])\*\*([^*\n]*?\S)([ \t]+)\*\*/g,
-    (_match, prefix: string, content: string, whitespace: string) =>
-      `${prefix}**${content}**${whitespace}`,
-  );
 }
 
 /** Render message content as Markdown with @mention and #channel highlighting.
@@ -693,6 +528,7 @@ function useRenderMessageMarkdown(
   channelParticipantMembersById?: ReadonlyMap<string, ServerMember>,
   channelParticipantExternalsById?: ReadonlyMap<string, ChannelExternalMember>,
   unavailableQuotedPermalinkUrl?: string | null,
+  mentionsDisplayOnly = false,
 ) {
   // Inline task refs render rui's inline `TaskChip` when the referenced task is
   // loaded in the client store. The chip is designed for running text —
@@ -738,190 +574,187 @@ function useRenderMessageMarkdown(
       />
     );
   }, [taskByNumber, onOpenTaskRef]);
-  let mentionIdentityMap: Map<string, MentionEntry> | null = null;
-  const resolveMentionByIdentity = (type: "agent" | "user" | "external", id: string) => {
-    mentionIdentityMap ??= buildMentionIdentityMap(mentionMap);
-    return mentionIdentityMap.get(`${type}:${id}`);
-  };
-  // Pre-process blockquotes: insert blank line after quote blocks so non-quoted
-  // lines don't get absorbed as "lazy continuation" (standard markdown behavior)
-  let processed = content.replace(
-    /(^|\n)(>.*?)(\n)(?!>|\n)/g,
-    "$1$2\n$3"
+  // Task #762: every ref below is recognised on the parsed markdown tree
+  // (remarkMessageTokens), so code, links and escapes are skipped by the
+  // parser itself. Matchers run in this order; each sees only the text the
+  // earlier ones left alone, which is the precedence the old placeholders
+  // enforced (thread refs before mentions, `dm:@peer` before `@peer`).
+  const messageRefsPlugin = useMemo(() => {
+    const channelNameSet = new Set(channels.map((c) => c.name.toLowerCase()));
+    const crossServerAuthority = !!refAuthorityServerSlug
+      && !!currentServerSlug
+      && refAuthorityServerSlug !== currentServerSlug;
+    let mentionIdentityMap: Map<string, MentionEntry> | null = null;
+    const resolveMentionByIdentity = (type: "agent" | "user" | "external", id: string) => {
+      mentionIdentityMap ??= buildMentionIdentityMap(mentionMap);
+      return mentionIdentityMap.get(`${type}:${id}`);
+    };
+    const plain = (text: string) => messageTokenNode("span", text);
+    const raftRefAnchor = (target: RaftRefTarget, label: string) =>
+      messageTokenNode("a", label, {
+        dataRaftRefKind: target.kind,
+        dataRaftRefTarget: formatRaftRefTarget(target),
+      });
+    const mentionAnchor = (name: string, entry: MentionEntry) => {
+      const resolvedMention = resolveMentionByIdentity(entry.type, entry.id);
+      const visibleLabel = resolvedMention?.displayName ? `@${resolvedMention.displayName}` : `@${name}`;
+      return messageTokenNode("a", visibleLabel, {
+        dataMention: name,
+        dataMentionType: entry.type,
+        dataMentionId: entry.id,
+      });
+    };
+
+    const matchers: TextTokenMatcher[] = [
+      // `<target>` refs. `\<target>` is the escape: it stays literal text and
+      // no later matcher may claim part of it.
+      {
+        pattern: /<([^<>\n]+)>/g,
+        replace: (match, { escaped }) => {
+          const target = parseRaftRefTarget(match[1]);
+          if (!target) return false;
+          if (escaped) return plain(match[0]);
+          return raftRefAnchor(target, formatRaftRefTarget(target));
+        },
+      },
+      {
+        pattern: createRaftMessageRefRegex(),
+        replace: (match) => {
+          const [, channelName, threadParentShortId, messageId] = match;
+          const target = parseRaftRefTarget(
+            threadParentShortId
+              ? `#${channelName}:${threadParentShortId} msg=${messageId}`
+              : `#${channelName} msg=${messageId}`,
+          );
+          return target ? raftRefAnchor(target, formatRaftRefTarget(target)) : false;
+        },
+      },
+      // Thread refs MUST run before the mention matchers: `dm:@peer(:shortId)?`
+      // contains `@peer`, and letting mentions claim it first breaks the ref
+      // into `dm:` + mention chip (+ `:shortId`) — the production regression
+      // where `dm:@artin:1f1def75` stopped being clickable.
+      {
+        pattern: createRaftChannelThreadRefRegex(),
+        replace: (match) => {
+          const [text, chanName, shortId] = match;
+          if (threadRefAuthorityUnavailable) return plain(text);
+          if (!channelNameSet.has(chanName.toLowerCase()) && !crossServerAuthority) return false;
+          const chan = channels.find((c) => c.name.toLowerCase() === chanName.toLowerCase() && (c.type === "channel" || c.type === "private" || c.type === "joint"));
+          return messageTokenNode("a", `#${chanName}:${shortId}`, {
+            dataThreadRef: shortId,
+            dataThreadParent: crossServerAuthority ? "" : chan?.id || "",
+            dataThreadParentName: chanName,
+          });
+        },
+      },
+      {
+        pattern: createRaftDmThreadRefRegex(),
+        replace: (match) => {
+          const [text, peerName, shortId] = match;
+          if (threadRefAuthorityUnavailable) return plain(text);
+          const dm = findDmByPeer(channels, peerName);
+          // Unresolvable refs must read identically to the source — claim the
+          // whole token as plain text instead of letting the mention matcher
+          // chip `@peer` out of it.
+          if (!dm && !crossServerAuthority) return plain(text);
+          return messageTokenNode("a", `dm:@${peerName}:${shortId}`, {
+            dataThreadRef: shortId,
+            dataThreadParent: crossServerAuthority ? "" : dm?.id || "",
+            dataThreadParentName: crossServerAuthority ? peerName : dm?.name || peerName,
+            dataThreadParentType: "dm",
+          });
+        },
+      },
+      // Bare `dm:@peer` refs: claim the whole token (same preemption rule) and
+      // render through the raft-ref anchor path, which navigates to the DM.
+      {
+        pattern: createRaftDmRefRegex(),
+        replace: (match) => {
+          const [text, peerName] = match;
+          if (!findDmByPeer(channels, peerName)) return plain(text);
+          return raftRefAnchor({ kind: "dm", peerName }, text);
+        },
+      },
+      // `dm:@name~bot` (unknown peer kind) is not a ref: keep it plain text so
+      // neither `dm:@name` nor the mention matcher turns it into another target.
+      { pattern: createRaftMalformedDmKindRefRegex(), replace: (match) => plain(match[0]) },
+      // A selected mention is an identity-backed entity, not a fresh username
+      // guess. Keep it mentionable after left-boundary edits such as
+      // `草案@Mona` and before CJK suffixes such as `@Mona的`; a Latin right
+      // boundary still prevents a stale `@Mona` entity from claiming `@Monica`.
+      ...[...structuredMentionMap].flatMap(([name, entry]): TextTokenMatcher[] => {
+        const pattern = createRaftStructuredUserRefRegex(name);
+        return pattern ? [{ pattern, replace: () => mentionAnchor(name, entry) }] : [];
+      }),
+      // Free text still uses the conservative grammar so emails/package-like
+      // strings never become notifications merely because a directory name
+      // happens to match.
+      {
+        pattern: createRaftUserRefRegex(),
+        replace: (match) => {
+          const [, prefix, token] = match;
+          const resolved = resolveRaftMentionHandle(
+            token,
+            (name) => structuredMentionMap.has(name) || mentionMap.has(name),
+          );
+          if (!resolved) return false; // Not a known name — keep as plain text
+          const entry = structuredMentionMap.get(resolved.handle) ?? mentionMap.get(resolved.handle);
+          if (!entry) return false;
+          return [
+            { type: "text", value: prefix },
+            mentionAnchor(resolved.handle, entry),
+            { type: "text", value: resolved.suffix },
+          ];
+        },
+      },
+      // "task #205" always links; bare "#205" only if it's a known task.
+      {
+        pattern: createRaftBareTaskRefRegex(),
+        replace: (match) => {
+          const [, prefix, taskKeyword, taskNumber] = match;
+          if (!taskKeyword && !knownTaskNumbers?.has(Number(taskNumber))) return false;
+          return [
+            { type: "text", value: `${prefix}${taskKeyword ?? ""}` },
+            messageTokenNode("a", `#${taskNumber}`, { dataTaskRef: taskNumber }),
+          ];
+        },
+      },
+      // #channel refs: only a known channel becomes a link.
+      {
+        pattern: createRaftChannelRefRegex(),
+        replace: (match) => {
+          const [, name] = match;
+          if (!channelNameSet.has(name.toLowerCase())) return false;
+          return messageTokenNode("a", `#${name}`, { dataChannel: name });
+        },
+      },
+    ];
+
+    return () => (tree: MdastRoot, file: VFile) => {
+      repairGeneratedMarkdown(tree, file);
+      unwrapDmKindStrikethrough(tree, file);
+      replaceLinksInTree(tree, (link) => {
+        // `[label](<target>)` and `<dm:@peer>`: the parser made these links,
+        // and only the angle-bracket forms are refs (`[x](#general)` is not).
+        const source = file.value ? String(file.value).slice(link.position?.start.offset ?? 0, link.position?.end.offset ?? 0) : "";
+        const isLabelled = /\]\(<[^<>\n]+>\)$/.test(source);
+        const isAutolink = source === `<${link.url}>`;
+        if (!isLabelled && !isAutolink) return null;
+        const target = parseRaftRefTarget(link.url);
+        if (!target) return null;
+        return raftRefAnchor(target, isLabelled ? plainTextOf(link) : formatRaftRefTarget(target));
+      });
+      replaceTokensInTree(tree, matchers, file);
+      highlightThreadSearchInTree(tree, threadSearchHighlightQuery ?? "");
+    };
+  }, [
+    channels, mentionMap, structuredMentionMap, knownTaskNumbers, threadRefAuthorityUnavailable,
+    refAuthorityServerSlug, currentServerSlug, threadSearchHighlightQuery,
+  ]);
+  const remarkPlugins = useMemo(
+    () => messageMarkdownRemarkPlugins(messageRefsPlugin),
+    [messageRefsPlugin],
   );
-
-  // Protect code regions from mention/channel replacement.
-  // Fenced code blocks (```...```) and inline code (`...`) are replaced with
-  // null-byte placeholders so @mention and #channel regexes skip them.
-  const codePlaceholders: string[] = [];
-  const protectCode = (s: string) => {
-    // Fenced code blocks first (greedy across lines)
-    s = s.replace(/```[\s\S]*?```/g, (match) => {
-      const idx = codePlaceholders.length;
-      codePlaceholders.push(match);
-      return `\x00CODE${idx}\x00`;
-    });
-    // Then inline code (backticks — handles `` double backtick `` too)
-    s = s.replace(/``[^`]+``|`[^`]+`/g, (match) => {
-      const idx = codePlaceholders.length;
-      codePlaceholders.push(match);
-      return `\x00CODE${idx}\x00`;
-    });
-    return s;
-  };
-  const restoreCode = (s: string) =>
-    // oxlint-disable-next-line no-control-regex -- NUL (\u0000) is an intentional private sentinel wrapping placeholder tokens; it never appears in user markdown, so matching it is safe and deliberate
-    s.replace(/\x00CODE(\d+)\x00/g, (_m, idx) => codePlaceholders[Number(idx)]);
-
-  // Convert literal \n sequences to actual newlines so markdown/remark-breaks
-  // can handle them. This is needed because some LLM outputs contain escaped
-  // newlines instead of real ones. Code blocks are already protected above.
-  processed = protectCode(processed);
-  processed = processed.replace(/\\n/g, "\n");
-  processed = normalizeGeneratedStrongClosingWhitespace(processed);
-  const raftRefPlaceholders: string[] = [];
-  processed = replaceRaftRefMarkdownWithPlaceholders(processed, raftRefPlaceholders);
-  processed = escapeUserRawHtmlForMessageMarkdown(processed);
-  const markdownLinkPlaceholders: string[] = [];
-  processed = protectMessageMarkdownLinks(processed, markdownLinkPlaceholders);
-
-  // Pre-process thread references: #channel:shortId or dm:@peer:shortId.
-  // These MUST run before the mention passes: `dm:@peer(:shortId)?` contains
-  // `@peer`, and letting mentions claim it first breaks the ref token into
-  // `dm:` + mention chip (+ `:shortId`), which is exactly the production
-  // regression where `dm:@artin:1f1def75` stopped being clickable.
-  // Placeholders also avoid double-processing by the channel regex.
-  const threadPlaceholders: string[] = [];
-  const channelNameSet = new Set(channels.map((c) => c.name.toLowerCase()));
-  processed = processed.replace(createRaftChannelThreadRefRegex(), (match, chanName: string, shortId: string) => {
-    if (threadRefAuthorityUnavailable) {
-      const idx = threadPlaceholders.length;
-      threadPlaceholders.push(`<span>${match}</span>`);
-      return `\x00THREAD${idx}\x00`;
-    }
-    const crossServerAuthority = !!refAuthorityServerSlug
-      && !!currentServerSlug
-      && refAuthorityServerSlug !== currentServerSlug;
-    if (!channelNameSet.has(chanName.toLowerCase()) && !crossServerAuthority) return match;
-    const chan = channels.find((c) => c.name.toLowerCase() === chanName.toLowerCase() && (c.type === "channel" || c.type === "private" || c.type === "joint"));
-    const html = `<a data-thread-ref="${shortId}" data-thread-parent="${crossServerAuthority ? "" : chan?.id || ""}" data-thread-parent-name="${chanName}">#${chanName}:${shortId}</a>`;
-    const idx = threadPlaceholders.length;
-    threadPlaceholders.push(html);
-    return `\x00THREAD${idx}\x00`;
-  });
-  processed = processed.replace(createRaftDmThreadRefRegex(), (_match, peerName: string, shortId: string) => {
-    if (threadRefAuthorityUnavailable) {
-      const idx = threadPlaceholders.length;
-      threadPlaceholders.push(`<span>${escapeMessageHtmlText(_match)}</span>`);
-      return `\x00THREAD${idx}\x00`;
-    }
-    const crossServerAuthority = !!refAuthorityServerSlug
-      && !!currentServerSlug
-      && refAuthorityServerSlug !== currentServerSlug;
-    const dm = findDmByPeer(channels, peerName);
-    if (!dm && !crossServerAuthority) {
-      // Unresolvable refs must read identically to the source — protect the
-      // whole token as plain text instead of letting the mention pass chip
-      // `@peer` out of it.
-      const idx = threadPlaceholders.length;
-      threadPlaceholders.push(`<span>${escapeMessageHtmlText(_match)}</span>`);
-      return `\x00THREAD${idx}\x00`;
-    }
-    const html = `<a data-thread-ref="${shortId}" data-thread-parent="${crossServerAuthority ? "" : dm?.id || ""}" data-thread-parent-name="${crossServerAuthority ? peerName : dm?.name || peerName}" data-thread-parent-type="dm">${escapeMessageHtmlText(`dm:@${peerName}:${shortId}`)}</a>`;
-    const idx = threadPlaceholders.length;
-    threadPlaceholders.push(html);
-    return `\x00THREAD${idx}\x00`;
-  });
-  // Bare `dm:@peer` refs: claim the whole token (same preemption rule) and
-  // render through the raft-ref anchor path, which navigates to the DM.
-  processed = processed.replace(createRaftDmRefRegex(), (_match, peerName: string) => {
-    const dm = findDmByPeer(channels, peerName);
-    if (!dm) {
-      const idx = threadPlaceholders.length;
-      threadPlaceholders.push(`<span>${escapeMessageHtmlText(_match)}</span>`);
-      return `\x00THREAD${idx}\x00`;
-    }
-    const index = raftRefPlaceholders.length;
-    raftRefPlaceholders.push(makeRaftRefAnchor({ kind: "dm", peerName }, _match));
-    return `\x00RAFTREF${index}\x00`;
-  });
-
-  // `dm:@name~bot` (unknown peer kind) is not a ref: keep it plain text so
-  // neither `dm:@name` nor the mention pass turns it into another target.
-  processed = processed.replace(createRaftMalformedDmKindRefRegex(), (match) => {
-    const idx = threadPlaceholders.length;
-    threadPlaceholders.push(`<span>${escapeMessageHtmlText(match)}</span>`);
-    return `\x00THREAD${idx}\x00`;
-  });
-
-  const mentionPlaceholders: string[] = [];
-  const storeMentionPlaceholder = (name: string, entry: MentionEntry) => {
-    const safeName = name.replace(/"/g, "&quot;");
-    const resolvedMention = resolveMentionByIdentity(entry.type, entry.id);
-    const visibleLabel = resolvedMention?.displayName
-      ? `@${resolvedMention.displayName}`
-      : `@${name}`;
-    const index = mentionPlaceholders.length;
-    mentionPlaceholders.push(
-      `<a data-mention="${safeName}" data-mention-type="${entry.type}" data-mention-id="${entry.id}">${escapeMessageHtmlText(visibleLabel)}</a>`,
-    );
-    return `\x00MENTION${index}\x00`;
-  };
-
-  // A selected mention is an identity-backed entity, not a fresh username
-  // guess. Keep it mentionable after left-boundary edits such as
-  // `草案@Mona` and before CJK suffixes such as `@Mona的`; a Latin right
-  // boundary still prevents a stale `@Mona` entity from claiming `@Monica`.
-  for (const [name, entry] of structuredMentionMap) {
-    const selectedMentionRegex = createRaftStructuredUserRefRegex(name);
-    if (!selectedMentionRegex) continue;
-    processed = processed.replace(selectedMentionRegex, () => storeMentionPlaceholder(name, entry));
-  }
-
-  // Free text still uses the conservative grammar so emails/package-like
-  // strings never become notifications merely because a directory name
-  // happens to match.
-  processed = processed.replace(createRaftUserRefRegex(), (match, prefix: string, token: string) => {
-    const resolved = resolveRaftMentionHandle(
-      token,
-      (name) => structuredMentionMap.has(name) || mentionMap.has(name),
-    );
-    if (!resolved) return match; // Not a known name — keep as plain text
-    const { handle: name, suffix } = resolved;
-    const entry = structuredMentionMap.get(name) ?? mentionMap.get(name);
-    if (!entry) return match;
-    return `${prefix}${storeMentionPlaceholder(name, entry)}${suffix}`;
-  });
-
-  // Pre-process task references: "task #205" always links; bare "#205" only if it's a known task
-  const taskPlaceholders: string[] = [];
-  processed = processed.replace(createRaftBareTaskRefRegex(), (match, prefix: string, taskKeyword: string | undefined, taskNumber: string) => {
-    const hasExplicitPrefix = !!taskKeyword;
-    const isKnownTask = knownTaskNumbers?.has(Number(taskNumber));
-    if (!hasExplicitPrefix && !isKnownTask) return match;
-    const html = `<a data-task-ref="${taskNumber}">#${taskNumber}</a>`;
-    const idx = taskPlaceholders.length;
-    taskPlaceholders.push(html);
-    return `${prefix}${taskKeyword ?? ""}\x00TASK${idx}\x00`;
-  });
-
-  // Pre-process #channel references: only replace if name matches a known channel
-  processed = processed.replace(createRaftChannelRefRegex(), (match, name: string) => {
-    if (!channelNameSet.has(name.toLowerCase())) return match; // Not a known channel — keep as plain text
-    return `<a data-channel="${name}">#${name}</a>`;
-  });
-
-  // Restore task/thread placeholders, then code placeholders
-  // oxlint-disable-next-line no-control-regex -- NUL (\u0000) is an intentional private sentinel wrapping placeholder tokens; it never appears in user markdown, so matching it is safe and deliberate
-  processed = processed.replace(/\x00TASK(\d+)\x00/g, (_m, idx) => taskPlaceholders[Number(idx)]);
-  // oxlint-disable-next-line no-control-regex -- NUL (\u0000) is an intentional private sentinel wrapping placeholder tokens; it never appears in user markdown, so matching it is safe and deliberate
-  processed = processed.replace(/\x00THREAD(\d+)\x00/g, (_m, idx) => threadPlaceholders[Number(idx)]);
-  processed = restoreRaftRefPlaceholders(processed, raftRefPlaceholders);
-  // oxlint-disable-next-line no-control-regex -- NUL is an internal placeholder delimiter removed before rendering
-  processed = processed.replace(/\x00MENTION(\d+)\x00/g, (_m, idx) => mentionPlaceholders[Number(idx)] ?? "");
-  processed = highlightThreadSearchMarkdownFragments(processed, threadSearchHighlightQuery ?? "");
-  processed = restoreMessageMarkdownLinkPlaceholders(processed, markdownLinkPlaceholders);
-  processed = restoreCode(processed);
 
   // Chat body shares its visual styling (code blocks, lists, headings, table,
   // etc.) with attachment preview via BASE_MARKDOWN_COMPONENTS in
@@ -947,6 +780,7 @@ function useRenderMessageMarkdown(
             if (target.kind === "user") {
               const entry = structuredMentionMap.get(target.name) ?? mentionMap.get(target.name);
               if (!entry) return <span>{children}</span>;
+              if (mentionsDisplayOnly) return renderDisplayOnlyMention(children);
               return (
                 <MentionLink
                   mentionType={entry.type}
@@ -1172,7 +1006,7 @@ function useRenderMessageMarkdown(
                     e.preventDefault();
                     onOpenTaskRef(target.taskNumber);
                   }}>
-                  <Badge variant="muted" uppercase={false}>{children}</Badge>
+                  <Badge variant="muted">{children}</Badge>
                 </a>
               );
             }
@@ -1186,9 +1020,10 @@ function useRenderMessageMarkdown(
             const mentionType = node?.properties?.dataMentionType as string | undefined;
             const mentionId = node?.properties?.dataMentionId as string | undefined;
 
+            if (mentionsDisplayOnly) return renderDisplayOnlyMention(children);
             if (!mentionId || (mentionType !== "agent" && mentionType !== "user" && mentionType !== "external")) {
               return (
-                <span className="font-bold text-foreground-strong underline decoration-line-muted decoration-2 underline-offset-2 select-text theme-brutal:text-black theme-brutal:decoration-black/30">
+                <span className="font-bold text-foreground underline decoration-foreground-hint decoration-[1.5px] underline-offset-[3px] select-text">
                   {children}
                 </span>
               );
@@ -1303,7 +1138,7 @@ function useRenderMessageMarkdown(
             if (!Number.isInteger(taskNumber) || taskNumber <= 0) {
               return (
                 <span className="opacity-60">
-                  <Badge variant="muted" uppercase={false}>{children}</Badge>
+                  <Badge variant="muted">{children}</Badge>
                 </span>
               );
             }
@@ -1318,7 +1153,7 @@ function useRenderMessageMarkdown(
                   e.preventDefault();
                   onOpenTaskRef(taskNumber);
                 }}>
-                <Badge variant="muted" uppercase={false}>{children}</Badge>
+                <Badge variant="muted">{children}</Badge>
               </a>
             );
           }
@@ -1366,7 +1201,7 @@ function useRenderMessageMarkdown(
               href={href}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-brutal-pink select-text"
+              className="text-foreground-link underline decoration-2 underline-offset-2 hover:decoration-attention select-text"
             >
               {children}
             </a>
@@ -1404,13 +1239,14 @@ function useRenderMessageMarkdown(
       onNavigateDm, onOpenThread, onOpenMessageRef, onOpenTaskRef, onOpenPermalink,
       formatMessage, channels, refAuthorityServerSlug, currentServerSlug,
       threadRefAuthorityUnavailable, resolvingThreadRefKey, renderTaskBadge,
-      timeFormatOptions, unavailableQuotedPermalinkUrl,
+      timeFormatOptions, unavailableQuotedPermalinkUrl, mentionsDisplayOnly,
     ]);
   return (
     <MarkdownContent
-      source={processed}
+      source={content}
       density="compact"
       enableMermaid
+      remarkPlugins={remarkPlugins}
       rehypePlugins={MESSAGE_MARKDOWN_REHYPE_PLUGINS}
       components={markdownComponents}
     />
@@ -1497,41 +1333,17 @@ function renderWithImageInlineFallback(
   return <ImageInlineFallbackLoader fallbackKey={fallbackKey}>{children}</ImageInlineFallbackLoader>;
 }
 
-export function AttachmentMetaText({
-  label,
-  sizeBytes,
-}: {
-  label: string;
-  sizeBytes?: number;
-}) {
-  const { formatMessage } = useIntl();
-  return (
-    <MessageAttachmentMetaStart
-      data-message-affordance="attachment-meta"
-      className="inline-flex max-w-full items-center gap-1.5"
-    >
-      <span data-message-affordance="attachment-meta-label" className="min-w-0 flex-1 truncate">{label}</span>
-      {sizeBytes && sizeBytes > 0 ? (
-        <>
-          <span className="shrink-0 text-foreground-placeholder theme-brutal:text-black/35">·</span>
-          <span data-message-affordance="attachment-meta-size" className="shrink-0">{formatFileSizeBytes(sizeBytes, formatMessage)}</span>
-        </>
-      ) : null}
-    </MessageAttachmentMetaStart>
-  );
-}
-
 function DiffPatchStatsLine({ preview }: { preview: DiffAttachmentPreview | null }) {
   const { formatMessage } = useIntl();
   if (!preview) {
-    return <span className="text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.diffPreview" })}</span>;
+    return <span className="text-foreground-hint">{formatMessage({ id: "message.messageItem.diffPreview" })}</span>;
   }
 
   const { files, hunks, additions, deletions } = preview.stats;
 
   return (
     <MessageAttachmentDiffSummary className="inline-flex min-w-0 items-center">
-      <span className="text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.diffStats" }, { fileCount: files, hunkCount: hunks })}</span>
+      <span className="text-foreground-hint">{formatMessage({ id: "message.messageItem.diffStats" }, { fileCount: files, hunkCount: hunks })}</span>
       <MessageAttachmentDiffAddition>+{additions}</MessageAttachmentDiffAddition>
       <MessageAttachmentDiffDeletion>-{deletions}</MessageAttachmentDiffDeletion>
     </MessageAttachmentDiffSummary>
@@ -1541,25 +1353,25 @@ function DiffPatchStatsLine({ preview }: { preview: DiffAttachmentPreview | null
 function DocumentPreviewSummaryLine({ preview }: { preview: DocumentAttachmentPreviewState | null }) {
   const { formatMessage } = useIntl();
   if (!preview) {
-    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.documentPreview" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-hint">{formatMessage({ id: "message.messageItem.documentPreview" })}</span>;
   }
 
   if (preview.preview.kind === "csv") {
     const id = preview.truncated
       ? "message.messageItem.documentSummaryFirst"
       : "message.messageItem.documentSummaryPreview";
-    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id }, { rowCount: preview.preview.rows.length, columnCount: preview.preview.columnCount })}</span>;
+    return <span className="min-w-0 truncate text-foreground-hint">{formatMessage({ id }, { rowCount: preview.preview.rows.length, columnCount: preview.preview.columnCount })}</span>;
   }
   if (preview.preview.kind === "markdown") {
-    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.markdownDocument" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-hint">{formatMessage({ id: "message.messageItem.markdownDocument" })}</span>;
   }
   if (preview.preview.kind === "text") {
-    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.plainTextDocument" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-hint">{formatMessage({ id: "message.messageItem.plainTextDocument" })}</span>;
   }
   if (preview.preview.kind === "xlsx") {
-    return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.xlsxDocument" })}</span>;
+    return <span className="min-w-0 truncate text-foreground-hint">{formatMessage({ id: "message.messageItem.xlsxDocument" })}</span>;
   }
-  return <span className="min-w-0 truncate text-foreground-muted theme-brutal:text-black/70">{formatMessage({ id: "message.messageItem.pdfDocument" })}</span>;
+  return <span className="min-w-0 truncate text-foreground-hint">{formatMessage({ id: "message.messageItem.pdfDocument" })}</span>;
 }
 
 // Locale-aware document-preview label for attachment card metadata. The modal
@@ -1649,7 +1461,6 @@ function AttachmentCard({
     return (
       <AttachmentChip
         attachment={attachment}
-        variant="compact"
         isOptimistic={isOptimistic}
         onClick={handleDownload}
         affordance="download"
@@ -1663,7 +1474,6 @@ function AttachmentCard({
     return (
       <AttachmentChip
         attachment={attachment}
-        variant="compact"
         isOptimistic={isOptimistic}
         loading={isHtmlLoading}
         loadingLabel={formatMessage({ id: "message.messageItem.openingPreview" })}
@@ -1690,14 +1500,12 @@ function AttachmentCard({
   return (
     <AttachmentChip
       attachment={attachment}
-      variant="wide"
       isOptimistic={isOptimistic}
       loading={isHtmlLoading}
       loadingLabel={formatMessage({ id: "message.messageItem.openingPreview" })}
       onClick={primaryOnClick}
       affordance={primaryAffordance}
       affordanceName={primaryAffordanceName}
-      icon={isVideo ? <Play size={16} className="text-foreground-muted" /> : isAudio ? <Music size={16} className="text-foreground-muted" /> : undefined}
       meta={<AttachmentMetaText label={primaryMetaLabel} sizeBytes={attachment.sizeBytes} />}
       secondaryDownload={audioSecondaryDownload}
     />
@@ -1718,12 +1526,13 @@ function InlineVideoAttachmentCard({
   const { formatMessage } = useIntl();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const requestRef = useRef<Promise<void> | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const [fetchedUrl, setFetchedUrl] = useState<string | null>(null);
-  const [loadingUrl, setLoadingUrl] = useState(false);
-  const [loadFailed, setLoadFailed] = useState(false);
-  const inlineUrl = attachment.localPreviewUrl ?? fetchedUrl;
+  const media = useRefreshingMediaUrl({
+    attachmentId: attachment.id,
+    localPreviewUrl: attachment.localPreviewUrl,
+    disabled: isOptimistic,
+    mediaKind: "video",
+  });
+  const { url: inlineUrl, loading: loadingUrl, failure, load: loadInlineVideoUrl, abort: abortInlineVideoUrl } = media;
 
   const handleOpenPreview = useCallback(() => {
     if (!isOptimistic) void onOpenPreview(attachment);
@@ -1732,44 +1541,12 @@ function InlineVideoAttachmentCard({
     void onDownload(attachment);
   }, [onDownload, attachment]);
 
-  const loadInlineVideoUrl = useCallback(() => {
-    if (inlineUrl || isOptimistic || requestRef.current) return;
-    setLoadingUrl(true);
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const request = api.get(`/attachments/${attachment.id}/url?disposition=inline`, { signal: controller.signal })
-      .then(({ data }) => {
-        if (controller.signal.aborted) return;
-        setFetchedUrl(data.url);
-        setLoadFailed(false);
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return;
-        console.error("Failed to load inline video attachment URL:", err);
-        setLoadFailed(true);
-      })
-      .finally(() => {
-        if (requestRef.current === request) {
-          requestRef.current = null;
-        }
-        if (abortRef.current === controller) {
-          abortRef.current = null;
-        }
-        if (!controller.signal.aborted) {
-          setLoadingUrl(false);
-        }
-      });
-    requestRef.current = request;
-  }, [attachment.id, inlineUrl, isOptimistic]);
-
   useEffect(() => {
     const node = containerRef.current;
     if (!node || isOptimistic) return;
     if (typeof window === "undefined" || !("IntersectionObserver" in window)) {
       loadInlineVideoUrl();
-      return () => {
-        abortRef.current?.abort();
-      };
+      return abortInlineVideoUrl;
     }
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -1784,9 +1561,19 @@ function InlineVideoAttachmentCard({
     observer.observe(node);
     return () => {
       observer.disconnect();
-      abortRef.current?.abort();
+      abortInlineVideoUrl();
     };
-  }, [attachment.id, isOptimistic, loadInlineVideoUrl]);
+  }, [attachment.id, isOptimistic, loadInlineVideoUrl, abortInlineVideoUrl]);
+
+  const downloadAction = (
+    <MessageVideoPreviewFailureAction
+      onClick={handleDownload}
+      aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}
+    >
+      <Download size={13} />
+      {formatMessage({ id: "message.messageItem.downloadToView" })}
+    </MessageVideoPreviewFailureAction>
+  );
 
   return (
     <Tooltip content={attachment.filename}>
@@ -1794,7 +1581,7 @@ function InlineVideoAttachmentCard({
       ref={containerRef}
       data-message-affordance="inline-video-preview"
     >
-      {inlineUrl && !loadFailed ? (
+      {inlineUrl && !failure ? (
         <MessageVideoPreviewMedia
           render={<video
             ref={videoRef}
@@ -1803,29 +1590,40 @@ function InlineVideoAttachmentCard({
             controls
             playsInline
             preload="metadata"
-            onError={() => setLoadFailed(true)}
+            {...media.mediaEvents}
           />}
         />
       ) : (
         <MessageVideoPreviewFallback>
           {isOptimistic || loadingUrl ? (
             <Spinner size="md" variant="inverse" aria-label={formatMessage({ id: "common.loadingLabel" })} />
-          ) : loadFailed ? (
+          ) : failure === "unsupported" ? (
             <MessageVideoPreviewFailureContent>
               <MessageVideoPreviewFailureIcon>
                 <AlertTriangle size={24} />
               </MessageVideoPreviewFailureIcon>
               <MessageVideoPreviewFailureTitle>{formatMessage({ id: "message.messageItem.codecWarning" })}</MessageVideoPreviewFailureTitle>
-              <MessageVideoPreviewFailureAction
-                onClick={handleDownload}
-                aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}
-              >
-                <Download size={13} />
-                {formatMessage({ id: "message.messageItem.downloadToView" })}
-              </MessageVideoPreviewFailureAction>
+              {downloadAction}
+            </MessageVideoPreviewFailureContent>
+          ) : failure === "unavailable" ? (
+            <MessageVideoPreviewFailureContent>
+              <MessageVideoPreviewFailureIcon>
+                <AlertTriangle size={24} />
+              </MessageVideoPreviewFailureIcon>
+              <MessageVideoPreviewFailureTitle>{formatMessage({ id: "message.messageItem.videoLoadFailed" })}</MessageVideoPreviewFailureTitle>
+              <div className="flex items-center gap-3">
+                <MessageVideoPreviewFailureAction
+                  onClick={media.retry}
+                  aria-label={formatMessage({ id: "message.messageItem.retryVideoPreview" }, { filename: attachment.filename })}
+                >
+                  <RotateCcw size={13} />
+                  {formatMessage({ id: "message.messageItem.videoRetry" })}
+                </MessageVideoPreviewFailureAction>
+                {downloadAction}
+              </div>
             </MessageVideoPreviewFailureContent>
           ) : (
-            <Play size={32} className="text-white/80" />
+            <Play size={32} />
           )}
         </MessageVideoPreviewFallback>
       )}
@@ -1856,11 +1654,11 @@ function formatAudioTimestamp(seconds: number) {
 function InlineAudioPlayer({
   filename,
   url,
-  onError,
+  mediaEvents,
 }: {
   filename: string;
   url: string;
-  onError: () => void;
+  mediaEvents: ReturnType<typeof useRefreshingMediaUrl>["mediaEvents"];
 }) {
   const { formatMessage } = useIntl();
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -1920,18 +1718,18 @@ function InlineAudioPlayer({
   }, []);
 
   return (
-    <div data-message-affordance="inline-audio-player" className="w-full border border-line-muted bg-layer-inset p-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
+    <div data-message-affordance="inline-audio-player" className="w-full rounded-control bg-fill-muted p-2">
       <div className="flex min-w-0 items-center gap-2">
         <button
           type="button"
           data-message-affordance="audio-play-toggle"
           aria-label={formatMessage({ id: playing ? "message.messageItem.pauseAudio" : "message.messageItem.playAudio" }, { filename })}
-          className="flex size-7 shrink-0 items-center justify-center border border-line-muted bg-layer-panel text-foreground-strong transition-colors hover:bg-primary-soft focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-strong theme-brutal:hover:bg-soft-signal theme-brutal:focus-visible:outline-black"
+          className="flex size-8 shrink-0 items-center justify-center rounded-control border-[1.5px] border-line-strong bg-layer-card text-foreground outline-none hover:press-overlay active:press-overlay focus-visible:shadow-focus"
           onClick={handleTogglePlayback}
         >
-          {playing ? <Pause size={14} fill="currentColor" /> : <Play size={14} fill="currentColor" />}
+          {playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}
         </button>
-        <div className="relative h-7 min-w-0 flex-1">
+        <div className="relative h-8 min-w-0 flex-1">
           <input
             type="range"
             data-message-affordance="audio-seek"
@@ -1942,29 +1740,29 @@ function InlineAudioPlayer({
             step={0.1}
             value={durationKnown ? boundedCurrentTime : 0}
             disabled={!durationKnown}
-            className="peer absolute inset-0 z-10 h-7 w-full opacity-0"
+            className="peer absolute inset-0 z-10 h-8 w-full opacity-0"
             onChange={handleSeek}
           />
           <div
             data-message-affordance="audio-seek-rail"
-            className="pointer-events-none absolute left-0 right-0 top-1/2 h-2 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
+            className="pointer-events-none absolute left-0 right-0 top-1/2 h-2 -translate-y-1/2 overflow-hidden rounded-[4px] border border-line-hairline bg-layer-card peer-focus-visible:shadow-focus"
             aria-hidden="true"
           >
-            <div className="h-full bg-primary-strong theme-brutal:bg-brutal-cyan" style={{ width: `${progress}%` }} />
+            <div className="h-full bg-info" style={{ width: `${progress}%` }} />
           </div>
           <span
             data-message-affordance="audio-seek-thumb"
-            className="pointer-events-none absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:bg-primary-soft peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-line-strong theme-brutal:peer-focus-visible:bg-soft-signal theme-brutal:peer-focus-visible:outline-black"
+            className="pointer-events-none absolute top-1/2 size-3.5 -translate-x-1/2 -translate-y-1/2 rounded-[2px] border-[1.5px] border-line-strong bg-layer-card peer-focus-visible:shadow-focus"
             style={{ left: `${progress}%` }}
             aria-hidden="true"
           />
         </div>
-        <div data-message-affordance="audio-time" className="w-[4.75rem] shrink-0 text-right font-mono text-[11px] font-bold tabular-nums text-foreground-muted">
+        <div data-message-affordance="audio-time" className="w-[4.75rem] shrink-0 text-right font-mono text-mono-meta tabular-nums text-foreground-hint">
           {timeLabel}
         </div>
       </div>
-      <div data-message-affordance="audio-volume-control" className="mt-1.5 flex items-center gap-2 pl-9">
-        <Volume2 size={13} className="shrink-0 text-foreground-muted" aria-hidden="true" />
+      <div data-message-affordance="audio-volume-control" className="mt-1.5 flex items-center gap-2 pl-10">
+        <Volume2 size={16} className="shrink-0 text-foreground-muted" aria-hidden="true" />
         <div className="relative h-6 min-w-0 flex-1">
           <input
             type="range"
@@ -1980,14 +1778,14 @@ function InlineAudioPlayer({
           />
           <div
             data-message-affordance="audio-volume-rail"
-            className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-2 peer-focus-visible:outline-black"
+            className="pointer-events-none absolute left-0 right-0 top-1/2 h-1.5 -translate-y-1/2 overflow-hidden rounded-[3px] border border-line-hairline bg-layer-card peer-focus-visible:shadow-focus"
             aria-hidden="true"
           >
-            <div className="h-full bg-primary-strong theme-brutal:bg-soft-signal" style={{ width: `${volumeProgress}%` }} />
+            <div className="h-full bg-foreground-muted" style={{ width: `${volumeProgress}%` }} />
           </div>
           <span
             data-message-affordance="audio-volume-thumb"
-            className="pointer-events-none absolute top-1/2 size-2.5 -translate-x-1/2 -translate-y-1/2 border border-line-muted bg-layer-panel peer-focus-visible:bg-primary-soft peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-offset-1 peer-focus-visible:outline-line-strong theme-brutal:peer-focus-visible:bg-soft-signal theme-brutal:peer-focus-visible:outline-black"
+            className="pointer-events-none absolute top-1/2 size-3 -translate-x-1/2 -translate-y-1/2 rounded-[2px] border-[1.5px] border-line-strong bg-layer-card peer-focus-visible:shadow-focus"
             style={{ left: `${volumeProgress}%` }}
             aria-hidden="true"
           />
@@ -1999,13 +1797,22 @@ function InlineAudioPlayer({
         src={url}
         preload="metadata"
         className="hidden"
-        onLoadedMetadata={syncMediaState}
+        onLoadedMetadata={(event) => {
+          syncMediaState();
+          mediaEvents.onLoadedMetadata(event);
+        }}
         onDurationChange={syncMediaState}
         onTimeUpdate={syncMediaState}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
+        onPlay={() => {
+          setPlaying(true);
+          mediaEvents.onPlay();
+        }}
+        onPause={() => {
+          setPlaying(false);
+          mediaEvents.onPause();
+        }}
         onEnded={() => setPlaying(false)}
-        onError={onError}
+        onError={mediaEvents.onError}
       />
     </div>
   );
@@ -2022,56 +1829,25 @@ function InlineAudioAttachmentCard({
 }) {
   const { formatMessage } = useIntl();
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const requestRef = useRef<Promise<void> | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-  const [fetchedUrl, setFetchedUrl] = useState<string | null>(null);
-  const [loadingUrl, setLoadingUrl] = useState(false);
-  const [loadFailed, setLoadFailed] = useState(false);
-  const inlineUrl = attachment.localPreviewUrl ?? fetchedUrl;
+  const media = useRefreshingMediaUrl({
+    attachmentId: attachment.id,
+    localPreviewUrl: attachment.localPreviewUrl,
+    disabled: isOptimistic,
+    mediaKind: "audio",
+  });
+  const { url: inlineUrl, loading: loadingUrl, load: loadInlineAudioUrl, abort: abortInlineAudioUrl } = media;
+  const loadFailed = media.failure !== null;
 
-  const handleAudioLoadError = useCallback(() => setLoadFailed(true), []);
   const handleDownload = useCallback(() => {
     void onDownload(attachment);
   }, [onDownload, attachment]);
-
-  const loadInlineAudioUrl = useCallback(() => {
-    if (inlineUrl || isOptimistic || requestRef.current) return;
-    setLoadingUrl(true);
-    const controller = new AbortController();
-    abortRef.current = controller;
-    const request = api.get(`/attachments/${attachment.id}/url?disposition=inline`, { signal: controller.signal })
-      .then(({ data }) => {
-        if (controller.signal.aborted) return;
-        setFetchedUrl(data.url);
-        setLoadFailed(false);
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return;
-        console.error("Failed to load inline audio attachment URL:", err);
-        setLoadFailed(true);
-      })
-      .finally(() => {
-        if (requestRef.current === request) {
-          requestRef.current = null;
-        }
-        if (abortRef.current === controller) {
-          abortRef.current = null;
-        }
-        if (!controller.signal.aborted) {
-          setLoadingUrl(false);
-        }
-      });
-    requestRef.current = request;
-  }, [attachment.id, inlineUrl, isOptimistic]);
 
   useEffect(() => {
     const node = containerRef.current;
     if (!node || isOptimistic) return;
     if (typeof window === "undefined" || !("IntersectionObserver" in window)) {
       loadInlineAudioUrl();
-      return () => {
-        abortRef.current?.abort();
-      };
+      return abortInlineAudioUrl;
     }
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -2084,9 +1860,9 @@ function InlineAudioAttachmentCard({
     observer.observe(node);
     return () => {
       observer.disconnect();
-      abortRef.current?.abort();
+      abortInlineAudioUrl();
     };
-  }, [attachment.id, isOptimistic, loadInlineAudioUrl]);
+  }, [attachment.id, isOptimistic, loadInlineAudioUrl, abortInlineAudioUrl]);
 
   const downloadButton = (
     <Tooltip content={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}>
@@ -2094,14 +1870,14 @@ function InlineAudioAttachmentCard({
       type="button"
       data-message-affordance="audio-download"
       aria-label={formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename })}
-      className="flex size-7 items-center justify-center border border-line-muted bg-layer-panel text-foreground-muted hover:bg-primary-soft hover:text-foreground-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-strong theme-brutal:hover:bg-soft-signal theme-brutal:focus-visible:outline-black"
+      className="flex size-8 items-center justify-center rounded-control text-foreground outline-none hover:bg-fill-pressed active:bg-fill-pressed focus-visible:shadow-focus"
       onClick={(event) => {
         event.preventDefault();
         event.stopPropagation();
         handleDownload();
       }}
     >
-      <Download size={14} />
+      <Download size={18} />
     </button>
     </Tooltip>
   );
@@ -2113,15 +1889,15 @@ function InlineAudioAttachmentCard({
       className="w-full max-w-xl"
     >
       {inlineUrl && !loadFailed ? (
-        <div className={INLINE_AUDIO_PREVIEW_CARD_CLASS}>
+        <Card className={INLINE_AUDIO_PREVIEW_CARD_CLASS}>
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <div className="flex size-8 shrink-0 items-center justify-center border border-line-muted bg-primary-soft text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
-                <Music size={16} className="text-current" />
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-chip bg-fill-muted text-foreground-muted">
+                <Music size={18} className="text-current" />
               </div>
               <div className="min-w-0">
-                <Tooltip content={attachment.filename}><div className="truncate text-sm font-bold text-foreground-strong">{attachment.filename}</div></Tooltip>
-                <div className="text-xs font-bold text-foreground-hint">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
+                <Tooltip content={attachment.filename}><div className="truncate text-callout font-semibold text-foreground">{attachment.filename}</div></Tooltip>
+                <div className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
               </div>
             </div>
             {downloadButton}
@@ -2130,26 +1906,26 @@ function InlineAudioAttachmentCard({
             key={inlineUrl}
             filename={attachment.filename}
             url={inlineUrl}
-            onError={handleAudioLoadError}
+            mediaEvents={media.mediaEvents}
           />
-        </div>
+        </Card>
       ) : (
-        <div className={INLINE_AUDIO_PREVIEW_CARD_CLASS}>
+        <Card className={INLINE_AUDIO_PREVIEW_CARD_CLASS}>
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2">
-              <div className="flex size-8 shrink-0 items-center justify-center border border-line-muted bg-primary-soft text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
-                <Music size={16} className="text-current" />
+              <div className="flex size-9 shrink-0 items-center justify-center rounded-chip bg-fill-muted text-foreground-muted">
+                <Music size={18} className="text-current" />
               </div>
               <div className="min-w-0">
-                <Tooltip content={attachment.filename}><div className="truncate text-sm font-bold text-foreground-strong">{attachment.filename}</div></Tooltip>
-                <div className="text-xs font-bold text-foreground-hint">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
+                <Tooltip content={attachment.filename}><div className="truncate text-callout font-semibold text-foreground">{attachment.filename}</div></Tooltip>
+                <div className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "message.messageItem.audioFile" })}</div>
               </div>
             </div>
             {!isOptimistic && !loadFailed ? downloadButton : null}
           </div>
           <button
             type="button"
-            className={`flex h-10 w-full items-center justify-center border border-line-muted bg-layer-inset text-xs font-bold text-foreground-muted theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:text-black/70 ${loadFailed ? "hover:bg-primary-soft hover:text-foreground-strong theme-brutal:hover:bg-soft-signal theme-brutal:hover:text-black" : "cursor-default"}`}
+            className={`flex h-10 w-full items-center justify-center rounded-control bg-fill-muted text-footnote font-semibold text-foreground-muted outline-none focus-visible:shadow-focus ${loadFailed ? "hover:press-overlay active:press-overlay" : "cursor-default"}`}
             onClick={loadFailed ? handleDownload : undefined}
             aria-label={loadFailed ? formatMessage({ id: "message.messageItem.downloadFile" }, { filename: attachment.filename }) : formatMessage({ id: "message.messageItem.loadingFile" }, { filename: attachment.filename })}
           >
@@ -2160,14 +1936,14 @@ function InlineAudioAttachmentCard({
               </span>
             ) : loadFailed ? (
               <span className="inline-flex items-center gap-1.5">
-                <Download size={13} />
+                <Download size={16} />
                 {formatMessage({ id: "message.messageItem.downloadToView" })}
               </span>
             ) : (
               <span>{formatMessage({ id: "message.messageItem.loadingFile" }, { filename: attachment.filename })}</span>
             )}
           </button>
-        </div>
+        </Card>
       )}
     </div>
   );
@@ -2203,6 +1979,8 @@ function buildLightboxCommentContexts(
 
 export interface ReadOnlySenderProjection {
   displayName: string;
+  /** Stable public @handle. Absent while web and server versions roll. */
+  handle?: string | null;
   avatarUrl: string | null;
   description: string | null;
 }
@@ -2242,6 +2020,9 @@ interface MessageItemProps {
   /** Display-only identity from a narrow public DTO. It never grants profile
    * navigation, mention authority, or access to a member/agent store row. */
   readOnlySender?: ReadOnlySenderProjection;
+  /** Read-only projection: the inline reply preview, supplied by the host page
+   *  because a read-only page has no thread store to read it from. */
+  readOnlyReplyScope?: ThreadRepliesScope;
   onReadOnlyNavigateChannel?: (channel: Channel) => void;
   onBeforeOpenThread?: () => void;
   onOpenThread?: (request: OpenThreadRequest) => void;
@@ -2265,6 +2046,12 @@ interface MessageItemProps {
   /** Rhythm marker (messageGrouping.followsSystemFor): this row directly
    * follows a system note, whose 12/12 rhythm the row completes. */
   followsSystem?: boolean;
+  /**
+   * #693 DM read status (artin, option C): set by ChatPanel on the LAST message
+   * of a DM at the live edge. The status line renders below this message only
+   * when it is also the viewer's own message and the peer has read it.
+   */
+  showDmReadStatus?: boolean;
 }
 
 // Isolated subscriber — only re-renders when this agent's activity changes.
@@ -2304,6 +2091,7 @@ function MessageSenderAvatar({
   email,
   hoverAgent,
   hoverMember,
+  readOnlySender,
   externalAvatarUrl,
   externalDisplayName,
   externalProvider,
@@ -2327,6 +2115,7 @@ function MessageSenderAvatar({
   email?: string | null;
   hoverAgent?: Agent | null;
   hoverMember?: ServerMember | null;
+  readOnlySender?: ReadOnlySenderProjection;
   externalAvatarUrl?: string | null;
   externalDisplayName: string;
   externalProvider?: string | null;
@@ -2512,11 +2301,12 @@ function MessageSenderAvatar({
             </button>
           }
         />
-        <PreviewCardContent sideOffset={6} collisionPadding={6} className="w-[280px]">
+        <PreviewCardContent sideOffset={6} collisionPadding={6}>
           <ProfilePreviewCardContent
             mentionType={mentionType}
             mentionId={senderId}
             fallbackAgent={hoverAgent}
+            readOnlyProfile={readOnlySender}
             onOpenAgentActivity={onOpenAgentActivity}
           />
         </PreviewCardContent>
@@ -2557,8 +2347,8 @@ function MessageSenderAvatar({
           </button>
         }
       />
-      <PreviewCardContent sideOffset={6} collisionPadding={6} className="w-[280px]">
-        <ProfilePreviewCardContent mentionType={mentionType} mentionId={senderId} fallbackMember={hoverMember} />
+      <PreviewCardContent sideOffset={6} collisionPadding={6}>
+        <ProfilePreviewCardContent mentionType={mentionType} mentionId={senderId} fallbackMember={hoverMember} readOnlyProfile={readOnlySender} />
       </PreviewCardContent>
     </PreviewCard>
   );
@@ -2682,6 +2472,9 @@ interface MessageMarkdownBodyProps {
   channelParticipantMembersById?: ReadonlyMap<string, ServerMember>;
   channelParticipantExternalsById?: ReadonlyMap<string, ChannelExternalMember>;
   unavailableQuotedPermalinkUrl?: string | null;
+  /** Read-only projection: mentions are highlighted text, never profile links
+   *  or hover cards (those read member stores and load profiles). */
+  mentionsDisplayOnly?: boolean;
 }
 
 // Memoized markdown body. `renderContent` runs the full markdown preprocessing
@@ -2726,6 +2519,7 @@ const MessageMarkdownBody = memo(function MessageMarkdownBody(props: MessageMark
     props.channelParticipantMembersById,
     props.channelParticipantExternalsById,
     props.unavailableQuotedPermalinkUrl,
+    props.mentionsDisplayOnly,
   );
   return (
     <MessageReadReceiptScopeProvider value={readReceiptScope}>
@@ -2757,7 +2551,16 @@ function taskAssigneeHandle(claimedByName: string) {
 
 const ignoreReadOnlyProjectionNavigation = () => undefined;
 
-const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, mentionMap, channels, previewSenderAgent, previewSenderMember, channelParticipantAgentsById, channelParticipantMembersById, channelParticipantExternalsById, threadSummary, parentChannelId, parentMessageId, hideThreadActions, showThreadFollowAction, linkedTask, senderAvatarTestId, mentionComposerChannelId, reactionParentScopeKey, canReact = true, readOnlyProjection = false, readOnlySender, onReadOnlyNavigateChannel, onBeforeOpenThread, onOpenThread, onOpenProfile, threadSearchHighlightQuery, threadSearchActive, groupState, followedBy, followsSystem, className }: MessageItemProps) {
+/** A mention on a read-only projection: the member highlight, no link. */
+function renderDisplayOnlyMention(children: ReactNode) {
+  return (
+    <MessageReferenceText variant="secondary" render={<span data-message-mention="display-only" />}>
+      {children}
+    </MessageReferenceText>
+  );
+}
+
+const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, mentionMap, channels, previewSenderAgent, previewSenderMember, channelParticipantAgentsById, channelParticipantMembersById, channelParticipantExternalsById, threadSummary, parentChannelId, parentMessageId, hideThreadActions, showThreadFollowAction, linkedTask, senderAvatarTestId, mentionComposerChannelId, reactionParentScopeKey, canReact = true, readOnlyProjection = false, readOnlySender, readOnlyReplyScope, onReadOnlyNavigateChannel, onBeforeOpenThread, onOpenThread, onOpenProfile, threadSearchHighlightQuery, threadSearchActive, groupState, followedBy, followsSystem, showDmReadStatus = false, className }: MessageItemProps) {
   // Feature flag gate: outside enabled scope, NO comment
   // affordance renders — preview comments context, re: chips, chip counts.
   const commentsEnabled = useAttachmentCommentsEnabled(!readOnlyProjection);
@@ -2776,8 +2579,12 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
     ? null
     : getHumanDepartureLabel(message.senderMembershipStatus);
   const structuredMentionMap = useMemo(() => buildStructuredMentionMap(message.mentions), [message.mentions]);
-  const effectiveMentionMap = isExternal ? EXTERNAL_MESSAGE_MENTION_MAP : mentionMap;
-  const effectiveStructuredMentionMap = isExternal ? EXTERNAL_MESSAGE_MENTION_MAP : structuredMentionMap;
+  // A read-only projection has no member directory: its only mention facts are
+  // the display-only ones carried on the message, which also supply the label.
+  const effectiveMentionMap = readOnlyProjection
+    ? structuredMentionMap
+    : isExternal ? EXTERNAL_MESSAGE_MENTION_MAP : mentionMap;
+  const effectiveStructuredMentionMap = structuredMentionMap;
   const { formatMessageTime, formatClock, formatMediumDateTime, options: timeFormatOptions } = useTimeFormatter();
   const intl = useIntl();
   const { formatMessage } = intl;
@@ -2822,8 +2629,12 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
     senderAgent?.runtime,
     senderAgent?.model,
   );
+  // A hosted agent's runtime/model are the "External agent" placeholders; name the hosting instead.
+  const hostedModelLabelText = senderAgent?.hostedRuntime
+    ? intl.formatMessage({ id: "message.agentModel.hosted" })
+    : null;
   const agentModelLabelText = showAgentModelNameOption
-    ? catalogModelLabelText ?? agentModelLabel(senderAgent)
+    ? hostedModelLabelText ?? catalogModelLabelText ?? agentModelLabel(senderAgent)
     : null;
   const senderMember = useMemo(() => {
     if (previewSenderMember) return previewSenderMember;
@@ -2876,7 +2687,12 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   const dmReadReceiptScope = useReadReceiptStore(
     (state) => state.scopes[message.channelId],
   );
-  const showDmReadReceipt = agentReadBadgesEnabled
+  // artin (option C): one status line under the DM's last message, never a
+  // per-message footer chip. A chip in the footer created the footer row the
+  // moment the peer read the message, so every read message grew ~26px, and
+  // the watermark made it repeat on every earlier message too.
+  const showDmReadReceipt = showDmReadStatus
+    && agentReadBadgesEnabled
     && isDmSurface
     && projectReadReceipt(dmReadReceiptScope, message.seq ?? undefined).read;
   const viewerReactionName = viewer?.displayName || viewer?.name || viewer?.email || formatMessage({ id: "message.messageItem.reactorYou" });
@@ -3164,7 +2980,10 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
     return storeOpenThread(request);
   }, [onOpenThread, storeOpenThread]);
   const closeThread = useThreadStore((s) => s.closeThread);
-  const followedThreads = useThreadStore((s) => s.followedThreads);
+  // Per-row answers, so a change to another thread does not re-render this row.
+  const threadFollowedInStore = useThreadStore((s) => isThreadFollowed(s, message.id));
+  const followedListThreadChannelId = useThreadStore((s) =>
+    s.followedThreads.find((thread) => thread.parentMessageId === message.id)?.threadChannelId ?? null);
   const followThread = useThreadStore((s) => s.followThread);
   const unfollowThread = useThreadStore((s) => s.unfollowThread);
   // Subscribe to this row's own answer, not the raw ids: every rendered row
@@ -3229,14 +3048,15 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   const imageFallbackKey = useMemo(() => buildImageInlineFallbackKey(message.attachments), [message.attachments]);
   // Stryker restore all
 
-  const followedThread = canShowThreadFollowAction
-    ? followedThreads.find((thread) => thread.parentMessageId === message.id)
+  const threadFollowed = canShowThreadFollowAction && threadFollowedInStore;
+  const followedThreadChannelId = threadFollowed
+    ? threadSummary?.threadChannelId ?? followedListThreadChannelId
     : null;
-  const hasThreadConversation = !!threadSummary?.threadChannelId || (threadSummary?.replyCount ?? 0) > 0 || !!followedThread;
+  const hasThreadConversation = !!threadSummary?.threadChannelId || (threadSummary?.replyCount ?? 0) > 0 || threadFollowed;
   const threadUnreadCount = threadSummary?.unreadCount ?? 0;
   const firstUnreadThreadMessageId = threadUnreadCount > 0 ? threadSummary?.firstUnreadMessageId ?? null : null;
   const threadDraftChannelId = !hideThreadActions
-    ? threadSummary?.threadChannelId ?? followedThread?.threadChannelId ?? null
+    ? threadSummary?.threadChannelId ?? followedThreadChannelId ?? null
     : null;
   const hasThreadDraft = useMessageStore((s) =>
     threadDraftChannelId ? !!s.drafts[threadDraftChannelId]?.trim() : false
@@ -3252,7 +3072,8 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   // re-render. Subscribing to the map itself (or to threadStore wholesale, which is
   // what ChatPanel does with `summaries` — hence the separate map) would re-render
   // every message in the channel on every reply in any thread: the #4434 regression.
-  const replyScope = useThreadStore((s) => s.replyScopes[message.id]);
+  const storedReplyScope = useThreadStore((s) => s.replyScopes[message.id]);
+  const replyScope = readOnlyProjection ? readOnlyReplyScope : storedReplyScope;
   const hasThreadReplies = threadReplyCount > 0;
   const inlineReplySurfaceReplacesBadge =
     !!replyScope &&
@@ -3854,14 +3675,14 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
   }, [followThread, message.id]);
 
   const handleUnfollowThread = useCallback(async () => {
-    if (!followedThread) return;
+    if (!followedThreadChannelId) return;
     setCtxMenu(null);
     try {
-      await unfollowThread(followedThread.threadChannelId);
+      await unfollowThread(followedThreadChannelId);
     } catch (err) {
       console.error("Failed to unfollow thread:", err);
     }
-  }, [followedThread, unfollowThread]);
+  }, [followedThreadChannelId, unfollowThread]);
 
   const reactions = useMemo(() => message.reactions ?? [], [message.reactions]);
   const visibleReactions = useMemo(
@@ -4455,13 +4276,11 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       data-highlighted={isHighlighted ? "true" : undefined}
       data-followed-by={followedBy}
       data-follows-system={followsSystem ? "true" : undefined}
+      // The message you jumped to is the DS cyan-soft wash; an open menu or
+      // picker needs nothing here: rui's data-popup-open state tints the row
+      // the same way hover does (task #694).
       className={`${isHighlighted
- ? "bg-info/10 ring-1 ring-inset ring-info/50 theme-brutal:bg-brutal-cyan/25 theme-brutal:shadow-brutal"
- : ctxMenu || reactionPicker
- // Brutal keeps its framed "menu open" card. Elegant has no frame here: rui's
- // data-popup-open state tints the row the same way hover does (task #694 —
- // a strong border drew a black box around the message).
- ? "theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+ ? "bg-info-soft hover:bg-info-soft"
  : ""} ${messageBodyFontSize === "lg" ? "[--mi-avatar:2.125rem]" : ""} ${className ?? ""}`.trim()}
     >
       {selectionScopedHere && (
@@ -4511,6 +4330,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           email={senderEmailForAvatar}
           hoverAgent={readOnlyProjection ? undefined : senderAgent}
           hoverMember={readOnlyProjection ? undefined : senderMember}
+          readOnlySender={readOnlyProjection ? readOnlySender : undefined}
           externalAvatarUrl={externalAvatarUrl}
           externalDisplayName={senderDisplayName}
           externalProvider={isExternal ? message.externalAuthor?.provider ?? null : null}
@@ -4535,8 +4355,8 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           <Tooltip content={gutterFullTimestamp}>
           <MessageItemContinuationTime
             // No transition — the time reveals instantly on hover, like the row
-            // border (stdrc: 时间不要动画呈现，跟边框一样立即出现).
-          className="absolute right-1 top-1 select-none font-mono text-[10px] leading-none tabular-nums text-transparent group-hover/message:text-foreground-placeholder theme-brutal:group-hover/message:text-black/40"
+            // border (stdrc: 时间不要动画呈现，跟边框一样立即出现). The DS
+            // treatment (Space Mono 12, ink-3 on row hover) is the recipe's.
           >
             {gutterClock}
           </MessageItemContinuationTime>
@@ -4546,6 +4366,10 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
       <MessageItemContent>
         {groupState?.showName === false && !showSelectedGroupedHeader ? null : (
           <MessageItemHeader>
+          {/* The font-preference size classes carry no line-height and would
+              displace the recipe's own leading in the merge, so each header
+              text re-asserts its DS leading right after the size (name 20,
+              role/model/time 16). */}
           {/* Left cluster: name · [model · badges · description]. Space is
               given up in this order: description, then model, then name
               (Artea, task #743). The name never shrinks while the tail has
@@ -4555,11 +4379,11 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
               still shaves a sub-pixel off the name and shows "C…". The time
               and status stay OUTSIDE the cluster, so a narrow panel can never
               clip them. */}
-          <span className="flex min-w-0 items-center gap-2 overflow-hidden in-data-[theme=elegant]:gap-1.5">
+          <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">
           {senderMention ? (
             <Tooltip content={formatMessage({ id: "message.messageItem.mentionSender" }, { name: senderMention.name })}>
             <MessageItemSenderButton
-              className={`max-w-full shrink-0 ${messageNameSizeClass} in-data-[theme=elegant]:leading-none`}
+              className={`max-w-full shrink-0 ${messageNameSizeClass} leading-5`}
               onClick={handleSenderNameMention}
               onContextMenu={readOnlyProjection ? undefined : handleSenderContextMenu}
               data-testid={`message-sender-mention-${message.id}`}
@@ -4569,18 +4393,18 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             </Tooltip>
           ) : (
             <MessageItemSender
-              className={`max-w-full shrink-0 ${messageNameSizeClass} in-data-[theme=elegant]:leading-none`}
+              className={`max-w-full shrink-0 ${messageNameSizeClass} leading-5`}
               onContextMenu={readOnlyProjection ? undefined : handleSenderContextMenu}
             >
               {senderDisplayName}
             </MessageItemSender>
           )}
-          <span data-testid={`message-sender-tail-${message.id}`} className="flex min-w-0 items-center gap-2 overflow-hidden in-data-[theme=elegant]:gap-1.5">
+          <span data-testid={`message-sender-tail-${message.id}`} className="flex min-w-0 items-center gap-1.5 overflow-hidden">
           {agentModelLabelText && (
             <Tooltip content={agentModelLabelText}>
             <MessageItemMeta
               render={<span />}
-              className={`min-w-0 max-w-full shrink-0 truncate ${messageMetaSizeClass} in-data-[theme=elegant]:leading-none`}
+              className={`min-w-0 max-w-full shrink-0 truncate ${messageMetaSizeClass} leading-4`}
               data-testid={`message-sender-model-${message.id}`}
             >
               {agentModelLabelText}
@@ -4588,12 +4412,12 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             </Tooltip>
           )}
           {isDeactivatedAgent && (
-            <span className="inline-flex shrink-0 items-center whitespace-nowrap border border-line-muted bg-fill-muted px-1.5 py-0.5 text-[10px] font-bold uppercase text-foreground-muted theme-brutal:border-black theme-brutal:bg-gray-300 theme-brutal:text-black/60">
+            <span className="inline-flex h-5 shrink-0 items-center whitespace-nowrap rounded-chip bg-fill-muted px-1.5 text-caption font-semibold text-foreground-muted">
               {formatMessage({ id: "message.messageItem.deletedBadge" })}
             </span>
           )}
           {humanDepartureLabel && (
-            <span className="inline-flex shrink-0 items-center whitespace-nowrap border border-line-muted bg-fill-muted px-1.5 py-0.5 text-[10px] font-bold uppercase text-foreground-muted theme-brutal:border-black theme-brutal:bg-gray-300 theme-brutal:text-black/60">
+            <span className="inline-flex h-5 shrink-0 items-center whitespace-nowrap rounded-chip bg-fill-muted px-1.5 text-caption font-semibold text-foreground-muted">
               {humanDepartureLabel}
             </span>
           )}
@@ -4601,7 +4425,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             <Tooltip content={senderSubtitle}>
             <MessageItemMeta
               render={<span />}
-              className={`min-w-0 shrink truncate ${messageMetaSizeClass} in-data-[theme=elegant]:leading-none`}
+              className={`min-w-0 shrink truncate ${messageMetaSizeClass} leading-4`}
             >
               {senderSubtitle}
             </MessageItemMeta>
@@ -4609,7 +4433,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           )}
           </span>
           </span>
-          <MessageItemTime render={<span />} className={`shrink-0 whitespace-nowrap ${messageMetaSizeClass} in-data-[theme=elegant]:leading-none`}>{time}</MessageItemTime>
+          <MessageItemTime render={<span />} className={`shrink-0 whitespace-nowrap ${messageMetaSizeClass} leading-4`}>{time}</MessageItemTime>
           {converting && (
             <MessageItemInlineStatus render={<span />}>
               {formatMessage({ id: "message.messageItem.converting" })}
@@ -4692,6 +4516,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 taskByNumber={taskByNumber}
                 timeFormatOptions={timeFormatOptions}
                 threadSearchHighlightQuery={threadSearchHighlightQuery}
+                mentionsDisplayOnly={readOnlyProjection}
               />
             );
           })()}
@@ -4738,6 +4563,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 taskByNumber={taskByNumber}
                 timeFormatOptions={timeFormatOptions}
                 threadSearchHighlightQuery={threadSearchHighlightQuery}
+                mentionsDisplayOnly={readOnlyProjection}
               />
             </div>
           </MessageItemTranslationOriginal>
@@ -4763,7 +4589,10 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
         ) : null}
         </CollapsibleMessageContent>
         {/* Attached files */}
-        {!forwardedBundleMetadata && message.attachments && message.attachments.length > 0 && (() => {
+        {readOnlyProjection && message.attachments && message.attachments.length > 0 ? (
+          <ReadOnlyMessageAttachments attachments={message.attachments} />
+        ) : null}
+        {!readOnlyProjection && !forwardedBundleMetadata && message.attachments && message.attachments.length > 0 && (() => {
           return renderWithImageInlineFallback(imageFallbackKey, (imageFallbackUrls) => {
             // Stryker disable all: pre-existing attachment classification moved under the fallback seam.
             if (!message.attachments) return null;
@@ -4885,7 +4714,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           // Stryker disable all: footer badge visibility/editability behavior is pre-existing; this PR only swaps Badge chrome to raft-ui.
           linkedTask ||
           isSaved ||
-          showDmReadReceipt ||
           visibleReactions.length > 0 ||
           hasThreadFooterMetadata
           // Stryker restore all
@@ -4930,10 +4758,6 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                 >
                   <TaskChip
                     status={toRuiTaskStatus(linkedTask.status)}
-                    // rui's elegant default nudges the chip up 1px for inline
-                    // text; here it sits in an overflow-hidden button, where
-                    // that nudge cuts off its top border.
-                    className="mt-0"
                     data-testid="message-task-badge"
                     data-task-status={linkedTask.status}
                   >
@@ -4975,17 +4799,19 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
               const reactionContent = (
                 <>
                   <span className="inline-flex items-center leading-none">
-                    <ReactionGlyph emoji={reaction.emoji} size={15} className="block" />
+                    <ReactionGlyph emoji={reaction.emoji} size={16} className="block" />
                   </span>
                   <ReactionCount count={reaction.count} />
                 </>
               );
-              const reactionClassName = `inline-flex h-5 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap rounded px-1.5 text-[12px] font-bold leading-none text-foreground-strong theme-brutal:text-black ${
+              // DS reaction: a 24px chip on fill-muted; yours is pink-soft; a
+              // failed toggle flashes the orange-soft problem wash.
+              const reactionClassName = `inline-flex h-6 min-w-0 max-w-full items-center gap-1 overflow-hidden whitespace-nowrap rounded-chip pl-1.5 pr-2 text-callout leading-none text-foreground ${
                 showFailureFlash
-                  ? "bg-warning/30 theme-brutal:bg-brutal-orange/30"
+                  ? "bg-warning-soft"
                   : currentViewerReacted
-                    ? "bg-accent-soft theme-brutal:bg-brutal-pink/20"
-                    : "bg-fill-muted/40"
+                    ? "bg-attention-soft"
+                    : "bg-fill-muted"
               }`;
               return (
                 <span key={reaction.emoji} className="inline-flex">
@@ -5000,9 +4826,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                       onMouseLeave={hideReactionPopover}
                       onFocus={(event) => showReactionPopover(reaction, event.currentTarget)}
                       onBlur={hideReactionPopover}
-                      className={`${reactionClassName} transition-colors ${
- currentViewerReacted ? "hover:bg-accent-soft" : "hover:bg-fill-muted"
- }`}
+                      className={`${reactionClassName} outline-none hover:press-overlay active:press-overlay focus-visible:shadow-focus`}
                       aria-label={formatMessage({ id: "message.messageItem.reactionAria" }, { emoji: reaction.emoji, reactors: reactorSummary })}
                     >
                       {reactionContent}
@@ -5033,32 +4857,15 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                         openReactionPicker(event.currentTarget);
                       }
                     }}
-                    className="inline-flex h-5 min-w-0 items-center justify-center rounded bg-fill-muted/40 px-1.5 text-foreground-strong transition-colors hover:bg-fill-muted active:bg-fill-muted theme-brutal:bg-black/[0.03] theme-brutal:text-black theme-brutal:hover:bg-black/[0.08] theme-brutal:active:bg-black/[0.08]"
+                    className="inline-flex h-6 min-w-0 items-center justify-center rounded-chip bg-fill-muted px-1.5 text-foreground-muted outline-none hover:press-overlay active:press-overlay focus-visible:shadow-focus"
                     aria-label={formatMessage({ id: "message.messageItem.addReaction" })}
                     data-message-affordance="mobile-reaction-add"
                   >
-                    <Plus size={13} strokeWidth={2.5} />
+                    <Plus size={16} strokeWidth={2} />
                   </button>
                   </Tooltip>
                 </span>
               ) : null}
-            {showDmReadReceipt ? (
-              // artin: FAR RIGHT of the message row. `ml-auto` right-aligns it,
-              // but alignment is not order: rendered before the reactions/thread
-              // chips it still sits to their LEFT once the row has any other
-              // content. It must be the last child, so it is emitted here after
-              // every other footer affordance.
-              <Tooltip content={formatMessage({ id: "message.messageItem.read" })}>
-              <span
-                className="ml-auto inline-flex h-5 shrink-0 items-center gap-1 whitespace-nowrap text-[10px] font-bold leading-none text-foreground-placeholder theme-brutal:text-black/45"
-                data-message-affordance="read-receipt"
-                aria-label={formatMessage({ id: "message.messageItem.read" })}
-              >
-                <CheckCircle size={10} className="shrink-0" />
-                <span>{formatMessage({ id: "message.messageItem.read" })}</span>
-              </span>
-              </Tooltip>
-            ) : null}
           </MessageItemFooter>
         ) : null}
         {/* Inside the Thread panel the replies ARE the surface — previewing them
@@ -5073,6 +4880,23 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
             channelParticipantAgentsById={channelParticipantAgentsById}
             channelParticipantMembersById={channelParticipantMembersById}
           />
+        ) : null}
+        {showDmReadReceipt ? (
+          // artin (option C): a status line under the DM's last message, below
+          // everything the message owns (footer, inline thread replies), like
+          // iMessage's "Read". Its own row, right-aligned.
+          <div className="mt-1 flex h-5 justify-end" data-testid="dm-read-status">
+            <Tooltip content={formatMessage({ id: "message.messageItem.read" })}>
+            <span
+              className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-caption text-foreground-hint"
+              data-message-affordance="read-receipt"
+              aria-label={formatMessage({ id: "message.messageItem.read" })}
+            >
+              <CheckCircle size={12} className="shrink-0" />
+              <span>{formatMessage({ id: "message.messageItem.read" })}</span>
+            </span>
+            </Tooltip>
+          </div>
         ) : null}
         {/* Parked, not dead. A message can hold exactly one task today
             (`uniqueIndex` on `tasks.message_id`) and its title is not editable
@@ -5098,7 +4922,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           <button
             type="button"
             onClick={() => handleQuickReactionClick(emoji)}
-            className="flex size-7 items-center justify-center rounded bg-transparent transition-colors hover:bg-accent-soft theme-brutal:hover:bg-brutal-pink/20"
+            className="flex size-7 items-center justify-center rounded-control bg-transparent outline-none hover:bg-brand-soft active:bg-brand-soft focus-visible:shadow-focus"
           >
             <ReactionGlyph emoji={emoji} size={QUICK_REACTION_GLYPH_SIZE} className="block" />
           </button>
@@ -5111,7 +4935,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
         <PopoverPopup
         role="tooltip"
         data-message-affordance="reaction-reactors-popover"
-        className="pointer-events-none fixed z-[80] min-w-0 max-w-[280px] px-2 py-1.5 text-xs font-bold text-foreground-strong theme-brutal:text-black"
+        className="pointer-events-none fixed z-[80] min-w-0 max-w-[280px] px-2.5 py-1.5 text-footnote font-semibold text-foreground"
         style={reactionPopoverPopupStyle}
       >
         {reactionPopover.visibleNames.length > 0 ? (
@@ -5120,12 +4944,12 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
               <span key={`${reactionPopover.emoji}-${index}-${name}`} className="inline-flex min-w-0 items-baseline leading-5">
                 <span className="max-w-28 truncate">{name}</span>
                 {index < reactionPopover.visibleNames.length - 1 || reactionPopover.hiddenCount > 0 ? (
-                  <span className="shrink-0 text-foreground-placeholder theme-brutal:text-black/45">, </span>
+                  <span className="shrink-0 text-foreground-hint">, </span>
                 ) : null}
               </span>
             ))}
             {reactionPopover.hiddenCount > 0 && (
-              <span className="leading-5 text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "message.messageItem.reactionHiddenMore" }, { count: reactionPopover.hiddenCount })}</span>
+              <span className="leading-5 text-foreground-muted">{formatMessage({ id: "message.messageItem.reactionHiddenMore" }, { count: reactionPopover.hiddenCount })}</span>
             )}
           </div>
         ) : (
@@ -5165,7 +4989,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           {!isSystem && canReact && (
             <>
               <div
-                className="flex h-9 items-center gap-1 bg-layer-panel px-2 theme-brutal:bg-white"
+                className="flex h-9 items-center gap-1 px-2"
                 data-message-affordance="reaction-quick-row"
               >
                 {QUICK_REACTION_EMOJIS.map((emoji) => (
@@ -5176,7 +5000,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                       event.stopPropagation();
                       handleQuickReactionClick(emoji);
                     }}
-                    className="flex size-7 items-center justify-center rounded bg-transparent transition-colors hover:bg-accent-soft active:bg-accent-soft theme-brutal:hover:bg-brutal-pink/20 theme-brutal:active:bg-brutal-pink/20"
+                    className="flex size-7 items-center justify-center rounded-control bg-transparent outline-none hover:bg-brand-soft active:bg-brand-soft focus-visible:shadow-focus"
                     aria-label={formatMessage({ id: "message.messageItem.reactWith" }, { emoji })}
                   >
                     <ReactionGlyph emoji={emoji} size={QUICK_REACTION_GLYPH_SIZE} className="block" />
@@ -5184,6 +5008,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                   </Tooltip>
                 ))}
               </div>
+              <ContextMenuDivider />
             </>
           )}
           <MenuItem
@@ -5268,10 +5093,10 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
           </MenuItem>
           {canShowThreadFollowAction && hasThreadConversation && (
             <MenuItem
-              icon={followedThread ? <MessageCircleOff size={14} /> : <MessageCirclePlus size={14} />}
-              onClick={followedThread ? handleUnfollowThread : handleFollowThread}
+              icon={threadFollowed ? <MessageCircleOff size={14} /> : <MessageCirclePlus size={14} />}
+              onClick={threadFollowed ? handleUnfollowThread : handleFollowThread}
             >
-              {followedThread ? formatMessage({ id: "message.messageItem.unfollowThread" }) : formatMessage({ id: "message.messageItem.followThread" })}
+              {threadFollowed ? formatMessage({ id: "message.messageItem.unfollowThread" }) : formatMessage({ id: "message.messageItem.followThread" })}
             </MenuItem>
           )}
           {canShowThreadFollowAction && hasThreadConversation && (

@@ -380,7 +380,7 @@ test("thread parent menu follows the existing thread while reply-thread actions 
 
   assert.ok(await screen.findByText("Follow Thread"));
   assert.equal(screen.queryByText("Open Thread"), null);
-  assert.equal(screen.queryByText("Reply in thread"), null);
+  assert.ok(screen.queryByText("Reply in Thread") === null);
 
   fireEvent.click(screen.getByText("Follow Thread"));
   await waitFor(() => {
@@ -606,7 +606,8 @@ test("closing thread search removes the active result and text highlights", asyn
     const matchedMessage = document.getElementById("message-reply-message");
     assert.ok(matchedMessage);
     await waitFor(() => {
-      assert.ok(matchedMessage.className.includes("theme-brutal:bg-brutal-cyan/25"));
+      assert.equal(matchedMessage.getAttribute("data-highlighted"), "true");
+      assert.ok(matchedMessage.classList.contains("bg-info-soft"), "the active result is the DS jumped-to wash");
       assert.ok(matchedMessage.querySelector("mark"));
     });
 
@@ -614,7 +615,8 @@ test("closing thread search removes the active result and text highlights", asyn
 
     await waitFor(() => {
       assert.equal(screen.queryByTestId("thread-search-bar"), null);
-      assert.equal(matchedMessage.className.includes("theme-brutal:bg-brutal-cyan/25"), false);
+      assert.equal(matchedMessage.getAttribute("data-highlighted"), null);
+      assert.equal(matchedMessage.classList.contains("bg-info-soft"), false);
       assert.equal(matchedMessage.querySelector("mark"), null);
     });
   } finally {
@@ -652,7 +654,7 @@ test("thread search highlights a match rendered inside inline code", async () =>
         "[data-testid='thread-search-fragment-highlight']",
       );
       assert.equal(highlight?.textContent, "read_receipts_v0");
-      assert.equal(highlight?.classList.contains("bg-primary-soft"), true);
+      assert.equal(highlight?.classList.contains("bg-brand"), true, "a search hit is the DS yellow sticker");
     });
   } finally {
     HTMLElement.prototype.scrollIntoView = originalScrollIntoView;

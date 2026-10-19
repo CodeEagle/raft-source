@@ -16,6 +16,7 @@ const NOT_A_LAYER = new Map<string, string>([
   ["components/message/MessageSelectionShortcut.tsx", "selection gesture tracking"],
   ["components/message/ThreadPanel.tsx", "thread search scope tracking"],
   ["store/messageStore.ts", "auto-read tab claim on user activity"],
+  ["utils/sidebarDndE2eProbe.tsx", "E2E-only pointer event recording; never dismisses a layer"],
 ]);
 // A file satisfies the contract by spreading the marker itself or by rendering
 // a shared component that carries it.

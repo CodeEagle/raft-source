@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import "./helpers/domSetup";
 import { act, cleanup, fireEvent, screen, waitFor } from "@testing-library/react";
+import { ThemeProvider } from "@botiverse/raft-ui";
 import ConfirmDialog from "../src/components/ConfirmDialog";
 import ResetAgentDialog from "../src/components/agent/ResetAgentDialog";
 // ConfirmDialog is react-intl-migrated, so it needs an <IntlProvider> ancestor.
@@ -17,7 +18,7 @@ test("plain rich-content messages do not inherit the confirmation warning frame"
       plainMessage
       message={<div data-testid="mode-picker">Mode picker</div>}
       confirmLabel="Restart"
-      confirmColor="bg-brutal-cyan"
+      confirmVariant="information"
       onConfirm={noop}
       onClose={noop}
     />,
@@ -29,16 +30,36 @@ test("plain rich-content messages do not inherit the confirmation warning frame"
   // carries no margin of its own (double-spacing regression, PR #8468).
   assert.equal(frame.className, "");
   assert.equal(frame.querySelector("svg"), null, "plain rich content must not gain a warning icon");
-  assert.doesNotMatch(frame.className, /border-2|bg-brutal-orange/);
+  assert.doesNotMatch(frame.className, /border-2|bg-palette-orange/);
 });
 
-test("ordinary confirmations use one compact content block and compact semantic actions", () => {
-  render(
+// raft-ui ThemeProvider reads matchMedia on mount; jsdom does not implement it.
+if (typeof window.matchMedia !== "function") {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+}
+
+// The confirmation chrome is checked under the app's one visual family (RUI
+// raft): the Raft Design System Dialog.
+function renderRaft(ui: Parameters<typeof render>[0]) {
+  return render(<ThemeProvider mode="light" syncDom={false}>{ui}</ThemeProvider>);
+}
+
+test("ordinary confirmations use one content block and DS-sized semantic actions", () => {
+  renderRaft(
     <ConfirmDialog
       title="Leave channel"
       message={<div data-testid="warning-copy">Are you sure?</div>}
       confirmLabel="Leave"
-      confirmColor="bg-brutal-orange"
+      confirmVariant="warning"
       onConfirm={noop}
       onClose={noop}
     />,
@@ -47,22 +68,25 @@ test("ordinary confirmations use one compact content block and compact semantic 
   const frame = screen.getByTestId("warning-copy").parentElement;
   assert.ok(frame);
   assert.equal(frame.getAttribute("data-slot"), "confirm-dialog-content");
-  assert.doesNotMatch(frame.className, /border-2|bg-brutal-orange/);
-  assert.equal(frame.querySelector("svg"), null, "confirmation copy must not repeat itself as a warning panel");
+  assert.doesNotMatch(frame.className, /border-2|bg-warning|bg-palette-orange/);
+  assert.equal(frame.querySelector("svg"), null, "a recoverable confirmation's copy is not a warning panel");
 
   const cancel = screen.getByRole("button", { name: "Cancel" });
   const confirm = screen.getByRole("button", { name: "Leave" });
+  // DS Dialog: the actions are standard 44px buttons; Cancel is the quiet
+  // ghost, the confirm colour says the consequence (orange = disruptive but
+  // recoverable).
   for (const action of [cancel, confirm]) {
-    assert.match(action.className, /\bh-7\b/);
-    assert.match(action.className, /\bpx-2\.5\b/);
-    assert.match(action.className, /\btext-xs\b/);
+    assert.match(action.className, /\bh-11\b/);
   }
-  assert.ok(!cancel.className.includes("bg-brutal"));
-  assert.match(confirm.className, /\bbg-brutal-orange\b/);
+  assert.match(cancel.className, /\bbg-transparent\b/);
+  assert.doesNotMatch(cancel.className, /\bbg-(?:warning|danger|accent)\b/);
+  assert.match(confirm.className, /\bbg-warning\b/);
+  assert.match(confirm.className, /\bborder-sticker-ink\b/);
 });
 
-test("destructive confirmations reserve red for the concrete destructive action", () => {
-  render(
+test("destructive confirmations reserve red for the concrete destructive action and its danger banner", () => {
+  renderRaft(
     <ConfirmDialog
       title="Delete server"
       message={<div data-testid="destructive-copy">This cannot be undone.</div>}
@@ -71,12 +95,20 @@ test("destructive confirmations reserve red for the concrete destructive action"
     />,
   );
 
-  const frame = screen.getByTestId("destructive-copy").parentElement;
+  const copy = screen.getByTestId("destructive-copy");
+  const frame = copy.closest('[data-slot="confirm-dialog-content"]');
   assert.ok(frame);
-  assert.equal(frame.getAttribute("data-slot"), "confirm-dialog-content");
-  assert.doesNotMatch(frame.className, /border-2|bg-brutal-red/);
-  assert.equal(frame.querySelector("svg"), null);
-  assert.match(screen.getByRole("button", { name: "Delete" }).className, /\bbg-brutal-red\b/);
+  // DS Dialog: an irreversible confirmation carries its one explanation in the
+  // red-soft danger banner (not a second, repeated panel).
+  const banner = copy.closest('[data-slot="banner"]');
+  assert.ok(banner, "the destructive explanation sits in the danger banner");
+  assert.ok(frame.contains(banner));
+  assert.equal(banner.getAttribute("role"), "note", "static explanation, not a live alert");
+  assert.match(banner.className, /\bbg-danger-soft\b/);
+  assert.equal(frame.querySelectorAll('[data-slot="banner"]').length, 1);
+  const deleteButton = screen.getByRole("button", { name: "Delete" });
+  assert.match(deleteButton.className, /\bbg-danger\b/);
+  assert.doesNotMatch(screen.getByRole("button", { name: "Cancel" }).className, /\bbg-danger\b/);
 });
 
 test("Reset Agent dialog renders the migrated zh surface under active zh-cn", () => {
@@ -87,7 +119,7 @@ test("Reset Agent dialog renders the migrated zh surface under active zh-cn", ()
     { locale: "zh-cn" },
   );
 
-  assert.ok(screen.getByText("重新启动 VPS-ADMIN"));
+  assert.ok(screen.getByText("重新启动或重置 VPS-ADMIN"));
   assert.ok(screen.getByText("重置会话并重启"));
   assert.ok(screen.getByText("完全重置并重启"));
   assert.ok(screen.getByText(/停止并重新启动 agent 进程/));

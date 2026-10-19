@@ -2,8 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { hostname } from "node:os";
 import { and, asc, eq, gt, inArray, isNotNull, lt, lte, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
-import { currentDate, currentTimeMs, noopTracer, setClockInterval, setClockTimeout, type Tracer } from "@botiverse/raft-shared";
+import { currentDate, currentTimeMs, SERVER_GUEST_FEATURE_FLAG_KEY, noopTracer, setClockInterval, setClockTimeout, type Tracer } from "@botiverse/raft-shared";
 
+import { evaluateFeatureFlag } from "./featureFlagService";
 import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
 import { FencedAuthorizationDeniedError, lockActorMembershipRow, ServerMembershipRevokedError } from "../lib/actorMembershipFence";
 import { decideReadStateDelegation } from "../lib/actorPermissions";
@@ -38,7 +39,7 @@ const DEFAULT_COMPACTION_BATCH_SIZE = 100;
 export const READ_MUTATION_COMPATIBILITY_WAIT_MS_ENV = "READ_MUTATION_COMPATIBILITY_WAIT_MS";
 const UUID_V4_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-export type ReadMutationKind = "row_read" | "row_unread" | "channel_read_all" | "global_read_all" | "done";
+export type ReadMutationKind = "row_read" | "row_unread" | "channel_read_all" | "conversation_read_all" | "global_read_all" | "done";
 export type ReadMutationPrincipalKind = "human" | "agent";
 export type ReadMutationState = "admitted" | "executing" | "applied" | "retired_no_effect";
 export type ReadMutationTerminalState = Extract<ReadMutationState, "applied" | "retired_no_effect">;
@@ -54,6 +55,7 @@ export type ReadMutationPayload =
   | { kind: "row_read"; scopeId: string; throughSeq: number }
   | { kind: "row_unread"; scopeId: string; throughSeq: number }
   | { kind: "channel_read_all"; scopeId: string }
+  | { kind: "conversation_read_all"; scopeId: string }
   | { kind: "global_read_all" }
   | { kind: "done"; targetKind: DoneTargetKind; scopeId: string; throughSeq: string };
 
@@ -214,6 +216,7 @@ function canonicalPayload(payload: ReadMutationPayload): ReadMutationPayload {
       assertSafeBoundary(payload.throughSeq, "throughSeq");
       return { kind: payload.kind, scopeId: payload.scopeId.toLowerCase(), throughSeq: payload.throughSeq };
     }
+    case "conversation_read_all":
     case "channel_read_all": {
       if (typeof payload.scopeId !== "string" || !UUID_V4_RE.test(payload.scopeId)) {
         throw new ReadMutationError("INVALID_MUTATION_PAYLOAD", "scopeId must be a UUID");
@@ -1123,6 +1126,10 @@ export async function admitReadMutation(input: ReadMutationAdmissionInput): Prom
     if (!authorized) {
       throw new ReadMutationError("SCOPE_NOT_FOUND", "read mutation scope was not found");
     }
+    if (mutation.kind === "conversation_read_all"
+      && (principalKind !== "human" || resolvedScope?.channelType === "thread")) {
+      throw new ReadMutationError("SCOPE_NOT_FOUND", "conversation read scope was not found");
+    }
     if (mutation.kind === "done") {
       const actualTargetKind: DoneTargetKind = resolvedScope!.channelType === "thread" ? "thread" : "channel";
       if (actualTargetKind !== mutation.targetKind) {
@@ -1614,7 +1621,21 @@ async function captureGlobalBoundary(
           AND tf.unfollowed_at IS NULL
         ORDER BY "scopeId"
       `);
-  const candidateRows = candidates.rows as Array<{ scopeId: string; channelType: string }>;
+  return captureLiveScopeBoundaries(
+    tx, serverId, principalKind, principalId,
+    candidates.rows as Array<{ scopeId: string; channelType: string }>,
+  );
+}
+
+/** Resolve every target before taking cursor locks, using the global read lock order. */
+async function captureLiveScopeBoundaries(
+  tx: DatabaseTransaction,
+  serverId: string,
+  principalKind: ReadMutationPrincipalKind,
+  principalId: string,
+  candidateRows: Array<{ scopeId: string; channelType: string }>,
+  requiredParentId?: string,
+): Promise<ReadMutationBoundary[] | null> {
   // The active-principal lock is already held from the head of this function;
   // the batched resolver below takes no per-scope locks at all (only row
   // locks inside its statements, in primary-key order).
@@ -1624,6 +1645,9 @@ async function captureGlobalBoundary(
     principalId,
     candidates: candidateRows,
   });
+  if (requiredParentId && !resolved.some((scope) => scope.scopeId === requiredParentId && scope.channelType !== "thread")) {
+    return null;
+  }
   // Batch the per-channel frontier probe into one round trip: unnest + a scalar
   // subquery per row keeps the planner's "Index Only Scan Backward ... Limit 1"
   // shape per channel (a GROUP BY aggregate would scan every index entry of
@@ -1678,12 +1702,75 @@ async function captureGlobalBoundary(
   return boundary;
 }
 
+/**
+ * A sidebar conversation owns its message cursor and active followed-thread
+ * cursors. Resolve local thread projections through canonical storage parents;
+ * never infer the target set from the browser's paginated followed list.
+ */
+async function captureConversationBoundary(
+  tx: DatabaseTransaction,
+  serverId: string,
+  principalId: string,
+  parentId: string,
+): Promise<ReadMutationBoundary[] | null> {
+  if (!await lockActiveReadMutationPrincipal(tx, serverId, "human", principalId)) return null;
+  const guestGate = await evaluateFeatureFlag({
+    key: SERVER_GUEST_FEATURE_FLAG_KEY, serverId, userId: principalId,
+  }, tx);
+  const candidates = await tx.execute(sql`
+    WITH parent AS (
+      SELECT p.id, p.type, sm.role, COALESCE(pj.canonical_channel_id, p.id) AS storage_id
+      FROM channels p
+      JOIN server_members sm ON sm.server_id = p.server_id AND sm.user_id = ${principalId}::uuid
+      LEFT JOIN joint_channel_servers pjs
+        ON pjs.local_channel_id = p.id AND pjs.server_id = ${serverId}::uuid AND pjs.status = 'active'
+      LEFT JOIN joint_channels pj ON pj.id = pjs.joint_channel_id AND pj.status = 'active'
+      WHERE p.id = ${parentId}::uuid AND p.server_id = ${serverId}::uuid
+        AND p.type IN ('channel', 'private', 'joint', 'dm')
+        AND p.deleted_at IS NULL AND p.archived_at IS NULL
+        AND (p.type <> 'joint' OR pj.id IS NOT NULL)
+        AND NOT (p.name = 'all' AND p.type = 'private')
+        -- Joined roots already require channel membership in the live resolver.
+        -- Guests may read those regular/private/DM roots, but never joint or
+        -- hidden #all roots, and only while the Guest gate is enabled.
+        AND (sm.role <> 'guest' OR (
+          ${guestGate.enabled} AND p.type <> 'joint' AND (p.type <> 'channel' OR p.name <> 'all' OR p.guest_visible)
+        ))
+    )
+    SELECT p.id::text AS "scopeId", p.type::text AS "channelType" FROM parent p
+    UNION
+    SELECT c.id::text AS "scopeId", c.type::text AS "channelType"
+    FROM thread_follows tf
+    JOIN channels c ON c.id = tf.thread_channel_id AND c.server_id = ${serverId}::uuid
+      AND c.type = 'thread' AND c.deleted_at IS NULL
+    LEFT JOIN joint_channel_servers js
+      ON js.local_channel_id = c.id AND js.server_id = ${serverId}::uuid AND js.status = 'active'
+    LEFT JOIN joint_channels j ON j.id = js.joint_channel_id AND j.status = 'active'
+    JOIN channels storage ON storage.id = COALESCE(j.canonical_channel_id, c.id)
+      AND storage.type = 'thread' AND storage.deleted_at IS NULL
+    JOIN messages pm ON pm.id = storage.parent_message_id
+    JOIN parent p ON p.storage_id = pm.channel_id
+    WHERE tf.follower_type = 'user' AND tf.follower_id = ${principalId}::uuid
+      AND tf.done_at IS NULL AND tf.unfollowed_at IS NULL
+      AND (p.role <> 'guest' OR j.id IS NULL)
+    ORDER BY "scopeId"
+  `);
+  return captureLiveScopeBoundaries(
+    tx, serverId, "human", principalId,
+    candidates.rows as Array<{ scopeId: string; channelType: string }>, parentId,
+  );
+}
+
 async function captureBoundary(
   tx: DatabaseTransaction,
   mutation: typeof readMutations.$inferSelect,
 ): Promise<CapturedChannelBoundary | null> {
   if (mutation.kind === "global_read_all") {
     const boundary = await captureGlobalBoundary(tx, mutation.serverId, mutation.principalType, mutation.principalId);
+    return boundary ? { boundary, residueScopeIds: [] } : null;
+  }
+  if (mutation.kind === "conversation_read_all") {
+    const boundary = await captureConversationBoundary(tx, mutation.serverId, mutation.principalId, mutation.scopeId!);
     return boundary ? { boundary, residueScopeIds: [] } : null;
   }
   if (mutation.kind === "channel_read_all") {
@@ -2219,7 +2306,7 @@ export async function executeReadMutationClaim(input: {
     const boundary = captured ?? [];
     await input.afterBoundaryCaptured?.({ tx, boundary });
     const scopes: ReadMutationAck["scopes"] = [];
-    if (minimum.kind === "global_read_all" && boundary.length > 0) {
+    if ((minimum.kind === "global_read_all" || minimum.kind === "conversation_read_all") && boundary.length > 0) {
       // Batched apply: one lock, one upsert, one supplementary read for the
       // whole boundary instead of a per-scope loop. mid_global fires after the
       // batch apply, before terminalize — the transaction still rolls back
@@ -2413,6 +2500,12 @@ export async function resolveReadMutationUnreadBoundary(input: {
           m.sender_type = ${principalKind === "human" ? "user" : "agent"}
           AND m.sender_id = ${input.principalId}
         )
+        AND NOT COALESCE(
+          m.message_type = 'system'
+          AND m.causal_actor_type = ${principalKind === "human" ? "user" : "agent"}
+          AND m.causal_actor_id = ${input.principalId}, FALSE
+        )
+        AND (m.system_subtype IS NULL OR m.system_subtype NOT IN ('channel.self_unfollow_thread', 'task.deleted_summary'))
     `);
     const [row] = result.rows as Array<{ latestUnreadEligibleSeq: unknown }>;
     const latestUnreadEligibleSeq = asNumber(row?.latestUnreadEligibleSeq ?? 0);

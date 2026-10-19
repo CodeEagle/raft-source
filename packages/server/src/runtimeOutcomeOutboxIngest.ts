@@ -29,6 +29,7 @@ import {
   SERVER_CAPABILITY_START_SPAWN_ERROR_V1,
   type MachineToServerMessage,
   type ServerToMachineMessage,
+  SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1,
 } from "@botiverse/raft-shared";
 import type { TerminalOutboxFrame, TerminalOutboxFrameInput } from "./terminalFailureBreaker";
 
@@ -50,7 +51,11 @@ export const RUNTIME_OUTCOME_ACK_ENABLED = false;
  * no backoff would apply anywhere.
  */
 export function serverMachineContextCapabilities(enabled: boolean = RUNTIME_OUTCOME_ACK_ENABLED): string[] {
-  return enabled ? [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1, SERVER_CAPABILITY_START_SPAWN_ERROR_V1] : [];
+  // task #1268: ready-before-detection is always offered; the daemon decides
+  // per connection (header pre-read, machine:context authoritative).
+  return enabled
+    ? [SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1, SERVER_CAPABILITY_START_SPAWN_ERROR_V1, SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1]
+    : [SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1];
 }
 
 function notSpawnedReason(value: unknown): AgentStartNotSpawnedReason | null {

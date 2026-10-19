@@ -139,7 +139,7 @@ test("Server MCP renders accessible shared actions and opens the shared delete c
   renderWithIntl(<AgentMcpTab scope="server" canManageServer />);
 
   assert.ok(await screen.findByText("Docs"));
-  assert.ok(screen.getByRole("button", { name: "Add server" }));
+  assert.ok(screen.getByRole("button", { name: "Add MCP server" }));
   assert.ok(screen.getByRole("button", { name: "Test Docs" }));
   assert.ok(screen.getByRole("button", { name: "Edit Docs" }));
 

@@ -7,7 +7,7 @@ import type {
   FeedbackWorkspaceNavigationOptions,
   FeedbackWorkspaceRoute,
 } from "@botiverse/hands-feedback-react";
-import { Download, MessageSquare, X } from "lucide-react";
+import { Download, X } from "lucide-react";
 import {
   Button,
   Lightbox,
@@ -18,11 +18,11 @@ import {
   LightboxStage,
   LightboxTitle,
   LightboxToolbar,
-  useThemeFamily,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { useIntl } from "react-intl";
 import { useLocation, useNavigate } from "react-router-dom";
 import api from "../../api/client";
+import { FEEDBACK_SDK_THEME } from "../../feedback/feedbackSdkTheme";
 import { handsFeedbackTransport } from "../../feedback/handsFeedbackTransport";
 import { useMediaQuery } from "../../hooks/effectPrimitives";
 import { useMobileBack } from "../../hooks/useAppNavigate";
@@ -32,6 +32,7 @@ import PanelHeader from "../ui/PanelHeader";
 import Tooltip from "../ui/Tooltip";
 
 const FEEDBACK_SETTINGS_SEGMENT = "/settings/feedback";
+
 
 const PANEL_HEADER_CONTAINER_PROPS = {
   "data-testid": "settings-feedback-panel-header",
@@ -109,7 +110,6 @@ function attachmentFilename(headers: unknown, fallback: string): string {
 export default function AboutFeedbackPanel() {
   const { locale } = useLocale();
   const { formatMessage } = useIntl();
-  const themeFamily = useThemeFamily();
   const location = useLocation();
   const navigate = useNavigate();
   const isMobile = useMediaQuery("(max-width: 767px)");
@@ -232,11 +232,9 @@ export default function AboutFeedbackPanel() {
   );
 
   return (
-    <div className="slock-feedback-panel flex h-full min-h-0 flex-col bg-layer-primary">
+    <div className="slock-feedback-panel flex h-full min-h-0 flex-col bg-layer-canvas">
       <PanelHeader
         title={formatMessage({ id: "settings.about.feedbackTitle" })}
-        icon={<MessageSquare size={18} />}
-        iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
         containerProps={PANEL_HEADER_CONTAINER_PROPS}
         onMobileBack={isInbox ? onSettingsBack : undefined}
         mobileBackProps={mobileBackProps}
@@ -249,7 +247,7 @@ export default function AboutFeedbackPanel() {
       <div className="min-h-0 flex-1">
         <FeedbackProvider
           transport={handsFeedbackTransport}
-          theme={themeFamily === "brutal" ? "brutal" : "elegant"}
+          theme={FEEDBACK_SDK_THEME}
           locale={locale === "zh-cn" ? "zh-CN" : "en"}
         >
           <FeedbackWorkspace
@@ -279,7 +277,7 @@ export default function AboutFeedbackPanel() {
                 <Button
                   aria-label={formatMessage({ id: "common.lightbox.download" })}
                   data-slot="button"
-                  size="icon-md"
+                  size="icon-lg"
                   variant="outline"
                   onClick={downloadAttachment}
                 >

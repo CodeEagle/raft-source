@@ -56,8 +56,10 @@ final names directly (such as the dev bootstrap) must not run that server until
 its indexes exist.
 
 `077-deleted-parent-threads.sql` drops threads whose parent is
-deleted (an agent's DM after the agent is deleted) from the human Activity, as
-the canonical Postgres read and `rw_agent_inbox_v6` already do. `rw_inbox_items_v12`
+deleted (an agent's DM after the agent is deleted), archived, or no longer
+visible to the receiver (removed from a private, DM or joint parent) from the
+human Activity, matching the canonical Postgres read and the sidebar
+(`rw_conversation_unread_v3`). `rw_inbox_items_v12`
 filters 076's `rw_inbox_items_v11` (which therefore stays, as its base); 077
 replaces 076's `rw_inbox_serving_v7`, `rw_activity_totals_v5` and 063-chain-v5's
 `rw_activity_watermark_v5` with `rw_inbox_serving_v8`, `rw_activity_totals_v6`
@@ -65,7 +67,8 @@ and `rw_activity_watermark_v6`; the columns are unchanged. The server reads serv
 back to v7 / v5, or to 068's v6 / v4 where 076 is not built either (same
 mechanism as above, one step further). Unlike 076,
 077 is not meant to be identical to what it replaces: `077-parity-checks.sql`
-expects the only differences to be threads below a deleted parent.
+expects the only differences to be threads below a deleted, archived or
+invisible parent.
 
 ### Building the views
 

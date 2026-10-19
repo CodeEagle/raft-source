@@ -263,7 +263,7 @@ test("Reset Agent keeps the shared confirmation frame around its frameless mode 
 
   const dialog = screen.getByRole("dialog");
   assertSharedDialogChrome(dialog);
-  assert.ok(within(dialog).getByText("Restart VPS-ADMIN"));
+  assert.ok(within(dialog).getByText("Restart or reset VPS-ADMIN"));
 
   // The mode picker is plain content: the shared content slot keeps its bare
   // layout (no margin — the rui Dialog recipe spaces body and footer itself)
@@ -272,20 +272,24 @@ test("Reset Agent keeps the shared confirmation frame around its frameless mode 
   assert.equal(contentSlot.className, "", "the mode picker must keep its own layout (plainMessage)");
   // Task #660: the three hand-rolled <button>s became rui RadioGroup items, so
   // the option's frame is a <label> now. The assertion that matters is
-  // unchanged -- the picker still carries no frame and no brutal fill.
+  // unchanged -- the picker still carries no frame and no fill of its own.
   const option = within(dialog).getByText("Reset Session & Restart").closest("label")!;
   assert.ok(option, "each mode is a rui radio option");
-  assert.doesNotMatch(option.className, /border-2|bg-brutal-orange/);
+  assert.doesNotMatch(option.className, /(^|\s)(?:border(?:-\S+)?|bg-\S+)(?=\s|$)/);
   assert.ok(
     option.querySelector('[data-slot="radio-group-item"]'),
     "options must be rui RadioGroup items, not hand-rolled buttons",
   );
 
-  // The confirm action labels itself with the selected mode.
-  assert.ok(within(dialog).getByRole("button", { name: "Restart" }));
+  // The confirm action labels itself with the selected mode, and its colour
+  // states the consequence: a restart comes back (raft `warning`), a full
+  // reset cannot be undone (raft `danger`).
+  const restart = within(dialog).getByRole("button", { name: "Restart" });
+  assert.match(restart.className, /(?:^|\s)bg-warning(?=\s|$)/, "restart is the recoverable warning action");
   fireEvent.click(within(dialog).getByText("Full Reset & Restart"));
   const confirm = within(dialog).getByRole("button", { name: "Full Reset & Restart" });
-  assert.match(confirm.className, /\bbg-brutal-red\b/, "full reset is the destructive red action");
+  assert.match(confirm.className, /(?:^|\s)bg-danger(?=\s|$)/, "full reset is the destructive red action");
+  assert.doesNotMatch(confirm.className, /\bbg-warning\b/);
   assert.ok(within(dialog).getByText(/permanently delete all workspace files/i));
   assert.ok(within(dialog).getByRole("button", { name: "Cancel" }));
 
@@ -316,7 +320,7 @@ test("a hand-rolled Modal look-alike fails this file's chrome oracle", () => {
       title="Cannot Delete Computer"
       message="Blocked."
       confirmLabel="OK"
-      confirmColor="bg-white"
+      confirmVariant="outline"
       hideCancel
       onConfirm={() => undefined}
       onClose={() => undefined}

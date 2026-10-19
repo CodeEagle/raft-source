@@ -8,14 +8,16 @@ import { PGlite } from "@electric-sql/pglite";
 import pg from "pg";
 import { attachPoolClientErrorHandler } from "./pgPoolErrorHandler";
 import { prewarmPool, resolvePoolPrewarmCount } from "./poolPrewarm";
-import { connectPermitWaitMs, createConnectGate, gatedClientClass, resolveConnectConcurrency } from "./connectGate";
+import { connectErrorCategory, connectPermitWaitMs, createConnectGate, gatedClientClass, resolveConnectConcurrency, type ConnectAttemptFailure, type ConnectGate } from "./connectGate";
 import { noopTracer, type TraceContext, type Tracer } from "@botiverse/raft-shared";
 import * as schema from "./schema";
 import { migratePglite } from "./pgliteMigrations";
 import { closeRisingWavePool, getRisingWavePoolState, isRisingWaveConfigured } from "./risingwave";
 import {
+  isInTransaction,
   recordSecondConnectionInsideTransaction,
   scopeTransactions,
+  setSavepointLeakReporter,
   type Database,
 } from "./ambientTransaction";
 import {
@@ -30,7 +32,7 @@ import {
   statementKindFromText,
   type DbStatementKind,
 } from "./statementMetrics";
-import { errorClassOf, getCurrentTraceContext } from "../tracing/semanticTrace";
+import { errorClassOf, getCurrentTraceContext, recordTraceEvent } from "../tracing/semanticTrace";
 
 let _tracer: Tracer = noopTracer;
 const dbTraceAttributes = new AsyncLocalStorage<Record<string, string | number | boolean>>();
@@ -292,6 +294,29 @@ function recordReadOnlyRecovery(label: string, err: unknown, state: ReadOnlyReco
   return recycleErr;
 }
 
+// Savepoints that outlive the ambient transaction they joined (un-awaited work)
+// and the 25P01 / 3B001 their RELEASE hits: see ambientTransaction.ts. The
+// event goes through the request's tracer so it carries its scope attrs
+// (route, server); the stack names the code that opened the savepoint.
+setSavepointLeakReporter((report) => {
+  const stack = report.kind === "outer_finished_with_open_savepoints"
+    ? report.openSavepointStacks.join("\n---\n")
+    : report.stack;
+  recordTraceEvent("server.db.ambient_transaction.savepoint_leak", {
+    event_kind: "db_savepoint_leak",
+    kind: report.kind,
+    outcome: report.kind === "outer_finished_with_open_savepoints" ? report.outcome : "none",
+    sqlstate: report.kind === "savepoint_statement_failed" ? report.sqlstate : "none",
+    open_savepoints: report.kind === "outer_finished_with_open_savepoints" ? report.openSavepointStacks.length : 1,
+    stack,
+  }, _tracer);
+  console.warn(JSON.stringify({
+    event: "db.ambient_transaction.savepoint_leak",
+    trace_id: getCurrentTraceContext()?.traceId ?? null,
+    ...report,
+  }));
+});
+
 function queryTextFromInput(input: unknown): string | undefined {
   if (typeof input === "string") return input;
   const text = (input as { text?: unknown } | null)?.text;
@@ -323,6 +348,38 @@ function rawSqlForTrace(text: string | undefined): string {
 
 function hashFingerprint(fingerprint: string): string {
   return createHash("sha256").update(fingerprint).digest("hex").slice(0, 16);
+}
+
+/**
+ * Lock conflicts PostgreSQL resolved by aborting this statement: 40P01
+ * deadlock_detected, 40001 serialization_failure, 55P03 lock_not_available.
+ */
+const LOCK_CONFLICT_SQLSTATES = new Set(["40P01", "40001", "55P03"]);
+
+/**
+ * db.lock_conflict: recorded when the statement fails, before the error
+ * reaches any caller, so a caller that swallows it (or code that never goes
+ * through withTransientTransactionRetry) still leaves a trace. Prod 10-18: 3
+ * deadlocks in Neon's log, no server-side trace of either side, and Neon's
+ * log export carries no DETAIL (#proj-o11y:058cb07b, tygg). Only the
+ * normalized fingerprint (no literal values) and its hash; the event joins
+ * its route/worker and query name through the current trace.
+ */
+function recordLockConflict(label: string, err: unknown, identityOf: () => QueryIdentity): void {
+  const code = (err as PgErrorLike | null)?.code;
+  if (typeof code !== "string" || !LOCK_CONFLICT_SQLSTATES.has(code)) return;
+  const identity = identityOf();
+  const ambient = dbTraceAttributes.getStore();
+  recordTraceEvent("db.lock_conflict", {
+    event_kind: "db_lock_conflict",
+    sqlstate: code,
+    pool: label,
+    in_transaction: isInTransaction(),
+    statement_kind: identity.statementKind,
+    sql_hash: identity.hash,
+    sql_fingerprint: identity.fingerprint.slice(0, 500),
+    ...(typeof ambient?.db_callsite === "string" ? { db_callsite: ambient.db_callsite } : {}),
+  }, _tracer);
 }
 
 function queryIdentityFromInput(input: unknown): QueryIdentity {
@@ -391,6 +448,16 @@ function checkoutErrorClass(err: unknown): string {
   return errorClassOf(err);
 }
 
+/** The connect gate of each pool, by label, so a checkout failure can say how full it was. */
+const connectGatesByPool = new Map<string, ConnectGate>();
+
+function connectGateAttrs(label: string): Record<string, number> {
+  const gate = connectGatesByPool.get(label);
+  if (!gate) return {};
+  const state = gate.state();
+  return { connect_in_flight: state.connecting, connect_queued: state.queued, connect_limit: gate.limit };
+}
+
 function recordConnectionCheckoutFailure(
   label: string,
   queueMs: number,
@@ -423,6 +490,8 @@ function recordConnectionCheckoutFailure(
       discarded: true,
       checkout_failed: true,
       checkout_error_class: checkoutErrorClass(err),
+      checkout_error_category: connectErrorCategory(err),
+      ...connectGateAttrs(label),
       ...traceAttributes,
     },
   }).end("error");
@@ -475,6 +544,8 @@ function preparePoolClient(
           checkout.firstQueryMs = Date.now() - checkout.firstQueryStartMs;
         }
         if (checkout && timesStatement) observeStatement(checkout.label, statementKind, statementStartMs, err);
+        // Rare, so the statement's identity is only built when one happens.
+        if (err) recordLockConflict(checkout?.label ?? label, err, () => queryIdentityFromInput(args[0]));
       };
       if (checkout) {
         const queryIdentity = queryIdentityFromInput(args[0]);
@@ -754,6 +825,11 @@ let _pool: pg.Pool | null = null;
 let _pglite: PGlite | null = null;
 let _searchDb: Database | null = null;
 let _searchPool: pg.Pool | null = null;
+// Public server SEO task #4: a small pool used only to authenticate the
+// raft.build service credential, so its waits never touch the content pool.
+let _authUrl: string | null = null;
+let _authPool: pg.Pool | null = null;
+let _authDb: Database | null = null;
 
 function abortErrorFor(signal?: AbortSignal): SearchQueryAbortedError {
   return new SearchQueryAbortedError("Message search query aborted", {
@@ -947,6 +1023,27 @@ export function resolvePoolIdleTimeoutMs(env: NodeJS.ProcessEnv): number {
 // Exported for the task #269 real-PG teeth: the child process in
 // pgPoolErrorHandler.realPg.child.ts must exercise this exact wiring (helper
 // + attach site), not a mirror of it.
+// Which side a stuck connect is on (o11y 2026-10-15): queued behind full
+// permits, or the handshake itself; and the error category, not text.
+function recordConnectAttemptFailure(label: string, gate: ConnectGate, failure: ConnectAttemptFailure): void {
+  const gateState = gate.state();
+  _tracer.emitEvent("server.db.connect_attempt_failed", {
+    surface: "server",
+    parent: getCurrentTraceContext(),
+    attrs: {
+      event_kind: "db_connect_attempt",
+      pool: label,
+      stage: failure.stage,
+      connect_permit_wait_ms: failure.permitWaitMs,
+      handshake_ms: failure.handshakeMs,
+      error_category: failure.errorCategory,
+      connect_in_flight: gateState.connecting,
+      connect_queued: gateState.queued,
+      connect_limit: gate.limit,
+    },
+  });
+}
+
 export function createPool(
   connectionString: string,
   options: { min?: number; label?: string; connectConcurrency?: number } = {},
@@ -955,10 +1052,11 @@ export function createPool(
   const label = options.label ?? "pg";
   // At most this many handshakes in flight per pool; the rest queue (./connectGate).
   const connectGate = createConnectGate(options.connectConcurrency ?? resolveConnectConcurrency(process.env));
+  connectGatesByPool.set(label, connectGate);
   const pool = new pg.Pool({
     Client: gatedClientClass(connectGate, (waitMs) => {
       dbPoolConnectPermitWait.labels(label).observe(waitMs / 1000);
-    }),
+    }, (failure) => recordConnectAttemptFailure(label, connectGate, failure)),
     connectionString,
     max: pgMaxConnections(),
     // Idle clients up to `min` are not closed by idleTimeoutMillis. Set only on
@@ -993,6 +1091,7 @@ export async function initDatabase(
     return initPgliteDatabase(new PGlite(getPgliteDataDir(databaseUrl)));
   }
 
+  _authUrl = databaseUrl;
   _pool = createPool(databaseUrl, { min: resolvePoolPrewarmCount(process.env, pgMaxConnections()), label: "primary" });
   instrumentPool("primary", _pool);
   _rootDb = drizzleNodePg(_pool, { schema });
@@ -1162,6 +1261,37 @@ export function stopPoolMetricsReporting(): void {
   }
 }
 
+/**
+ * The bounded authentication database (task #4): at most two connections, a
+ * connection wait, statement timeout and client query timeout of `timeoutMs`
+ * each, no retry. A caller that times out never queues on, or later takes, a
+ * connection of the content pool. Null on PGlite or before initDatabase.
+ */
+export function getBoundedAuthDb(timeoutMs: number): Database | null {
+  if (!_authUrl) return null;
+  if (!_authDb) {
+    _authPool = new pg.Pool({
+      connectionString: _authUrl,
+      max: 2,
+      min: 0,
+      connectionTimeoutMillis: timeoutMs,
+      statement_timeout: timeoutMs,
+      query_timeout: timeoutMs + 50,
+      idleTimeoutMillis: 30_000,
+      application_name: "raft-public-search-auth",
+      ssl: _authUrl.includes("neon.tech") ? { rejectUnauthorized: false } : undefined,
+      keepAlive: true,
+      keepAliveInitialDelayMillis: 10_000,
+    });
+    _authPool.on("error", (err) => {
+      console.error("Unexpected pg auth pool error:", err.message);
+    });
+    attachPoolClientErrorHandler(_authPool, "pg-auth");
+    _authDb = drizzleNodePg(_authPool, { schema });
+  }
+  return _authDb;
+}
+
 export async function closeDatabase() {
   stopPoolMetricsReporting();
   const errors: Error[] = [];
@@ -1170,6 +1300,7 @@ export async function closeDatabase() {
     closeRisingWavePool,
     ...(_pool ? [() => _pool!.end()] : []),
     ...(_searchPool && _searchPool !== _pool ? [() => _searchPool!.end()] : []),
+    ...(_authPool ? [() => _authPool!.end()] : []),
     ...(_pglite ? [() => _pglite!.close()] : []),
   ];
   try {
@@ -1187,6 +1318,9 @@ export async function closeDatabase() {
     _pool = null;
     _pglite = null;
     _searchPool = null;
+    _authPool = null;
+    _authDb = null;
+    _authUrl = null;
   }
   if (errors.length === 1) throw errors[0];
   if (errors.length > 1) throw new AggregateError(errors, "Database cleanup failed");

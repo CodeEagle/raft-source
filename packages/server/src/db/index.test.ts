@@ -953,3 +953,40 @@ test("a pool that hands out no connection in time counts as acquire_timeout, eve
   assert.equal(await statementErrorCount("metrics-acquire", "acquire_timeout"), 2);
   assert.equal(await statementCount("metrics-acquire", "select"), 0);
 });
+
+test("a statement that fails with a lock conflict records db.lock_conflict before the error propagates, with no values", async () => {
+  let now = 0;
+  Date.now = () => now;
+  const sink = new MemoryTraceSink();
+  setDbTracer(new BasicTracer({ sink, clock: () => now }));
+  const client = new FakeClient();
+  const pool = new FakePool(client) as unknown as pg.Pool;
+  instrumentPool("primary", pool);
+
+  for (const sqlstate of ["40P01", "40001", "55P03"]) {
+    client.queryError = Object.assign(new Error(`conflict ${sqlstate}`), { code: sqlstate });
+    const checkedOut = await pool.connect();
+    // The caller swallows it: the event must already be recorded.
+    await withDbTraceAttributes({ db_callsite: "test.swallowed" }, () =>
+      checkedOut.query("UPDATE external_channel_bindings SET state = 'paused' WHERE id = $1", ["b-secret"]).catch(() => null));
+    checkedOut.release();
+  }
+  // A non-conflict failure records nothing.
+  client.queryError = Object.assign(new Error("syntax"), { code: "42601" });
+  const other = await pool.connect();
+  await other.query("SELECT 1").catch(() => null);
+  other.release();
+
+  const events = sink.getAllLogEvents().filter((event) => event.name === "db.lock_conflict");
+  assert.deepEqual(events.map((event) => event.attrs?.sqlstate), ["40P01", "40001", "55P03"]);
+  for (const event of events) {
+    assert.equal(event.attrs?.pool, "primary");
+    assert.equal(event.attrs?.statement_kind, "update");
+    assert.equal(event.attrs?.in_transaction, false);
+    assert.equal(event.attrs?.db_callsite, "test.swallowed");
+    assert.equal(event.attrs?.sql_fingerprint, "UPDATE external_channel_bindings SET state = ? WHERE id = ?");
+    assert.equal(typeof event.attrs?.sql_hash, "string");
+    assert.equal(JSON.stringify(event.attrs).includes("paused"), false, "no literal values");
+    assert.equal(JSON.stringify(event.attrs).includes("b-secret"), false, "no parameters");
+  }
+});

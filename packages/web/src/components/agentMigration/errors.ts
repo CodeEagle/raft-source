@@ -79,6 +79,8 @@ export function parseMigrationResumableCapabilityDetail(
 export interface MigrationErrorInput {
   code?: string | null;
   rawMessage?: string | null;
+  /** Structured server `details` when a code needs them (task #1268: TARGET_RUNTIME_DETECTION_PENDING). */
+  details?: unknown;
   context: "start" | "status" | "failed" | "aborted";
   reason?: string | null;
   computerCapabilityDetails?: MigrationComputerCapabilityDetails | null;
@@ -348,6 +350,12 @@ const MIGRATION_ERROR_IDS = {
   TARGET_COMPUTER_MATCHES_SOURCE: "migration.error.targetMatchesSource",
   COMPUTER_CAPABILITY_INSUFFICIENT: "migration.error.capabilityInsufficient",
   TARGET_COMPUTER_OFFLINE: "migration.error.targetOffline",
+  HOSTED_TARGET_UNAVAILABLE: "migration.error.hostedUnavailable",
+  HOSTED_TARGET_ALREADY_USED: "migration.error.hostedAlreadyUsed",
+  HOSTED_TARGET_MODEL_INVALID: "migration.error.hostedModelInvalid",
+  HOSTED_REVIEW_NOT_READY: "migration.error.hostedReviewNotReady",
+  HOSTED_IMPORT_MEMORY_UNIMPORTABLE: "migration.error.hostedMemoryUnimportable",
+  MIGRATION_NOT_CANCELABLE: "migration.error.notCancelable",
   MIGRATION_ALREADY_IN_PROGRESS: "migration.error.alreadyInProgress",
   MIGRATION_PRO_PLAN_REQUIRED: "migration.error.proPlanRequired",
   MIGRATION_TRANSPORT_NOT_PROVISIONED: "migration.error.transportNotProvisioned",
@@ -406,7 +414,17 @@ function workspaceConflictMessage(
   };
 }
 
+/** task #1268: the target is still detecting (pending) or never probed (incomplete) the agent's runtime; both retryable. */
+function targetRuntimeDetectionMessage(formatMessage: Format, input: MigrationErrorInput): string {
+  const details = (input.details ?? {}) as { detectionStatus?: unknown; runtime?: unknown };
+  if (details.detectionStatus === "incomplete") {
+    return formatMessage({ id: "migration.error.targetRuntimeDetectionIncomplete" }, { runtime: typeof details.runtime === "string" ? details.runtime : "" });
+  }
+  return formatMessage({ id: "migration.error.targetRuntimeDetectionPending" });
+}
+
 const MIGRATION_INPUT_BUILDERS = {
+  TARGET_RUNTIME_DETECTION_PENDING: targetRuntimeDetectionMessage,
   MIGRATION_TRANSPORT_LOST: transportLostMessage,
   MIGRATION_WORKSPACE_ALREADY_EXISTS: workspaceConflictMessage(
     "migration.error.workspaceAlreadyExistsAt",

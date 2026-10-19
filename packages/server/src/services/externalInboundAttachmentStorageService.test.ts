@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
+import { Readable, Writable } from "node:stream";
 import { eq } from "drizzle-orm";
 
 import { closeDatabase, getDb, initDatabase } from "../db/index";
@@ -326,4 +326,73 @@ test("a pre-deploy planned external intent keeps its legacy storage route on rep
   assert.equal(object.storageKey, legacyStorageKey);
   assert.deepEqual(writes.get(legacyStorageKey), body);
   assert.equal(await externalInboundAttachmentIntentState(state.db, messageFactId), "completed");
+});
+
+test("a provider byte generator that throws on first read rejects storeExternalInboundAttachment without using the streaming path", async () => {
+  const state = await fixture();
+  const writes = new Map<string, Buffer>();
+  const messageFactId = randomUUID();
+  let streamPathUsed = false;
+  // Regression for the prod crash: `transport.download` claimed the credential
+  // lease inside the generator; losing the lease race threw on the first read.
+  // `memoryStorage.putStream` iterates with `for await`, which turns a
+  // generator error into an ordinary rejection — that is NOT how the S3 SDK
+  // consumes a request body. Model the SDK faithfully (pipe into a sink with
+  // no 'error' listener on the source) so a stream 'error' is emitted the way
+  // it was in prod, AND flag that the streaming path was entered: the
+  // regression is that putStream was called at all. On the old code both the
+  // flag trips and a source 'error' escapes; on the fix the storage is asked
+  // for `put` only.
+  const sdkStyleStorage: StorageBackend = {
+    async put(key, data) {
+      writes.set(key, Buffer.from(data));
+    },
+    async putStream(_key, data) {
+      streamPathUsed = true;
+      const sink = new Writable({ write(_chunk, _enc, cb) { cb(); } });
+      data.pipe(sink);
+      // Also surface the source error as a rejection so the harness fails fast
+      // instead of hanging on the never-finishing sink.
+      await new Promise<void>((resolve, reject) => {
+        data.once("error", reject);
+        sink.on("finish", resolve);
+        sink.on("error", reject);
+      });
+    },
+    async get(key) {
+      const value = writes.get(key);
+      if (!value) throw new Error("missing");
+      return Readable.from(value);
+    },
+    async delete(key) {
+      writes.delete(key);
+    },
+  };
+  async function* firstReadThrows(): AsyncIterable<Uint8Array> {
+    throw Object.assign(new Error("provider_attachment_credential_busy"), {
+      class: "transient",
+    });
+  }
+  await assert.rejects(
+    () => storeExternalInboundAttachment({
+      assetId: randomUUID(),
+      messageFactId,
+      serverId: state.server.id,
+      channelId: state.channel.id,
+      uploaderId: state.actor.id,
+      uploaderType: "external_projection",
+      filename: "provider.bin",
+      mimeType: "application/octet-stream",
+      declaredSizeBytes: 4,
+      maximumSizeBytes: 1024,
+      bytes: firstReadThrows(),
+      storage: sdkStyleStorage,
+      db: state.db,
+      now: NOW,
+    }),
+    /provider_attachment_credential_busy/,
+  );
+  assert.equal(streamPathUsed, false, "provider bytes must be buffered before storage, never streamed");
+  assert.equal(writes.size, 0);
+  assert.equal((await state.db.select().from(attachments)).length, 0);
 });

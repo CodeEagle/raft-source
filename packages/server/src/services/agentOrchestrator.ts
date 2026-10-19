@@ -4,6 +4,10 @@ import crypto from "node:crypto";
 import type { Server as SocketServer } from "socket.io";
 import type { WebSocket } from "ws";
 import {
+  summarizeTurnsFromLog,
+  type ActivityTurnOutcome,
+  type ExternalHookTurnBoundary,
+  type ActivityTurnSummary,
   DAEMON_CAPABILITY_SEQUENCED_STATUS,
   DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
   type AgentWakeRefusedReason,
@@ -66,6 +70,7 @@ import {
   type TraceStatus,
   type Tracer,
   type ExternalAgentActivityEvent,
+  type SubagentLineage,
   type ExternalAgentActivityIngestRequest,
   type AgentMigrationTransportLeaseSource,
   type AgentMigrationTransportReady,
@@ -78,9 +83,12 @@ import {
   type FeedbackTranscriptWindow,
   type RuntimeAccountUsageProvider,
   type RuntimeErrorActivityDiagnostic,
+  type RuntimeErrorRequiredAction,
   type DeliveryConsumptionActivityDiagnostic,
   type WakeCrashLoopActivityDiagnostic,
   type SpawnFailureActivityDiagnostic,
+  type DeviceClass,
+  isDeviceClass,
   AGENT_MIGRATION_CAPABILITY,
   MODEL_SEEN_MAX_ITEMS_PER_REPORT,
   MACHINE_DUPLICATE_CONNECTION_CLOSE_CODE,
@@ -142,19 +150,23 @@ import * as agentService from "./agentService";
 import * as agentMigrationService from "./agentMigrationService";
 import * as agentRuntimeProfileService from "./agentRuntimeProfileService";
 import * as machineService from "./machineService";
+import * as computerHostIdentityService from "./computerHostIdentityService";
+import { isHostIdHash } from "./computerHostIdentityService";
 import * as channelService from "./channelService";
 import * as messageService from "./messageService";
 import * as oauthService from "./oauthService";
 import * as mentionDeliveryOccurrenceService from "./mentionDeliveryOccurrenceService";
 import * as agentActivityLogService from "./agentActivityLogService";
 import * as computerLifecycleOperationService from "./computerLifecycleOperationService";
+import { dispatchPendingAgentArchiveOps, type AgentArchiveDispatchPort } from "./agentArchiveService";
 import * as computerUpgradeRequestService from "./computerUpgradeRequestService";
 import {
   recordComputerOfflineTransition,
   recordComputerOnlineTransition,
 } from "./computerOutageNotificationService";
 import { legacyRuntimeStateFromActivity } from "./legacyActivityStateInference";
-import { CONSTRUCTED_WAKE_CONTEXT_FEATURE_FLAG_KEY, evaluateFeatureFlag, PASSIVE_AX_FEATURE_FLAG_KEY, SUBAGENT_DELEGATION_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { recordAgentContextReturned } from "../tracing/agentContextReturnTrace";
+import { CONSTRUCTED_WAKE_CONTEXT_FEATURE_FLAG_KEY, evaluateFeatureFlag, PASSIVE_AX_FEATURE_FLAG_KEY, REMINDER_APP_FEATURE_FLAG_KEY, SUBAGENT_DELEGATION_FEATURE_FLAG_KEY, VAULT_APP_FEATURE_FLAG_KEY } from "./featureFlagService";
 import { runtimeAccountUsageCacheService } from "./runtimeAccountUsageCacheService";
 import { usageLimitAttentionService } from "./usageLimitAttentionService";
 import { machineRuntimeModelCatalogService } from "./machineRuntimeModelCatalogService";
@@ -180,9 +192,13 @@ import {
   adaptStartLifecycleEvent,
   adaptStopLifecycleEvent,
   normalizeRuntimeErrorActivityDiagnostic,
+  runtimeErrorRequiredAction,
 } from "./legacyAgentLifecycleAdapter";
 import { normalizeDeliveryConsumptionActivityDiagnostic } from "./deliveryConsumptionActivityDiagnostic";
-import { WakeCrashLoopBreaker, type WakeCrashLoopExit, type WakeCrashLoopStartRecord } from "./wakeCrashLoopBreaker";
+import { isRuntimeAbsentStartFailure, WakeCrashLoopBreaker, type WakeCrashLoopExit, type WakeCrashLoopStartRecord } from "./wakeCrashLoopBreaker";
+import { postAgentActionRequiredNotice } from "./agentActionRequiredNoticeService";
+import { isLegacyStartFailureDetail, isLegacyUnkindedStartFailure, legacySpawnFailureCarrier } from "./legacySpawnFailure";
+import { normalizeExternalSubagentMarker } from "./externalSubagentMarker";
 import { normalizeSpawnFailureActivityDiagnostic } from "./spawnFailureActivityDiagnostic";
 import { createAgentLifecycleEvent, type AgentLifecycleEventType } from "./agentLifecycleEvents";
 import {
@@ -333,6 +349,9 @@ interface MachineConnection {
   // When this connection was accepted; SLI 4 failure outcomes are bucketed by
   // connection age (task #432). Optional so hand-built test connections compile.
   connectedAt?: number;
+  // Task #1295: when this connection last sent any agent:deliver:ack; a recent
+  // one defers due delivery re-sends.
+  lastDeliveryAckAt?: number;
   daemonVersion: string | null;
   // Task #374: closed because another replica holds a live, renewing
   // connection for this machine. Its disconnect is local cleanup only.
@@ -340,6 +359,9 @@ interface MachineConnection {
   // Task #374: short hash of the hostname the daemon reported in `ready`
   // (never the name itself). A clue for duplicate reports, not host identity.
   reportedHostnameHash?: string | null;
+  // WSL flavour the daemon reported in `ready` (its `os` still says linux);
+  // null on older daemons and other hosts. Telemetry grouping only.
+  osVariant?: "wsl1" | "wsl2" | null;
   // Task #374: when this connection, as lease holder, last published its
   // daemon identity next to the lease (observation for duplicate detection).
   lastReplicaInstancePublishedAt?: number;
@@ -359,6 +381,14 @@ interface MachineConnection {
   // no double-source divergence. Null until `ready` is processed.
   runtimes: string[] | null;
   runtimeVersions: Record<string, string>;
+  /**
+   * task #1268: the daemon's runtime detection state for this connection. A
+   * `pending` ready carries no inventory and leaves `runtimes` untouched; an
+   * `incomplete` ready names the runtimes it never probed, whose previous
+   * state is kept and marked unconfirmed (never unavailable). Null until a
+   * ready is processed; synchronous daemons are `complete`.
+   */
+  runtimeDetection?: MachineRuntimeDetectionState | null;
   // Latest `machine:disk_status` of this connection; null until reported.
   diskStatus?: MachineDiskStatus | null;
   migrationTransport: MachineMigrationTransportState | null;
@@ -381,11 +411,71 @@ interface MachineConnection {
 // per machine so a transient DB-write failure can be retried by the server
 // itself (see enqueueCapabilitiesPersist) instead of waiting for the daemon to
 // send another `ready`.
+/** task #1268: detection state fanned out with `machine:capabilities` and kept on the connection. */
+export interface MachineRuntimeDetectionState {
+  status: "pending" | "complete" | "incomplete";
+  /** `incomplete` only: runtimes whose previous state is retained unconfirmed. */
+  unfinishedRuntimes?: string[];
+  /** `incomplete` only: why the daemon's round ended early. */
+  reason?: "deadline" | "child_failed" | "cancelled";
+  updatedAtMs: number;
+}
+
+/**
+ * task #1268: null when the daemon sent no report (it detects synchronously
+ * before ready, i.e. complete); the fan-out then carries no `runtimeDetection`
+ * and web treats absence as complete.
+ */
+export function normalizeRuntimeDetectionReport(value: unknown, nowMs: number): MachineRuntimeDetectionState | null {
+  if (!value || typeof value !== "object") return null;
+  const report = value as { status?: unknown; unfinishedRuntimes?: unknown; reason?: unknown };
+  if (report.status === "pending") return { status: "pending", updatedAtMs: nowMs };
+  if (report.status === "incomplete") {
+    const unfinished = Array.isArray(report.unfinishedRuntimes)
+      ? report.unfinishedRuntimes.filter((id): id is string => typeof id === "string" && id.trim().length > 0)
+      : [];
+    const reason = report.reason === "deadline" || report.reason === "child_failed" || report.reason === "cancelled" ? report.reason : "child_failed";
+    return { status: "incomplete", unfinishedRuntimes: unfinished, reason, updatedAtMs: nowMs };
+  }
+  return { status: "complete", updatedAtMs: nowMs };
+}
+
+/** task #1268: the last confirmed inventory a pending/incomplete ready is laid over. */
+export interface MachineRuntimeInventory {
+  runtimes: string[];
+  runtimeVersions: Record<string, string>;
+}
+
+/**
+ * task #1268: an incomplete round keeps the previous state (presence and
+ * version) of every runtime it never probed; probed runtimes take the new
+ * result. Pure, so the merge is testable without a connection.
+ */
+export function mergeIncompleteRuntimeInventory(
+  previous: MachineRuntimeInventory | null,
+  reported: MachineRuntimeInventory,
+  unfinishedRuntimes: readonly string[],
+): MachineRuntimeInventory {
+  const unfinished = new Set(unfinishedRuntimes);
+  const runtimes = new Set(reported.runtimes);
+  const runtimeVersions: Record<string, string> = { ...reported.runtimeVersions };
+  for (const runtime of previous?.runtimes ?? []) {
+    if (!unfinished.has(runtime)) continue;
+    runtimes.add(runtime);
+    const version = previous?.runtimeVersions[runtime];
+    if (version && !runtimeVersions[runtime]) runtimeVersions[runtime] = version;
+  }
+  return { runtimes: [...runtimes], runtimeVersions };
+}
+
 interface CapabilitiesPersistPayload {
   runtimes: string[];
   runtimeVersions?: Record<string, string>;
+  runtimeDetection?: MachineRuntimeDetectionState;
   hostname?: string;
   os?: string;
+  /** Validated against DEVICE_CLASSES; null when absent (unknown / older daemon). */
+  deviceClass?: DeviceClass | null;
   daemonVersion?: string | null;
   computerVersion?: string | null;
 }
@@ -401,6 +491,20 @@ function normalizeRuntimeVersions(value: unknown, runtimes: readonly string[]): 
     versions[runtimeId] = version;
   }
   return versions;
+}
+
+/** task #1268: the owner replica's last fanned-out detection state, or null. */
+function runtimeDetectionFromMachineMeta(meta: MachineMeta | null): MachineRuntimeDetectionState | null {
+  if (typeof meta?.probeRuntimeDetection !== "string" || !meta.probeRuntimeDetection) return null;
+  try {
+    const parsed = JSON.parse(meta.probeRuntimeDetection) as unknown;
+    const normalized = normalizeRuntimeDetectionReport(parsed, 0);
+    if (!normalized) return null;
+    const updatedAtMs = typeof (parsed as { updatedAtMs?: unknown }).updatedAtMs === "number" ? (parsed as { updatedAtMs: number }).updatedAtMs : 0;
+    return { ...normalized, updatedAtMs };
+  } catch {
+    return null;
+  }
 }
 
 function runtimeVersionsFromMachineMeta(meta: MachineMeta | null): Record<string, string> {
@@ -794,6 +898,15 @@ interface PendingAgentDeliveryAck {
   arrivedAt?: number;
   firstAttemptAt: number;
   lastAttemptAt: number;
+  /**
+   * When this record began its current wait for an ack on a live connection:
+   * the first send, a reconnect re-send, or the re-send after a park. The
+   * give-up bounds count from here, so time offline never counts against a
+   * delivery; `firstAttemptAt` stays the SLO latency start (task #1295).
+   */
+  ackWaitStartedAt: number;
+  /** Ack timeouts scheduled in the current wait; indexes the re-send backoff (task #1295). */
+  ackWaits: number;
   /** SLO v1 SLI 4: the machine socket was open on this replica when the record was created. */
   onlineAtFirstAttempt: boolean;
   /**
@@ -815,6 +928,19 @@ type AgentDeliveryOutcome =
   | "replica_shutdown"
   | "parked_expired"
   | "held_expired";
+
+/**
+ * What a give-up leaves behind so a late ack can still be counted: the SLO
+ * labels and the identity for the log line, not the message itself.
+ */
+interface GaveUpAgentDelivery {
+  givenUpAt: number;
+  machineId: string;
+  agentId: string;
+  seq: number;
+  deliveryId: string | null;
+  labels: ReturnType<typeof agentDeliverySloLabels>;
+}
 
 type AgentStartMessage = Extract<
   ServerToMachineMessage,
@@ -1109,6 +1235,7 @@ export type DeliveryGates = {
   access: Map<string, boolean>;
   passiveScope: Map<string, boolean>;
   migrationGated: Map<string, boolean>;
+  raftbenchServices?: Set<string>;
 };
 
 type ActivityTraceOptions = {
@@ -1786,6 +1913,7 @@ export type AgentMessageDeliveryResult =
       status: "dropped";
       reason:
         | "agent_unavailable"
+        | "raftbench_service_no_chat"
         | "passive_scope_revoked"
         | "target_access_changed"
         | "transient_delivery_unsupported"
@@ -1816,6 +1944,7 @@ function normalizeRoutedInboxDeliveryReceipt(
   const reason = receipt.reason;
   if (
     reason === "agent_unavailable"
+    || reason === "raftbench_service_no_chat"
     || reason === "passive_scope_revoked"
     || reason === "target_access_changed"
     || reason === "transient_delivery_unsupported"
@@ -2201,6 +2330,139 @@ interface MappedExternalPluginActivity {
   dedupeKey?: string;
 }
 
+/** Hook names `mapExternalPluginActivityEvent` maps; anything else is traced as `other`. */
+const EXTERNAL_ACTIVITY_HOOK_EVENT_NAMES: ReadonlySet<string> = new Set([
+  "BridgeFatal", "PreToolUse", "PostToolUse", "PostToolUseFailure", "PostToolBatch",
+  "UserPromptSubmit", "Stop", "SessionStart", "SessionEnd", "SubagentStart", "SubagentStop",
+]);
+
+/** The distinct values in a batch, sorted and comma-joined; null when none. */
+function externalActivityClosedValues(values: Array<string | null>): string | null {
+  const distinct = [...new Set(values.filter((value): value is string => value !== null))].sort();
+  return distinct.length > 0 ? distinct.join(",") : null;
+}
+
+/**
+ * A turn the provider ended on purpose: a BridgeFatal whose errorClass starts
+ * with `stopped:` (the owner's stop, or the agent's delete). The status line it
+ * shows, never an error (Tenny); null for any other event.
+ */
+export function externalStoppedTurnDetail(event: ExternalAgentActivityEvent): string | null {
+  const hookEventName = externalActivityString(event.hookEventName ?? event.hook_event_name, 80);
+  if (hookEventName !== "BridgeFatal") return null;
+  const errorClass = externalActivityString(event.errorClass ?? event.error_class, 120);
+  if (!errorClass?.startsWith("stopped:")) return null;
+  const reason = errorClass.slice("stopped:".length).trim();
+  if (reason === "by owner") return "Stopped by owner";
+  if (reason === "agent deleted") return "Stopped: agent deleted";
+  return "Stopped";
+}
+
+/** Rows the server refolds per external batch when it has no turn yet to start from (task #17). */
+const EXTERNAL_TURN_SUMMARY_WINDOW_ROWS = 400;
+/** Most rows refolded after the last settled turn (one long turn fits). */
+const EXTERNAL_TURN_SUMMARY_REFOLD_ROWS = 2000;
+/** A reported "online" followed by "working" within this is one turn (status streams flap). */
+const EXTERNAL_SOFT_END_GRACE_MS = 15_000;
+
+const EXTERNAL_STATUS_REPORT_PROVENANCE = "external/status-reported:";
+
+/** A status the agent reported itself (raft-agent-status.v1), as stored. */
+function externalReportedStatus(entry: TrajectoryEntry): Extract<TrajectoryEntry, { kind: "status" }> | null {
+  return entry.kind === "status" && typeof entry.producerFactId === "string" && entry.producerFactId.startsWith(EXTERNAL_STATUS_REPORT_PROVENANCE)
+    ? entry
+    : null;
+}
+
+/** The hook turn boundary a stored row marks, whether stored as the status (no status protocol) or kept beside it. */
+function externalHookBoundary(entry: TrajectoryEntry): ExternalHookTurnBoundary | null {
+  if (entry.kind !== "status" || !isExternalHookEntry(entry)) return null;
+  if (entry.hookBoundary) return entry.hookBoundary;
+  return (entry.detailKind && EXTERNAL_HOOK_BOUNDARY_BY_DETAIL_KIND[entry.detailKind]) ?? null;
+}
+
+function externalHookTurnOutcome(entry: TrajectoryEntry): ActivityTurnOutcome | null {
+  const boundary = externalHookBoundary(entry);
+  if (boundary === "turn_end") return "completed";
+  if (boundary === "session_end") return "interrupted";
+  if (entry.kind === "system" && entry.title === "Turn stopped") return "interrupted";
+  if (entry.kind === "system" && entry.title === "Bridge fatal") return "failed";
+  return null;
+}
+
+function externalReportedTurnOutcome(entry: TrajectoryEntry): ActivityTurnOutcome | null {
+  const reported = externalReportedStatus(entry);
+  if (reported?.activity === "online") return "completed";
+  if (reported?.activity === "error") return "failed";
+  if (reported?.activity === "offline") return "interrupted";
+  return null;
+}
+
+/**
+ * How an external agent's stored rows split into turns (Tenny): by its hooks
+ * when it sends any (UserPromptSubmit opens, Stop / SessionEnd / BridgeFatal
+ * close: cody), otherwise by the status it reports itself (busy after idle
+ * opens; idle, error or offline closes, and a brief "online" between two busy
+ * reports does not split a turn).
+ */
+function externalTurnBoundaries(rows: readonly { entry: TrajectoryEntry }[], knownHookReporter: boolean) {
+  const byHooks = knownHookReporter || rows.some((row) => externalHookBoundary(row.entry) !== null);
+  if (byHooks) {
+    return {
+      turnStart: (entry: TrajectoryEntry) => (externalHookBoundary(entry) === "turn_start" ? {} : null),
+      turnEnd: externalHookTurnOutcome,
+    };
+  }
+  return {
+    turnStart: (entry: TrajectoryEntry) => {
+      const reported = externalReportedStatus(entry);
+      return reported && (reported.activity === "working" || reported.activity === "thinking") ? {} : null;
+    },
+    turnEnd: (entry: TrajectoryEntry) => externalReportedTurnOutcome(entry) ?? externalHookTurnOutcome(entry),
+    softEnd: (entry: TrajectoryEntry) => externalReportedStatus(entry) !== null,
+    softEndGraceMs: EXTERNAL_SOFT_END_GRACE_MS,
+  };
+}
+
+const EXTERNAL_HOOK_BOUNDARY_BY_DETAIL_KIND: Partial<Record<string, ExternalHookTurnBoundary>> = {
+  message_received: "turn_start",
+  ready: "turn_end",
+  stopped: "session_end",
+};
+
+/**
+ * What a hook stores when the agent's own reported status replaces the
+ * hook-derived one. Status rows go, except (task #17):
+ * - the Tool finished outcome row, which marks a step, not the agent's state
+ *   (the restart hint skips tool_end);
+ * - turn boundaries (UserPromptSubmit / Stop / SessionEnd), kept so the turn
+ *   summary can use them, with `detailKind` "external_activity": the same
+ *   kind a reported status row has, so the restart hint read from this row
+ *   says nothing the reported status did not.
+ */
+function externalLogOnlyEntries(entries: readonly TrajectoryEntry[]): TrajectoryEntry[] {
+  return entries.flatMap((entry): TrajectoryEntry[] => {
+    if (entry.kind !== "status" || entry.detailKind === "tool_end") return [entry];
+    const hookBoundary = entry.detailKind ? EXTERNAL_HOOK_BOUNDARY_BY_DETAIL_KIND[entry.detailKind] : undefined;
+    if (hookBoundary && isExternalHookEntry(entry)) return [{ ...entry, detailKind: "external_activity", hookBoundary }];
+    return [];
+  });
+}
+
+function isExternalHookEntry(entry: TrajectoryEntry): boolean {
+  return typeof entry.producerFactId === "string" && entry.producerFactId.startsWith(`${EXTERNAL_AGENT_ACTIVITY_PROVENANCE}:`);
+}
+
+/** A daemon-sent summary is stored only if its times and counts are sane. */
+function isPlausibleTurnSummary(summary: unknown): summary is ActivityTurnSummary {
+  if (!summary || typeof summary !== "object") return false;
+  const value = summary as Partial<ActivityTurnSummary>;
+  return value.v === 1
+    && typeof value.startedAt === "number" && Number.isFinite(value.startedAt)
+    && typeof value.endedAt === "number" && Number.isFinite(value.endedAt) && value.endedAt >= value.startedAt
+    && typeof value.outcome === "string" && Array.isArray(value.actions) && Array.isArray(value.problems);
+}
+
 export function mapExternalPluginActivityEvent(event: ExternalAgentActivityEvent): MappedExternalPluginActivity | null {
   const hookEventName = externalActivityString(event.hookEventName ?? event.hook_event_name, 80);
   const eventId = externalActivityString(event.eventId ?? event.event_id, 160);
@@ -2211,6 +2473,30 @@ export function mapExternalPluginActivityEvent(event: ExternalAgentActivityEvent
   const detail = getToolActivityLabel(toolName);
   const occurredAtMs = externalActivityTimeMs(event.occurredAt ?? event.occurred_at);
   const dedupeKey = externalAgentActivityDedupeKey(eventId);
+  const callId = externalActivityString(event.toolUseId ?? event.tool_use_id, 160);
+
+  const stoppedDetail = externalStoppedTurnDetail(event);
+  if (stoppedDetail) {
+    return {
+      activity: "online",
+      detail: stoppedDetail,
+      entries: [{
+        kind: "status",
+        activity: "online",
+        activityKind: "online",
+        detail: stoppedDetail,
+        detailKind: "external_activity",
+        producerFactId,
+      }, {
+        kind: "system",
+        title: "Turn stopped",
+        text: stoppedDetail,
+        producerFactId,
+      }],
+      occurredAtMs,
+      dedupeKey,
+    };
+  }
 
   if (hookEventName === "BridgeFatal") {
     const errorClass = externalActivityString(event.errorClass ?? event.error_class, 120) ?? "BridgeFatal";
@@ -2252,6 +2538,7 @@ export function mapExternalPluginActivityEvent(event: ExternalAgentActivityEvent
         kind: "tool_start",
         toolName,
         toolInput: input.text,
+        ...(callId ? { callId } : {}),
         producerFactId,
       }],
       occurredAtMs,
@@ -2267,6 +2554,14 @@ export function mapExternalPluginActivityEvent(event: ExternalAgentActivityEvent
     const errorClass = externalActivityString(event.errorClass ?? event.error_class, 120);
     const title = hookEventName === "PostToolUseFailure" ? `Tool failed: ${toolName}` : `Tool output: ${toolName}`;
     const text = [errorClass, output.text].filter(Boolean).join("\n");
+    const rawDuration = event.durationMs ?? event.duration_ms;
+    const durationMs = typeof rawDuration === "number" && Number.isFinite(rawDuration) && rawDuration >= 0 ? Math.round(rawDuration) : undefined;
+    const rawExitCode = event.exitCode ?? event.exit_code;
+    const exitCode = typeof rawExitCode === "number" && Number.isSafeInteger(rawExitCode) ? rawExitCode : undefined;
+    // An explicit boolean `ok` wins (a hosted bridge may know a non-zero exit
+    // still ran); `ok: null` says the outcome is unknown (cancelled, result
+    // lost) and records no `ok`; without `ok` the hook name decides.
+    const ok = typeof event.ok === "boolean" ? event.ok : event.ok === null ? undefined : hookEventName !== "PostToolUseFailure";
     return {
       activity: "working",
       detail,
@@ -2274,6 +2569,20 @@ export function mapExternalPluginActivityEvent(event: ExternalAgentActivityEvent
         kind: "system",
         title,
         text,
+        producerFactId,
+      }, {
+        // The same "Tool finished" outcome row managed agents record, so the
+        // activity view reads one shape whatever produced the tool call.
+        kind: "status",
+        activity: "working",
+        detail: "Tool finished",
+        detailKind: "tool_end",
+        tool: {
+          ...(callId ? { callId } : {}),
+          ...(ok !== undefined ? { ok } : {}),
+          ...(durationMs !== undefined ? { durationMs } : {}),
+          ...(exitCode !== undefined ? { exitCode } : {}),
+        },
         producerFactId,
       }],
       occurredAtMs,
@@ -2337,6 +2646,70 @@ export function mapExternalPluginActivityEvent(event: ExternalAgentActivityEvent
   return null;
 }
 
+/** A subagent's event, recorded under the subagent without touching the agent's status or turn. */
+export interface MappedExternalSubagentActivity {
+  entries: TrajectoryEntry[];
+  occurredAtMs?: number;
+  dedupeKey: string;
+}
+
+/**
+ * An event carrying the `subagent` marker belongs to a subagent of this agent
+ * (hosted agents' `send_to_agent`): SubagentStart, the child's Pre/PostToolUse,
+ * SubagentStop. Its rows go to the log with the marker; it never reports the
+ * agent's own status, and a child's turn boundary is not the agent's, so
+ * status rows other than the tool outcome are dropped. Null when unusable.
+ */
+export function mapExternalSubagentActivityEvent(
+  event: ExternalAgentActivityEvent,
+  subagent: NonNullable<SubagentLineage["subagent"]>,
+): MappedExternalSubagentActivity | null {
+  const hookEventName = externalActivityString(event.hookEventName ?? event.hook_event_name, 80);
+  const eventId = externalActivityString(event.eventId ?? event.event_id, 160);
+  if (!hookEventName || !eventId) return null;
+  const occurredAtMs = externalActivityTimeMs(event.occurredAt ?? event.occurred_at);
+  const dedupeKey = externalAgentActivityDedupeKey(eventId);
+  if (hookEventName === "SubagentStart" || hookEventName === "SubagentStop") {
+    return {
+      entries: [{
+        kind: "system",
+        title: hookEventName === "SubagentStart" ? "Subagent started" : "Subagent finished",
+        // Bounded label / enum only, never the task or the report.
+        text: (hookEventName === "SubagentStart" ? subagent.subagentType : subagent.outcome) ?? "",
+        producerFactId: buildExternalPluginProducerFactId(eventId),
+        subagent,
+      }],
+      ...(occurredAtMs !== undefined ? { occurredAtMs } : {}),
+      dedupeKey,
+    };
+  }
+  const mapped = mapExternalPluginActivityEvent(event);
+  if (!mapped) return null;
+  const entries = scopeEntriesToSubagent(mapped.entries, subagent);
+  if (entries.length === 0) return null;
+  return { entries, ...(occurredAtMs !== undefined ? { occurredAtMs } : {}), dedupeKey };
+}
+
+function scopeEntriesToSubagent(
+  entries: readonly TrajectoryEntry[],
+  subagent: NonNullable<SubagentLineage["subagent"]>,
+): TrajectoryEntry[] {
+  return entries.flatMap((entry): TrajectoryEntry[] => {
+    switch (entry.kind) {
+      case "status":
+        // The tool outcome marks a step; any other status row would be the child's state.
+        return entry.detailKind === "tool_end" ? [{ ...entry, subagent }] : [];
+      case "tool_start":
+      case "system":
+      case "text":
+      case "thinking":
+        return [{ ...entry, subagent }];
+      default:
+        return [];
+    }
+  });
+}
+
 function truncateExternalActivityText(value: unknown, alreadyTruncated?: unknown): { text: string; truncated: boolean } {
   let text: string;
   if (typeof value === "string") {
@@ -2391,6 +2764,7 @@ function externalAgentActivityDedupeKey(eventId: string): string {
 
 type PlannedExternalActivityEvent =
   | { kind: "hook"; mapped: MappedExternalPluginActivity }
+  | { kind: "subagent"; mapped: MappedExternalSubagentActivity }
   | {
     kind: "status";
     eventId: string;
@@ -2486,6 +2860,9 @@ function agentDeliverySloLabels(pending: PendingAgentDeliveryAck): {
   };
 }
 
+/** Rejection message of `deleteMachineWorkspaceDir` when the Computer has not answered yet. */
+const WORKSPACE_DELETE_TIMED_OUT = "Delete timed out";
+
 export class AgentOrchestrator extends EventEmitter {
   private io: SocketServer | null = null;
   private machineConnections = new Map<string, MachineConnection>();
@@ -2521,6 +2898,8 @@ export class AgentOrchestrator extends EventEmitter {
   private pendingMachineDisconnects = new Map<string, PendingMachineDisconnectProjection>();
   private pendingAgentSkillsListRequests = new Map<string, PendingAgentSkillsListRequest>();
   private pendingAgentDeliveryAcks = new Map<string, PendingAgentDeliveryAck>();
+  // Insertion order is give-up order, so the oldest tombstones come first.
+  private gaveUpAgentDeliveries = new Map<string, GaveUpAgentDelivery>();
   private pendingAgentStartAcks = new Map<string, PendingAgentStartAck>();
   // replica-local: agents a start is being prepared for on this replica, until
   // its dispatch is recorded in pendingAgentStartAcks (see startAgentHere).
@@ -2611,6 +2990,8 @@ export class AgentOrchestrator extends EventEmitter {
    * this one at the next `/activity` batch.
    */
   private statusProtocolAdoptedAgents = new Set<string>();
+  /** External agents seen sending hook turn boundaries (task #17 turn splitting). */
+  private readonly externalHookTurnAgents = new Set<string>();
   private activityDaemonGenerationsByAgent = new Map<string, string[]>();
   private kimiActivityCircuitByLaunch = new Map<string, KimiActivityCircuitState>();
   private daemonIngressRateLimitWindows = new Map<string, DaemonIngressRateLimitWindow>();
@@ -2647,8 +3028,16 @@ export class AgentOrchestrator extends EventEmitter {
   private static RUNTIME_PROFILE_MIGRATION_MAX_NUDGES = 3;
   private static RUNTIME_PROFILE_HEARTBEAT_NUDGE_COOLDOWN_MS = 24 * 60 * 60_000;
   private static MACHINE_HEARTBEAT_TIMEOUT_MS = 60_000;
-  private static AGENT_DELIVERY_ACK_TIMEOUT_MS = 5_000;
-  private static AGENT_DELIVERY_ACK_MAX_ATTEMPTS = 24;
+  // Task #1295: ack-timeout re-sends back off (5, 10, 20, then every 40 s) and
+  // give up by age, not by count. A fixed 5 s re-send fed a backlogged daemon
+  // one more copy per delivery every 5 s (10-15: 53 give-ups were late acks).
+  private static AGENT_DELIVERY_ACK_BACKOFF_MS = [5_000, 10_000, 20_000, 40_000] as const;
+  private static AGENT_DELIVERY_GIVE_UP_AFTER_MS = 120_000;
+  // A connection that acked any delivery this recently is alive but behind, so
+  // a due re-send waits for the next backoff point instead; deferring stretches
+  // the give-up to the second bound, never further.
+  private static AGENT_DELIVERY_LIVE_ACK_WINDOW_MS = 5_000;
+  private static AGENT_DELIVERY_DEFERRED_GIVE_UP_AFTER_MS = 5 * 60_000;
   // A parked delivery record (machine offline) checks the machine's status this
   // often, and ends as parked_expired after the max age (task #432).
   private static AGENT_DELIVERY_PARKED_PROBE_MS = 30_000;
@@ -2656,6 +3045,11 @@ export class AgentOrchestrator extends EventEmitter {
   // A mention that reached the daemon (daemon_pending) stays an in-flight cycle
   // until its final ack or terminal error, at most this long (task #432).
   private static AGENT_DELIVERY_HELD_MAX_MS = 30 * 60_000;
+  // A give-up keeps a tombstone this long, so an ack that arrives after it is
+  // counted as acked_after_gave_up instead of vanishing (10-15: a daemon that
+  // stalled ~2 min acked 53 deliveries 4-6s after the server gave up).
+  private static AGENT_DELIVERY_GAVE_UP_TOMBSTONE_MS = 10 * 60_000;
+  private static AGENT_DELIVERY_GAVE_UP_TOMBSTONE_MAX = 10_000;
   private static AGENT_START_ACK_TIMEOUT_MS = 5_000;
   private static AGENT_START_ACK_MAX_ATTEMPTS = 24;
   private static AGENT_START_TERMINAL_CACHE_SIZE = 1_024;
@@ -3163,6 +3557,7 @@ export class AgentOrchestrator extends EventEmitter {
         void this.sweepStaleActivities();
         void this.sweepComputerLifecycleOperations().catch(() => {});
         void this.dispatchPendingComputerLifecycleOperations().catch(() => {});
+        void this.dispatchPendingAgentArchiveOps().catch(() => {});
       }, 30_000);
     }
     if (this.runtimeOutcomeAckEnabled && !this.spawnErrorRetryTimer) {
@@ -3688,6 +4083,14 @@ export class AgentOrchestrator extends EventEmitter {
         server_id: resolvedServerId,
         session_id: request.coreSessionId,
         event_count: request.events.length,
+        // Which inputs drove the projection, from closed sets only (AndyLok): the
+        // reported statuses and hook names in the batch, unknown names as `other`.
+        status: externalActivityClosedValues(request.events.map((event) => isRaftAgentStatus(event.status) ? event.status : null)),
+        hook_event_name: externalActivityClosedValues(request.events.map((event) => {
+          const name = event.hookEventName ?? event.hook_event_name;
+          if (typeof name !== "string" || name.length === 0) return null;
+          return EXTERNAL_ACTIVITY_HOOK_EVENT_NAMES.has(name) ? name : "other";
+        })),
       },
     });
     let acceptedCount = 0;
@@ -3698,7 +4101,22 @@ export class AgentOrchestrator extends EventEmitter {
     try {
       const planned: PlannedExternalActivityEvent[] = [];
       for (const event of request.events) {
-        const status = isRaftAgentStatus(event.status) ? event.status : undefined;
+        // A subagent's event is not this agent's: logged under the subagent,
+        // whatever status it carries.
+        const subagent = normalizeExternalSubagentMarker(event.subagent);
+        if (subagent) {
+          const mapped = mapExternalSubagentActivityEvent(event, subagent);
+          if (!mapped) {
+            rejectedCount += 1;
+            continue;
+          }
+          planned.push({ kind: "subagent", mapped });
+          continue;
+        }
+        // A stopped turn is calm whatever status the runtime reported with it.
+        const stoppedDetail = externalStoppedTurnDetail(event);
+        const reported = isRaftAgentStatus(event.status) ? event.status : undefined;
+        const status = reported && stoppedDetail ? "online" : reported;
         if (!status) {
           const mapped = mapExternalPluginActivityEvent(event);
           if (!mapped) {
@@ -3718,7 +4136,7 @@ export class AgentOrchestrator extends EventEmitter {
           kind: "status",
           eventId,
           status,
-          detail: typeof event.detail === "string" ? event.detail.slice(0, RAFT_AGENT_STATUS_DETAIL_LIMIT) : "",
+          detail: stoppedDetail ?? (typeof event.detail === "string" ? event.detail.slice(0, RAFT_AGENT_STATUS_DETAIL_LIMIT) : ""),
           occurredAtMs,
           mapped: mapExternalPluginActivityEvent(event),
         });
@@ -3754,6 +4172,13 @@ export class AgentOrchestrator extends EventEmitter {
       for (const item of fresh) {
         acceptedCount += 1;
         const receivedAtMs = this.clock.now();
+        if (item.kind === "subagent") {
+          const observedAtMs = Math.min(item.mapped.occurredAtMs ?? receivedAtMs, receivedAtMs);
+          if (await this.persistExternalSubagentActivity(agentId, item.mapped.entries, observedAtMs, item.mapped.dedupeKey)) {
+            loggedOnlyCount += 1;
+          }
+          continue;
+        }
         if (item.kind === "hook") {
           const { mapped } = item;
           const observedAtMs = Math.min(mapped.occurredAtMs ?? receivedAtMs, receivedAtMs);
@@ -3787,7 +4212,13 @@ export class AgentOrchestrator extends EventEmitter {
             occurredAtMs: mapped.occurredAtMs,
             observedAtMs,
           });
-          await applyAgentLifecycleProjectionPlan(plan, this.lifecycleProjectionWriterDeps(), span);
+          const applied = await applyAgentLifecycleProjectionPlan(plan, this.lifecycleProjectionWriterDeps(), span);
+          // A hook older than the live status (a later batch, or a PreToolUse
+          // back-dated to the tool's start) does not override it, but it is
+          // still part of the agent's history and of its turn (task #17).
+          if (applied.liveActivityResult?.action === "kernel-preserve") {
+            await this.persistBackdatedExternalHookRow(agentId, mapped.entries, mapped.occurredAtMs ?? observedAtMs, mapped.dedupeKey);
+          }
           continue;
         }
 
@@ -3796,7 +4227,8 @@ export class AgentOrchestrator extends EventEmitter {
         const dedupeKey = externalAgentActivityDedupeKey(item.eventId);
         // The hook's usual log entries ride along; its hook-derived status
         // entry is replaced by the reported status.
-        const hookEntries = (item.mapped?.entries ?? []).filter((entry) => entry.kind !== "status");
+        // Tool outcome rows stay (task #17): they are per-step markers, not a status.
+        const hookEntries = externalLogOnlyEntries(item.mapped?.entries ?? []);
         const lifecycleEvent = createAgentLifecycleEvent({
           serverId: resolvedServerId,
           agentId,
@@ -3812,29 +4244,41 @@ export class AgentOrchestrator extends EventEmitter {
             external_signal_kind: "status_report",
           },
         });
+        const reportedStatusEntry: TrajectoryEntry = {
+          kind: "status",
+          activity: item.status,
+          activityKind: item.status,
+          detail: item.detail,
+          detailKind: "external_activity",
+          producerFactId: buildExternalStatusProducerFactId(item.eventId),
+        };
         const plan = reduceExternalActivityLifecycle({
           event: lifecycleEvent,
           activity: item.status,
           detail: item.detail,
-          entries: [...hookEntries, {
-            kind: "status",
-            activity: item.status,
-            activityKind: item.status,
-            detail: item.detail,
-            detailKind: "external_activity",
-            producerFactId: buildExternalStatusProducerFactId(item.eventId),
-          }],
+          entries: [...hookEntries, reportedStatusEntry],
           dedupeKey,
           occurredAtMs: observedAtMs,
           observedAtMs,
         });
         const applied = await applyAgentLifecycleProjectionPlan(plan, this.lifecycleProjectionWriterDeps(), span);
-        // A stale status (older than the live one) does not override it, but
-        // the hook it rode on is still recorded.
-        if (applied.liveActivityResult?.action === "kernel-preserve" && hookEntries.length > 0) {
-          await this.persistExternalActivityLogOnly(agentId, hookEntries, observedAtMs, dedupeKey);
+        // A stale status (older than the live one: a later batch, a back-dated
+        // event) does not override it, but it and the hook it rode on are still
+        // history, recorded at their own time (task #17: the turn summary folds
+        // them; being older than the latest row they cannot become the hint).
+        if (applied.liveActivityResult?.action === "kernel-preserve") {
+          await this.persistBackdatedExternalHookRow(agentId, [...hookEntries, reportedStatusEntry], observedAtMs, dedupeKey);
         }
       }
+      // Every accepted batch can complete or change a turn, whichever path its
+      // events took (hooks, reported statuses, or both).
+      // A subagent's events are never part of a parent turn, so a batch of only
+      // those changes no turn and needs no refold.
+      const eventTimes = fresh.flatMap((item) => item.kind === "subagent" ? [] : [Math.min(
+        item.kind === "status" ? item.occurredAtMs : item.mapped.occurredAtMs ?? this.clock.now(),
+        this.clock.now(),
+      )]);
+      if (eventTimes.length > 0) await this.rebuildExternalTurnSummaries(agentId, Math.min(...eventTimes));
       span.end("ok", {
         attrs: {
           outcome: acceptedCount > 0 ? "accepted" : "dropped",
@@ -3906,14 +4350,14 @@ export class AgentOrchestrator extends EventEmitter {
     observedAtMs: number,
     dedupeKey: string | undefined,
   ): Promise<boolean> {
-    const entries = mappedEntries.filter((entry) => entry.kind !== "status");
+    const entries = externalLogOnlyEntries(mappedEntries);
     if (entries.length === 0) return false;
-    const current = this.agentActivity.get(agentId);
     try {
+      const current = await this.liveActivityForLogRow(agentId);
       return await this.persistActivityEvent(
         agentId,
-        current?.activity ?? "online",
-        current?.detail ?? "",
+        current.activity,
+        current.detail,
         entries,
         new Date(observedAtMs),
         dedupeKey,
@@ -3921,6 +4365,65 @@ export class AgentOrchestrator extends EventEmitter {
     } catch (err) {
       console.warn(`[ActivityLog ${agentId}] Failed to persist external activity event:`, err);
       return false;
+    }
+  }
+
+  /**
+   * The agent's live status for a row that must not change it (log-only and
+   * subagent rows): the row's activity is what the restart hint reads back.
+   * The ingest runs on whichever replica got the request, so this replica's
+   * cache may be stale; the shared mirror wins when it is at least as new.
+   */
+  private async liveActivityForLogRow(agentId: string): Promise<{ activity: AgentActivityKind; detail: string }> {
+    const local = this.agentActivity.get(agentId) ?? null;
+    let shared: PersistedAgentActivity | null = null;
+    if (this.replicaStateStore.isAvailable()) {
+      try {
+        shared = await this.replicaStateStore.getAgentActivity(agentId);
+      } catch (err) {
+        console.warn(`[ActivityLog ${agentId}] Shared activity unreadable; using this replica's:`, err);
+      }
+    }
+    const current = shared && (!local || shared.updatedAt >= local.updatedAt) ? shared : local;
+    return { activity: current?.activity ?? "online", detail: current?.detail ?? "" };
+  }
+
+  /**
+   * A subagent's rows, at their own time, under the agent's current status:
+   * the agent's status, live dot and restart hint are not the subagent's.
+   */
+  private async persistExternalSubagentActivity(
+    agentId: string,
+    entries: TrajectoryEntry[],
+    observedAtMs: number,
+    dedupeKey: string,
+  ): Promise<boolean> {
+    try {
+      const current = await this.liveActivityForLogRow(agentId);
+      return await this.persistActivityEvent(agentId, current.activity, current.detail, entries, new Date(observedAtMs), dedupeKey);
+    } catch (err) {
+      console.warn(`[ActivityLog ${agentId}] Failed to persist subagent activity event:`, err);
+      return false;
+    }
+  }
+
+  /**
+   * Record a hook row that lost to a newer live status, at its own time and
+   * with all its entries (turn boundaries and tool outcomes included). Being
+   * older than the latest row, it cannot become the restart hint.
+   */
+  private async persistBackdatedExternalHookRow(
+    agentId: string,
+    entries: readonly TrajectoryEntry[],
+    occurredAtMs: number,
+    dedupeKey: string | undefined,
+  ): Promise<void> {
+    if (entries.length === 0) return;
+    const current = this.agentActivity.get(agentId);
+    try {
+      await this.persistActivityEvent(agentId, current?.activity ?? "online", current?.detail ?? "", [...entries], new Date(occurredAtMs), dedupeKey);
+    } catch (err) {
+      console.warn(`[ActivityLog ${agentId}] Failed to persist back-dated external hook row:`, err);
     }
   }
 
@@ -4035,10 +4538,20 @@ export class AgentOrchestrator extends EventEmitter {
     agentId: string,
     launchId: string | null,
     carrier: SpawnFailureActivityDiagnostic,
+    where: { runtime: string; machineId: string },
   ): Promise<SpawnFailureActivityDiagnostic> {
     try {
       const nowMs = this.clock.now();
-      const result = await this.wakeCrashLoopBreaker.recordStartFailure(agentId, { launchId, reason: carrier.reason, nowMs });
+      const runtimeAbsent = isRuntimeAbsentStartFailure(carrier.reason, carrier.lookupReason);
+      // The owner hears once per runtime and computer that the runtime is missing there.
+      const noticeFingerprint = runtimeAbsent ? `runtime_not_found:${where.runtime}:${where.machineId}` : undefined;
+      const result = await this.wakeCrashLoopBreaker.recordStartFailure(agentId, {
+        launchId,
+        reason: carrier.reason,
+        ...(carrier.lookupReason ? { lookupReason: carrier.lookupReason } : {}),
+        nowMs,
+        ...(noticeFingerprint ? { noticeFingerprint } : {}),
+      });
       this.recordEvent("wake.start_failure", {
         outcome: result.outcome,
         reason: carrier.reason,
@@ -4065,11 +4578,93 @@ export class AgentOrchestrator extends EventEmitter {
       if (result.outcome === "retry_scheduled" && result.retryAfterMs !== null) {
         this.scheduleStartFailureRetry(agentId, result.retryAfterMs - nowMs);
       }
+      if (result.notify && noticeFingerprint) {
+        const notified = await this.postRuntimeUnavailableNotice(agentId, where);
+        this.recordEvent("wake.runtime_unavailable.owner_notice", { outcome: notified ? "posted" : "no_owner", runtime: where.runtime });
+        // Only a posted notice counts as told: a failed post is retried on the next block.
+        if (notified) await this.wakeCrashLoopBreaker.markActionRequiredNotified(agentId, noticeFingerprint);
+      }
       return result.blocked ? { ...carrier, autoRestartPaused: true } : carrier;
     } catch (error) {
       console.error(`[Agent ${agentId}] Failed to record a start failure:`, error);
       return carrier;
     }
+  }
+
+  /**
+   * The current start's runtime stopped on an error only the owner can fix.
+   * Retrying cannot help, so automatic wakes stop now (messages and reminders
+   * wait as the owed catch-up) until a human start or a runtime config change;
+   * the owner is told once per distinct error. Best effort: a failure here
+   * leaves the agent waking as before, and is logged.
+   */
+  private async observeRuntimeActionRequired(
+    agentId: string,
+    input: { launchId: string | null; requiredAction: RuntimeErrorRequiredAction; fingerprint: string },
+  ): Promise<void> {
+    try {
+      const result = await this.wakeCrashLoopBreaker.recordActionRequired(agentId, {
+        launchId: input.launchId,
+        reason: input.requiredAction,
+        fingerprint: input.fingerprint,
+        nowMs: this.clock.now(),
+      });
+      this.recordEvent("wake.runtime_action_required", {
+        outcome: result.outcome,
+        required_action: input.requiredAction,
+        notify: result.notify,
+        launch_id_present: input.launchId !== null,
+      });
+      if (result.outcome !== "blocked") return;
+      const cached = this.agentStateCache.get(agentId);
+      this.recordLifecycleEvent({
+        agentId,
+        machineId: cached?.machineId ?? null,
+        action: "wake",
+        outcome: "suppressed",
+        cause: "message",
+        previousStatus: cached?.status ?? null,
+        detail: "runtime_action_required",
+      });
+      console.warn(
+        `[Agent ${agentId}] Automatic wakes paused: runtime error needs the owner (${input.requiredAction}); `
+        + "a manual start or a runtime config change lifts it",
+      );
+      if (!result.notify) return;
+      const notified = await this.postRuntimeActionRequiredNotice(agentId, input.requiredAction);
+      this.recordEvent("wake.runtime_action_required.owner_notice", { outcome: notified ? "posted" : "no_owner" });
+      // Only a posted notice counts as told: a failed post is retried on the next occurrence.
+      if (notified) await this.wakeCrashLoopBreaker.markActionRequiredNotified(agentId, input.fingerprint);
+    } catch (error) {
+      console.error(`[Agent ${agentId}] Failed to record a runtime error that needs the owner:`, error);
+    }
+  }
+
+  private async forgetRuntimeActionRequiredNotice(agentId: string): Promise<void> {
+    try {
+      await this.wakeCrashLoopBreaker.forgetActionRequiredNotice(agentId);
+    } catch (error) {
+      console.error(`[Agent ${agentId}] Failed to reset the needs-action notice:`, error);
+    }
+  }
+
+  protected async postRuntimeActionRequiredNotice(
+    agentId: string,
+    requiredAction: RuntimeErrorRequiredAction,
+  ): Promise<boolean> {
+    if (!this.io) return false;
+    return postAgentActionRequiredNotice(this.io, this, { agentId, notice: { kind: "runtime_error", requiredAction } });
+  }
+
+  protected async postRuntimeUnavailableNotice(
+    agentId: string,
+    where: { runtime: string; machineId: string },
+  ): Promise<boolean> {
+    if (!this.io) return false;
+    return postAgentActionRequiredNotice(this.io, this, {
+      agentId,
+      notice: { kind: "runtime_unavailable", runtime: where.runtime, machineId: where.machineId },
+    });
   }
 
   /**
@@ -5260,12 +5855,13 @@ export class AgentOrchestrator extends EventEmitter {
     }
     const live = [...agents.values()].filter((row): row is PersistedAgentRow => Boolean(row));
     // Whatever fails below is checked per agent, with its own error handling.
-    const [access, passiveScope, migrationGated] = await Promise.all([
+    const [access, passiveScope, migrationGated, raftbenchServices] = await Promise.all([
       live.length > 0 ? this.loadDeliveryTargetAccess(channelId, live).catch(() => new Map<string, boolean>()) : new Map<string, boolean>(),
       live.length > 0 ? this.loadPassiveDeliveryScopes(live.map((row) => row.id)).catch(() => new Map<string, boolean>()) : new Map<string, boolean>(),
       live.length > 0 ? this.loadMigrationGates(live.map((row) => row.id)).catch(() => new Map<string, boolean>()) : new Map<string, boolean>(),
+      this.loadRaftBenchServiceAgentIds(live.map(row => row.id)),
     ]);
-    return { agents, access, passiveScope, migrationGated };
+    return { agents, access, passiveScope, migrationGated, raftbenchServices };
   }
 
   /**
@@ -5638,14 +6234,65 @@ export class AgentOrchestrator extends EventEmitter {
     return agentService.getAgentsForMachine(machineId);
   }
 
+  /** Same-machine grouping: ask a freshly ready daemon for its per-server host hash while the flag is on. */
+  protected async requestHostIdentity(machineId: string, serverId: string): Promise<void> {
+    try {
+      if (!(await computerHostIdentityService.isHostIdentityEnabled(serverId))) return;
+      await this.sendToMachine(machineId, { type: "machine:host_identity:request" });
+    } catch (error) {
+      console.warn(`[Machine ${machineId}] host identity request failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  protected async storeHostIdentity(machineId: string, serverId: string, hostIdHash: string): Promise<void> {
+    try {
+      if (!(await computerHostIdentityService.isHostIdentityEnabled(serverId))) {
+        this.recordEvent("server.computer.host_identity.dropped", { reason: "flag_off" });
+        return;
+      }
+      await computerHostIdentityService.recordHostIdHash(machineId, hostIdHash, new Date(this.clock.now()));
+      this.recordEvent("server.computer.host_identity.stored", {});
+    } catch (error) {
+      this.recordEvent("server.computer.host_identity.dropped", { reason: "write_failed" });
+      console.warn(`[Machine ${machineId}] host identity write failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   protected async persistMachineCapabilities(
     machineId: string,
     runtimes: string[],
     hostname?: string,
     os?: string,
     daemonVersion?: string | null,
+    deviceClass?: DeviceClass | null,
   ) {
-    await machineService.updateMachineRuntimes(machineId, runtimes, hostname, os, daemonVersion);
+    await machineService.updateMachineRuntimes(machineId, runtimes, hostname, os, daemonVersion, deviceClass);
+  }
+
+  /**
+   * task #1268: the last confirmed inventory when this connection has none yet
+   * (a `pending` ready is the FIRST frame of a fresh connection, whose
+   * `conn.runtimes` is null): the persisted `machines.runtimes` column plus the
+   * replica meta's versions. Null when neither can be read; callers then keep
+   * nothing rather than invent an empty list.
+   */
+  protected async loadPersistedMachineInventory(machineId: string): Promise<MachineRuntimeInventory | null> {
+    try {
+      const machine = await machineService.getMachine(machineId as Parameters<typeof machineService.getMachine>[0]);
+      if (!machine) return null;
+      let runtimeVersions: Record<string, string> = {};
+      if (this.replicaStateStore.isAvailable()) {
+        try {
+          runtimeVersions = runtimeVersionsFromMachineMeta(await this.replicaStateStore.getMachineMeta(machineId));
+        } catch {
+          runtimeVersions = {};
+        }
+      }
+      return { runtimes: [...(machine.runtimes ?? [])], runtimeVersions };
+    } catch (error) {
+      console.warn(`[Orchestrator] persisted runtime inventory unavailable for ${machineId}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   protected async persistMachineComputerVersion(
@@ -5787,7 +6434,7 @@ export class AgentOrchestrator extends EventEmitter {
         await this.runInTraceSpan(
           "server.machine.capabilities.persist",
           { attrs: { machine_id: machineId, attempt: state.attempt + 1 } },
-          () => this.persistMachineCapabilities(machineId, payload.runtimes, payload.hostname, payload.os, payload.daemonVersion),
+          () => this.persistMachineCapabilities(machineId, payload.runtimes, payload.hostname, payload.os, payload.daemonVersion, payload.deviceClass),
         );
       } catch (err) {
         const failed = this.capabilitiesWrites.get(machineId);
@@ -5849,17 +6496,47 @@ export class AgentOrchestrator extends EventEmitter {
       if (conn) {
         conn.runtimes = payload.runtimes;
         conn.runtimeVersions = payload.runtimeVersions ?? {};
+        // task #1268: the detection state of an inventory-carrying ready lands
+        // together with the persisted inventory, here, and is mirrored to the
+        // replica meta at the same moment (a synchronous ready carries none).
+        conn.runtimeDetection = payload.runtimeDetection ?? null;
+        if (this.replicaStateStore.isAvailable()) {
+          this.replicaStateStore
+            .setMachineMeta(machineId, { probeRuntimeDetection: payload.runtimeDetection ? JSON.stringify(payload.runtimeDetection) : null })
+            .catch(() => {});
+        }
         this.io?.to(`server:${conn.serverId}`).emit("machine:capabilities", {
           machineId,
           runtimes: payload.runtimes,
           runtimeVersions: payload.runtimeVersions ?? {},
+          ...(conn.runtimeDetection ? { runtimeDetection: conn.runtimeDetection } : {}),
           hostname: payload.hostname,
           os: payload.os,
+          deviceClass: payload.deviceClass ?? null,
           daemonVersion: payload.daemonVersion,
           computerVersion: payload.computerVersion,
         });
       }
+      await this.liftRuntimeUnavailableBlocks(machineId, payload.runtimes);
       return;
+    }
+  }
+
+  /**
+   * The computer reported its runtimes: agents there paused only because their
+   * runtime was missing wake normally again once it is listed. Best effort.
+   */
+  private async liftRuntimeUnavailableBlocks(machineId: string, runtimes: readonly string[]): Promise<void> {
+    try {
+      const machineAgents = await this.loadAgentsForReadyReconcile(machineId);
+      for (const agent of machineAgents) {
+        if (!runtimes.includes(agent.runtime)) continue;
+        if (await this.wakeCrashLoopBreaker.liftForRuntimeAvailable(agent.id)) {
+          this.recordEvent("wake.block_lifted", { cause: "runtime_available", runtime: agent.runtime });
+        }
+      }
+    } catch (error) {
+      console.warn(`[Machine ${machineId}] Lifting runtime-unavailable pauses failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -6726,6 +7403,11 @@ export class AgentOrchestrator extends EventEmitter {
     }
   }
 
+  /** WSL flavour from this replica's live connection; null when not WSL or not local. */
+  getMachineOsVariant(machineId: string): "wsl1" | "wsl2" | null {
+    return this.machineConnections.get(machineId)?.osVariant ?? null;
+  }
+
   getMachineConnectionEpoch(machineId: string): string | null {
     return this.machineConnections.get(machineId)?.connectionEpochId ?? null;
   }
@@ -6876,6 +7558,7 @@ export class AgentOrchestrator extends EventEmitter {
     try {
       const expired = await computerUpgradeRequestService.expireComputerUpgradeRequests(new Date(this.clock.now()));
       for (const row of expired) {
+        this.recordEvent("server.computer.upgrade_request.expired", computerUpgradeRequestService.computerUpgradeRequestTraceAttrs(row));
         this.io?.to(`server:${row.serverId}`).emit("machine:upgrade-request", { machineId: row.machineId, upgradeRequest: computerUpgradeRequestService.projectComputerUpgradeRequest(row) });
       }
     } catch (error) {
@@ -6959,9 +7642,10 @@ export class AgentOrchestrator extends EventEmitter {
         outcome: "reprovisioned",
         machine_role: role,
       });
+      // A hosted target has no daemon: only the source gets the new generation.
       const sends = await Promise.allSettled([
         this.sendAgentMigrationTransportLease(result.source.machineId, result.source.message),
-        this.sendAgentMigrationTransportLease(result.target.machineId, result.target.message),
+        ...(result.target ? [this.sendAgentMigrationTransportLease(result.target.machineId, result.target.message)] : []),
       ]);
       for (const send of sends) {
         if (send.status === "rejected") {
@@ -7302,6 +7986,28 @@ export class AgentOrchestrator extends EventEmitter {
     }
   }
 
+  /** What the agent archive dispatch needs from this replica. */
+  agentArchiveDispatchPort(): AgentArchiveDispatchPort {
+    return {
+      localMachineIds: () => [...this.machineConnections.keys()].filter((machineId) => this.hasMachineLocally(machineId)),
+      hasMachineLocally: (machineId) => this.hasMachineLocally(machineId),
+      deleteMachineWorkspaceDir: (machineId, directoryName) => this.deleteMachineWorkspaceDir(machineId, directoryName).then(
+        (ok) => (ok ? "deleted" : "failed"),
+        // A large workspace can take longer than the wait; the Computer keeps deleting.
+        (err: unknown) => (err instanceof Error && err.message === WORKSPACE_DELETE_TIMED_OUT ? "timed_out" : Promise.reject(err)),
+      ),
+    };
+  }
+
+  dispatchPendingAgentArchiveOps(): Promise<void> {
+    return dispatchPendingAgentArchiveOps(this.agentArchiveDispatchPort(), this.io);
+  }
+
+  /** One Computer's ops only (it just sent `ready`); the 30 s sweep covers every other Computer. */
+  dispatchPendingAgentArchiveOpsForMachine(machineId: string): Promise<void> {
+    return dispatchPendingAgentArchiveOps(this.agentArchiveDispatchPort(), this.io, { machineIds: [machineId] });
+  }
+
   /** Check if a machine is connected to THIS replica (for fly-replay routing). */
   hasMachineLocally(machineId: string): boolean {
     const conn = this.machineConnections.get(machineId);
@@ -7338,6 +8044,7 @@ export class AgentOrchestrator extends EventEmitter {
       if (pending.parked) shutdownPendingParked += 1;
     }
     this.pendingAgentDeliveryAcks.clear();
+    this.gaveUpAgentDeliveries.clear();
     releaseAgentDeliveryPending(this.agentDeliveryPendingProvider);
     // The replica_shutdown counter is incremented as the process exits, after
     // the last metrics scrape, so it never reaches AMP. This line is the only
@@ -8022,6 +8729,18 @@ export class AgentOrchestrator extends EventEmitter {
         break;
       }
 
+      case "machine:host_identity":
+      {
+        // Same-machine grouping: stored only while the flag is on for this
+        // server, and only a well-formed hash; the value is never echoed back.
+        if (!conn || !isHostIdHash(msg.hostIdHash)) {
+          this.recordEvent("server.computer.host_identity.dropped", { reason: conn ? "malformed" : "no_connection" });
+          break;
+        }
+        void this.storeHostIdentity(machineId, conn.serverId, msg.hostIdHash);
+        break;
+      }
+
       case "machine:disk_status":
       {
         if (!conn) break;
@@ -8108,6 +8827,11 @@ export class AgentOrchestrator extends EventEmitter {
             now: new Date(this.clock.now()),
           });
           this.recordEvent("server.computer.upgrade_request.refused", {
+            // No open request: the id is not a web upgrade request (e.g. a
+            // lifecycle-operation upgrade), so keep the Computer's own reason.
+            ...(settled
+              ? computerUpgradeRequestService.computerUpgradeRequestTraceAttrs(settled)
+              : { reason: computerUpgradeRequestService.traceSafeUpgradeReason(msg.reason) }),
             request_id: msg.requestId,
             machine_id: machineId,
             code: msg.code ?? "",
@@ -8193,10 +8917,52 @@ export class AgentOrchestrator extends EventEmitter {
         if (conn) {
           conn.daemonInstanceId = typeof msg.daemonInstanceId === "string" && msg.daemonInstanceId.trim() ? msg.daemonInstanceId : null;
           conn.reportedHostnameHash = reportedHostnameHash(msg.hostname);
+          conn.osVariant = msg.osVariant === "wsl1" || msg.osVariant === "wsl2" ? msg.osVariant : null;
           conn.capabilities = new Set((msg.capabilities ?? []).filter((capability) => typeof capability === "string" && capability.trim()));
         }
         const readyCapturedAtMs = ingressAtMs;
-        const runtimeVersions = normalizeRuntimeVersions(msg.runtimeVersions, msg.runtimes);
+        // task #1268: a `pending` ready carries no inventory and must not touch
+        // `machines.runtimes`; an `incomplete` ready keeps the unprobed runtimes'
+        // previous state. Both are status, fanned out as `runtimeDetection`.
+        const runtimeDetection = normalizeRuntimeDetectionReport(msg.runtimeDetection, this.clock.now());
+        const inventoryPending = runtimeDetection?.status === "pending";
+        // The inventory a pending/incomplete ready is laid over. A pending ready
+        // is the first frame of a fresh connection, so `conn.runtimes` is null
+        // then and the persisted column is the only "previous" there is.
+        const previousInventory: MachineRuntimeInventory | null = runtimeDetection && runtimeDetection.status !== "complete"
+          ? (conn?.runtimes
+              ? { runtimes: conn.runtimes, runtimeVersions: conn.runtimeVersions }
+              : await this.loadPersistedMachineInventory(machineId))
+          : null;
+        // archer (#9665): when the previous inventory cannot be read, a pending
+        // fan-out carries no inventory fields and an incomplete ready persists
+        // nothing (status only), so old values are never replaced by guesses.
+        const previousInventoryUnknown = runtimeDetection !== null && runtimeDetection.status !== "complete" && previousInventory === null;
+        const reportedInventory: MachineRuntimeInventory = inventoryPending
+          ? { runtimes: previousInventory?.runtimes ?? [], runtimeVersions: previousInventory?.runtimeVersions ?? {} }
+          : runtimeDetection?.status === "incomplete"
+            ? mergeIncompleteRuntimeInventory(
+                previousInventory,
+                { runtimes: msg.runtimes ?? [], runtimeVersions: normalizeRuntimeVersions(msg.runtimeVersions, msg.runtimes ?? []) },
+                runtimeDetection.unfinishedRuntimes ?? [],
+              )
+            : { runtimes: msg.runtimes ?? [], runtimeVersions: normalizeRuntimeVersions(msg.runtimeVersions, msg.runtimes ?? []) };
+        const reportedRuntimes = reportedInventory.runtimes;
+        const runtimeVersions = reportedInventory.runtimeVersions;
+        // Mirror the detection state on the connection BEFORE the first await
+        // and before the replica meta is written below (probeCarrierMetaFields
+        // carries it), so a remote replica never reads the previous round's
+        // state — but ONLY for states that carry no inventory write: `pending`,
+        // an `incomplete` whose previous inventory is unknown (status only), and
+        // a synchronous ready (null, which clears an earlier async state). A
+        // `complete` (or persisting `incomplete`) becomes visible only when the
+        // capabilities writer has converged (see runCapabilitiesWriter): while
+        // the DB write keeps failing the state stays `pending`, so an old
+        // inventory is never shown as confirmed (archer + Huaihuai, #9680).
+        const statusOnlyReport = runtimeDetection === null
+          || inventoryPending
+          || (runtimeDetection.status === "incomplete" && previousInventoryUnknown);
+        if (conn && statusOnlyReport) conn.runtimeDetection = runtimeDetection;
         const migrationTransport = normalizeMigrationTransportReady(msg.migrationTransport, readyCapturedAtMs);
         const span = this.tracer.startSpan("server.machine.ready.reconcile", {
           parent: getCurrentTraceContext(),
@@ -8207,7 +8973,8 @@ export class AgentOrchestrator extends EventEmitter {
             server_id: conn?.serverId,
             machine_id_present: Boolean(machineId),
             server_id_present: Boolean(conn?.serverId),
-            runtimes_count: msg.runtimes.length,
+            runtimes_count: reportedRuntimes.length,
+            runtime_detection_status: runtimeDetection?.status ?? "complete",
             running_agents_count: msg.runningAgents.length,
             daemon_version_present: Boolean(msg.daemonVersion),
             ...(msg.daemonVersion ? { daemonVersion: msg.daemonVersion } : {}),
@@ -8221,6 +8988,7 @@ export class AgentOrchestrator extends EventEmitter {
             ...(migrationTransport?.leaseSource ? { migration_transport_lease_source: migrationTransport.leaseSource } : {}),
             hostname_present: Boolean(msg.hostname),
             os_present: Boolean(msg.os),
+            ...(conn?.osVariant ? { os_variant: conn.osVariant } : {}),
             ...projectMachineConnectTraceAttrs(conn?.traceContext ?? buildRuntimeTraceContext()),
           },
         });
@@ -8241,7 +9009,7 @@ export class AgentOrchestrator extends EventEmitter {
                 );
               }
             }
-            console.log(`[Machine ${machineId}] Ready, runtimes: ${msg.runtimes.join(", ") || "none"}, version: ${msg.daemonVersion || "unknown"}, running agents: ${msg.runningAgents.join(", ") || "none"}`);
+            console.log(`[Machine ${machineId}] Ready (detection ${runtimeDetection?.status ?? "complete"}), runtimes: ${inventoryPending ? "(pending)" : reportedRuntimes.join(", ") || "none"}, version: ${msg.daemonVersion || "unknown"}, running agents: ${msg.runningAgents.join(", ") || "none"}`);
             // Store version in memory (transient connection state)
             if (conn) {
               conn.daemonVersion = msg.daemonVersion ?? null;
@@ -8249,6 +9017,11 @@ export class AgentOrchestrator extends EventEmitter {
               conn.computerVersion = msg.computerVersion ?? null;
               conn.migrationTransport = migrationTransport;
               void this.dispatchPendingComputerLifecycleOperations().catch(() => {});
+              // Only this Computer: a sweep of every Computer on the replica per
+              // `ready` multiplied in reconnect waves (prod 10-16 20:54Z, one ECS
+              // task stopped: 225 readies in a minute, 100-134 claim
+              // transactions each, up to 130 PG connections per trace).
+              void this.dispatchPendingAgentArchiveOpsForMachine(machineId).catch(() => {});
             }
             // Mirror the same fields through the replica state store so REST
             // handlers that land on a non-owner replica can still surface
@@ -8286,13 +9059,7 @@ export class AgentOrchestrator extends EventEmitter {
                 now: new Date(this.clock.now()),
               });
               if (settled) {
-                this.recordEvent("server.computer.upgrade_request.settled", {
-                  request_id: settled.id,
-                  machine_id: machineId,
-                  target_version: settled.targetVersion,
-                  observed_version: settled.observedVersion ?? "",
-                  outcome: settled.outcome ?? "",
-                });
+                this.recordEvent("server.computer.upgrade_request.settled", computerUpgradeRequestService.computerUpgradeRequestTraceAttrs(settled));
                 if (conn) this.io?.to(`server:${conn.serverId}`).emit("machine:upgrade-request", { machineId, upgradeRequest: computerUpgradeRequestService.projectComputerUpgradeRequest(settled) });
               }
             } catch (error) {
@@ -8312,19 +9079,48 @@ export class AgentOrchestrator extends EventEmitter {
             // capped backoff (it does NOT wait for the daemon to send another
             // `ready`), with a newer `ready` superseding the pending payload. See
             // enqueueCapabilitiesPersist and task #154 / #4691 / #4694.
-            this.recordEvent("machine.capabilities.enqueued", {
-              outcome: "enqueued",
-              runtimes_count: msg.runtimes.length,
-            });
-            await this.enqueueCapabilitiesPersist(machineId, {
-              runtimes: msg.runtimes,
-              runtimeVersions,
-              hostname: msg.hostname,
-              os: msg.os,
-              daemonVersion: msg.daemonVersion,
-              computerVersion: msg.computerVersion,
-            });
+            if (runtimeDetection && (inventoryPending || (runtimeDetection.status === "incomplete" && previousInventoryUnknown))) {
+              // task #1268: status only. The persisted column and `conn.runtimes`
+              // keep their last confirmed value; web learns "detecting" from the
+              // explicit state, never from an empty list. When even the persisted
+              // inventory could not be read, the fan-out carries no inventory
+              // fields at all (archer, #9665) and an incomplete round persists
+              // nothing rather than overwrite unknown old values.
+              if (conn) {
+                conn.runtimeDetection = runtimeDetection;
+                this.io?.to(`server:${conn.serverId}`).emit("machine:capabilities", {
+                  machineId,
+                  ...(previousInventoryUnknown ? {} : { runtimes: reportedRuntimes, runtimeVersions }),
+                  runtimeDetection,
+                  hostname: msg.hostname,
+                  os: msg.os,
+                  daemonVersion: msg.daemonVersion,
+                  computerVersion: msg.computerVersion ?? null,
+                });
+              }
+              this.recordEvent("machine.capabilities.detection_pending", {
+                outcome: inventoryPending ? "pending" : "incomplete_without_previous",
+                previous_inventory_known: !previousInventoryUnknown,
+              });
+            } else {
+              this.recordEvent("machine.capabilities.enqueued", {
+                outcome: "enqueued",
+                runtimes_count: reportedRuntimes.length,
+                runtime_detection_status: runtimeDetection?.status ?? "complete",
+              });
+              await this.enqueueCapabilitiesPersist(machineId, {
+                runtimes: reportedRuntimes,
+                runtimeVersions,
+                ...(runtimeDetection ? { runtimeDetection } : {}),
+                hostname: msg.hostname,
+                os: msg.os,
+                deviceClass: isDeviceClass(msg.deviceClass) ? msg.deviceClass : null,
+                daemonVersion: msg.daemonVersion,
+                computerVersion: msg.computerVersion,
+              });
+            }
             if (conn) this.startRuntimeAccountUsageSchedule(machineId, conn);
+            if (conn) void this.requestHostIdentity(machineId, conn.serverId);
 
             // Reconcile all agents assigned to this machine:
             // - running now => mark active
@@ -9019,11 +9815,27 @@ export class AgentOrchestrator extends EventEmitter {
             }
             // task #1123: same discipline for the typed spawn-failure reason on a
             // failed-start frame. Observation only — the reason picks web copy.
-            if (detailKind === "runtime_unavailable") {
+            const legacyUnkindedStartFailure = isLegacyUnkindedStartFailure({
+              detailKind: msg.detailKind,
+              activity: declaredActivity,
+              detail: msg.detail,
+            });
+            if (detailKind === "runtime_unavailable" || legacyUnkindedStartFailure) {
               const normalizedSpawnFailure = normalizeSpawnFailureActivityDiagnostic(
                 (msg as { spawnFailure?: SpawnFailureActivityDiagnostic | Record<string, unknown> | null }).spawnFailure ?? null,
               );
-              this.recordEvent("spawn_failure.carrier", { present: normalizedSpawnFailure !== null, reason: normalizedSpawnFailure?.reason });
+              // A daemon older than the carrier still reported a failed start
+              // (one of its fixed messages): count it too, or nothing ever
+              // stops its automatic wakes.
+              const legacySpawnFailure = normalizedSpawnFailure === null && isLegacyStartFailureDetail(msg.detail)
+                ? legacySpawnFailureCarrier({ detail: msg.detail, runtime: agent.runtime, machineRuntimes: conn?.runtimes ?? null })
+                : null;
+              const spawnFailure = normalizedSpawnFailure ?? legacySpawnFailure;
+              this.recordEvent("spawn_failure.carrier", {
+                present: normalizedSpawnFailure !== null,
+                reason: spawnFailure?.reason,
+                ...(legacySpawnFailure ? { legacy_frame: legacyUnkindedStartFailure ? "no_detail_kind" : "no_carrier" } : {}),
+              });
               // task #1221: count the failed start; a reason retrying cannot
               // fix, a retry-once reason failing twice, or too many failures in
               // a row stops automatic wakes until a person restarts the agent or
@@ -9031,8 +9843,11 @@ export class AgentOrchestrator extends EventEmitter {
               // Awaited so this frame already shows the pause.
               this.pendingSpawnFailure.set(
                 msg.agentId,
-                normalizedSpawnFailure
-                  ? await this.observeStartFailure(msg.agentId, typeof msg.launchId === "string" ? msg.launchId : null, normalizedSpawnFailure)
+                spawnFailure
+                  ? await this.observeStartFailure(msg.agentId, typeof msg.launchId === "string" ? msg.launchId : null, spawnFailure, {
+                    runtime: agent.runtime,
+                    machineId,
+                  })
                   : null,
               );
             }
@@ -9096,7 +9911,7 @@ export class AgentOrchestrator extends EventEmitter {
               span,
             );
             if (runtimeErrorAction === "set") {
-              await this.rememberRuntimeError(msg.agentId, this.buildRuntimeErrorState({
+              const persisted = await this.rememberRuntimeError(msg.agentId, this.buildRuntimeErrorState({
                 detail: msg.detail,
                 launchId: msg.launchId,
                 typed: normalizedTypedRuntimeError,
@@ -9106,8 +9921,17 @@ export class AgentOrchestrator extends EventEmitter {
                 source: activitySignal.source,
                 detail_kind: detailKind,
               });
+              const requiredAction = runtimeErrorRequiredAction(normalizedTypedRuntimeError);
+              if (persisted && requiredAction && normalizedTypedRuntimeError) {
+                await this.observeRuntimeActionRequired(msg.agentId, {
+                  launchId: typeof msg.launchId === "string" ? msg.launchId : null,
+                  requiredAction,
+                  fingerprint: normalizedTypedRuntimeError.fingerprint,
+                });
+              }
             } else if (runtimeErrorAction === "clear") {
               await this.clearLastRuntimeError(msg.agentId);
+              await this.forgetRuntimeActionRequiredNotice(msg.agentId);
               this.recordEvent("runtime_error_state.cleared", {
                 reason: "strong_typed_runtime_progress",
                 detail_kind: detailKind,
@@ -9653,6 +10477,7 @@ export class AgentOrchestrator extends EventEmitter {
       }
 
       case "agent:deliver:ack": {
+        if (conn) conn.lastDeliveryAckAt = this.clock.now();
         const span = this.tracer.startSpan("server.agent.delivery.ack", {
           parent: parseTraceparent(msg.traceparent),
           surface: "server",
@@ -11338,10 +12163,14 @@ export class AgentOrchestrator extends EventEmitter {
       parked: false,
       firstAttemptAt: now,
       lastAttemptAt: now,
+      ackWaitStartedAt: now,
+      ackWaits: 0,
       onlineAtFirstAttempt: this.hasMachineLocally(machineId),
       daemonVersion: daemonVersionLabel(this.machineConnections.get(machineId)?.daemonVersion),
     };
     this.pendingAgentDeliveryAcks.set(key, pending);
+    // A re-send after a give-up is a new record; its ack is on time, not late.
+    this.gaveUpAgentDeliveries.delete(key);
     agentDeliveryTrackedTotal.inc(agentDeliverySloLabels(pending));
     if (scheduleTimeout) {
       this.scheduleAgentDeliveryAckTimeout(key, pending);
@@ -11352,9 +12181,23 @@ export class AgentOrchestrator extends EventEmitter {
     if (pending.timer) {
       this.clock.clearTimeout(pending.timer);
     }
+    const backoff = AgentOrchestrator.AGENT_DELIVERY_ACK_BACKOFF_MS;
+    let delayMs: number = backoff[Math.min(pending.ackWaits, backoff.length - 1)];
+    pending.ackWaits += 1;
+    // Land exactly on a give-up bound rather than one backoff step past it.
+    const ageMs = this.clock.now() - pending.ackWaitStartedAt;
+    for (const boundMs of [
+      AgentOrchestrator.AGENT_DELIVERY_GIVE_UP_AFTER_MS,
+      AgentOrchestrator.AGENT_DELIVERY_DEFERRED_GIVE_UP_AFTER_MS,
+    ]) {
+      if (ageMs < boundMs) {
+        delayMs = Math.min(delayMs, boundMs - ageMs);
+        break;
+      }
+    }
     pending.timer = this.scheduleOnClock(() => {
       void this.retryPendingAgentDelivery(key, "ack_timeout");
-    }, AgentOrchestrator.AGENT_DELIVERY_ACK_TIMEOUT_MS);
+    }, delayMs);
     const timerWithUnref = pending.timer as { unref?: () => void } | null;
     timerWithUnref?.unref?.();
   }
@@ -11364,7 +12207,10 @@ export class AgentOrchestrator extends EventEmitter {
     outcome: "acked" | "terminal",
   ): boolean {
     const key = this.findAgentDeliveryAckKey(msg.agentId, msg.seq, msg.deliveryId);
-    if (!key) return false;
+    if (!key) {
+      if (outcome === "acked") this.recordAgentDeliveryAckedAfterGaveUp(msg);
+      return false;
+    }
     const pending = this.pendingAgentDeliveryAcks.get(key);
     if (pending?.timer) this.clock.clearTimeout(pending.timer);
     if (pending) {
@@ -11512,6 +12358,55 @@ export class AgentOrchestrator extends EventEmitter {
     }
   }
 
+  private rememberGaveUpAgentDelivery(key: string, pending: PendingAgentDeliveryAck): void {
+    const now = this.clock.now();
+    for (const [oldKey, entry] of this.gaveUpAgentDeliveries) {
+      const expired = now - entry.givenUpAt >= AgentOrchestrator.AGENT_DELIVERY_GAVE_UP_TOMBSTONE_MS;
+      if (!expired && this.gaveUpAgentDeliveries.size < AgentOrchestrator.AGENT_DELIVERY_GAVE_UP_TOMBSTONE_MAX) break;
+      this.gaveUpAgentDeliveries.delete(oldKey);
+    }
+    this.gaveUpAgentDeliveries.delete(key);
+    this.gaveUpAgentDeliveries.set(key, {
+      givenUpAt: now,
+      machineId: pending.machineId,
+      agentId: pending.msg.agentId,
+      seq: pending.msg.seq,
+      deliveryId: pending.msg.deliveryId ?? null,
+      labels: agentDeliverySloLabels(pending),
+    });
+  }
+
+  /**
+   * An ack for a delivery this replica already gave up on: the daemon did get
+   * it. Counted (and logged next to agent_delivery.gave_up, joinable on
+   * delivery_correlation_id) so
+   * real non-delivery is gave_up minus acked_after_gave_up. Delivery itself is
+   * unchanged: the record is gone and nothing is re-sent.
+   */
+  private recordAgentDeliveryAckedAfterGaveUp(
+    msg: Pick<Extract<MachineToServerMessage, { type: "agent:deliver:ack" }>, "agentId" | "seq" | "deliveryId">,
+  ): void {
+    const keys = msg.deliveryId ? [`delivery:${msg.deliveryId}`] : [];
+    keys.push(`seq:${msg.agentId}:${msg.seq}`);
+    const key = keys.find((candidate) => this.gaveUpAgentDeliveries.has(candidate));
+    if (!key) return;
+    const entry = this.gaveUpAgentDeliveries.get(key)!;
+    this.gaveUpAgentDeliveries.delete(key);
+    const sinceGaveUpMs = this.clock.now() - entry.givenUpAt;
+    if (sinceGaveUpMs >= AgentOrchestrator.AGENT_DELIVERY_GAVE_UP_TOMBSTONE_MS) return;
+    agentDeliveryOutcomesTotal.inc({ outcome: "acked_after_gave_up", ...entry.labels, conn_age: "n/a" });
+    console.log(JSON.stringify({
+      event: "agent_delivery.acked_after_gave_up",
+      machine_id: entry.machineId,
+      agent_id: entry.agentId,
+      delivery_correlation_id: entry.deliveryId,
+      seq: entry.seq,
+      delivery_kind: entry.labels.delivery_kind,
+      daemon_version: entry.labels.daemon_version,
+      since_gave_up_ms: sinceGaveUpMs,
+    }));
+  }
+
   private async logAgentDeliveryGaveUp(pending: PendingAgentDeliveryAck): Promise<void> {
     const conn = this.machineConnections.get(pending.machineId);
     let daemonVersion = conn?.daemonVersion ?? null;
@@ -11642,6 +12537,8 @@ export class AgentOrchestrator extends EventEmitter {
     pending.parked = false;
     pending.parkedReason = undefined;
     pending.parkedAt = undefined;
+    // The machine is back: a new wait, not the tail of the one before the park.
+    this.restartAgentDeliveryAckWait(pending);
     await this.retryPendingAgentDelivery(key, "ack_timeout");
   }
 
@@ -11702,6 +12599,17 @@ export class AgentOrchestrator extends EventEmitter {
     };
   }
 
+  private restartAgentDeliveryAckWait(pending: PendingAgentDeliveryAck): void {
+    pending.ackWaitStartedAt = this.clock.now();
+    pending.ackWaits = 0;
+  }
+
+  private machineAckedDeliveryRecently(machineId: string): boolean {
+    const lastAckAt = this.machineConnections.get(machineId)?.lastDeliveryAckAt;
+    return lastAckAt !== undefined
+      && this.clock.now() - lastAckAt <= AgentOrchestrator.AGENT_DELIVERY_LIVE_ACK_WINDOW_MS;
+  }
+
   private async retryPendingAgentDelivery(key: string, reason: "ack_timeout" | "ready_reconcile" | "register"): Promise<void> {
     const pending = this.pendingAgentDeliveryAcks.get(key);
     if (!pending) return;
@@ -11740,10 +12648,25 @@ export class AgentOrchestrator extends EventEmitter {
         ...ownerTraceAttrs,
       },
     });
-    if (pending.attempts >= AgentOrchestrator.AGENT_DELIVERY_ACK_MAX_ATTEMPTS) {
+    // A reconnect starts a new wait on a new connection (task #1295).
+    if (reason !== "ack_timeout") this.restartAgentDeliveryAckWait(pending);
+    const ageMs = this.clock.now() - pending.ackWaitStartedAt;
+    if (
+      reason === "ack_timeout"
+      && ageMs < AgentOrchestrator.AGENT_DELIVERY_DEFERRED_GIVE_UP_AFTER_MS
+      && this.machineAckedDeliveryRecently(pending.machineId)
+    ) {
+      // Task #1295: the daemon is acking other deliveries, so this one is queued
+      // behind them, not lost; another copy would only lengthen that queue.
+      this.scheduleAgentDeliveryAckTimeout(key, pending);
+      span.end("ok", { attrs: { ack_wait_age_ms: ageMs, outcome: "deferred", reason: "connection_acking" } });
+      return;
+    }
+    if (ageMs >= AgentOrchestrator.AGENT_DELIVERY_GIVE_UP_AFTER_MS) {
       if (pending.timer) this.clock.clearTimeout(pending.timer);
       this.recordAgentDeliveryOutcome(pending, "gave_up");
       this.pendingAgentDeliveryAcks.delete(key);
+      this.rememberGaveUpAgentDelivery(key, pending);
       // Task #432: gave_up concentrates on a few replicas (10-18% of their
       // deliveries vs 1-8% elsewhere), i.e. on a few machines, and the metrics
       // carry no machine. One JSON line per give-up (a few hundred per hour)
@@ -11753,6 +12676,7 @@ export class AgentOrchestrator extends EventEmitter {
       span.end("ok", {
         attrs: {
           first_attempt_age_ms: this.clock.now() - pending.firstAttemptAt,
+          ack_wait_age_ms: ageMs,
           outcome: "gave_up",
           reason: "ack_retry_exhausted",
         },
@@ -11855,6 +12779,14 @@ export class AgentOrchestrator extends EventEmitter {
     msg: Extract<ServerToMachineMessage, { type: "agent:deliver" }>,
     errorContext: string,
   ): Promise<boolean> {
+    // Glimpse layer-1 input duplication: the server offers this body to the agent.
+    // No launch: the cached expected launch is this instance's and can be stale.
+    recordAgentContextReturned({
+      source: "delivery",
+      agentId: msg.agentId,
+      channelId: msg.message.channel_id,
+      seqs: [msg.seq],
+    });
     const localAtSend = this.hasMachineLocally(machineId);
     if (localAtSend) {
       this.trackPendingAgentDeliveryAck(machineId, msg);
@@ -12461,7 +13393,8 @@ export class AgentOrchestrator extends EventEmitter {
     return next;
   }
 
-  private async loadWakePlanInput(
+  /** Protected so deterministic tests can replace the DB-backed gate reads with a fixed lifecycle snapshot. */
+  protected async loadWakePlanInput(
     agentId: string,
     status: AgentStatus,
     // The batch-read migration gate for this agent (deliverMessagesOnChannel), if any.
@@ -12648,6 +13581,23 @@ export class AgentOrchestrator extends EventEmitter {
       return (await evaluateFeatureFlag({ key: SUBAGENT_DELEGATION_FEATURE_FLAG_KEY, serverId })).enabled === true;
     } catch (error) {
       console.warn(`[AgentOrchestrator] ${SUBAGENT_DELEGATION_FEATURE_FLAG_KEY} evaluation failed; leaving it off`, error);
+      return false;
+    }
+  }
+
+  /**
+   * Reminder / Vault app rollout flags, per server, default off. Evaluated at
+   * every agent start; any evaluation failure keeps the flag off.
+   */
+  protected async appRolloutFlagEnabled(
+    key: typeof REMINDER_APP_FEATURE_FLAG_KEY | typeof VAULT_APP_FEATURE_FLAG_KEY,
+    serverId: string | null | undefined,
+  ): Promise<boolean> {
+    if (!serverId) return false;
+    try {
+      return (await evaluateFeatureFlag({ key, serverId })).enabled === true;
+    } catch (error) {
+      console.warn(`[AgentOrchestrator] ${key} evaluation failed; leaving it off`, error);
       return false;
     }
   }
@@ -12997,6 +13947,12 @@ export class AgentOrchestrator extends EventEmitter {
     }
     if (await this.passiveAxEnabled(agent.serverId)) {
       config.passiveAx = true;
+    }
+    if (await this.appRolloutFlagEnabled(REMINDER_APP_FEATURE_FLAG_KEY, agent.serverId)) {
+      config.reminderApp = true;
+    }
+    if (await this.appRolloutFlagEnabled(VAULT_APP_FEATURE_FLAG_KEY, agent.serverId)) {
+      config.vaultApp = true;
     }
 
     // task #319 — installed-app catalog rides agent:start config (server-level
@@ -13762,8 +14718,14 @@ export class AgentOrchestrator extends EventEmitter {
 
   // Agent workspace file browsing
 
-  async getAgentFileTree(agentId: string, dirPath?: string, includeHidden = false): Promise<FileNode[]> {
-    const result = await this.getMachineForAgent(agentId);
+  /**
+   * `archivedOnMachineId`: an archived agent has no `daemon_id`; its archive
+   * record names the Computer that still holds the workspace.
+   */
+  async getAgentFileTree(agentId: string, dirPath?: string, includeHidden = false, archivedOnMachineId?: string): Promise<FileNode[]> {
+    const result = archivedOnMachineId
+      ? (this.hasMachineLocally(archivedOnMachineId) ? { machineId: archivedOnMachineId } : null)
+      : await this.getMachineForAgent(agentId);
     if (!result) throw new RouteFailureError("daemon_offline", "Agent has no connected machine");
     const { machineId } = result;
 
@@ -13890,6 +14852,7 @@ export class AgentOrchestrator extends EventEmitter {
     probeReplicaGeneration: string | null;
     probeObservedAt: string;
     probeRuntimeVersions: string;
+    probeRuntimeDetection: string | null;
   } {
     return {
       probeCapabilities: JSON.stringify([...conn.capabilities].sort()),
@@ -13897,7 +14860,24 @@ export class AgentOrchestrator extends EventEmitter {
       probeReplicaGeneration: conn.replicaGeneration ?? null,
       probeObservedAt: new Date(currentTimeMs()).toISOString(),
       probeRuntimeVersions: JSON.stringify(normalizedRuntimeVersions ?? conn.runtimeVersions ?? {}),
+      probeRuntimeDetection: conn.runtimeDetection ? JSON.stringify(conn.runtimeDetection) : null,
     };
+  }
+
+  /**
+   * task #1268: the machine's runtime detection state (pending / complete /
+   * incomplete with unfinished runtimes), from the owner replica's connection
+   * or the replica meta. Null for synchronous daemons and unknown machines.
+   */
+  async getMachineRuntimeDetection(machineId: string): Promise<MachineRuntimeDetectionState | null> {
+    const local = this.machineConnections.get(machineId);
+    if (local) return local.runtimeDetection ?? null;
+    if (!this.replicaStateStore.isAvailable()) return null;
+    try {
+      return runtimeDetectionFromMachineMeta(await this.replicaStateStore.getMachineMeta(machineId));
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -13953,7 +14933,15 @@ export class AgentOrchestrator extends EventEmitter {
     };
   }
 
-  async detectMachineRuntimeModels(machineId: string, runtime: string): Promise<RuntimeModelSourceOutcome> {
+  /**
+   * `force`: bypass the Computer's model-list cache (a form's refresh action,
+   * `?refresh=1`). Daemons without the cache ignore it; they detect every time.
+   */
+  async detectMachineRuntimeModels(
+    machineId: string,
+    runtime: string,
+    options: { force?: boolean } = {},
+  ): Promise<RuntimeModelSourceOutcome> {
     // Plain model discovery does not consume connection-generation authority.
     // Built-in admission continues to use the local, fenced WithAuthority path.
     let outcome: RuntimeModelSourceOutcome;
@@ -13962,13 +14950,13 @@ export class AgentOrchestrator extends EventEmitter {
       const response = await this.getMachineResponseRelay().request({
         requestId, machineId, type: "machine:runtime_models:result",
       }, runtimeModelDetectionRequestTimeoutMs(runtime), () => this.sendRequiredToMachine(machineId, {
-        type: "machine:runtime_models:detect", requestId, runtime,
+        type: "machine:runtime_models:detect", requestId, runtime, ...(options.force ? { force: true } : {}),
       }), (event, attrs) => this.recordMachineResponseRelay(event, attrs));
       if (response.type !== "machine:runtime_models:result") throw new Error("Unexpected model response");
       outcome = projectRuntimeModelSourceResult(response, runtime);
     } else {
       outcome = (
-        await this.detectMachineRuntimeModelsWithAuthority(machineId, runtime)
+        await this.detectMachineRuntimeModelsWithAuthority(machineId, runtime, options)
       ).outcome;
     }
     // A live detection is a fresh report of the machine's model list; keep
@@ -13983,6 +14971,7 @@ export class AgentOrchestrator extends EventEmitter {
   async detectMachineRuntimeModelsWithAuthority(
     machineId: string,
     runtime: string,
+    options: { force?: boolean } = {},
   ): Promise<MachineRuntimeModelDetection> {
     const connection = this.machineConnections.get(machineId);
     if (
@@ -14034,7 +15023,12 @@ export class AgentOrchestrator extends EventEmitter {
       this.on(`machine:response:${machineId}`, handler);
 
       try {
-        await this.sendRequiredToMachine(machineId, { type: "machine:runtime_models:detect", requestId, runtime });
+        await this.sendRequiredToMachine(machineId, {
+          type: "machine:runtime_models:detect",
+          requestId,
+          runtime,
+          ...(options.force ? { force: true } : {}),
+        });
       } catch {
         clearTimeout(timeout);
         this.removeListener(`machine:response:${machineId}`, handler);
@@ -14101,8 +15095,10 @@ export class AgentOrchestrator extends EventEmitter {
     return this.machineCatalogAuthority.acquire(machineId, authority);
   }
 
-  async readAgentFile(agentId: string, filePath: string): Promise<{ content: string | null; binary: boolean; size: number; mimeType?: string; encoding?: "utf-8" | "base64" }> {
-    const result = await this.getMachineForAgent(agentId);
+  async readAgentFile(agentId: string, filePath: string, archivedOnMachineId?: string): Promise<{ content: string | null; binary: boolean; size: number; mimeType?: string; encoding?: "utf-8" | "base64" }> {
+    const result = archivedOnMachineId
+      ? (this.hasMachineLocally(archivedOnMachineId) ? { machineId: archivedOnMachineId } : null)
+      : await this.getMachineForAgent(agentId);
     if (!result) throw new RouteFailureError("daemon_offline", "Agent has no connected machine");
     const { machineId } = result;
 
@@ -14663,7 +15659,7 @@ export class AgentOrchestrator extends EventEmitter {
     return new Promise(async (resolve, reject) => {
       const timeout = setTimeout(() => {
         this.removeListener(`machine:response:${machineId}`, handler);
-        reject(new Error("Delete timed out"));
+        reject(new Error(WORKSPACE_DELETE_TIMED_OUT));
       }, 15_000);
 
       const handler = (msg: MachineToServerMessage) => {
@@ -14690,6 +15686,14 @@ export class AgentOrchestrator extends EventEmitter {
    * target access) for persisted messages an EXTERNAL agent pulls from its
    * inbox rather than receiving into the buffer. One result per item.
    */
+  protected loadRaftBenchServiceAgentIds(agentIds: readonly string[]): Promise<Set<string>> {
+    return agentService.raftBenchServiceAgentIds(agentIds);
+  }
+
+  protected async isRaftBenchServiceAgent(agentId: string): Promise<boolean> {
+    return (await this.loadRaftBenchServiceAgentIds([agentId])).has(agentId);
+  }
+
   async filterExternalInboxDeliveries(
     agentId: string,
     items: Array<{ message: AgentMessage; options: DeliverMessageOptions }>,
@@ -14697,9 +15701,14 @@ export class AgentOrchestrator extends EventEmitter {
     if (items.length === 0) return [];
     const agent = await this.getAuthoritativeAgentForDelivery(agentId);
     if (!agent) return items.map(() => false);
+    const serviceOnly = await this.isRaftBenchServiceAgent(agentId);
     let passiveScope: boolean | null = null;
     const results: boolean[] = [];
     for (const { message, options } of items) {
+      if (serviceOnly && message.third_party_event?.client_id !== "system.raftbench") {
+        results.push(false);
+        continue;
+      }
       if (!options.intrinsic && !options.adminAuthority) {
         passiveScope ??= await this.hasPassiveDeliveryScope(agentId).catch(() => false);
         if (!passiveScope) {
@@ -14753,6 +15762,12 @@ export class AgentOrchestrator extends EventEmitter {
       ? this.applyPersistedAgentForDelivery(agentId, gates.agents.get(agentId) ?? null)
       : await this.getAuthoritativeAgentForDelivery(agentId);
     if (!agent) return { status: "dropped", reason: "agent_unavailable" };
+    // Channel membership grants context reads, never passive chat delivery.
+    // Check before cross-replica routing, local buffering and webhook emission.
+    if ((gates?.raftbenchServices?.has(agentId) ?? await this.isRaftBenchServiceAgent(agentId))
+      && message.third_party_event?.client_id !== "system.raftbench") {
+      return { status: "dropped", reason: "raftbench_service_no_chat" };
+    }
     const requireQueueReceipt = options.requireQueueReceipt === true
       || options.reconcileNonMemberMention === true;
     // Passive scope gate — see DeliverMessageOptions.intrinsic. We drop rather
@@ -15361,6 +16376,10 @@ export class AgentOrchestrator extends EventEmitter {
   }
 
   async receiveMessages(agentId: string, block: boolean, timeoutMs: number, signal?: AbortSignal): Promise<AgentMessage[]> {
+    if (await this.isRaftBenchServiceAgent(agentId)) {
+      const buffered = this.agentInboxes.get(agentId);
+      if (buffered) buffered.inbox = buffered.inbox.filter(message => message.third_party_event?.client_id === "system.raftbench");
+    }
     if (await agentRuntimeProfileService.isRuntimeProfileMigrationGated(agentId)) {
       const agent = await this.getCachedAgent(agentId);
       const inbox = this.agentInboxes.get(agentId);
@@ -16262,7 +17281,97 @@ export class AgentOrchestrator extends EventEmitter {
     if (this.shouldSkipActivityLogPersistence(agentId)) {
       return false;
     }
-    return agentActivityLogService.appendAgentActivityEvent(agentId, activity, detail, entries, createdAt, dedupeKey);
+    const inserted = await agentActivityLogService.appendAgentActivityEvent(agentId, activity, detail, entries, createdAt, dedupeKey);
+    await this.persistDaemonTurnSummaries(agentId, entries);
+    return inserted;
+  }
+
+  /**
+   * Task #17: a daemon's `turn_summary` entries also go to the per-turn
+   * summary table the Activity overview reads. Keyed by the turn's start, so a
+   * replayed frame rewrites the same row. Best effort: the log row stands.
+   */
+  private async persistDaemonTurnSummaries(agentId: string, entries: readonly TrajectoryEntry[]): Promise<void> {
+    const turns = entries.flatMap((entry) => (
+      entry.kind === "turn_summary" && isPlausibleTurnSummary(entry.summary)
+        ? [{ turnKey: `daemon:${entry.summary.startedAt}`, summary: entry.summary }]
+        : []
+    ));
+    if (turns.length === 0) return;
+    try {
+      await this.upsertTurnSummaries(agentId, turns);
+    } catch (err) {
+      console.warn(`[ActivityLog ${agentId}] Failed to persist turn summaries:`, err);
+    }
+  }
+
+  protected async upsertTurnSummaries(agentId: string, turns: readonly { turnKey: string; summary: ActivityTurnSummary }[]): Promise<void> {
+    await agentActivityLogService.upsertAgentTurnSummaries(agentId, turns);
+  }
+
+  /** Newest finished turns first (Activity overview, task #17). */
+  async listTurnSummaries(
+    agentId: string,
+    options: { limit?: number; before?: agentActivityLogService.TurnSummaryCursor } = {},
+  ): Promise<{ summaries: agentActivityLogService.StoredTurnSummary[]; next?: agentActivityLogService.TurnSummaryCursor }> {
+    return this.loadTurnSummaries(agentId, options);
+  }
+
+  protected async loadTurnSummaries(
+    agentId: string,
+    options: { limit?: number; before?: agentActivityLogService.TurnSummaryCursor },
+  ): Promise<{ summaries: agentActivityLogService.StoredTurnSummary[]; next?: agentActivityLogService.TurnSummaryCursor }> {
+    return agentActivityLogService.listAgentTurnSummaries(agentId, options);
+  }
+
+  protected async loadLastTurnEndBefore(agentId: string, beforeMs: number): Promise<number | null> {
+    return agentActivityLogService.latestAgentTurnEndBefore(agentId, beforeMs);
+  }
+
+  protected async loadPersistedActivityLogAfter(agentId: string, afterMs: number, limit: number) {
+    return agentActivityLogService.listAgentTrajectoryAfter(agentId, afterMs, limit);
+  }
+
+  protected async loadAgentSentMessagesBetween(agentId: string, fromMs: number, toMs: number): Promise<{ at: number; messageId: string }[]> {
+    return agentActivityLogService.listAgentSentMessagesBetween(agentId, fromMs, toMs);
+  }
+
+  /**
+   * Task #17: rebuild turn summaries for an agent without a daemon from its
+   * stored hook rows. Hook events arrive in batches and out of order (a
+   * PreToolUse carries the tool's back-dated start), so every batch refolds
+   * the recent window in event-time order and upserts each closed turn it
+   * touched; a late event rewrites its turn's row.
+   */
+  private async rebuildExternalTurnSummaries(agentId: string, touchedFromMs: number): Promise<void> {
+    try {
+      // Refold only from the last turn that ended before the earliest event in
+      // this batch (less the soft-end grace, which can still extend it): older
+      // turns cannot change, so the cost per batch stays one turn or so.
+      const boundary = await this.loadLastTurnEndBefore(agentId, touchedFromMs - EXTERNAL_SOFT_END_GRACE_MS);
+      const loaded = boundary === null
+        ? await this.loadPersistedActivityLog(agentId, EXTERNAL_TURN_SUMMARY_WINDOW_ROWS)
+        : await this.loadPersistedActivityLogAfter(agentId, boundary, EXTERNAL_TURN_SUMMARY_REFOLD_ROWS);
+      // A hosted subagent runs on its own, between the parent's turns (the
+      // parent ends its turn after spawning it; the report wakes a new one), so
+      // its steps are the subagent's, never a parent turn's.
+      const rows = loaded.filter((row) => !(row.entry as SubagentLineage).subagent);
+      if (rows.length === 0) return;
+      const windowStart = Math.min(...rows.map((row) => row.timestamp));
+      const sends = await this.loadAgentSentMessagesBetween(agentId, windowStart, this.clock.now());
+      // Once an agent has sent hook boundaries it is split by hooks for good,
+      // so a window that starts before this turn's UserPromptSubmit arrived
+      // does not fall back to statuses and key the turn differently.
+      if (rows.some((row) => externalHookBoundary(row.entry) !== null)) this.externalHookTurnAgents.add(agentId);
+      const turns = summarizeTurnsFromLog(rows, { ...externalTurnBoundaries(rows, this.externalHookTurnAgents.has(agentId)), sends }).filter((turn) => turn.summary.endedAt >= touchedFromMs || boundary !== null);
+      if (turns.length === 0) return;
+      await this.upsertTurnSummaries(agentId, turns.map((turn) => {
+        const start = rows[turn.startIndex]!.entry;
+        return { turnKey: `external:${start.producerFactId ?? rows[turn.startIndex]!.timestamp}`, summary: turn.summary };
+      }));
+    } catch (err) {
+      console.warn(`[ActivityLog ${agentId}] Failed to rebuild external turn summaries:`, err);
+    }
   }
 
   private shouldSkipActivityLogPersistence(agentId: string): boolean {

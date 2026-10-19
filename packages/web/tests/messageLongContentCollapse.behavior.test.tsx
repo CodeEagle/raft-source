@@ -436,13 +436,14 @@ test("long channel and thread messages collapse by rendered height and remember 
   assert.match(content.className, /overflow-clip/);
   const fade = channelView.container.querySelector<HTMLElement>("[data-message-collapse-fade]");
   assert.ok(fade);
-  assert.match(fade.className, /from-layer-panel/);
-  assert.match(fade.className, /theme-brutal:from-white/);
+  assert.match(fade.className, /from-layer-canvas/);
+  assert.doesNotMatch(fade.className, /theme-brutal:/);
 
   const showMore = screen.getByRole("button", { name: "Show more" });
   assert.equal(showMore.getAttribute("aria-expanded"), "false");
-  assert.match(showMore.className, /text-foreground-muted/);
-  assert.match(showMore.className, /theme-brutal:text-black\/60/);
+  // DS UI text link: ink, 1.5px underline (ui/ShowMoreToggle).
+  assert.match(showMore.className, /(?:^| )text-foreground(?: |$)/);
+  assert.doesNotMatch(showMore.className, /theme-brutal:/);
   fireEvent.click(showMore);
   assert.equal(preserveViewportRequests, 1);
   assert.equal(content.dataset.messageCollapsed, "false");

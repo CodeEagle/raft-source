@@ -7,7 +7,11 @@
 // for audit.
 //
 // Hot-path auth lookup: prefix-indexed (O(1) by `idx_agent_credentials_prefix_active`,
-// the partial index that excludes revoked rows). Argon2id verify follows.
+// the partial index that excludes revoked rows). Verify follows: a
+// constant-time HMAC compare when the row has `api_key_hmac`; otherwise, or
+// when that compare fails, argon2id (legacy rows, `AGENT_API_KEY_HMAC_SECRET`
+// unset, or an HMAC from an older secret), and an argon2 success stores the
+// current HMAC.
 //
 // This module owns:
 //   - findAgentCredentialByApiKey(apiKey)   — middleware-side lookup
@@ -19,13 +23,15 @@
 // returns the raw key exactly once at mint time; subsequent reads return the
 // row WITHOUT the raw key.
 
-import { randomBytes, createHmac } from "node:crypto";
+import { randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import argon2 from "argon2";
 import { eq, and, isNull, desc, inArray, max } from "drizzle-orm";
 import { isExternalAgentRuntime, makeIsMember } from "@botiverse/raft-shared";
 import { getDb, type DatabaseExecutor } from "../db/index";
-import { agentCredentials, agentBootstrapTokens, agents, servers } from "../db/schema";
+import { agentCredentials, agentBootstrapTokens, agents, servers, raftbenchServiceAgents } from "../db/schema";
+import { hasExactRaftbenchServiceScopes } from "../raftbench/credentialScopes";
 import { addTraceEvent } from "../tracing/semanticTrace";
+import { agentCredentialVerifyTotal } from "../metrics";
 
 const API_KEY_PREFIX_LENGTH = 16;
 const RAW_KEY_BYTES = 32;
@@ -46,6 +52,7 @@ export const ALLOWED_AGENT_CAPABILITIES = [
   "channels",
   "knowledge",
   "mcp",
+  "raftbench",
 ] as const;
 export type AgentCapability = (typeof ALLOWED_AGENT_CAPABILITIES)[number];
 const isAgentCapability = makeIsMember(ALLOWED_AGENT_CAPABILITIES);
@@ -79,6 +86,20 @@ export const DEFAULT_EXTERNAL_AGENT_CAPABILITIES: readonly AgentCapability[] = [
  * can too (tygg, #raft-antiproton:9a4fe245). Role checks still run live on
  * every call, so `server` lets an admin agent edit the server, not a member.
  */
+/**
+ * Capability set for a managed app bot (`agents.managed_by_app_install_id
+ * IS NOT NULL`). Narrower than `DEFAULT_EXTERNAL_AGENT_CAPABILITIES`: yezizp's
+ * Phase-1 ask is DM people/agents, channelable, send/receive. Tasks, manual,
+ * reactions, server/channel-management, knowledge, mcp are all withheld until
+ * the product asks for them.
+ */
+export const MANAGED_APP_BOT_CAPABILITIES: readonly AgentCapability[] = [
+  "send",
+  "read",
+  "mentions",
+  "channels",
+];
+
 export const HOSTED_RUNTIME_AGENT_CAPABILITIES: readonly AgentCapability[] = [
   ...DEFAULT_EXTERNAL_AGENT_CAPABILITIES,
   "server",
@@ -135,6 +156,33 @@ export function computeTokenLookupHash(rawToken: string): Buffer {
   return createHmac("sha256", getBootstrapTokenPepper()).update(rawToken, "utf8").digest();
 }
 
+// Secret for `agent_credentials.api_key_hmac`. Deliberately separate from the
+// bootstrap pepper and with no JWT_SECRET fallback: rotating it invalidates
+// every stored HMAC, so it gets its own rotation boundary. Optional — when it
+// is unset (or too short) mint stores no HMAC and verify stays on argon2.
+export const AGENT_API_KEY_HMAC_SECRET_ENV = "AGENT_API_KEY_HMAC_SECRET";
+let warnedMissingApiKeyHmacSecret = false;
+
+function getAgentApiKeyHmacSecret(): Buffer | null {
+  const raw = process.env[AGENT_API_KEY_HMAC_SECRET_ENV];
+  if (!raw || raw.length < 32) {
+    if (!warnedMissingApiKeyHmacSecret) {
+      warnedMissingApiKeyHmacSecret = true;
+      console.warn(
+        `[AgentCredential] ${AGENT_API_KEY_HMAC_SECRET_ENV} unset or shorter than 32 chars — sk_agent_* keys verify with argon2 only`,
+      );
+    }
+    return null;
+  }
+  return Buffer.from(raw, "utf8");
+}
+
+/** HMAC-SHA-256 of a raw `sk_agent_*` key, or null when the secret is unset. */
+export function computeAgentApiKeyHmac(apiKey: string): Buffer | null {
+  const secret = getAgentApiKeyHmacSecret();
+  return secret ? createHmac("sha256", secret).update(apiKey, "utf8").digest() : null;
+}
+
 export function extractApiKeyPrefix(apiKey: string): string {
   return apiKey.slice(0, API_KEY_PREFIX_LENGTH);
 }
@@ -177,9 +225,12 @@ export async function getLatestActiveAgentCredential(
  * Look up an agent credential by raw API key.
  *
  * Hot path: prefix lookup served by `idx_agent_credentials_prefix_active`
- * (partial index `WHERE revoked_at IS NULL`) → argon2id verify against
- * matching rows. Revoked rows are excluded by the index — the middleware
- * never argon2-verifies against a revoked credential.
+ * (partial index `WHERE revoked_at IS NULL`) → verify against matching rows:
+ * constant-time HMAC compare when the row has `apiKeyHmac` and the secret is
+ * configured; otherwise, or when the compare fails, argon2id, whose success
+ * stores the current HMAC (best-effort).
+ * Revoked rows are excluded by the query on every request — the middleware
+ * never verifies against a revoked credential.
  *
  * Returns `null` for: unknown key, revoked credential, soft-deleted agent.
  * The agent join ensures the credential's bound agent still exists.
@@ -202,6 +253,7 @@ export async function findAgentCredentialByApiKey(
       id: agentCredentials.id,
       agentId: agentCredentials.agentId,
       apiKeyHash: agentCredentials.apiKeyHash,
+      apiKeyHmac: agentCredentials.apiKeyHmac,
       scopes: agentCredentials.scopes,
     })
     .from(agentCredentials)
@@ -217,22 +269,52 @@ export async function findAgentCredentialByApiKey(
   });
 
   const verifyStart = Date.now();
+  const presentedHmac = candidates.length > 0 ? computeAgentApiKeyHmac(apiKey) : null;
   let verifiedCredential: typeof candidates[number] | null = null;
+  let usedArgon2 = false;
+  // The verified row carried an HMAC that did not match, but argon2 accepted
+  // the key: that HMAC came from a different secret and is rewritten below.
+  let staleHmac = false;
   for (const cred of candidates) {
+    if (presentedHmac && cred.apiKeyHmac) {
+      if (cred.apiKeyHmac.length === presentedHmac.length && timingSafeEqual(cred.apiKeyHmac, presentedHmac)) {
+        verifiedCredential = cred;
+        break;
+      }
+      // No match: a wrong key, or an HMAC stored under a secret that has since
+      // changed. argon2 tells them apart, so a changed or re-created secret
+      // degrades to argon2 and heals itself instead of 401ing every key.
+    }
+    usedArgon2 = true;
     try {
       if (!(await argon2.verify(cred.apiKeyHash, apiKey))) continue;
       verifiedCredential = cred;
+      staleHmac = Boolean(presentedHmac && cred.apiKeyHmac);
       break;
     } catch {
       continue;
     }
   }
+  // "none": no candidate had this prefix, so nothing was verified.
+  // "argon2_rehmac": a stored HMAC was stale (secret changed); a burst of these
+  // after a secret change is the signal that load went back to argon2.
+  const verifyPath = candidates.length === 0
+    ? "none"
+    : staleHmac ? "argon2_rehmac" : usedArgon2 ? "argon2" : "hmac";
+  const verifyOutcome = verifiedCredential ? "matched" : "not_matched";
+  // Event name predates the HMAC path; kept for trace-query continuity.
   addTraceEvent("agent_credential_auth.argon2_verify.finished", {
     duration_ms: Date.now() - verifyStart,
     candidate_count: candidates.length,
-    outcome: verifiedCredential ? "matched" : "not_matched",
+    outcome: verifyOutcome,
+    verify_path: verifyPath,
   });
+  if (candidates.length > 0) agentCredentialVerifyTotal.inc({ path: verifyPath, outcome: verifyOutcome });
   if (!verifiedCredential) return null;
+
+  if (presentedHmac && (!verifiedCredential.apiKeyHmac || staleHmac)) {
+    await storeAgentApiKeyHmac(verifiedCredential.id, verifiedCredential.apiKeyHash, presentedHmac);
+  }
 
   // Resolve serverId via the bound agent. The credential row itself does
   // not carry serverId — it's derived from `agents.serverId` (FK chain).
@@ -256,6 +338,23 @@ export async function findAgentCredentialByApiKey(
     scopes: verifiedCredential.scopes,
   } satisfies AgentCredentialLookupResult;
   return result;
+}
+
+// Row verified by argon2: store its HMAC (filling a missing one, or replacing
+// one from an older secret) so later requests take the fast path. Conditional
+// on the hash just verified. Best-effort: auth already passed.
+async function storeAgentApiKeyHmac(credentialId: string, apiKeyHash: string, apiKeyHmac: Buffer): Promise<void> {
+  try {
+    await getDb()
+      .update(agentCredentials)
+      .set({ apiKeyHmac })
+      .where(and(eq(agentCredentials.id, credentialId), eq(agentCredentials.apiKeyHash, apiKeyHash)));
+  } catch (err) {
+    console.warn("[AgentCredential] api_key_hmac store failed", {
+      credentialId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 /**
@@ -394,12 +493,14 @@ export async function getAgentsLastSeenAt(agentIds: readonly string[]): Promise<
 
 /**
  * Helper for the step-3 mint endpoints. Generates a raw `sk_agent_*` key
- * + its argon2id hash + the prefix used for indexed lookup. Returns the
- * raw key ONLY to the caller; never persists it in raw form.
+ * + its argon2id hash + its HMAC (null when the secret is unset) + the prefix
+ * used for indexed lookup. Returns the raw key ONLY to the caller; never
+ * persists it in raw form.
  */
 export async function generateAgentApiKeyMaterial(): Promise<{
   apiKey: string;
   apiKeyHash: string;
+  apiKeyHmac: Buffer | null;
   apiKeyPrefix: string;
 }> {
   const apiKey = `sk_agent_${randomBytes(RAW_KEY_BYTES).toString("hex")}`;
@@ -407,6 +508,7 @@ export async function generateAgentApiKeyMaterial(): Promise<{
   return {
     apiKey,
     apiKeyHash,
+    apiKeyHmac: computeAgentApiKeyHmac(apiKey),
     apiKeyPrefix: extractApiKeyPrefix(apiKey),
   };
 }
@@ -469,7 +571,7 @@ export interface MintAgentCredentialInput {
 /**
  * Mint a fresh `sk_agent_*` credential bound to `agentId`. Returns the raw
  * API key exactly once — callers MUST return it to the user in the same
- * response and then forget it. The argon2 hash is what persists.
+ * response and then forget it. The argon2 hash and HMAC are what persist.
  *
  * One row per credential. Other credentials for the same agent are NOT
  * revoked (each device/profile holds its own); only `replacesCredentialId`,
@@ -508,6 +610,11 @@ export async function mintAgentCredential(
   }
 
   const scopes = normalizeAgentCapabilities(input.scopes);
+  const [raftbenchService] = await db.select({ agentId: raftbenchServiceAgents.agentId })
+    .from(raftbenchServiceAgents).where(eq(raftbenchServiceAgents.agentId, input.agentId));
+  if (raftbenchService && !hasExactRaftbenchServiceScopes(scopes)) {
+    throw new Error("raftbench_service_credential_scope_invalid");
+  }
 
   let replacedCredentialId: string | null = null;
   if (input.replacesCredentialId) {
@@ -536,6 +643,7 @@ export async function mintAgentCredential(
     .values({
       agentId: input.agentId,
       apiKeyHash: material.apiKeyHash,
+      apiKeyHmac: material.apiKeyHmac,
       apiKeyPrefix: material.apiKeyPrefix,
       name: input.name ?? null,
       scopes,

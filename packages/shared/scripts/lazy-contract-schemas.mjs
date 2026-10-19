@@ -1,7 +1,10 @@
 #!/usr/bin/env node
-// Mechanical rewrite: wrap every top-level zod schema constant in the Agent API
-// contract files with `lazySchema("<name>", () => <initializer>)`, so the
+// Mechanical rewrite: wrap every top-level zod schema constant in the shared
+// package's source with `lazySchema("<name>", () => <initializer>)`, so the
 // schema is built on first use instead of at import (see src/lazySchema.ts).
+// Every non-test module under src/ that imports zod is covered: the CLI loads
+// most of them through the package barrel, so one eager module costs every
+// `raft` call.
 //
 // A top-level `const` is a schema when its initializer (after `as` /
 // `satisfies` / parentheses) is a call chain rooted at `z`, at
@@ -11,14 +14,38 @@
 //
 //   node scripts/lazy-contract-schemas.mjs          rewrite in place
 //   node scripts/lazy-contract-schemas.mjs --check  exit 1 if any file would change
-import { readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+//   node scripts/lazy-contract-schemas.mjs --list   JSON list of modules that use lazySchema
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { dirname, join, relative, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
 const SRC = join(dirname(fileURLToPath(import.meta.url)), "..", "src");
-export const LAZY_CONTRACT_FILES = ["agentApiContract.ts", "agentApiMessageContract.ts", "daemonApiContract.ts"];
-const IMPORT_LINE = `import { lazySchema } from "./lazySchema";\n`;
+
+/** Source files (relative to src/, `/`-separated) the rewrite applies to. */
+export function lazySchemaCandidateFiles(root = SRC) {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const path = join(dir, entry);
+      if (statSync(path).isDirectory()) {
+        if (entry !== "generated" && entry !== "testVectors") walk(path);
+        continue;
+      }
+      if (!entry.endsWith(".ts") || entry.endsWith(".d.ts") || /\.test\.ts$|testkit/.test(entry)) continue;
+      const rel = relative(root, path).split(sep).join("/");
+      if (rel === "lazySchema.ts") continue;
+      if (readFileSync(path, "utf8").includes('from "zod"')) files.push(rel);
+    }
+  };
+  walk(root);
+  return files.sort();
+}
+
+function importLineFor(fileName) {
+  const depth = fileName.split("/").length - 1;
+  return `import { lazySchema } from "${depth === 0 ? "./" : "../".repeat(depth)}lazySchema";\n`;
+}
 
 function rootIdentifier(expression) {
   let current = expression;
@@ -64,18 +91,25 @@ export function rewriteContractSource(fileName, source) {
   for (const edit of edits.sort((a, b) => b.at - a.at)) {
     output = output.slice(0, edit.at) + edit.text + output.slice(edit.at);
   }
-  if (!output.includes(IMPORT_LINE)) {
-    const zodImport = output.match(/^import \{ z \} from "zod";\n/m);
+  const importLine = importLineFor(fileName);
+  if (!output.includes(importLine)) {
+    const zodImport = output.match(/^import \{[^}]*\} from "zod";\n/m);
     const at = zodImport ? zodImport.index + zodImport[0].length : 0;
-    output = output.slice(0, at) + IMPORT_LINE + output.slice(at);
+    output = output.slice(0, at) + importLine + output.slice(at);
   }
   return { output, wrapped: edits.length / 2 };
 }
 
 function main() {
+  const files = lazySchemaCandidateFiles();
+  if (process.argv.includes("--list")) {
+    const lazy = files.filter((file) => readFileSync(join(SRC, file), "utf8").includes("lazySchema("));
+    console.log(JSON.stringify(lazy.map((file) => file.replace(/\.ts$/, ""))));
+    return;
+  }
   const check = process.argv.includes("--check");
   let stale = 0;
-  for (const file of LAZY_CONTRACT_FILES) {
+  for (const file of files) {
     const path = join(SRC, file);
     const source = readFileSync(path, "utf8");
     const { output, wrapped } = rewriteContractSource(file, source);

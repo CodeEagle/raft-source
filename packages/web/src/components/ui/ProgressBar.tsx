@@ -1,14 +1,17 @@
-import { Progress, ProgressTrack, ProgressIndicator } from "raft-ui";
+import { Progress, ProgressTrack, ProgressIndicator } from "@botiverse/raft-ui";
 import type { HTMLAttributes } from "react";
 import { useContext } from "react";
 import { IntlContext } from "react-intl";
 import { en } from "../../i18n/messages/en";
 
-/** Product labels and value normalization over the themed RUI progress recipe. */
-export type ProgressBarTone = "pink" | "cyan" | "lime" | "orange";
+/** Product labels and value normalization over the themed RUI progress recipe.
+ *
+ *  Raft Design System › Loading (`rf-progress`): an 8px sunken track with a
+ *  cyan fill that carries an ink edge; orange near a limit, lime when done.
+ *  Progress is a passive indicator, so it is never the action pink. */
+export type ProgressBarTone = "cyan" | "lime" | "orange";
 
-const TONE_CLASS: Record<ProgressBarTone, "accent" | "information" | "success" | "warning"> = {
-  pink: "accent",
+const TONE_CLASS: Record<ProgressBarTone, "information" | "success" | "warning"> = {
   cyan: "information",
   lime: "success",
   orange: "warning",
@@ -17,7 +20,7 @@ const TONE_CLASS: Record<ProgressBarTone, "accent" | "information" | "success" |
 export interface ProgressBarProps extends Omit<HTMLAttributes<HTMLDivElement>, "role"> {
   /** 0–100 for a determinate bar; omit (or null) for an indeterminate stripe. */
   value?: number | null;
-  /** Fill color. Defaults to pink (CTA), matching the Upgrade button. */
+  /** Fill color. Defaults to the DS cyan fill. */
   tone?: ProgressBarTone;
   /** Optional phase / status label rendered above the track (left). */
   label?: string;
@@ -27,7 +30,7 @@ export interface ProgressBarProps extends Omit<HTMLAttributes<HTMLDivElement>, "
 
 export default function ProgressBar({
   value = null,
-  tone = "pink",
+  tone = "cyan",
   label,
   showPercent = false,
   className = "",
@@ -42,9 +45,9 @@ export default function ProgressBar({
   return (
     <div className={className} {...rest}>
       {(label || (showPercent && !indeterminate)) && (
-        <div className="mb-1 flex items-center justify-between text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
-          {label ? <span className="truncate">{label}</span> : <span />}
-          {showPercent && !indeterminate && <span className="shrink-0">{Math.round(pct)}%</span>}
+        <div className="mb-1.5 flex items-center justify-between gap-2">
+          {label ? <span className="truncate text-footnote font-semibold text-foreground">{label}</span> : <span />}
+          {showPercent && !indeterminate && <span className="shrink-0 font-mono text-mono-meta text-foreground-hint">{Math.round(pct)}%</span>}
         </div>
       )}
       <Progress value={indeterminate ? null : pct} variant={TONE_CLASS[tone]} aria-label={label ?? defaultAriaLabel}>

@@ -64,11 +64,13 @@ test("selecting luna clamps an Ultra choice down to the model default", () => {
 });
 
 test("non-gating models fall back to the BASE set — max/ultra must NOT leak (task #496)", () => {
-  const values = reasoningEffortOptionsForModel("claude", "sonnet").map((o) => o.value);
-  // Claude declares no supportedReasoningEfforts → BASE set only, not the full
-  // catalog. max/ultra are Codex-GPT-5.6-only and must never appear on Claude.
+  // A model that declares no supportedReasoningEfforts (Claude Haiku 4.5, which
+  // takes no effort) gets the BASE set only, not the full catalog.
+  const values = reasoningEffortOptionsForModel("claude", "claude-haiku-4-5").map((o) => o.value);
   assert.deepEqual(values, ["low", "medium", "high", "xhigh"]);
-  assert.ok(!values.includes("max") && !values.includes("ultra"), "claude must not offer max/ultra");
+  assert.ok(!values.includes("max") && !values.includes("ultra"), "a non-gating model must not offer max/ultra");
+  // Claude models that declare low..max offer max, never ultra.
+  assert.deepEqual(reasoningEffortOptionsForModel("claude", "sonnet").map((o) => o.value), ["low", "medium", "high", "xhigh", "max"]);
   // A base-level value passes through unchanged (incl. null).
   assert.equal(reconcileReasoningEffort("claude", "sonnet", "high"), "high");
   assert.equal(reconcileReasoningEffort("claude", "sonnet", null), null);

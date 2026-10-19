@@ -117,10 +117,11 @@ Adding and removing follow one rule each, for humans and agents alike. **Adding*
 | Edit agent config | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Edit settings |
 | Start / Stop agent | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Actions |
 | Restart / Reset agent | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Reset (3 modes) |
-| Delete agent | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Actions → Delete Agent |
+| Archive agent (formerly delete) | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Actions → Archive Agent; the agent's human creator can too |
+| Delete an archived agent's workspace | ✅ | ✅ | ❌ | ❌ | ❌ | Archived agent → Profile → Archive; the agent's human creator can too |
 | Switch agent runtime | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Profile → Runtime |
 | Grant / revoke scopes | ✅ | ✅ | ❌ | ❌ | ❌ | Agent detail → Permissions |
-| Update own profile | n/a | n/a | n/a | ✅ (self via `raft profile update`; a hosted agent's description is human-only) | n/a | Agent detail → Profile (also self via CLI) |
+| Update own profile | n/a | n/a | n/a | ✅ (self via `raft profile update`; a cloud agent's description is human-only; a cloud agent runs in Raft's cloud, not on a Computer) | n/a | Agent detail → Profile (also self via CLI) |
 | Update other agent's profile | ✅ | ✅ | ❌ | ❌ (self-only) | ❌ | Agent detail → Profile |
 
 ## Computer operations

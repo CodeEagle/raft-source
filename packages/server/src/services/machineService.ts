@@ -1,12 +1,13 @@
 import { eq, and, inArray, isNotNull, isNull, lt, or, sql, asc } from "drizzle-orm";
 import { createHash, randomBytes } from "node:crypto";
 import argon2 from "argon2";
+import { timedArgon2Verify, type Argon2VerifyStats } from "./argon2VerifyStats";
 import { getDb, type DatabaseExecutor } from "../db/index";
 import { computers, machines, servers, agents, agentMigrations, agentRuntimeProfiles } from "../db/schema";
 import { withServerLock, acquireServerLock } from "./planService";
 import { FencedAuthorizationDeniedError, lockActorMembershipRow } from "../lib/actorMembershipFence";
 import { actorRoleHasServerCapability } from "../lib/actorPermissions";
-import { PLAN_CONFIG, currentDate, getEffectiveLimits, type MachineId, type ServerPlan } from "@botiverse/raft-shared";
+import { PLAN_CONFIG, currentDate, getEffectiveLimits, type DeviceClass, type MachineId, type ServerPlan } from "@botiverse/raft-shared";
 import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
 
 /** Extract a short prefix from an API key for indexed DB lookup. */
@@ -168,6 +169,7 @@ export async function listMachines(
       runtimes: machines.runtimes,
       hostname: machines.hostname,
       os: machines.os,
+      deviceClass: machines.deviceClass,
       daemonVersion: machines.daemonVersion,
       computerVersion: machines.computerVersion,
       computerVersionReportedAt: machines.computerVersionReportedAt,
@@ -263,12 +265,14 @@ export async function updateMachineRuntimes(
   hostname?: string,
   os?: string,
   daemonVersion?: string | null,
+  deviceClass?: DeviceClass | null,
 ) {
   const db = getDb();
   await db.update(machines).set({
     runtimes,
     ...(hostname !== undefined ? { hostname } : {}),
     ...(os !== undefined ? { os } : {}),
+    ...(deviceClass !== undefined ? { deviceClass } : {}),
     ...(daemonVersion !== undefined ? { daemonVersion } : {}),
   }).where(eq(machines.id, machineId));
   if (daemonVersion !== undefined) {
@@ -334,7 +338,7 @@ export async function regenerateApiKey(machineId: string, options: { executor?: 
 }
 
 /** Prefix-indexed key verification with live authorization state on every call. */
-export async function findMachineByApiKey(apiKey: string) {
+export async function findMachineByApiKey(apiKey: string, argon2Stats?: Argon2VerifyStats) {
   const db = getDb();
   const cached = authCache.get(apiKey);
   if (cached && cached.expiresAt > Date.now()) {
@@ -355,7 +359,7 @@ export async function findMachineByApiKey(apiKey: string) {
   for (const candidate of candidates) {
     let valid: boolean;
     try {
-      valid = await argon2.verify(candidate.apiKeyHash, apiKey);
+      valid = await timedArgon2Verify(candidate.apiKeyHash, apiKey, argon2Stats);
     } catch {
       continue;
     }
@@ -471,6 +475,8 @@ export async function deleteMachine(machineId: string, options: { executor?: Dat
       ));
     const completedMoveTargetsByAgent = new Map<string, Set<string>>();
     for (const row of completedMoves) {
+      // A move to hosted leaves the agent on no machine; nothing to match.
+      if (!row.targetMachineId) continue;
       const targets = completedMoveTargetsByAgent.get(row.agentId) ?? new Set<string>();
       targets.add(row.targetMachineId);
       completedMoveTargetsByAgent.set(row.agentId, targets);

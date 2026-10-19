@@ -1,6 +1,7 @@
 // `raft message search [--query <q>] [--target <t>] [--sender <handle>]
 //                       [--sort relevance|recent]
-//                       [--before <ts>] [--after <ts>] [--limit N] [--offset N]`
+//                       [--before <ts>] [--after <ts>] [--limit N] [--offset N]
+//                       [--cursor <c>]`
 // → GET /internal/agent-api/search
 
 import type { Command } from "commander";
@@ -8,7 +9,7 @@ import type { Command } from "commander";
 import {
   AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT,
   AGENT_API_MESSAGE_SEARCH_MAX_LIMIT,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";
@@ -26,6 +27,7 @@ interface SearchOpts extends TargetAliasOpts {
   after?: string;
   limit?: string;
   offset?: string;
+  cursor?: string;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -178,6 +180,19 @@ function normalizeSearchOpts(opts: Partial<SearchOpts & { sort?: string }>): Omi
   const limit = parsePositiveInt("limit", opts.limit);
   const offset = parseNonNegativeInt("offset", opts.offset);
   const sort = opts.sort ?? (query ? undefined : "recent");
+  const cursor = opts.cursor?.trim();
+  if (opts.cursor !== undefined && (!cursor || !query || sort !== "recent")) {
+    throw new CliError({
+      code: "INVALID_ARG",
+      message: "--cursor continues a recent search: pass a previous nextCursor with the same --query and --sort recent",
+    });
+  }
+  if (cursor && offset !== undefined) {
+    throw new CliError({
+      code: "INVALID_ARG",
+      message: "--cursor already marks where to continue; drop --offset",
+    });
+  }
   const before = normalizeSearchTimestampArg("before", opts.before);
   const after = normalizeSearchTimestampArg("after", opts.after);
   return {
@@ -190,6 +205,7 @@ function normalizeSearchOpts(opts: Partial<SearchOpts & { sort?: string }>): Omi
     ...(after ? { after } : {}),
     ...(limit !== undefined ? { limit } : {}),
     ...(offset !== undefined ? { offset } : {}),
+    ...(cursor ? { cursor } : {}),
   };
 }
 
@@ -256,7 +272,15 @@ export const messageSearchCommand = defineCommand(
           "Skip this many results (default 0). Not a stable cursor in either sort "
           + "mode: under relevance the ordering re-ranks as the corpus changes; under "
           + "recent (including filter-only searches) new messages shift every later "
-          + "row, so the same offset can repeat rows. For recent, page with --before",
+          + "row, so the same offset can repeat rows. For recent, page with --cursor when the "
+          + "output gives one, else --before",
+      },
+      {
+        flags: "--cursor <c>",
+        description:
+          "Continue a recent search exactly where the previous output said (its nextCursor, unchanged); "
+          + "keep the same --query and filters, no --offset. An incomplete result (the search stopped at "
+          + "its scan budget) is continued this way",
       },
     ],
   },
@@ -274,6 +298,7 @@ export const messageSearchCommand = defineCommand(
       ...(searchOpts.after ? { after: searchOpts.after } : {}),
       ...(searchOpts.limit !== undefined ? { limit: String(searchOpts.limit) } : {}),
       ...(searchOpts.offset !== undefined ? { offset: String(searchOpts.offset) } : {}),
+      ...(searchOpts.cursor ? { cursor: searchOpts.cursor } : {}),
     });
     if (!res.ok) {
       const code = toSearchErrorCode(res.errorCode, res.status);
@@ -283,7 +308,12 @@ export const messageSearchCommand = defineCommand(
         ...(code === "QUERY_TOO_BROAD" ? { suggestedNextAction: formatQueryTooBroadNextAction(searchOpts) } : {}),
       });
     }
-    writeText(ctx.io, formatSearchResults(searchOpts.displayQuery, res.data as SearchData, searchOpts.offset, searchOpts.sort, searchOpts.limit), NL);
+    writeText(ctx.io, formatSearchResults(searchOpts.displayQuery, res.data as SearchData, searchOpts.offset, searchOpts.sort, searchOpts.limit, {
+      ...(searchOpts.channel ? { target: searchOpts.channel } : {}),
+      ...(searchOpts.sender ? { sender: searchOpts.sender } : {}),
+      ...(searchOpts.after ? { after: searchOpts.after } : {}),
+      ...(searchOpts.before ? { before: searchOpts.before } : {}),
+    }), NL);
   },
 );
 

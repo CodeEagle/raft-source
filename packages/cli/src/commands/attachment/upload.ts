@@ -18,7 +18,7 @@ import { basename } from "node:path";
 import { finished } from "node:stream/promises";
 
 import type { Command } from "commander";
-import { setClockTimeout } from "@botiverse/raft-shared";
+import { setClockTimeout } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";

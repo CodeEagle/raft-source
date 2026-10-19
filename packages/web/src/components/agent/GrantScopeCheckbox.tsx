@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { Checkbox } from "raft-ui";
+import { Checkbox } from "@botiverse/raft-ui";
 
 export function GrantScopeCheckbox({
   scope,
@@ -12,8 +12,8 @@ export function GrantScopeCheckbox({
 }) {
   const handleCheckedChange = useCallback((next: boolean) => onToggle(scope, next), [onToggle, scope]);
   return (
-    <label className="flex items-center gap-2 font-mono text-xs text-foreground-strong">
-      <Checkbox size="sm" checked={checked} onCheckedChange={handleCheckedChange} />
+    <label className="flex min-h-8 items-center gap-2 break-all font-mono text-mono-meta text-foreground">
+      <Checkbox checked={checked} onCheckedChange={handleCheckedChange} />
       {scope}
     </label>
   );

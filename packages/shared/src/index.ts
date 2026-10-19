@@ -1,3 +1,8 @@
+export { normalizeAppSetupUrl, normalizeAppSetupDescription, projectAppSetup, asAppSetupInstallationId, AppSetupValidationError } from "./appSetup";
+export type { AppSetupState, AppSetupInstallationId } from "./appSetup";
+export { validateAnnouncementAudience, matchesAnnouncementAudience, asAnnouncementRecipientUserId, ANNOUNCEMENT_AUDIENCE_MAX_IDS } from "../announcement-audience";
+export type { AnnouncementAudience, AnnouncementDeliveryScope, AnnouncementAudienceSnapshot, AnnouncementRecipientUserId } from "../announcement-audience";
+import type { ActivityTurnSummary } from "./activityTurnSummary";
 import type { AnnouncementContent, AnnouncementPresentation } from "../announcement-presentation";
 export { validateAnnouncementPresentation } from "../announcement-presentation";
 export type { AnnouncementContent, AnnouncementPresentation } from "../announcement-presentation";
@@ -17,6 +22,7 @@ import { formatRuntimeProviderModelLabel } from "./runtimeProviderDisplay";
 import { hydrateLegacyRuntimeConfigWithTrace } from "./runtimeConfigLegacy";
 import type { AttentionHint } from "./attentionDependencyOracle";
 import type { EXTERNAL_AGENT_ACTIVITY_LEGACY_STATUS_VALUES, RaftAgentStatus } from "./agentStatusStandard";
+import type { EXTERNAL_AGENT_ACTIVITY_DRAIN_SCHEMA, EXTERNAL_AGENT_ACTIVITY_EVENT_SCHEMA, EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA } from "./externalAgentActivity";
 import type {
   ComputerBoundDueReceiptMessage,
   ServerBoundDueReceiptMessage,
@@ -49,9 +55,15 @@ export {
   agentMigrationSupportRefSchema,
   agentMigrationTransferSummarySchema,
   agentMigrationUpdatedPayloadSchema,
+  AGENT_MIGRATION_TARGET_KINDS,
+  AGENT_MIGRATION_HOSTED_SKIP_REASONS,
   type AgentMigrationSourceBuildProgress,
   type AgentMigrationTransferSummary,
   type AgentMigrationUpdatedPayload,
+  type AgentMigrationTargetKind,
+  type AgentMigrationHostedImportLimits,
+  type AgentMigrationHostedSkipReason,
+  type AgentMigrationHostedImportSummary,
 } from "./agentMigration";
 export {
   AGENT_MIGRATION_TERMINAL_FAILURE_CODES,
@@ -215,6 +227,7 @@ export interface AgentMessage {
 }
 
 export * from "./observedFailureSummary";
+export * from "./agentNameGenerator";
 export * from "./diagnosticRedaction";
 export * from "./feedbackMachineEvidence";
 export * from "./machineDuplicateConnection";
@@ -240,6 +253,7 @@ export * from "./tracing/fields";
 export * from "./tracing/memory";
 export * from "./tracing/assertions";
 export * from "./toolDisplay";
+export * from "./activityTurnSummary";
 export * from "./attachmentPreview";
 export * from "./typeGuards";
 export * from "./brandedIds";
@@ -292,6 +306,7 @@ export * from "./startupMemoryContract";
 // compatibility re-export so existing `@botiverse/raft-shared` consumers keep working.
 export * from "@botiverse/raft-sync-core";
 export * from "./onboardingStateMachineContract";
+export * from "./cindyOnboardingContent";
 export * from "./knowledgeContext";
 export * from "./capabilityInventories";
 
@@ -545,6 +560,33 @@ export const SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1 = "agent:runtime-outcome-a
  * the #1119 crash-loop breaker still protects an older server).
  */
 export const SERVER_CAPABILITY_START_SPAWN_ERROR_V1 = "agent:start-spawn-error-v1";
+/**
+ * task #1268 (server capability, on `machine:context.capabilities` AND on the
+ * daemon WebSocket 101 response header `RAFT_SERVER_CAPABILITIES_HEADER`): the
+ * server understands `ready.runtimeDetection`. Only then may a daemon send a
+ * `pending` ready (no inventory fields) and finish detection afterwards; without
+ * it the daemon keeps today's synchronous detection before `ready`.
+ */
+export const SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1 = "machine:runtime-detection-async-v1";
+/**
+ * task #1268: HTTP response header on the daemon WebSocket upgrade (101) carrying
+ * the server's machine-context capabilities, space-separated. The daemon reads it
+ * before its first `ready` (the `machine:context` frame arrives after `open`);
+ * `machine:context.capabilities` stays authoritative and corrects a mismatch.
+ */
+export const RAFT_SERVER_CAPABILITIES_HEADER = "raft-server-capabilities";
+/**
+ * task #1268: runtime detection state carried on `ready`. `pending` = detection
+ * runs after this ready and the message carries NO inventory fields; `complete`
+ * = `runtimes`/`runtimeVersions` are this round's full result; `incomplete` =
+ * the round ended early (deadline, child failure, cancel) and
+ * `unfinishedRuntimes` were not probed — their previous state is unconfirmed,
+ * not unavailable. Absent on older daemons = `complete` (synchronous detection).
+ */
+export type RuntimeDetectionReport =
+  | { status: "pending" }
+  | { status: "complete"; durationMs: number }
+  | { status: "incomplete"; reason: "deadline" | "child_failed" | "cancelled"; unfinishedRuntimes: string[]; durationMs: number };
 export const COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS = "computer:supervisor-mutations-v1";
 
 /**
@@ -758,6 +800,12 @@ export type ServerToMachineMessage =
    */
   | { type: "machine:context"; machineId: string; serverId: string; /** Additive: server capabilities, e.g. `SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1`. */ capabilities?: string[]; /** Additive (task #365): the server's id for this connection; an automatic `agent:start` carrying another one is stale. */ connectionEpochId?: string }
   /**
+   * Same-machine grouping: asks the daemon for its per-server host hash. Sent
+   * after registration only while `computer_host_identity_v0` is on for the
+   * server; older daemons ignore it.
+   */
+  | { type: "machine:host_identity:request" }
+  /**
    * RFC 071 outbox: the server applied (or deliberately ignored) one outbox
    * entry. A normal entry is named by `(daemonInstanceId, clientSeq)`; a gap
    * or cross-instance marker by its `gapId`. The daemon deletes only the
@@ -834,7 +882,12 @@ export type ServerToMachineMessage =
   | { type: "agent:activity_probe"; agentId: string; probeId: string; purpose: "sweep" | "manual" }
   | { type: "machine:workspace:scan" }
   | { type: "machine:workspace:delete"; directoryName: string }
-  | { type: "machine:runtime_models:detect"; requestId: string; runtime: string }
+  /**
+   * `force`: bypass the daemon's model-list cache (a form's refresh action).
+   * Optional and additive: daemons without a cache ignore it, as they detect
+   * on every request anyway.
+   */
+  | { type: "machine:runtime_models:detect"; requestId: string; runtime: string; force?: boolean }
   /**
    * Ask the owning Computer to run one bounded provider probe for an opaque
    * probe intent. Carries no credential, endpoint or connection id: the daemon
@@ -1023,6 +1076,14 @@ export function runtimeErrorReasonForClass(errorClass: RuntimeErrorClass): Runti
   }
 }
 
+/**
+ * What the owner has to do before this agent can run again: sign in / fix the
+ * provider credential, or pick a model the plan allows. Retrying cannot fix it.
+ */
+export type RuntimeErrorRequiredAction = "user_reauth" | "user_model_access";
+
+export const RUNTIME_ERROR_REQUIRED_ACTIONS: readonly RuntimeErrorRequiredAction[] = ["user_reauth", "user_model_access"];
+
 export interface RuntimeErrorActivityDiagnostic {
   errorClass: RuntimeErrorClass;
   errorReason: RuntimeErrorReason;
@@ -1031,6 +1092,12 @@ export interface RuntimeErrorActivityDiagnostic {
   reasonProvenance: RuntimeErrorReasonProvenance;
   /** Absent means that the runtime event contract cannot answer this fact. */
   nativeReasonPresent?: boolean;
+  /**
+   * Set when the daemon decided the owner must act (the same decision that
+   * stops the runtime). Absent: no action needed, or a daemon older than this
+   * field.
+   */
+  requiredAction?: RuntimeErrorRequiredAction;
 }
 
 /**
@@ -1095,6 +1162,9 @@ export const SPAWN_FAILURE_REASONS = [
   "runtime_config_invalid",
   "model_not_configured",
   "session_needs_reset",
+  // task #1258: the saved session belongs to another major line of the
+  // runtime (OpenCode 1.x vs 2.x); resuming is refused, never guessed.
+  "session_runtime_mismatch",
 ] as const;
 export type SpawnFailureReason = (typeof SPAWN_FAILURE_REASONS)[number];
 
@@ -1130,6 +1200,9 @@ export const NON_RETRYABLE_SPAWN_FAILURE_REASONS: readonly SpawnFailureReason[] 
   // task #10: the session's context compaction failed repeatedly; resuming it
   // again cannot succeed. Only Reset Session (a new session id) gets out.
   "session_needs_reset",
+  // task #1258: the session was made by another runtime major line; retrying
+  // the same resume cannot succeed. Reset Session or reinstall that line.
+  "session_runtime_mismatch",
 ];
 
 /**
@@ -1235,7 +1308,26 @@ export interface FeedbackTranscriptWindow {
   transcriptLastEventAt?: string;
 }
 
+/** Shape of `machine:host_identity.hostIdHash`; anything else is dropped by the Server. */
+export const HOST_ID_HASH_PATTERN = /^[0-9a-f]{32}$/;
+
+/**
+ * Coarse kind of machine a Computer runs on, for its icon. Reported by the
+ * daemon (`ready.deviceClass`); the Server drops values outside this list.
+ */
+export const DEVICE_CLASSES = ["laptop", "mini", "studio", "imac", "desktop", "server", "vm"] as const;
+export type DeviceClass = (typeof DEVICE_CLASSES)[number];
+export const isDeviceClass = (value: unknown): value is DeviceClass =>
+  typeof value === "string" && (DEVICE_CLASSES as readonly string[]).includes(value);
+
 export type MachineToServerMessage =
+  /**
+   * Reply to `machine:host_identity:request`: HMAC(key = this machine's
+   * hardware ID, "raft-host-id-v1:" + serverId), 32 hex chars. Equal for every
+   * Computer on one machine within a server, unrelated across servers; the
+   * hardware ID itself never leaves the machine.
+   */
+  | { type: "machine:host_identity"; hostIdHash: string }
   /**
    * TODO(lifecycle-v2/daemon-protocol): `agent:status`,
    * `agent:activity`, and `agent:session` are legacy lifecycle signal
@@ -1576,7 +1668,7 @@ export type MachineToServerMessage =
    * relayed on the next `ready`. Older servers ignore the type.
    */
   | { type: "computer:upgrade:done"; requestId: string; ok: boolean; reason?: string; code?: string }
-  | { type: "ready"; capabilities?: string[]; /** RFC 069 §8: this daemon process's generation. */ daemonInstanceId?: string; /** RFC 071 outbox: agents whose outcome storage is unreliable; `agent:runtime-outcome-v1` does not apply to them. */ runtimeOutcomeUnreliableAgents?: string[]; runtimes: string[]; runtimeVersions?: Record<string, string>; runningAgents: string[]; hostname?: string; os?: string; daemonVersion?: string; computerVersion?: string; migrationTransport?: AgentMigrationTransportReady; lifecycleAcks?: ComputerLifecycleExecutionAck[]; lastUpgradeReceipt?: ComputerLastUpgradeReceipt };
+  | { type: "ready"; capabilities?: string[]; /** RFC 069 §8: this daemon process's generation. */ daemonInstanceId?: string; /** RFC 071 outbox: agents whose outcome storage is unreliable; `agent:runtime-outcome-v1` does not apply to them. */ runtimeOutcomeUnreliableAgents?: string[]; /** task #1268: omitted entirely while `runtimeDetection.status` is "pending" (a pending ready carries no inventory); otherwise this round's detected runtime ids. */ runtimes?: string[]; runtimeVersions?: Record<string, string>; /** task #1268: absent on daemons that detect synchronously before ready (= complete). */ runtimeDetection?: RuntimeDetectionReport; runningAgents: string[]; hostname?: string; os?: string; /** Set only on WSL (`os` still says `linux`); absent on older daemons and other hosts. */ osVariant?: "wsl1" | "wsl2"; /** Coarse kind of machine for the Computer icon, classified on the machine (the model it comes from is not sent); absent when unknown and on older daemons. */ deviceClass?: DeviceClass; daemonVersion?: string; computerVersion?: string; migrationTransport?: AgentMigrationTransportReady; lifecycleAcks?: ComputerLifecycleExecutionAck[]; lastUpgradeReceipt?: ComputerLastUpgradeReceipt };
 
 export type MachineShutdownReason =
   | "computer_stop"
@@ -1919,6 +2011,21 @@ export interface AgentConfig {
    *     degrades to the historical prompt (no apps section).
    */
   installedApps?: AgentInstalledAppCatalogEntry[] | null;
+  /**
+   * Server-evaluated `reminder_app` rollout flag. When true, the prompt's
+   * Reminders section and command-list entry point at the Reminder app (found
+   * in the installed-app list) instead of `raft reminder schedule`, which the
+   * Server then refuses with `reminders_moved_to_app`. Absent or false means
+   * off; older servers never send it, and older daemons ignore it and learn of
+   * the move from that refusal.
+   */
+  reminderApp?: boolean;
+  /**
+   * Server-evaluated `vault_app` rollout flag. When true, the prompt's
+   * Credential handling section tells the agent to request secrets through
+   * the Vault app. Absent or false means off.
+   */
+  vaultApp?: boolean;
 }
 
 /** One entry of {@link AgentConfig.installedApps} — the prompt-facing
@@ -1927,6 +2034,8 @@ export interface AgentInstalledAppCatalogEntry {
   name: string;
   description: string | null;
   whenToUse: string;
+  /** `raft integration invoke --service <id>` id (the app's client id). Absent on older servers. */
+  service?: string;
 }
 
 export type ProfileVisibilityMembershipStatus = "active" | "left" | "removed";
@@ -2153,12 +2262,7 @@ export * from "./runtimeCatalog";
 
 // ── Agent Trajectory ──
 
-export const EXTERNAL_AGENT_ACTIVITY_EVENT_SCHEMA = "raft-activity.v1" as const;
-export const EXTERNAL_AGENT_ACTIVITY_DRAIN_SCHEMA = "raft-activity-drain.v1" as const;
-export const EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA = "raft-agent-activity-ingest.v1" as const;
-export const EXTERNAL_AGENT_ACTIVITY_PROVENANCE = "external/plugin-reported" as const;
-export const EXTERNAL_AGENT_ACTIVITY_TEXT_LIMIT = 4096;
-export const EXTERNAL_AGENT_ACTIVITY_TOOL_NAME_LIMIT = 120;
+export * from "./externalAgentActivity";
 
 export * from "./agentStatusStandard";
 
@@ -2171,6 +2275,9 @@ export type ExternalAgentActivityHookEventName =
   | "Stop"
   | "SessionStart"
   | "SessionEnd"
+  // A subagent of this agent started / finished; only with the `subagent` marker.
+  | "SubagentStart"
+  | "SubagentStop"
   | (string & {});
 
 export interface ExternalAgentActivityEvent {
@@ -2196,6 +2303,21 @@ export interface ExternalAgentActivityEvent {
   occurred_at?: string;
   durationMs?: number;
   duration_ms?: number;
+  /** Tool call id (Claude Code `tool_use_id`); recorded as `callId` on the tool rows. */
+  toolUseId?: string;
+  tool_use_id?: string;
+  /** Exit code of a command the tool ran; independent of `ok`. */
+  exitCode?: number;
+  exit_code?: number;
+  /**
+   * The event belongs to a subagent of this agent, not to the agent itself
+   * (same marker as `SubagentLineage`). Such events are recorded in the
+   * activity log under the subagent and never change the agent's status or
+   * end its turn. Ids and enums only.
+   */
+  subagent?: SubagentLineage["subagent"];
+  /** Whether the tool call itself succeeded. `null` = unknown (no `ok` recorded); absent = inferred from the hook name. */
+  ok?: boolean | null;
   errorClass?: string;
   error_class?: string;
   toolInput?: unknown;
@@ -2248,10 +2370,24 @@ export interface SubagentLineage {
     subagentType?: string;
     /** Claude `system` task-lifecycle envelope id (task_started/task_progress/…). */
     taskId?: string;
-    /** Bounded lifecycle phase of the subagent, from the `system` envelope kind. */
-    phase?: "started" | "progress" | "notification" | "active";
+    /**
+     * Bounded lifecycle phase of the subagent, from the `system` envelope kind.
+     * `ended`: the subagent finished (hosted agents' `send_to_agent`), with
+     * `outcome` and `reportChars`.
+     */
+    phase?: SubagentPhase;
+    /** Only with `phase: "ended"`: how the subagent finished. */
+    outcome?: SubagentOutcome;
+    /** Only with `phase: "ended"`: length of the subagent's report in characters (JS string length; never the report). */
+    reportChars?: number;
   };
 }
+
+export const SUBAGENT_PHASES = ["started", "progress", "notification", "active", "ended"] as const;
+export type SubagentPhase = (typeof SUBAGENT_PHASES)[number];
+/** `ceiling`: stopped by a limit (turns, time or budget), not by the subagent itself. */
+export const SUBAGENT_OUTCOMES = ["done", "failed", "stopped", "ceiling"] as const;
+export type SubagentOutcome = (typeof SUBAGENT_OUTCOMES)[number];
 
 /** Bounded runtime facts; never provider text, summaries, or prompt contents. */
 export interface RuntimeCompactionInterruption {
@@ -2264,18 +2400,57 @@ export interface RuntimeCompactionInterruption {
 }
 
 /** A single entry in the agent's trajectory log — rich activity data from stream-json */
+/**
+ * What a runtime reported when one tool call finished, carried on the
+ * "Tool finished" status entry (`detailKind: "tool_end"`). Every field is
+ * optional: a runtime that does not report a value leaves it out, and it
+ * reads as unknown, never as success.
+ */
+export type ExternalHookTurnBoundary = "turn_start" | "turn_end" | "session_end";
+
+export interface ToolCallOutcome {
+  /** The runtime's id for the call; the matching `tool_start` entry carries the same `callId`. */
+  callId?: string;
+  /**
+   * Whether the tool call itself succeeded. A command that ran and exited
+   * non-zero is still `ok: true`; see `exitCode`.
+   */
+  ok?: boolean;
+  /** Time from the call's start to its end in ms, measured by the daemon or reported by the runtime. */
+  durationMs?: number;
+  /** Exit status of the command the tool ran, as reported. Independent of `ok`. */
+  exitCode?: number;
+}
+
 export type TrajectoryEntry =
   | ({ kind: "thinking"; text: string } & TrajectoryProducerLineage & SubagentLineage)
-  | ({ kind: "tool_start"; toolName: string; toolInput: string } & TrajectoryProducerLineage & SubagentLineage)
+  | ({ kind: "tool_start"; toolName: string; toolInput: string; callId?: string } & TrajectoryProducerLineage & SubagentLineage)
   | ({ kind: "text"; text: string } & TrajectoryProducerLineage & SubagentLineage)
   // Durable history of an agent-visible action performed through Slock itself
   // (send / claim / reminder / profile update, etc.). This is not a live-status
   // subtitle, and it must not carry agent-facing recovery instructions.
   | ({ kind: "slock_action"; title: string; text: string } & TrajectoryProducerLineage)
-  | ({ kind: "system"; title: string; text: string } & TrajectoryProducerLineage)
+  | ({ kind: "system"; title: string; text: string } & TrajectoryProducerLineage & SubagentLineage)
   | ({ kind: "compaction_started" } & TrajectoryProducerLineage)
   | ({ kind: "compaction_finished" } & TrajectoryProducerLineage)
-  | ({ kind: "status"; activity: AgentActivityKind; activityKind?: AgentActivityKind; detail: string; detailKind?: AgentActivityDetailKind; compaction?: RuntimeCompactionInterruption } & TrajectoryProducerLineage & SubagentLineage);
+  | ({
+      kind: "status";
+      activity: AgentActivityKind;
+      activityKind?: AgentActivityKind;
+      detail: string;
+      detailKind?: AgentActivityDetailKind;
+      compaction?: RuntimeCompactionInterruption;
+      tool?: ToolCallOutcome;
+      /**
+       * A hook turn boundary (UserPromptSubmit / Stop / SessionEnd) stored for
+       * an agent that reports its own status, where the hook-derived status is
+       * not the agent's state (task #17 turn summaries read it).
+       */
+      hookBoundary?: ExternalHookTurnBoundary;
+    } & TrajectoryProducerLineage & SubagentLineage)
+  // One record per finished turn (task #17): see activityTurnSummary.ts. The
+  // Activity overview reads only these; the other kinds are the raw log.
+  | ({ kind: "turn_summary"; summary: ActivityTurnSummary } & TrajectoryProducerLineage);
 
 /**
  * Daemon-to-server trajectory payload. Daemons emit the full trajectory union
@@ -2292,6 +2467,7 @@ export type DaemonTrajectoryEntry =
       detail: string;
       detailKind?: AgentActivityDetailKind;
       compaction?: RuntimeCompactionInterruption;
+      tool?: ToolCallOutcome;
     } & TrajectoryProducerLineage & SubagentLineage);
 
 /** Normalize backend activity string to a valid frontend AgentActivity.
@@ -2666,6 +2842,9 @@ export function hasStaticRuntimeModelSource(runtimeId: string): boolean {
   return (STATIC_RUNTIME_MODEL_SOURCE_IDS as readonly string[]).includes(runtimeId);
 }
 
+/** Effort levels every listed Claude Code model accepts (`claude --effort`); never `ultra`. */
+const CLAUDE_REASONING_EFFORTS: ReasoningEffort[] = ["low", "medium", "high", "xhigh", "max"];
+
 export const RUNTIME_MODELS: Record<string, RuntimeModelInfo[]> = {
   [EXTERNAL_AGENT_RUNTIME_ID]: [
     { id: EXTERNAL_AGENT_RUNTIME_MODEL, label: EXTERNAL_AGENT_RUNTIME_DISPLAY_NAME },
@@ -2674,21 +2853,27 @@ export const RUNTIME_MODELS: Record<string, RuntimeModelInfo[]> = {
     .flat()
     .map((model) => ({ id: model.id, label: model.label || formatRuntimeProviderModelLabel(model.id), verified: "launchable" as const })),
   claude: [
-    { id: "opus", label: "Claude Opus" },
-    { id: "fable", label: "Claude Fable" },
-    { id: "sonnet", label: "Claude Sonnet" },
+    // Claude Code takes `--effort low|medium|high|xhigh|max`, and every current
+    // Claude model accepts `max`. Haiku 4.5 takes no effort at all, and the `haiku`
+    // alias may still resolve to it, so both keep the base set; Claude Code drops an
+    // effort a model does not take, and Opus/Sonnet 4.6 run `xhigh` as `high`
+    // (OAR probe, #oar-raft 2026-10-14). Per-model levels should come from Claude
+    // Code's own model list (`supportedEffortLevels`) rather than this table.
+    { id: "opus", label: "Claude Opus", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "fable", label: "Claude Fable", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "sonnet", label: "Claude Sonnet", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
     { id: "haiku", label: "Claude Haiku" },
-    { id: "claude-opus-5-5", label: "Claude Opus 5.5" },
-    { id: "claude-opus-5", label: "Claude Opus 5" },
-    { id: "claude-opus-4-8", label: "Claude Opus 4.8" },
-    { id: "claude-opus-4-7", label: "Claude Opus 4.7" },
-    { id: "claude-opus-4-6", label: "Claude Opus 4.6" },
-    { id: "claude-fable-5-1", label: "Claude Fable 5.1" },
-    { id: "claude-fable-5", label: "Claude Fable 5" },
-    { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5" },
-    { id: "claude-sonnet-5", label: "Claude Sonnet 5" },
-    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
-    { id: "claude-haiku-5-5", label: "Claude Haiku 5.5" },
+    { id: "claude-opus-5-5", label: "Claude Opus 5.5", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-opus-5", label: "Claude Opus 5", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-opus-4-8", label: "Claude Opus 4.8", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-opus-4-7", label: "Claude Opus 4.7", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-opus-4-6", label: "Claude Opus 4.6", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-fable-5-1", label: "Claude Fable 5.1", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-fable-5", label: "Claude Fable 5", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-sonnet-5-5", label: "Claude Sonnet 5.5", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-sonnet-5", label: "Claude Sonnet 5", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
+    { id: "claude-haiku-5-5", label: "Claude Haiku 5.5", supportedReasoningEfforts: CLAUDE_REASONING_EFFORTS },
     { id: "claude-haiku-4-5", label: "Claude Haiku 4.5" },
   ],
   codex: [
@@ -3656,8 +3841,9 @@ export const REASONING_EFFORTS: { id: KnownReasoningEffort; label: string }[] = 
 /**
  * The reasoning efforts available to any reasoning-capable model that does NOT
  * declare an explicit `supportedReasoningEfforts` gate. `max`/`ultra` are opt-in
- * only — Codex GPT-5.6 (sol/terra) declares them; they must never leak to models
- * that inherit this base set (e.g. Claude). tygg/stdrc 2026-07-10 task #496.
+ * only — a model must declare them (Codex GPT-5.6+ declares both; Claude models
+ * declare `max`, never `ultra`); they must never leak to models that inherit this
+ * base set (e.g. a custom model id). tygg/stdrc 2026-07-10 task #496.
  */
 export const BASE_REASONING_EFFORTS: readonly ReasoningEffort[] = ["low", "medium", "high", "xhigh"];
 
@@ -3705,24 +3891,7 @@ export type TaskStatus = "todo" | "in_progress" | "in_review" | "done" | "closed
 // Single source of truth for runtime validation (see REMINDER_STATUSES above).
 export const TASK_STATUSES = ["todo", "in_progress", "in_review", "done", "closed"] as const satisfies readonly TaskStatus[];
 
-/**
- * Refusal reason a claim carries when the task is already assigned to the
- * caller. It is a *refusal* — no state was written, so the row's `success` is
- * false — but it authorises work, because it proves the caller already holds
- * the task.
- *
- * Shared rather than written out at each site because the server produces this
- * string and the CLI branches on it: the claim exit status treats it as
- * authorising work (so an agent re-confirming its own claim is not told the
- * claim failed), and the result formatter gives it its own line. Comparing
- * against a copied literal would mean a pure copy edit on the producer could
- * silently flip the consumer's branch, with production broken and tests still
- * green because each side held its own copy of the old wording.
- *
- * One symbol keeps the sides from diverging at all, rather than relying on a
- * test to notice that they have (@Kaiming, `#proj-runtime:941d4a53`).
- */
-export const TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU = "already claimed by you";
+export { TASK_CLAIM_REASON_ALREADY_CLAIMED_BY_YOU } from "./taskClaimReason";
 export const isTaskStatus = (s: string): s is TaskStatus =>
   (TASK_STATUSES as readonly string[]).includes(s);
 
@@ -4308,6 +4477,9 @@ export interface Announcement extends AnnouncementPresentation {
   startsAt: string;
   endsAt: string | null;
   locale: DisplayLocale;
+  /** Additive for installed clients; omitted legacy values mean version 1/account scope. */
+  deliveryVersion?: number;
+  deliveryScope?: import("../announcement-audience").AnnouncementDeliveryScope;
 }
 
 // ── Daemon Version ──
@@ -4395,17 +4567,19 @@ export function compareComputerVersions(left: string, right: string): number {
 }
 
 /**
- * First Computer release that runs remote upgrade v2 (task #873): launches the
- * installer against an exact target and reports nothing until it is back.
- * Older Computers are not driven from the web; the web shows a one-time hint
- * to upgrade locally instead.
+ * Oldest Computer the web drives a remote upgrade v2 (task #873) on. v2 itself
+ * landed in 1.0.37, but from 1.0.37–1.0.44 the old service's own upgrade path
+ * proved unreliable in production: over 24 h (2026-10-18) 4 of 11 web upgrades
+ * from ≤1.0.44 never took effect (acknowledged, then silent until the deadline,
+ * or rolled back), against 11 of 11 from ≥1.0.45. Older Computers are not
+ * driven from the web; the web shows a one-time hint to upgrade locally instead.
  */
-export const COMPUTER_REMOTE_UPGRADE_MIN_VERSION = "1.0.37";
+export const COMPUTER_REMOTE_UPGRADE_MIN_VERSION = "1.0.45";
 
 /** null when the version is unknown; otherwise whether the web may drive an
  *  upgrade. Full SemVer, fail-closed: a version that is not SemVer is not
- *  supported, and a prerelease sorts below its release (1.0.37-rc.1 is below
- *  1.0.37). The server projection and the upgrade route's guard both use this. */
+ *  supported, and a prerelease sorts below its release (1.0.45-rc.1 is below
+ *  1.0.45). The server projection and the upgrade route's guard both use this. */
 export function isRemoteUpgradeSupported(version: string | null | undefined): boolean | null {
   const trimmed = version?.trim();
   if (!trimmed) return null;
@@ -4656,6 +4830,7 @@ export function signupRoleLabel(id: string | null | undefined): string | null {
 export * from "./canonicalMessageManifest";
 export * from "./canonicalMessageV2";
 export * from "./agentMigrationResumable";
+export * from "./agentArchive";
 export * from "./discussionGraph";
 export * from "./managedMcp";
 export * from "./providerConnections";
@@ -4705,5 +4880,6 @@ export * from "./inboxScopeReadFrontier";
 export * from "./channelConversionState";
 export * from "./providerRequestActivity";
 
-export { appAgentJwtSettingsSchema, updateAppAgentJwtSettingsSchema, type AppAgentJwtSettings } from "./agentAudienceJwt";
 export * from "./appWhenToUse";
+
+export * from "./raftbenchContract";

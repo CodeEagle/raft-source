@@ -36,7 +36,7 @@ export function CreatedAgentRow({
     <AvatarListRow
       avatar={
         <AvatarSlot
-          context="surface-list"
+          context="list-row"
           type="agent"
           agentAvatarUrl={createdAgent.avatarUrl}
         />

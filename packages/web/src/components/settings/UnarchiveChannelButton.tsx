@@ -2,7 +2,7 @@ import { useCallback } from "react";
 import { useIntl } from "react-intl";
 import { ArchiveRestore } from "lucide-react";
 
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import type { ArchivedChannel } from "./ArchivedChannelsSection";
 
 export function UnarchiveChannelButton({
@@ -21,7 +21,7 @@ export function UnarchiveChannelButton({
   return (
     <Button
       size="sm"
-      variant="success"
+      variant="outline"
       className="w-full sm:w-auto"
       disabled={disabled}
       aria-label={formatMessage(

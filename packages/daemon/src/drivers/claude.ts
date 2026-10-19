@@ -4,7 +4,8 @@ import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProb
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import { ClaudeEventNormalizer } from "./claudeEventNormalizer";
 import { assertClaudeStartupPayloadWithinBudget } from "./claudeInputBudget";
-import { buildClaudeArgs, buildClaudeManagedMcpConfig, buildClaudeSpawnSpec, probeClaude, probeClaudeLaunch, resolveClaudeLaunchCommand, writeClaudeSystemPromptFile } from "./claudeLaunch";
+import { buildClaudeArgs, buildClaudeManagedMcpConfig, buildClaudeSpawnSpec, probeClaude, probeClaudeLaunch, resolveClaudeLaunchCommand, resolveClaudeLaunchCommandAsync, writeClaudeSystemPromptFile } from "./claudeLaunch";
+import { ProbeChildError } from "./probeChild";
 import {
   buildClaudeProviderIsolationEnv,
   isClaudeCustomProviderConfig,
@@ -133,11 +134,15 @@ export class ClaudeDriver implements RuntimeDriver {
       `[Agent ${ctx.agentId}] transport=cli cli=${ctx.slockCliPath} token_file=${tokenFile}`,
     );
 
-    const claudeCommand = resolveClaudeLaunchCommand(ctx.config);
+    // task #1277: the PATH lookup runs as a bounded probe child under this
+    // start attempt's signal; a cancelled lookup is rethrown, never a verdict.
+    const claudeCommand = await resolveClaudeLaunchCommandAsync(ctx.config, { signal: ctx.launchSignal });
     const spawnSpec = buildClaudeSpawnSpec(claudeCommand, args, { env: spawnEnv as NodeJS.ProcessEnv });
 
     // task #365: after the last await, right before the child exists.
     ctx.assertLaunchCurrent?.();
+    // A start stopped while the lookup ran must not create a child.
+    if (ctx.launchSignal?.aborted) throw new ProbeChildError("claude launch cancelled before the child was created", { code: "ABORT_ERR" });
     const proc = spawnRuntimeChild(spawnSpec.command, spawnSpec.args, {
       cwd: ctx.workingDirectory,
       stdio: ["pipe", "pipe", "pipe"],

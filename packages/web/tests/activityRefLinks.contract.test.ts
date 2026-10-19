@@ -122,10 +122,11 @@ test("AgentActivityLog linkifies ONLY structured-metadata entries, not free-form
     "RefText must be used exactly 3x (SlockAction + System + Status)",
   );
 
-  // SlockActionEntry — the function carrying the bg-blue-300 slock-action dot.
+  // SlockActionEntry — the function carrying the done-lime slock-action pixel
+  // (DS Timeline activity log: presence lights only, raft-ui Status presence).
   const slockAction = src.match(/function SlockActionEntry\([\s\S]*?\n\}\n/);
   assert.ok(slockAction, "SlockActionEntry not found");
-  assert.match(slockAction[0], /bg-blue-300/);
+  assert.match(slockAction[0], /presence="online"/);
   assert.match(slockAction[0], /<RefText text=\{text\} \/>/);
 
   // The structured-metadata entries route through RefText.

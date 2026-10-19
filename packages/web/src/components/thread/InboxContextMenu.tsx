@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import { Bell, BellOff, Check, MessageSquareCheck, MessageSquareDot } from "lucide-react";
-import { ContextMenuPopup } from "raft-ui";
+import { ContextMenuPopup } from "@botiverse/raft-ui";
 import { useInboxStore } from "../../store/inboxStore";
 import type { InboxItem } from "../../store/inboxStore";
 import { useThreadStore } from "../../store/threadStore";

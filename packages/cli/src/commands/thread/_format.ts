@@ -1,5 +1,5 @@
 import type { AgentApiThreadListItem } from "@botiverse/raft-shared";
-import { formatAgentThreadList } from "@botiverse/raft-shared";
+import { formatAgentThreadList } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { axSurface } from "../../core/renderer";
 

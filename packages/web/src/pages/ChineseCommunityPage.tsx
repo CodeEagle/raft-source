@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
+import { Card } from "@botiverse/raft-ui";
 import { trackEvent } from "../analytics/track";
 import {
   CHINESE_COMMUNITY_QR_FALLBACK_CONFIG_PATH,
@@ -82,21 +83,22 @@ export default function ChineseCommunityPage() {
   const unavailableMessageId = qrUnavailableMessageId(state, expired, imageLoadFailed);
 
   return (
-    <main className="h-dvh overflow-hidden bg-layer-canvas-muted px-4 font-display text-foreground-strong safe-top safe-bottom theme-brutal:bg-brutal-cream theme-brutal:text-black">
+    <main className="h-dvh overflow-hidden bg-layer-sidebar px-4 font-display text-foreground safe-top safe-bottom">
       <div className="mx-auto flex h-full w-full max-w-sm flex-col items-center justify-center gap-5 text-center">
-        <h1 className="text-2xl font-black leading-tight sm:text-3xl">
+        <h1 className="text-title sm:text-display">
           {formatMessage({ id: "pages.chineseCommunity.title" })}
         </h1>
 
-        <section
+        <Card
           aria-label={formatMessage({ id: "pages.chineseCommunity.qrLabel" })}
-          className="w-full max-w-[20rem] rounded-lg border border-line-muted bg-layer-panel p-3 shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal sm:p-4"
+          render={<section />}
+          className="w-full max-w-[20rem] shrink-0 p-3 sm:p-4"
         >
-          <div className="mx-auto grid aspect-square w-full place-items-center rounded-md border border-line-muted bg-layer-inset theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream">
+          <div className="mx-auto grid aspect-square w-full place-items-center overflow-hidden rounded-control border border-line-hairline bg-layer-canvas">
             {state.status === "loading" ? (
               <div
                 data-testid="chinese-community-qr-loading"
-                className="size-40 animate-pulse rounded-md border border-line-muted bg-layer-panel theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white"
+                className="size-40 animate-pulse rounded-sticker bg-fill-muted"
               />
             ) : showQrImage && config ? (
               <img
@@ -119,13 +121,13 @@ export default function ChineseCommunityPage() {
               <div
                 role="status"
                 data-testid="chinese-community-qr-missing"
-                className="px-5 text-sm font-bold leading-6 text-foreground-muted"
+                className="px-5 text-callout font-semibold text-foreground-muted"
               >
                 {formatMessage({ id: unavailableMessageId })}
               </div>
             )}
           </div>
-        </section>
+        </Card>
       </div>
     </main>
   );

@@ -67,6 +67,17 @@ export async function enforceDowngradeLimits(
   }
 }
 
+/**
+ * The agents to stop on a downgraded server: the newest ones beyond the free
+ * limit, keeping the oldest N (the list is ordered oldest first). -1 means the
+ * free plan has no agent limit, so nothing is stopped; without that check
+ * `length > -1` was always true and `slice(-1)` stopped the newest agent.
+ */
+export function agentsOverFreeLimit<T>(activeAgentsOldestFirst: readonly T[], freeAgentLimit: number): T[] {
+  if (freeAgentLimit < 0 || activeAgentsOldestFirst.length <= freeAgentLimit) return [];
+  return activeAgentsOldestFirst.slice(freeAgentLimit);
+}
+
 async function enforceServerLimit(
   db: ReturnType<typeof getDb>,
   orchestrator: AgentOrchestrator,
@@ -83,13 +94,15 @@ async function enforceServerLimit(
         eq(agents.serverId, serverId),
         ne(agents.status, "inactive"),
         isNull(agents.deletedAt),
+        // App-owned bots do not count against the free agent limit (they are
+        // not a billable seat) and are not subject to downgrade stop.
+        isNull(agents.managedByAppInstallId),
       ),
     )
     .orderBy(asc(agents.createdAt));
 
-  if (activeAgents.length > freeAgentLimit) {
-    // Stop the newest agents beyond the limit (keep oldest N)
-    const toStop = activeAgents.slice(freeAgentLimit);
+  const toStop = agentsOverFreeLimit(activeAgents, freeAgentLimit);
+  if (toStop.length > 0) {
     let failCount = 0;
     for (const agent of toStop) {
       const stopSpan = tracer.startSpan("server.downgrade_enforcement.agent_stop", {

@@ -1,6 +1,6 @@
 import type { ComponentProps, ReactElement, ReactNode } from "react";
 import { useMemo } from "react";
-import { TooltipProvider } from "raft-ui";
+import { TooltipProvider } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useLightboxPortalContainer } from "../ui/Lightbox";
 

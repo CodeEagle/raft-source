@@ -1,6 +1,8 @@
 import { and, asc, eq, gte, isNull, lt, or } from "drizzle-orm";
 import {
   actionCardActionSchema,
+  projectAppSetup,
+  asAppSetupInstallationId,
   canonicalizeOAuthClientCategory,
   type AgentApiOwnedIntegrationApp,
 } from "@botiverse/raft-shared";
@@ -27,6 +29,13 @@ function committedProjection(row: {
   homepageUrl: string | null;
   callbackUrl: string | null;
   agentManifestUrl: string | null;
+  setupUrl: string | null;
+  setupDescription: string | null;
+  setupRevision: number;
+  setupServerId: string | null;
+  setupInstallStatus: string | null;
+  setupCompletedRevision: number | null;
+  setupCompletedAt: Date | null;
   scopes: string[] | null;
   category: string;
   dataAccessSummary: string | null;
@@ -48,6 +57,15 @@ function committedProjection(row: {
     homepageUrl: row.homepageUrl,
     callbackUrl: row.callbackUrl,
     agentManifestUrl: row.agentManifestUrl,
+    ...(row.setupUrl ? {
+      setupUrl: row.setupUrl,
+      setupDescription: row.setupDescription,
+      setup: row.installationId && row.setupServerId && row.setupInstallStatus === "active" ? projectAppSetup({
+        setupUrl: row.setupUrl, setupDescription: row.setupDescription, setupRevision: row.setupRevision,
+        installationId: asAppSetupInstallationId(row.installationId), serverId: row.setupServerId,
+        completedRevision: row.setupCompletedRevision, completedAt: row.setupCompletedAt,
+      }) : null,
+    } : {}),
     scopes: row.scopes ?? [],
     category: canonicalizeOAuthClientCategory(row.category) ?? "Other",
     dataAccessSummary: row.dataAccessSummary,
@@ -79,6 +97,7 @@ function pendingProjection(row: {
     homepageUrl: parsed.data.homepageUrl ?? null,
     callbackUrl: parsed.data.returnUrl ?? null,
     agentManifestUrl: parsed.data.agentManifestUrl ?? null,
+    ...(parsed.data.setupUrl ? { setupUrl: parsed.data.setupUrl, setupDescription: parsed.data.setupDescription ?? null } : {}),
     scopes: parsed.data.scopes ?? [],
     category: parsed.data.category ?? null,
     dataAccessSummary: null,
@@ -114,6 +133,13 @@ const MANAGEABLE_APP_COLUMNS = {
   homepageUrl: oauthClients.homepageUrl,
   callbackUrl: oauthClients.returnUrl,
   agentManifestUrl: oauthClients.agentManifestUrl,
+  setupUrl: oauthClients.setupUrl,
+  setupDescription: oauthClients.setupDescription,
+  setupRevision: oauthClients.setupRevision,
+  setupServerId: oauthClientInstalls.serverId,
+  setupInstallStatus: oauthClientInstalls.status,
+  setupCompletedRevision: oauthClientInstalls.setupCompletedRevision,
+  setupCompletedAt: oauthClientInstalls.setupCompletedAt,
   scopes: oauthClients.allowedScopes,
   category: oauthClients.category,
   dataAccessSummary: oauthClients.dataAccessSummary,

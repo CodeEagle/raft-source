@@ -203,6 +203,29 @@ test("mention write: resolves user and agent @handles in public channel (server-
   assert.equal(occurrenceRows[0]?.state, "recorded");
 });
 
+test("mention write: an agent mentioning itself records the fact but no delivery occurrence", async ({ db: database }) => {
+
+  const { db, agent, channel, server } = await seedPublicChannel();
+  setupDepsForIntegration(server.id);
+  await db.insert(channelAgents).values({ channelId: channel.id, agentId: agent.id }).onConflictDoNothing();
+
+  await broadcastAndDeliver(createIo(), noopOrchestrator, {
+    channelId: channel.id,
+    senderType: "agent",
+    senderId: agent.id,
+    senderName: "TestBot",
+    content: "note to self @TestBot",
+  });
+
+  const rows = await db.select().from(messageMentions).where(eq(messageMentions.channelId, channel.id));
+  assert.equal(rows.length, 1, "the lexical mention fact is still recorded");
+  assert.equal(rows[0]?.targetId, agent.id);
+  // The sender is never delivered its own message, so an occurrence would stay
+  // `recorded` with no payload forever (unrecoverable and never terminal).
+  const occurrenceRows = await db.select().from(mentionDeliveryOccurrences);
+  assert.equal(occurrenceRows.length, 0, "no delivery occurrence for a self-mention");
+});
+
 test("mention write: Slock Ref user targets mention in angle and named-link forms outside code", async ({ db: database }) => {
 
   const { db, user, user2, agent, channel, server } = await seedPublicChannel();
@@ -213,7 +236,8 @@ test("mention write: Slock Ref user targets mention in angle and named-link form
     senderType: "user",
     senderId: user.id,
     senderName: "Alice",
-    content: "angle <@Bob> named [same](<@Bob>) escaped \\<@Nope> code `@TestBot` ```txt\n@TestBot\n```",
+    // A fence opens only at the start of a line (as the web renders it).
+    content: "angle <@Bob> named [same](<@Bob>) escaped \\<@Nope> code `@TestBot`\n```txt\n@TestBot\n```",
   });
 
   const rows = await db.select().from(messageMentions).where(eq(messageMentions.channelId, channel.id));
@@ -224,6 +248,26 @@ test("mention write: Slock Ref user targets mention in angle and named-link form
   );
   assert.equal(rows.find((row) => row.handleAtSendTime === "Bob")?.targetId, user2.id);
   assert.equal(rows.some((row) => row.targetId === agent.id), false, "code-wrapped names are literal references, not recipients");
+});
+
+// Task #762: the server decides mentions from the same markdown parse the web
+// renders, so a name in `~~~` code, a link label or a URL is not notified.
+test("mention write: no mention from ~~~ code, link labels or URLs", async ({ db: database }) => {
+
+  const { db, user, user2, channel, server } = await seedPublicChannel();
+  setupDepsForIntegration(server.id);
+
+  await broadcastAndDeliver(createIo(), noopOrchestrator, {
+    channelId: channel.id,
+    senderType: "user",
+    senderId: user.id,
+    senderName: "Alice",
+    content: "~~~\n@TestBot in tilde code\n~~~\n[hi @TestBot](https://e.com) https://x.com/@TestBot and @Bob",
+  });
+
+  const rows = await db.select().from(messageMentions).where(eq(messageMentions.channelId, channel.id));
+  assert.deepEqual(rows.map((row) => row.handleAtSendTime), ["Bob"]);
+  assert.equal(rows[0]?.targetId, user2.id);
 });
 
 test("mention write: stores message_seq from the created message", async ({ db: database }) => {

@@ -112,6 +112,13 @@ test("422 and 409 on save say why and reload what the provider has now", async (
   await waitFor(() => assert.match(screen.getByTestId("agent-hosted-runtime-model-notice").textContent ?? "", /was not saved/));
 });
 
+test("hidden where the server may not pick a model", async () => {
+  mockGet({ ...VIEW, picker: false });
+  const { container } = renderModel();
+  await waitFor(() => assert.ok(container.querySelector('[data-testid="agent-hosted-runtime-model"]') === null));
+  assert.equal(screen.queryAllByTestId("agent-hosted-runtime-model-select").length, 0);
+});
+
 test("hidden when the agent is not hosted or not ready (4xx); a warning on provider failure", async () => {
   mockGet({ status: 409 });
   const { container } = renderModel();

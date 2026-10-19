@@ -5,6 +5,13 @@ import assert from "node:assert/strict";
 
 import type { AgentContext } from "../../auth/env";
 import { drainInbox } from "./_inbox";
+import { globalFetchJsonTransport, setJsonTransportForTests } from "../../client";
+import { afterEach, beforeEach } from "vitest";
+// These tests stub globalThis.fetch; route the client's JSON transport (node:http
+// in production) through it.
+let previousJsonTransport: ReturnType<typeof setJsonTransportForTests>;
+beforeEach(() => { previousJsonTransport = setJsonTransportForTests(globalFetchJsonTransport); });
+afterEach(() => { setJsonTransportForTests(previousJsonTransport); });
 
 const ctx: AgentContext = {
   agentId: "agent_test",

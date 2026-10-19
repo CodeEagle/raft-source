@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test as nodeTest } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { toast } from "raft-ui";
+import { toast } from "@botiverse/raft-ui";
 import "./helpers/domSetup";
 
 import api from "../src/api/client";

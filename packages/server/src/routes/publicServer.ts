@@ -1,9 +1,24 @@
 import { Router, type Router as ExpressRouter } from "express";
+import { createRaftStructuredUserRefRegex, extractRaftMentionHandles, normalizeTranslationLanguageCode } from "@botiverse/raft-shared";
 import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
-import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
 import { getDb } from "../db/index";
-import { agents, channels, messages, serverMembers, servers, users } from "../db/schema";
+import {
+  agents,
+  attachmentObjects,
+  attachments,
+  channels,
+  externalActorProjections,
+  externalMentionFacts,
+  externalReactionStates,
+  messageMentions,
+  messageReactions,
+  messages,
+  serverMembers,
+  servers,
+  users,
+} from "../db/schema";
 import { UUID_RE } from "../lib/messageId";
 import { guardUuidPathParams } from "../lib/uuidPathParams";
 import { requireAuth, requireVerified } from "../middleware/auth";
@@ -11,6 +26,10 @@ import * as channelService from "../services/channelService";
 import * as onboardingService from "../services/onboardingService";
 import * as serverAgreementService from "../services/serverAgreementService";
 import * as serverService from "../services/serverService";
+import { getProductEventSink, getPublicVisitorSink } from "../services/productEventIngest";
+import { publicVisitorIdOffered, recordPublicServerJoin } from "../services/publicVisitCounts";
+import { publicVisitorIdMode } from "../services/publicVisitorRegion";
+import type { DbQueryTracer } from "../tracing/dbQueryTrace";
 import { isStoredServerScopedAvatarUrl, isStoredUserAvatarUrl } from "../services/avatarService";
 import { projectServerPublicProfile } from "../services/serverProfileProjection";
 import type { AgentOrchestrator } from "../services/agentOrchestrator";
@@ -20,6 +39,28 @@ import {
   SERVER_GUEST_FEATURE_FLAG_KEY,
 } from "../services/featureFlagService";
 import { sendJsonServerError } from "./errorResponse";
+import {
+  buildAttachmentContentDisposition,
+  buildAttachmentContentLengthHeader,
+  buildAttachmentDownloadContentDisposition,
+  buildAttachmentInlinePreviewContentDisposition,
+  buildAttachmentInlinePreviewContentSecurityPolicy,
+  buildAttachmentResponseContentType,
+  isPdfAttachmentMimeType,
+  isPreviewableImageMimeType,
+  normalizeAttachmentFilename,
+  resolveAttachmentMimeType,
+  shouldStreamAttachmentThroughServerForRequest,
+} from "./attachments";
+import { getAttachmentsForMessagesWithExecutor } from "../services/attachmentLinkingService";
+import { getStorage, isStorageNotFoundError } from "../services/storageService";
+import { streamStorageResponse } from "../services/storageResponseStream";
+import {
+  isTranslationProviderConfigured,
+  translatePublicMessagesBatch,
+  TranslationFeatureUnavailableError,
+  type TranslationMode,
+} from "../services/messageTranslationService";
 
 /**
  * Task #70 — the logged-out read surface for a public server.
@@ -46,7 +87,7 @@ import { sendJsonServerError } from "./errorResponse";
  */
 export const publicServerRouter: ExpressRouter = Router();
 // Uniform 404 for non-UUID path params (task #12); `slug` is not a uuid.
-guardUuidPathParams(publicServerRouter, { channelId: "Channel", threadChannelId: "Thread" });
+guardUuidPathParams(publicServerRouter, { channelId: "Channel", threadChannelId: "Thread", attachmentId: "Attachment" });
 
 // A browser/CDN cache would outlive the database decision and violate the
 // next-request revocation contract even if every request handler re-queries it.
@@ -64,6 +105,7 @@ async function findPubliclyVisibleServer(slug: string) {
       slug: servers.slug,
       avatarUrl: servers.avatarUrl,
       publicGuestJoinEnabled: servers.publicGuestJoinEnabled,
+      translationEnabled: servers.translationEnabled,
     })
     .from(servers)
     .where(and(
@@ -76,6 +118,7 @@ async function findPubliclyVisibleServer(slug: string) {
   return {
     ...projectServerPublicProfile(row),
     publicGuestJoinEnabled: row.publicGuestJoinEnabled,
+    translationEnabled: row.translationEnabled,
   };
 }
 
@@ -126,10 +169,216 @@ async function findAnonymousReadableChannel(slug: string, channelId: string) {
 }
 
 /**
+ * Thread summaries for a page of public parent messages: reply count, last
+ * reply time and the newest replies (at most 3 per thread), from the same
+ * channel-view read members get, with no viewer.
+ *
+ * Bounded by the page: thread rows for the given parents, at most 3 replies
+ * per thread, and those replies' senders. Participants are switched off: that
+ * read scans each thread's whole history, the public page does not show them,
+ * and an anonymous request has no reason to read those ids (Ark, review of
+ * PR 9695). Unread state needs a viewer and is never read here.
+ */
+export async function loadPublicThreadPreviews(
+  channelId: string,
+  parentMessageIds: string[],
+  traceQuery?: DbQueryTracer,
+) {
+  if (parentMessageIds.length === 0) return {};
+  return channelService.getThreadSummaries(channelId, {
+    parentMessageIds,
+    parentMessageScopeSource: "messages_page",
+    includeParticipants: false,
+    ...(traceQuery ? { traceQuery } : {}),
+  });
+}
+
+/**
+ * Attachments of a page of public messages: file metadata only. Physical
+ * metadata comes from the same linked-projection read members get (revoked
+ * projections and non-active objects are already dropped there). CDN
+ * thumbnail URLs are deliberately not projected: they are long-lived
+ * capabilities that would outlive the server toggle. The bytes are served by
+ * the public attachment route below, which rechecks authority per request.
+ */
+async function loadPublicAttachments(messageIds: string[]) {
+  const byMessage = await getAttachmentsForMessagesWithExecutor(getDb(), messageIds);
+  return new Map([...byMessage].map(([messageId, rows]) => [messageId, rows.map((row) => {
+    const filename = normalizeAttachmentFilename(row.filename);
+    return {
+      id: row.id,
+      filename,
+      mimeType: resolveAttachmentMimeType(filename, row.mimeType),
+      sizeBytes: row.sizeBytes,
+      width: row.width,
+      height: row.height,
+    };
+  })]));
+}
+
+/**
+ * Mentions of a page of public messages, projected for display only: the
+ * `@token` as written in the content (so the page can highlight it) and the
+ * target's display name. No user/agent/projection id crosses the boundary.
+ *
+ * Same fact set the member read renders (notifiable or later notified rows,
+ * plus provider-side facts). A fact whose token no longer occurs in the
+ * content (edited away) is dropped, so this projection never reveals a handle
+ * the content itself does not already show.
+ */
+async function loadPublicMentions(messages: Array<{ id: string; content: string; senderType: string }>, serverId: string) {
+  const byMessage = new Map<string, Array<{ type: "user" | "agent" | "external"; name: string; displayName: string }>>();
+  if (messages.length === 0) return byMessage;
+  const messageIds = messages.map((message) => message.id);
+  const db = getDb();
+  const [raftRows, externalRows] = await Promise.all([
+    db
+      .select({
+        messageId: messageMentions.messageId,
+        type: messageMentions.targetType,
+        token: messageMentions.handleAtSendTime,
+        displayName: sql<string | null>`CASE
+          WHEN ${messageMentions.targetType} = 'user' THEN ${users.displayName}
+          ELSE ${agents.displayName}
+        END`,
+      })
+      .from(messageMentions)
+      .leftJoin(users, and(eq(messageMentions.targetType, "user"), eq(messageMentions.targetId, users.id)))
+      .leftJoin(agents, and(
+        eq(messageMentions.targetType, "agent"),
+        eq(messageMentions.targetId, agents.id),
+        eq(agents.serverId, serverId),
+      ))
+      .where(and(
+        inArray(messageMentions.messageId, messageIds),
+        or(eq(messageMentions.notifiableAtSend, true), isNotNull(messageMentions.notifiedAt)),
+      ))
+      .orderBy(messageMentions.createdAt, messageMentions.handleAtSendTime),
+    db
+      .select({ messageId: externalMentionFacts.messageId, token: externalMentionFacts.handleAtSendTime })
+      .from(externalMentionFacts)
+      .where(inArray(externalMentionFacts.messageId, messageIds)),
+  ]);
+  const contentById = new Map(messages.map((message) => [message.id, message.content]));
+  const facts = [
+    ...raftRows,
+    ...externalRows.map((row) => ({ ...row, type: "external" as const, displayName: row.token })),
+  ];
+  for (const fact of facts) {
+    const pattern = createRaftStructuredUserRefRegex(fact.token);
+    const content = contentById.get(fact.messageId) ?? "";
+    if (!pattern || !pattern.test(content)) continue;
+    const list = byMessage.get(fact.messageId) ?? [];
+    if (list.some((mention) => mention.name === fact.token)) continue;
+    list.push({ type: fact.type, name: fact.token, displayName: fact.displayName || fact.token });
+    byMessage.set(fact.messageId, list);
+  }
+
+  // Typed `@name`s with no stored fact (written before mention facts existed,
+  // or naming someone outside the channel at send time). The member view
+  // highlights these by matching against the directory it already holds; a
+  // public reader has no directory, so the match happens here instead. Only
+  // names already present in the content are looked up, so this reveals that
+  // those names are members, never the member list.
+  const unmatchedByMessage = new Map<string, string[]>();
+  const wanted = new Set<string>();
+  for (const message of messages) {
+    // External-origin text (e.g. Slack) has no Raft mention authority of its
+    // own: the member view renders its free-text `@name`s inert and highlights
+    // only stored facts (MessageItem's EXTERNAL_MESSAGE_MENTION_MAP). Mirror
+    // that, so untrusted provider text cannot confirm who is a member here.
+    if (message.senderType === "external_projection") continue;
+    const known = new Set((byMessage.get(message.id) ?? []).map((mention) => mention.name));
+    const handles = extractRaftMentionHandles(message.content).filter((handle) => !known.has(handle));
+    if (handles.length === 0) continue;
+    unmatchedByMessage.set(message.id, handles);
+    for (const handle of handles) wanted.add(handle);
+  }
+  if (wanted.size === 0) return byMessage;
+  const names = [...wanted].slice(0, 500);
+  const [memberRows, agentRows] = await Promise.all([
+    db
+      .select({ name: users.name, displayName: users.displayName })
+      .from(serverMembers)
+      .innerJoin(users, eq(users.id, serverMembers.userId))
+      .where(and(eq(serverMembers.serverId, serverId), inArray(users.name, names))),
+    db
+      .select({ name: agents.name, displayName: agents.displayName })
+      .from(agents)
+      .where(and(eq(agents.serverId, serverId), isNull(agents.deletedAt), inArray(agents.name, names))),
+  ]);
+  // Agents first, then humans, so a human wins a name collision exactly as in
+  // the member view's `buildMentionMap`.
+  const directory = new Map<string, { type: "user" | "agent"; displayName: string }>();
+  for (const row of agentRows) directory.set(row.name, { type: "agent", displayName: row.displayName || row.name });
+  for (const row of memberRows) directory.set(row.name, { type: "user", displayName: row.displayName || row.name });
+  for (const [messageId, handles] of unmatchedByMessage) {
+    const list = byMessage.get(messageId) ?? [];
+    for (const handle of handles) {
+      const entry = directory.get(handle);
+      if (!entry) continue;
+      list.push({ type: entry.type, name: handle, displayName: entry.displayName });
+    }
+    if (list.length > 0) byMessage.set(messageId, list);
+  }
+  return byMessage;
+}
+
+/**
+ * Reactions of a page of public messages: emoji and count only. Reactor ids
+ * and names are never read on this path. Counts include provider-side
+ * reactions from active projections, matching the member read.
+ */
+async function loadPublicReactions(messageIds: string[]) {
+  const byMessage = new Map<string, Array<{ emoji: string; count: number }>>();
+  if (messageIds.length === 0) return byMessage;
+  const db = getDb();
+  const firstAt = sql<string>`min(${messageReactions.createdAt})`;
+  const externalFirstAt = sql<string>`min(${externalReactionStates.createdAt})`;
+  const [raftRows, externalRows] = await Promise.all([
+    db
+      .select({ messageId: messageReactions.messageId, emoji: messageReactions.emoji, count: sql<number>`count(*)::int`, firstAt })
+      .from(messageReactions)
+      .where(inArray(messageReactions.messageId, messageIds))
+      .groupBy(messageReactions.messageId, messageReactions.emoji)
+      .orderBy(firstAt, messageReactions.emoji),
+    db
+      .select({
+        messageId: externalReactionStates.raftMessageId,
+        emoji: externalReactionStates.canonicalEmoji,
+        count: sql<number>`count(*)::int`,
+        firstAt: externalFirstAt,
+      })
+      .from(externalReactionStates)
+      .innerJoin(externalActorProjections, and(
+        eq(externalActorProjections.id, externalReactionStates.projectionId),
+        eq(externalActorProjections.state, "active"),
+        eq(externalActorProjections.deactivated, false),
+      ))
+      .where(and(
+        inArray(externalReactionStates.raftMessageId, messageIds),
+        eq(externalReactionStates.present, true),
+      ))
+      .groupBy(externalReactionStates.raftMessageId, externalReactionStates.canonicalEmoji)
+      .orderBy(externalFirstAt, externalReactionStates.canonicalEmoji),
+  ]);
+  for (const row of [...raftRows, ...externalRows]) {
+    const list = byMessage.get(row.messageId) ?? [];
+    const existing = list.find((reaction) => reaction.emoji === row.emoji);
+    if (existing) existing.count += Number(row.count);
+    else list.push({ emoji: row.emoji, count: Number(row.count) });
+    byMessage.set(row.messageId, list);
+  }
+  return byMessage;
+}
+
+/**
  * Anonymous history is an explicit public projection, not the authenticated
- * message DTO. In particular it excludes actor ids, task/action metadata,
- * mentions, reactions and attachment metadata; widening this response requires
- * an intentional change at this boundary.
+ * message DTO. In particular it excludes actor ids, task/action
+ * metadata, reactor identities and attachment storage/thumbnail URLs.
+ * Attachments (file metadata), mentions (token + display name) and reactions
+ * (emoji + count) are projected by the loaders above; widening this response
+ * requires an intentional change at this boundary.
  */
 async function listPublicMessages(channelId: string, serverId: string, limit: number, beforeMessageId?: string) {
   const conditions = [eq(messages.channelId, channelId)];
@@ -152,6 +401,11 @@ async function listPublicMessages(channelId: string, serverId: string, limit: nu
         WHEN ${messages.senderType} = 'agent' THEN COALESCE(${agents.displayName}, ${agents.name}, 'Unknown agent')
         ELSE 'External'
       END`,
+      senderHandle: sql<string | null>`CASE
+        WHEN ${messages.senderType} = 'user' THEN ${users.name}
+        WHEN ${messages.senderType} = 'agent' THEN ${agents.name}
+        ELSE NULL
+      END`,
       userAvatarUrl: users.avatarUrl,
       userDescription: users.description,
       agentAvatarUrl: agents.avatarUrl,
@@ -173,12 +427,19 @@ async function listPublicMessages(channelId: string, serverId: string, limit: nu
     .where(and(...conditions))
     .orderBy(desc(messages.seq))
     .limit(limit);
-  const summaries = await channelService.getThreadSummariesForParentMessages(rows.map((row) => row.id));
+  const messageIds = rows.map((row) => row.id);
+  const [summaries, attachmentsByMessage, mentionsByMessage, reactionsByMessage] = await Promise.all([
+    loadPublicThreadPreviews(channelId, messageIds),
+    loadPublicAttachments(messageIds),
+    loadPublicMentions(rows, serverId),
+    loadPublicReactions(messageIds),
+  ]);
   return rows.reverse().map((row) => ({
     id: row.id,
     senderType: row.senderType,
     sender: {
       displayName: row.senderName,
+      handle: row.senderHandle,
       // Human uploads are capability URLs served by the public avatar route.
       // Historical third-party profile URLs are deliberately not projected.
       avatarUrl: row.senderType === "user"
@@ -195,8 +456,30 @@ async function listPublicMessages(channelId: string, serverId: string, limit: nu
     messageType: row.messageType,
     content: row.content,
     createdAt: row.createdAt,
+    attachments: attachmentsByMessage.get(row.id) ?? [],
+    mentions: mentionsByMessage.get(row.id) ?? [],
+    reactions: reactionsByMessage.get(row.id) ?? [],
     threadId: summaries[row.id]?.threadChannelId ?? null,
     replyCount: summaries[row.id]?.replyCount ?? 0,
+    lastReplyAt: summaries[row.id]?.lastReplyAt ?? null,
+    // The newest replies, so the public page can show the same inline preview
+    // a member sees instead of a bare count. Nothing new becomes readable: the
+    // same replies are served by the public thread endpoint below. Projected
+    // like the parent rows: display name only (no sender id, no handle) and
+    // avatars through the same stored-upload rule.
+    latestReplies: (summaries[row.id]?.latestReplies ?? []).map((reply) => ({
+      messageId: reply.messageId,
+      seq: reply.seq,
+      preview: reply.preview,
+      senderType: reply.senderType,
+      senderName: reply.senderDisplayName,
+      senderAvatarUrl: reply.senderType === "user"
+        ? (isStoredUserAvatarUrl(reply.senderAvatarUrl) ? reply.senderAvatarUrl : null)
+        : reply.senderType === "agent"
+          ? (isStoredServerScopedAvatarUrl(reply.senderAvatarUrl, serverId) ? reply.senderAvatarUrl : null)
+          : null,
+      createdAt: reply.createdAt,
+    })),
   }));
 }
 
@@ -229,6 +512,57 @@ async function findPublicThread(slug: string, threadChannelId: string) {
   return thread;
 }
 
+const MAX_PUBLIC_TRANSLATION_BATCH_SIZE = 200;
+
+// POST /api/public/servers/:slug/message-translations:batch — paid public
+// translation for anonymous and nonmember visitors. This route intentionally
+// carries no auth middleware: authority is the current public projection, not
+// membership or login state. app.ts applies a separate IP-only limiter first.
+publicServerRouter.post("/servers/:slug/message-translations:batch", async (req, res) => {
+  try {
+    const targetLanguage = typeof req.body?.targetLanguage === "string"
+      ? normalizeTranslationLanguageCode(req.body.targetLanguage)
+      : null;
+    const mode: TranslationMode | null = req.body?.mode === "auto" || req.body?.mode === "manual"
+      ? req.body.mode
+      : null;
+    const messageIds = Array.isArray(req.body?.messageIds)
+      ? req.body.messageIds.filter((id: unknown): id is string => typeof id === "string" && UUID_RE.test(id))
+      : null;
+    if (!targetLanguage || !mode || !messageIds || messageIds.length > MAX_PUBLIC_TRANSLATION_BATCH_SIZE) {
+      res.status(400).json({ error: "Invalid public translation request" });
+      return;
+    }
+    const server = await findPubliclyVisibleServer(req.params.slug);
+    if (!server?.translationEnabled || !isTranslationProviderConfigured()) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const publicGate = await evaluateFeatureFlag({
+      key: PUBLIC_SERVER_FEATURE_FLAG_KEY,
+      serverId: server.id,
+      platform: "web",
+    });
+    if (!publicGate.enabled) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const results = await translatePublicMessagesBatch({
+      serverSlug: req.params.slug,
+      targetLanguage,
+      mode,
+      messageIds,
+    });
+    res.json({ results });
+  } catch (err) {
+    if (err instanceof TranslationFeatureUnavailableError) {
+      res.status(403).json({ error: err.message });
+      return;
+    }
+    sendJsonServerError(req, res, { error: "Failed to translate public messages", logPrefix: "Public translation batch error:", err });
+  }
+});
+
 // GET /api/public/servers/:slug — server card + the channels a stranger may read.
 publicServerRouter.get("/servers/:slug", async (req, res) => {
   try {
@@ -254,11 +588,25 @@ publicServerRouter.get("/servers/:slug", async (req, res) => {
       .where(anonymousReadableChannel(server.id))
       .orderBy(channels.name);
 
+    // A visitor id only where it would be kept (flags + the server's analytics
+    // switch); never fail the page on it. Then the visitor's country decides
+    // whether the page asks first or turns it on by default (cindyz,
+    // 2026-10-15). The router's no-store keeps a CDN from serving one
+    // visitor's answer to another.
+    const visitorIdMode = await publicVisitorIdOffered(req.params.slug).catch(() => false)
+      ? publicVisitorIdMode({
+        country: req.get("cloudfront-viewer-country"),
+        region: req.get("cloudfront-viewer-country-region"),
+        gpc: req.get("sec-gpc"),
+      })
+      : undefined;
     const { publicGuestJoinEnabled, ...publicServer } = server;
     res.json({
       server: publicServer,
       channels: visible,
       canJoinAsGuest: publicGuestJoinEnabled && guestGate.enabled,
+      translationAvailable: isTranslationProviderConfigured(),
+      visitorIdMode,
     });
   } catch {
     res.status(500).json({ error: "Failed to load public server" });
@@ -302,6 +650,133 @@ publicServerRouter.get("/servers/:slug/threads/:threadChannelId/messages", async
   }
 });
 
+/**
+ * Presigned object-storage URLs handed to anonymous readers live one minute,
+ * not the member route's five: the redirect itself is `no-store`, but the URL
+ * it points at stays valid until expiry even after the server toggle flips.
+ */
+export const PUBLIC_ATTACHMENT_PRESIGNED_URL_TTL_SECONDS = 60;
+
+/**
+ * Authorize one anonymous attachment read. Authority is the message, never
+ * the attachment row: the projection must be bound to a message (draft
+ * uploads have none), not revoked, and — once bound to an RFC 049 object —
+ * backed by an active object. That message's channel must then pass the same
+ * predicate as the history routes: an anonymously readable ordinary channel,
+ * or a thread whose parent message lives in one, on this slug's public server.
+ *
+ * Deliberately not `resolveReadableAttachmentAuthorityContext`: that resolver
+ * is principal-based (and maps joint projections into a requesting server);
+ * the anonymous rule is the narrower one spelled out here.
+ */
+async function findPublicAttachment(slug: string, attachmentId: string) {
+  const [row] = await getDb()
+    .select({ projection: attachments, object: attachmentObjects, channelId: messages.channelId })
+    .from(attachments)
+    .innerJoin(messages, eq(messages.id, attachments.messageId))
+    .leftJoin(attachmentObjects, eq(attachmentObjects.id, attachments.objectId))
+    .where(and(
+      eq(attachments.id, attachmentId),
+      isNull(attachments.revokedAt),
+      isNull(attachments.pendingChannelId),
+    ))
+    .limit(1);
+  if (!row) return null;
+  if (row.projection.objectId && row.object?.lifecycleState !== "active") return null;
+  const readable = await findAnonymousReadableChannel(slug, row.channelId)
+    ?? await findPublicThread(slug, row.channelId);
+  if (!readable) return null;
+  const physical = row.projection.objectId ? row.object! : row.projection;
+  const filename = normalizeAttachmentFilename(row.projection.filename);
+  return {
+    serverId: readable.serverId,
+    filename,
+    mimeType: resolveAttachmentMimeType(filename, physical.mimeType),
+    sizeBytes: physical.sizeBytes,
+    storageKey: physical.storageKey,
+  };
+}
+
+// GET /api/public/servers/:slug/attachments/:attachmentId — the bytes behind
+// a public message's attachment, for anonymous and nonmember readers. Every
+// request reauthorizes (see findPublicAttachment) and answers a uniform 404
+// otherwise. Only raster images on the preview allowlist render inline by
+// default; a PDF renders inline only when the read-only preview frame asks for
+// it with `?disposition=inline` (the member route's opt-in, PDF only here).
+// Every other type (HTML, SVG, ...) is a download, and `?download=1` forces a
+// download for images and PDFs too. app.ts applies a separate IP-only limiter
+// first.
+publicServerRouter.get("/servers/:slug/attachments/:attachmentId", async (req, res) => {
+  try {
+    const attachment = await findPublicAttachment(req.params.slug, req.params.attachmentId);
+    if (!attachment) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const gate = await evaluateFeatureFlag({ key: PUBLIC_SERVER_FEATURE_FLAG_KEY, serverId: attachment.serverId, platform: "web" });
+    if (!gate.enabled) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const storage = getStorage();
+    if (!storage) {
+      res.status(503).json({ error: "File storage is not configured on this server" });
+      return;
+    }
+    const forceDownload = req.query.download === "1";
+    const inlineImage = !forceDownload && isPreviewableImageMimeType(attachment.mimeType);
+    const inlinePdf = !forceDownload && req.query.disposition === "inline" && isPdfAttachmentMimeType(attachment.mimeType);
+    const contentDisposition = inlinePdf
+      ? buildAttachmentInlinePreviewContentDisposition(attachment.filename, attachment.mimeType)
+      : inlineImage
+        ? buildAttachmentContentDisposition(attachment.filename, attachment.mimeType)
+        : buildAttachmentDownloadContentDisposition(attachment.filename);
+    const contentType = buildAttachmentResponseContentType(attachment.mimeType);
+    // The public page (app origin) loads these with <img> from the API origin.
+    // Helmet's default `same-origin` CORP makes the browser block that no-cors
+    // load, including on the redirect hop, so every authorized response here
+    // opts out; the bytes are anonymously readable by construction.
+    res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+
+    if (storage.getPresignedUrl && !shouldStreamAttachmentThroughServerForRequest(req)) {
+      const presignedUrl = await storage.getPresignedUrl(attachment.storageKey, {
+        expiresIn: PUBLIC_ATTACHMENT_PRESIGNED_URL_TTL_SECONDS,
+        responseContentDisposition: contentDisposition,
+        responseContentType: contentType,
+      });
+      res.redirect(302, presignedUrl);
+      return;
+    }
+
+    const stream = await storage.get(attachment.storageKey);
+    res.setHeader("Content-Type", contentType);
+    const contentLength = buildAttachmentContentLengthHeader(attachment.sizeBytes);
+    if (contentLength) res.setHeader("Content-Length", contentLength);
+    res.setHeader("Content-Disposition", contentDisposition);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    if (inlinePdf) {
+      // Same headers as the member inline preview: Chromium's PDF viewer cannot
+      // run under a `sandbox` CSP, so the framed PDF is bounded by
+      // frame-ancestors and the cross-origin frame check in the web client.
+      res.removeHeader("X-Frame-Options");
+      res.setHeader("Content-Security-Policy", buildAttachmentInlinePreviewContentSecurityPolicy());
+      res.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      res.setHeader("Referrer-Policy", "no-referrer");
+    } else {
+      // Defense in depth if a browser ever renders a non-image response.
+      res.setHeader("Content-Security-Policy", "default-src 'none'; sandbox");
+    }
+    await streamStorageResponse(stream, res);
+  } catch (err) {
+    if (res.destroyed || res.headersSent) return;
+    if (isStorageNotFoundError(err)) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    sendJsonServerError(req, res, { error: "Failed to serve public attachment", logPrefix: "Public attachment error:", err });
+  }
+});
+
 // POST /api/public/servers/:slug/join-as-guest
 //
 // Authentication is deliberately attached to this one route rather than the
@@ -316,6 +791,9 @@ publicServerRouter.post("/servers/:slug/join-as-guest", requireAuth, requireVeri
       return;
     }
     const agreementId = typeof req.body?.agreementId === "string" ? req.body.agreementId : null;
+    // The page's visitor id, sent only after cookie consent; checked in
+    // recordPublicServerJoin, which is the only place it meets an account.
+    const anonymousId = typeof req.body?.anonymous_id === "string" ? req.body.anonymous_id : null;
     const result = await getDb().transaction(async (tx) => {
       const [server] = await tx
         .select({
@@ -376,6 +854,14 @@ publicServerRouter.post("/servers/:slug/join-as-guest", requireAuth, requireVeri
     if (result.joined) {
       // Committed: deliver the server.member_added App Notification now.
       kickAppNotificationDelivery();
+      // Best effort and after commit: analytics never fails a join.
+      void recordPublicServerJoin(
+        { slug, userId: req.userId!, anonymousId },
+        getProductEventSink(req.app),
+        getPublicVisitorSink(req.app),
+      ).catch((err: unknown) => {
+        console.warn("[public-visits] join not recorded:", err instanceof Error ? err.name : "unknown");
+      });
       const io = req.app.get("io") as SocketServer | undefined;
       const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator | undefined;
       if (io) {

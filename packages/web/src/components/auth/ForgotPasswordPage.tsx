@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { Button, Input, TextSans } from "raft-ui";
+import { Button, Input, TextSans } from "@botiverse/raft-ui";
 import { useAuthStore } from "../../store/authStore";
 import { ArrowLeft } from "lucide-react";
 import AuthPageFrame, { AuthPageIntro } from "./AuthPageFrame";
@@ -44,7 +44,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
       <AuthPageFrame>
         <div className="w-full">
           <AuthPageIntro title={formatMessage({ id: "pages.forgotPassword.checkEmailTitle" })}>
-            <p className="mt-2 text-sm text-foreground-muted theme-brutal:text-black/60">
+            <p className="mt-2 text-callout text-foreground-muted">
               {formatMessage(
                 { id: "pages.forgotPassword.sentTo" },
                 {
@@ -53,7 +53,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
                   // collide with the {email} VALUE above and silently win,
                   // rendering the function instead of the address.
                   addr: (c: ReactNode) => (
-                    <strong key="addr" className="font-mono text-sm">
+                    <strong key="addr" className="font-mono font-bold text-foreground">
                       {c}
                     </strong>
                   ),
@@ -64,7 +64,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
           <div className="mb-6" />
           <Button
             onClick={onBack}
-            size="lg"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -85,11 +85,11 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
         />
 
         {error && (
-          <Banner intent="warning" className="mb-4 font-bold">{error}</Banner>
+          <Banner intent="warning" className="mb-4">{error}</Banner>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <FormField label={formatMessage({ id: "pages.forgotPassword.emailLabel" })} labelStyle="plain">
+          <FormField label={formatMessage({ id: "pages.forgotPassword.emailLabel" })}>
             <Input
               type="email"
               value={email}
@@ -100,7 +100,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
           <Button
             type="submit"
             disabled={loading}
-            size="lg"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -110,7 +110,7 @@ export default function ForgotPasswordPage({ onBack }: ForgotPasswordPageProps) 
           </Button>
         </form>
 
-        <TextSans size="small" className="mt-4 text-center theme-brutal:text-black/60">
+        <TextSans size="small" className="mt-4 text-center">
           <TextLink variant="primary" onClick={onBack}>
             {formatMessage({ id: "auth.backToSignIn.link" })}
           </TextLink>

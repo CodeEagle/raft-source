@@ -14,7 +14,7 @@ import {
 import { httpRequestDuration, httpRequestsTotal } from "../metrics";
 import { normalizeRequestRoutePattern } from "./requestRoutePattern";
 import { runWithTraceSpan } from "../tracing/semanticTrace";
-import { agentIdHashAttrs, serverIdHashAttrs } from "../tracing/traceIdentity";
+import { agentIdHashAttrs, serverIdHashAttrs, traceMachineIdHash } from "../tracing/traceIdentity";
 import { cachedTraceUserId } from "../tracing/traceUserId";
 
 export type HttpStatusBucket = "2xx" | "3xx" | "4xx" | "5xx" | "other";
@@ -41,6 +41,15 @@ const HTTP_REQUEST_SCOPE_ATTR_KEYS = [
   "auth_trace_reason",
   // A route's stable failure code (setRequestTraceErrorCode), e.g. rw_overloaded.
   "error_code",
+  // Coarse 4xx class next to error_code (setRequestTraceErrorCode), e.g. not_found.
+  "reason_class",
+  // The Computer a request waits on (setRequestTraceComputerTarget), so slow or
+  // 504 answers split by Computer version and runtime.
+  "target_machine_id_hash",
+  "target_computer_version",
+  "target_daemon_version",
+  "target_runtime",
+  "option_source_id",
 ] as const;
 
 // How the request span treated the caller's traceparent (see
@@ -214,19 +223,74 @@ function buildInitialRequestTraceScope(req: Request): TraceScope {
 }
 
 const REQUEST_TRACE_ERROR_CODE_LOCAL = "traceErrorCode";
+const REQUEST_TRACE_REASON_CLASS_LOCAL = "traceReasonClass";
+
+/** Coarse class of a client error, from its status: what kind of wall the caller hit. */
+export type RequestTraceReasonClass = "invalid_input" | "forbidden" | "not_found" | "conflict" | "gone" | "rate_limited" | "client_error";
+
+export function requestTraceReasonClassForStatus(status: number): RequestTraceReasonClass | null {
+  if (status < 400 || status >= 500) return null;
+  if (status === 400 || status === 413 || status === 415 || status === 422) return "invalid_input";
+  if (status === 401 || status === 403) return "forbidden";
+  if (status === 404) return "not_found";
+  if (status === 409 || status === 412) return "conflict";
+  if (status === 410) return "gone";
+  if (status === 429) return "rate_limited";
+  return "client_error";
+}
 
 /**
  * A stable, low-cardinality code for why this request failed (e.g.
  * "rw_overloaded"), recorded as error_code on server.http.request alongside the
  * status-derived `reason`, which keeps its meaning.
  */
-export function setRequestTraceErrorCode(res: { locals?: Record<string, unknown> }, code: string): void {
-  if (res.locals) res.locals[REQUEST_TRACE_ERROR_CODE_LOCAL] = code;
+export function setRequestTraceErrorCode(res: { locals?: Record<string, unknown> }, code: string, reasonClass?: RequestTraceReasonClass): void {
+  if (!res.locals) return;
+  res.locals[REQUEST_TRACE_ERROR_CODE_LOCAL] = code;
+  if (reasonClass) res.locals[REQUEST_TRACE_REASON_CLASS_LOCAL] = reasonClass;
 }
 
-function requestTraceErrorCodeAttrs(res: { locals?: Record<string, unknown> }): { error_code?: string } {
+const REQUEST_TRACE_COMPUTER_TARGET_LOCAL = "traceComputerTarget";
+
+/**
+ * Name the Computer a request is waiting on (a model list, an option source),
+ * recorded on server.http.request next to the route: its hashed id, versions,
+ * runtime and option source.
+ */
+export function setRequestTraceComputerTarget(
+  res: { locals?: Record<string, unknown> },
+  target: { machineId: string; computerVersion?: string | null; daemonVersion?: string | null; runtime: string; sourceId?: string },
+): void {
+  if (!res.locals) return;
+  // Hashed like server_id_hash: a raw Computer id never reaches a request span.
+  const machineIdHash = traceMachineIdHash(target.machineId);
+  res.locals[REQUEST_TRACE_COMPUTER_TARGET_LOCAL] = {
+    ...(machineIdHash ? { target_machine_id_hash: machineIdHash } : {}),
+    ...(target.computerVersion ? { target_computer_version: target.computerVersion } : {}),
+    ...(target.daemonVersion ? { target_daemon_version: target.daemonVersion } : {}),
+    target_runtime: target.runtime.slice(0, 64),
+    ...(target.sourceId ? { option_source_id: target.sourceId.slice(0, 64) } : {}),
+  };
+}
+
+function requestTraceComputerTargetAttrs(res: { locals?: Record<string, unknown> }): Record<string, string> {
+  const target = res.locals?.[REQUEST_TRACE_COMPUTER_TARGET_LOCAL];
+  return target && typeof target === "object" ? target as Record<string, string> : {};
+}
+
+/** The code a route already set (setRequestTraceErrorCode), if any. */
+export function requestTraceErrorCode(res: { locals?: Record<string, unknown> }): string | null {
   const code = res.locals?.[REQUEST_TRACE_ERROR_CODE_LOCAL];
-  return typeof code === "string" && code ? { error_code: code } : {};
+  return typeof code === "string" && code ? code : null;
+}
+
+function requestTraceErrorCodeAttrs(res: { locals?: Record<string, unknown> }): { error_code?: string; reason_class?: string } {
+  const code = requestTraceErrorCode(res);
+  const reasonClass = res.locals?.[REQUEST_TRACE_REASON_CLASS_LOCAL];
+  return {
+    ...(code ? { error_code: code } : {}),
+    ...(typeof reasonClass === "string" && reasonClass ? { reason_class: reasonClass } : {}),
+  };
 }
 
 // Only the daemon's agent proxy and its managed MCP tools stamp this on
@@ -320,6 +384,7 @@ export function requestObservabilityMiddleware(req: Request, res: Response, next
       ...serverIdHashAttrs(req.serverId),
       ...requestTraceUserIdAttrs(req),
       ...requestTraceErrorCodeAttrs(res),
+      ...requestTraceComputerTargetAttrs(res),
     };
     const labels = {
       route_pattern: routePattern,

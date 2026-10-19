@@ -1,7 +1,6 @@
-import { ChevronDown, ChevronRight } from "lucide-react";
 import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
-import { DEFAULT_REASONING_EFFORT_SELECT_VALUE, Field, RuntimeEnvVarsField, RuntimeSelectControl } from "./RuntimeConfigFields";
+import { DEFAULT_REASONING_EFFORT_SELECT_VALUE, Field, RuntimeDisclosureToggle, RuntimeEnvVarsField, RuntimeSelectControl } from "./RuntimeConfigFields";
 import type { RuntimeOption, SchemaDrivenRuntimeFieldsProps, SchemaSelectSource } from "./RuntimeConfigFields";
 
 const NO_REASONING_EFFORTS: readonly string[] = [];
@@ -95,17 +94,11 @@ export function SchemaKimiRuntimeFields({
       )}
       {definition.uiSchema.layout.advanced.includes("/envVars") && (
         <div>
-          <button
-            type="button"
-            onClick={() => onAdvancedOpenChange?.(!advancedOpen)}
-            aria-expanded={advancedOpen}
-            className="flex items-center gap-1 text-sm font-bold uppercase tracking-wide text-foreground-muted hover:text-foreground-strong"
-          >
-            {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <RuntimeDisclosureToggle open={advancedOpen} onOpenChange={onAdvancedOpenChange}>
             {formatMessage({ id: "agent.runtimeConfig.advanced" })}
-          </button>
+          </RuntimeDisclosureToggle>
           {advancedOpen && (
-            <div className="mt-3 border-l border-line-muted theme-brutal:border-l-2 theme-brutal:border-black/10 pl-3">
+            <div className="mt-3 border-l border-line-hairline pl-3">
               <RuntimeEnvVarsField
                 entries={envVarEntries}
                 onChange={onEnvVarEntriesChange}

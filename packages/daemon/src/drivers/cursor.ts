@@ -1,3 +1,4 @@
+import { ambientProcessEnv } from "../processEnvPatch";
 import { spawn } from "node:child_process";
 import { spawnRuntimeChild } from "./runtimeChild";
 import { existsSync, readdirSync } from "node:fs";
@@ -108,7 +109,7 @@ export function resolveCursorWindowsInstallLaunch(
     return {
       command: node,
       args: [entry, ...args],
-      env: { ...(deps.env ?? process.env), CURSOR_INVOKED_AS: winPath.basename(shimPath) },
+      env: { ...(deps.env ?? ambientProcessEnv()), CURSOR_INVOKED_AS: winPath.basename(shimPath) },
       shell: false,
     };
   }
@@ -312,7 +313,7 @@ export async function detectCursorModelSource(
 
 export function buildCursorModelProbeEnv(deps: ProbeDeps = {}): NodeJS.ProcessEnv {
   return withWindowsUserEnvironment({
-    ...(deps.env ?? process.env),
+    ...(deps.env ?? ambientProcessEnv()),
     FORCE_COLOR: "0",
     NO_COLOR: "1",
   }, deps);
@@ -339,7 +340,7 @@ export interface CursorModelsProbeOptions {
 export function killCursorProbeTree(pid: number, platform: NodeJS.Platform): void {
   try {
     if (platform === "win32") {
-      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true }).on("error", () => {});
+      spawn("taskkill", ["/PID", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true, env: ambientProcessEnv() }).on("error", () => {});
     } else {
       process.kill(-pid, "SIGKILL");
     }

@@ -1,4 +1,4 @@
-import { MessageReferenceChip } from "raft-ui";
+import { MessageReferenceChip } from "@botiverse/raft-ui";
 import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { useRefNavigation } from "../../hooks/useRefNavigation";

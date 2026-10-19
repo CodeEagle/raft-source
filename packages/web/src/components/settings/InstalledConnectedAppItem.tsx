@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import { useCallback } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { Pencil } from "lucide-react";
@@ -42,7 +42,7 @@ export function InstalledConnectedAppItem({
         <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} size="sm" />
         <div className="min-w-0 flex-1">
           {app.editable ? (
-            <div className="min-w-0 break-words font-bold text-foreground-strong theme-brutal:text-black">{app.name}</div>
+            <div className="min-w-0 break-words text-body font-semibold text-foreground">{app.name}</div>
           ) : (
             <div
               role="button"
@@ -54,12 +54,12 @@ export function InstalledConnectedAppItem({
                 event.preventDefault();
                 onOpen(app);
               }}
-              className="w-fit max-w-full break-words font-bold text-foreground-strong theme-brutal:text-black underline-offset-2 hover:underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-foreground-strong theme-brutal:focus-visible:outline-black"
+              className="w-fit max-w-full break-words rounded-sticker text-body font-semibold text-foreground decoration-[1.5px] underline-offset-[3px] outline-none hover:underline focus-visible:shadow-focus"
             >
               {app.name}
             </div>
           )}
-          <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/50">
+          <div className="mt-0.5 text-footnote text-foreground-muted">
             <span>{formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" })}</span>
             <span aria-hidden="true"> · </span>
             <span>{app.developer}</span>
@@ -80,7 +80,7 @@ export function InstalledConnectedAppItem({
         <Button size="sm" variant="outline"
           type="button"
           onClick={handleEdit}
-          className={` inline-flex w-fit items-center justify-center gap-1.5 bg-layer-panel theme-brutal:bg-white px-2.5 py-1 text-xs ${viewMode === "grid" ? "mt-auto self-end" : "self-end sm:self-auto"}`}
+          className={`w-fit ${viewMode === "grid" ? "mt-auto self-end" : "self-end sm:self-auto"}`}
         >
           <Pencil size={14} />
           {formatMessage({ id: "settings.connectedApps.edit" })}
@@ -92,7 +92,6 @@ export function InstalledConnectedAppItem({
             type="button"
             onClick={handleRequestUninstall}
             disabled={uninstalling}
-            className="inline-flex items-center justify-center gap-1.5"
           >
             {uninstalling ? formatMessage({ id: "settings.connectedApps.uninstalling" }) : formatMessage({ id: "settings.connectedApps.uninstall" })}
           </Button>

@@ -27,7 +27,7 @@ test("bundle-too-large wire payload becomes human copy with an action", () => {
 
   assert.equal(
     presentation.message,
-    "The workspace is too large to move: compressed, it is over the 3 GiB limit. Largest items: .git/ (2 GiB), archive.tar (1 GiB), media/ (0.5 GiB). Ask the agent to delete large files it no longer needs, or to list them in .raftmigrateignore, then try again.",
+    "The workspace is too large to move: compressed, it is over the 3 GiB limit. Largest items (before compression): .git/ (2 GiB), archive.tar (1 GiB), media/ (0.5 GiB). Ask the agent to delete large files it no longer needs, or to list them in .raftmigrateignore, then try again.",
   );
   assert.equal(presentation.technicalCode, "MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE");
   assert.doesNotMatch(presentation.message, /[A-Z][A-Z0-9_]+:.*=/);
@@ -514,4 +514,35 @@ test("detailed transport causes without dedicated copy fall back to the known fa
   );
   assert.equal(migrationFailureCopyCode(null, "auto_start_failed"), "auto_start_failed");
   assert.equal(migrationFailureCopyCode("FETCH_ECONNRESET", null), "FETCH_ECONNRESET");
+});
+
+// task #1268: the target's runtime detection gate (retryable 409) gets
+// status-specific copy: pending says wait, incomplete names the runtime and
+// points at a rescan.
+test("TARGET_RUNTIME_DETECTION_PENDING renders pending vs incomplete copy from details, in both locales", () => {
+  const pending = migrationErrorPresentation({
+    code: "TARGET_RUNTIME_DETECTION_PENDING",
+    rawMessage: "server wording must not render",
+    context: "start",
+    details: { side: "target", runtime: "codex", detectionStatus: "pending", retryable: true },
+  }, fm);
+  assert.equal(pending.message, "The target computer is still detecting its runtimes. Try again in a moment.");
+  assert.equal(pending.technicalCode, "TARGET_RUNTIME_DETECTION_PENDING");
+  assert.doesNotMatch(JSON.stringify(pending), /server wording/);
+
+  const incomplete = migrationErrorPresentation({
+    code: "TARGET_RUNTIME_DETECTION_PENDING",
+    context: "start",
+    details: { side: "target", runtime: "codex", detectionStatus: "incomplete", reason: "deadline", retryable: true },
+  }, fm);
+  assert.equal(incomplete.message, "The target computer's last runtime detection did not finish for codex. Rescan its runtimes on the Computer page, then try again.");
+
+  const zhIncomplete = migrationErrorPresentation({
+    code: "TARGET_RUNTIME_DETECTION_PENDING",
+    context: "start",
+    details: { detectionStatus: "incomplete", runtime: "codex" },
+  }, zhIntl.formatMessage);
+  assert.equal(zhIncomplete.message, "目标计算机上一次运行时检测没有完成 codex 的检测。请在该计算机页面重新检测运行时后重试。");
+  const zhPending = migrationErrorPresentation({ code: "TARGET_RUNTIME_DETECTION_PENDING", context: "start" }, zhIntl.formatMessage);
+  assert.equal(zhPending.message, "目标计算机正在检测运行时，请稍后重试。");
 });

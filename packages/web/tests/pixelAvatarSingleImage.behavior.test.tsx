@@ -7,14 +7,16 @@ import { test } from "vitest";
 import { render } from "@testing-library/react";
 import PixelAvatar, { AVATAR_KEYS, DEFAULT_AVATAR_KEY, getPixelAvatarData, pixelAvatarDataUrl } from "../src/components/agent/PixelAvatar";
 
-test("renders exactly one element: an <img> with the SVG data URL, markers and size kept", () => {
-  const { container } = render(<PixelAvatar avatarKey={DEFAULT_AVATAR_KEY} size={24} className="rounded-sm" />);
+test("renders exactly one element: an <img> with the SVG data URL and marker that fills its frame", () => {
+  const { container } = render(<PixelAvatar avatarKey={DEFAULT_AVATAR_KEY} className="rounded-sm" />);
   assert.equal(container.querySelectorAll("*").length, 1, "one node per avatar");
   const img = container.querySelector("img")!;
   assert.equal(img.getAttribute("data-agent-pixel-avatar"), "true");
-  assert.equal(img.getAttribute("data-cell-size"), "3");
   assert.equal(img.getAttribute("alt"), "", "decorative, like the old grid");
-  assert.equal(img.style.width, "24px");
+  // The avatar sticker sizes it: no fixed inline box for a caller to fight.
+  assert.ok(img.className.includes("size-full"));
+  assert.equal(img.style.width, "");
+  assert.equal(img.style.height, "");
   assert.ok(img.className.includes("rounded-sm"));
   assert.equal(img.getAttribute("src"), pixelAvatarDataUrl(DEFAULT_AVATAR_KEY));
 });

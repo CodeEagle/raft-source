@@ -51,7 +51,11 @@ test("external projection reader ratchet keeps immutable author and Agent de-esc
     "services/messageService.ts": [
       /loadExternalMessageAuthors/,
       /missing immutable author fact/i,
-      /senderType === "external_projection"[\s\S]*?mentioned: false/,
+      // Only Slack-bridged rows may carry a mention fact or ordinary content;
+      // every other external payload renders inert.
+      /function isSlackBridgedExternalMessage[\s\S]*?isSlackBridgedExternalProvider\(message\.externalAuthor\?\.provider\)/,
+      /senderType === "external_projection" && !isSlackBridgedExternalMessage\(message\)\s*\?\s*renderThirdPartyInertText/,
+      /isSlackBridgedExternalMessage\(message\)\s*&& isAgentPersonallyMentioned\(message\.mentions, viewerAgentId\)/,
       /senderType !== "external_projection"[\s\S]*?taskStatus/,
       /isAgentApiExternalMessageForbiddenAuthorityField[\s\S]*?projectAgentVisibleHttpMessageResponse/,
       /projectAgentVisibleHttpMessageResponse[\s\S]*?Object\.keys\(envelope\)[\s\S]*?isAgentApiExternalMessageForbiddenAuthorityField/,
@@ -73,12 +77,12 @@ test("external projection reader ratchet keeps immutable author and Agent de-esc
       /third_party_app/,
       /externalAuthor: _externalAuthor/,
       /!external &&/,
-      /reaction-add\.updated[\s\S]*?projectAgentVisibleHttpMessageResponse\(enriched\)/,
-      /reaction-remove\.updated[\s\S]*?projectAgentVisibleHttpMessageResponse\(enriched\)/,
+      /reaction-add\.updated[\s\S]*?projectAgentVisibleHttpMessageResponse\(enriched, enriched\.content, agent\.id\)/,
+      /reaction-remove\.updated[\s\S]*?projectAgentVisibleHttpMessageResponse\(enriched, enriched\.content, agent\.id\)/,
     ],
     "routes/internalAgentApi.ts": [
       /third_party_app/,
-      /toAgentApiMessageEnvelope\(enriched, enriched\.content\)/,
+      /toAgentApiMessageEnvelope\(enriched, enriched\.content, actingAgentId\)/,
       /registerAgentApiRoute\("messageReactionAdd"[\s\S]*?handleReaction\(req, res, "add"\)/,
       /registerAgentApiRoute\("messageReactionRemove"[\s\S]*?handleReaction\(req, res, "remove"\)/,
     ],

@@ -722,10 +722,16 @@ async function runCli(): Promise<void> {
   // Execute on the injected release artifact, without reading account files or
   // contacting an OAuth service. A successful --version cannot detect missing
   // modules behind the SDK's lazy credential-derivation path.
-  if (process.argv[2] === "__verify-bundled-oauth") {
-    const { verifyBundledPiOAuth } = await import("@botiverse/raft-daemon/core");
-    await verifyBundledPiOAuth();
-    process.stdout.write("oauth-bundle-ok\n");
+  if (process.argv[2] === "__verify-bundled-oauth" || process.argv[2] === "__verify-bundled-kimi") {
+    const core = await import("@botiverse/raft-daemon/core");
+    if (process.argv[2] === "__verify-bundled-oauth") {
+      await core.verifyBundledPiOAuth();
+      process.stdout.write("oauth-bundle-ok\n");
+    } else {
+      // The SEA ships the kimi SDK as its own asset; load it like a launch would.
+      await core.verifyBundledKimiSdk();
+      process.stdout.write("kimi-bundle-ok\n");
+    }
     return;
   }
   // Hidden `__cli` mode (busybox/self-re-exec): run the bundled `slock` CLI

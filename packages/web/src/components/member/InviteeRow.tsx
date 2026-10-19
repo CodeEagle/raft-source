@@ -1,4 +1,4 @@
-import { Button, Field, Input, Select, SelectContent, SelectIcon, SelectItem, SelectItemIndicator, SelectItemText, SelectList, SelectTrigger, SelectValue } from "raft-ui";
+import { Button, Field, Input, Select, SelectContent, SelectIcon, SelectItem, SelectItemIndicator, SelectItemText, SelectList, SelectTrigger, SelectValue } from "@botiverse/raft-ui";
 import { Trash2 } from "lucide-react";
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
@@ -107,14 +107,16 @@ export function InviteeRow({
       {/* Hidden, not disabled, at one row: removing the last row
           leaves no way back to a usable form. */}
       {canRemove && (
+        // Dropping an unsent row is local and reversible: a quiet icon
+        // button at the field's height, not a red one.
         <Button
           type="button"
-          size="icon-xs"
-          variant="danger"
+          size="icon-lg"
+          variant="ghost"
           onClick={handleRemove}
           aria-label={formatMessage({ id: "member.invite.removeInvitee" }, { index: index + 1 })}
         >
-          <Trash2 size={14} />
+          <Trash2 size={18} aria-hidden="true" />
         </Button>
       )}
     </div>

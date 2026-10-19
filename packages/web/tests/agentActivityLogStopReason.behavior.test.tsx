@@ -106,8 +106,13 @@ test("activity ref chips keep the shared line box inside clamped detail rows", (
       refClasses.some((c) => c.endsWith(":inline-block")),
     `ref chip must lay out inline, got: ${refClasses.join(" ")}`,
   );
-  // raft-ui 0.5.16 (#319) aligns message references to the text baseline.
-  assert.ok(refClasses.includes("align-baseline"), "ref chip must sit on the shared baseline");
+  // The raft chip sticker sits on the text line: the baseline nudged by a
+  // fixed pixel offset (`align-[1px]`), never `middle`/`top`, which would
+  // detach it from the shared line box.
+  assert.ok(
+    refClasses.some((c) => c === "align-baseline" || /^align-\[-?\d+px\]$/.test(c)),
+    `ref chip must sit on the shared baseline, got: ${refClasses.join(" ")}`,
+  );
   assert.ok(
     refClasses.some((c) => c.includes("max-w-full")),
     "ref chip must not exceed its column",

@@ -44,7 +44,7 @@ test("external detail preserves the Joint Channel header-then-From information o
   const headerIndex = detailSource.indexOf("<PanelHeader");
   const bodyIndex = detailSource.indexOf("<ProfilePanelBody");
   const sourceIndex = detailSource.indexOf('data-testid="external-identity-source"');
-  const profileIndex = detailSource.indexOf('context="profile-tile"');
+  const profileIndex = detailSource.indexOf('context="profile-hero"');
 
   assert.ok(headerIndex >= 0);
   assert.ok(bodyIndex > headerIndex);

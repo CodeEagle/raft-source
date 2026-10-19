@@ -19,6 +19,8 @@ import {
   preprocessSearchContent,
   readMessageSearchEstimatedCandidateRows,
   tokenizeSearchText,
+  chooseMessageSearchRecentPlan,
+  MESSAGE_SEARCH_RECENT_COLLECT_FIRST_TEXT_MATCH_LIMIT,
 } from "./searchService";
 
 function normalizeSql(input: string): string {
@@ -337,4 +339,12 @@ test("search manual is structurally bound to the code threshold and probe deadli
   assert.match(manual, new RegExp(`\\*\\*${MESSAGE_SEARCH_BREADTH_PROBE_TIMEOUT_MS.toLocaleString("en-US")} ms\\*\\*`));
   assert.match(manual, new RegExp(`at most \\*\\*${MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT.toLocaleString("en-US")} estimated matching messages across all servers\\*\\*`));
   assert.match(manual, new RegExp(`\\*\\*${MESSAGE_SEARCH_COMMON_TERM_CORPUS_FRACTION * 100}% of all messages\\*\\*`));
+});
+
+test("the recent plan collects text matches first only up to the recent cap", () => {
+  assert.equal(chooseMessageSearchRecentPlan(0), "text_matches_first");
+  assert.equal(chooseMessageSearchRecentPlan(MESSAGE_SEARCH_RECENT_COLLECT_FIRST_TEXT_MATCH_LIMIT), "text_matches_first");
+  assert.equal(chooseMessageSearchRecentPlan(MESSAGE_SEARCH_RECENT_COLLECT_FIRST_TEXT_MATCH_LIMIT + 1), "walk");
+  assert.equal(chooseMessageSearchRecentPlan(18_000), "walk", "the 10-16 timeout shape");
+  assert.equal(chooseMessageSearchRecentPlan(Number.NaN), "walk");
 });

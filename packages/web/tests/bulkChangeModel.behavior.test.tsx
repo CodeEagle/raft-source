@@ -19,6 +19,7 @@ import {
 import { useServerStore } from "../src/store/serverStore";
 import type { Server } from "../src/store/serverStore";
 import { renderWithIntl } from "./helpers/intl";
+import { flushProductEvents, resetProductEventsForTest } from "../src/analytics/track";
 
 // task #1287 (designs task #1285): bulk "Change model" on the Computer page.
 const initialAgentState = useAgentStore.getState();
@@ -83,6 +84,50 @@ function renderMachine() {
   );
 }
 
+type SentEvent = { event: string; properties: Record<string, unknown>; serverId?: string };
+
+/** Captures product events (RFC-067) the way the batch endpoint would get them. */
+function captureProductEvents() {
+  const sent: SentEvent[] = [];
+  resetProductEventsForTest(async (url, init) => {
+    if (url.endsWith("/product-events/config")) {
+      return new Response(JSON.stringify({ clientEventsAllowed: true }), { status: 200 });
+    }
+    const serverId = (init?.headers as Record<string, string> | undefined)?.["X-Server-Id"];
+    for (const { event, properties } of (JSON.parse(String(init?.body)) as { events: SentEvent[] }).events) {
+      sent.push({ event, properties, serverId });
+    }
+    return new Response(JSON.stringify({ accepted: 1 }), { status: 202 });
+  });
+  return {
+    async flush(): Promise<SentEvent[]> {
+      const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+      Object.defineProperty(globalThis, "localStorage", {
+        configurable: true,
+        value: { getItem: (key: string) => (key === "slock_access_token" ? "token-1" : null) },
+      });
+      try {
+        await flushProductEvents();
+      } finally {
+        if (original) Object.defineProperty(globalThis, "localStorage", original);
+        else delete (globalThis as { localStorage?: unknown }).localStorage;
+      }
+      return [...sent];
+    },
+  };
+}
+
+function withoutOperationId({ event, properties }: SentEvent): SentEvent {
+  const { operation_id: _operationId, duration_ms: _durationMs, ...rest } = properties;
+  return { event, properties: rest };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => { resolve = r; });
+  return { promise, resolve };
+}
+
 function selectBothAgents() {
   fireEvent.click(screen.getByRole("button", { name: "Select" }));
   fireEvent.click(screen.getByRole("button", { name: "Select Ada" }));
@@ -100,6 +145,7 @@ afterEach(() => {
   useServerStore.setState(initialServerState, true);
   useBulkChangeModelReceiptStore.setState(initialReceiptState, true);
   runtimeAccountUsageClient.clear();
+  resetProductEventsForTest();
 });
 
 test("the Change model button is not rendered while the flag is off", () => {
@@ -134,6 +180,7 @@ test("a save that fails after the config landed becomes restart_pending, and Try
     posts.push({ url, body });
     return { data: { evaluations: [] } };
   }) as typeof api.post;
+  const events = captureProductEvents();
 
   renderMachine();
   selectBothAgents();
@@ -179,6 +226,76 @@ test("a save that fails after the config landed becomes restart_pending, and Try
   assert.deepEqual(resets.map((p) => p.body), [{ mode: "restart" }]);
   assert.equal(patches.length, 2, "the retry must not resend the config");
   assert.ok(screen.queryByTestId("bulk-model-partial-banner") === null);
+
+  // Usage events: each dialog open is one operation; the save that landed but
+  // owes a restart is restart_pending, not a failed change.
+  const sent = await events.flush();
+  assert.deepEqual(sent.map(withoutOperationId), [
+    { event: "bulk_model_change_opened", properties: { entry: "machine_panel", agent_count: 2 } },
+    { event: "bulk_model_change_submitted", properties: { change_count: 2, restart_only_count: 0, skip_count: 0 } },
+    {
+      event: "bulk_model_change_finished",
+      properties: { outcome: "partial", succeeded_count: 1, restart_pending_count: 1, save_failed_count: 0, unconfirmed_count: 0 },
+    },
+    { event: "bulk_model_change_opened", properties: { entry: "partial_receipt", agent_count: 1 } },
+    { event: "bulk_model_change_submitted", properties: { change_count: 0, restart_only_count: 1, skip_count: 0 } },
+    {
+      event: "bulk_model_change_finished",
+      properties: { outcome: "all_succeeded", succeeded_count: 1, restart_pending_count: 0, save_failed_count: 0, unconfirmed_count: 0 },
+    },
+  ]);
+  const operationIds = sent.map((e) => e.properties.operation_id);
+  assert.equal(new Set(operationIds.slice(0, 3)).size, 1);
+  assert.equal(new Set(operationIds.slice(3)).size, 1);
+  assert.notEqual(operationIds[0], operationIds[3]);
+});
+
+test("usage events: a failed change whose fresh read also fails is unconfirmed, and Cancel records the step", async () => {
+  setServerFeatureFlagForTests("server-1", BULK_CHANGE_MODEL_WEB_FLAG_KEY, true);
+  api.get = (async (url: string) => {
+    throw new Error(`unexpected GET ${url}`);
+  }) as typeof api.get;
+  api.patch = (async (url: string) => {
+    if (url === "/agents/bolt") throw new Error("network down");
+    return { data: { id: url.split("/").pop() } };
+  }) as typeof api.patch;
+  api.post = (async () => ({ data: { evaluations: [] } })) as typeof api.post;
+  const events = captureProductEvents();
+
+  renderMachine();
+  selectBothAgents();
+  fireEvent.click(screen.getByTestId("bulk-change-model-button"));
+  let dialog = await screen.findByTestId("bulk-change-model-dialog");
+  await waitFor(() => assert.equal((within(dialog).getByTestId("bulk-model-next") as HTMLButtonElement).disabled, false));
+  fireEvent.click(within(dialog).getByTestId("bulk-model-next"));
+  await within(dialog).findByTestId("bulk-model-review-list");
+  fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  await waitFor(() => assert.ok(screen.queryByTestId("bulk-change-model-dialog") === null));
+
+  fireEvent.click(screen.getByTestId("bulk-change-model-button"));
+  dialog = await screen.findByTestId("bulk-change-model-dialog");
+  await waitFor(() => assert.equal((within(dialog).getByTestId("bulk-model-next") as HTMLButtonElement).disabled, false));
+  fireEvent.click(within(dialog).getByTestId("bulk-model-next"));
+  await within(dialog).findByTestId("bulk-model-review-list");
+  fireEvent.click(within(dialog).getByTestId("bulk-model-apply"));
+  await screen.findByTestId("bulk-model-partial-banner");
+
+  const sent = (await events.flush()).map(withoutOperationId);
+  assert.deepEqual(sent.map((e) => e.event), [
+    "bulk_model_change_opened",
+    "bulk_model_change_closed",
+    "bulk_model_change_opened",
+    "bulk_model_change_submitted",
+    "bulk_model_change_finished",
+  ]);
+  assert.deepEqual(sent[1].properties, { step: "review" });
+  assert.deepEqual(sent[4].properties, {
+    outcome: "partial",
+    succeeded_count: 1,
+    restart_pending_count: 0,
+    save_failed_count: 0,
+    unconfirmed_count: 1,
+  });
 });
 
 for (const canViewUsage of [true, false]) {
@@ -225,3 +342,44 @@ for (const canViewUsage of [true, false]) {
     }
   });
 }
+
+test("usage events stay with the server the dialog was opened in when the user switches servers during Apply", async () => {
+  setServerFeatureFlagForTests("server-1", BULK_CHANGE_MODEL_WEB_FLAG_KEY, true);
+  const pending = new Map<string, ReturnType<typeof deferred<void>>>();
+  api.get = (async (url: string) => {
+    throw new Error(`unexpected GET ${url}`);
+  }) as typeof api.get;
+  api.patch = (async (url: string) => {
+    const gate = deferred<void>();
+    pending.set(url, gate);
+    await gate.promise;
+    return { data: { id: url.split("/").pop() } };
+  }) as typeof api.patch;
+  api.post = (async () => ({ data: { evaluations: [] } })) as typeof api.post;
+  const events = captureProductEvents();
+
+  renderMachine();
+  selectBothAgents();
+  fireEvent.click(screen.getByTestId("bulk-change-model-button"));
+  const dialog = await screen.findByTestId("bulk-change-model-dialog");
+  await waitFor(() => assert.equal((within(dialog).getByTestId("bulk-model-next") as HTMLButtonElement).disabled, false));
+  fireEvent.click(within(dialog).getByTestId("bulk-model-next"));
+  await within(dialog).findByTestId("bulk-model-review-list");
+  fireEvent.click(within(dialog).getByTestId("bulk-model-apply"));
+  await waitFor(() => assert.equal(pending.size, 2));
+
+  // The user moves to another server while both updates are still in flight.
+  useServerStore.setState({ current: { ...server, id: "server-2", slug: "other" } });
+  for (const gate of pending.values()) gate.resolve();
+
+  let sent: SentEvent[] = [];
+  await waitFor(async () => {
+    sent = await events.flush();
+    assert.ok(sent.some((e) => e.event === "bulk_model_change_finished"));
+  });
+  assert.deepEqual(sent.map((e) => [e.event, e.serverId]), [
+    ["bulk_model_change_opened", "server-1"],
+    ["bulk_model_change_submitted", "server-1"],
+    ["bulk_model_change_finished", "server-1"],
+  ]);
+});

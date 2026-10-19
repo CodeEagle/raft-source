@@ -416,8 +416,9 @@ test("long code lines stay horizontally scrollable inside the theme code surface
   const pre = container.querySelector("pre");
   assert.ok(pre);
   assert.ok(pre.className.includes("overflow-x-auto"));
-  assert.ok(pre.className.includes("border-2"));
-  assert.ok(pre.className.includes("bg-code-surface"));
+  // DS code block: the code layer with a hairline edge.
+  assert.ok(pre.className.includes("border-line-hairline"));
+  assert.ok(pre.className.includes("bg-layer-code"));
 });
 
 test("cold and warm code retain both Shiki palettes in the same cached token entry", async () => {

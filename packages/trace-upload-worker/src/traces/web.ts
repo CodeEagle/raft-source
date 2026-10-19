@@ -24,6 +24,7 @@ import {
   type LocalTraceRecord,
   type OtlpAnyValue,
 } from "./otlp";
+import { postOtlpJson } from "./otlpSink";
 import {
   projectV2BestEffort,
   projectorDisabledByMissingCanonicalSink,
@@ -65,7 +66,7 @@ export async function ingestWebTraceBatch(request: Request, env: TraceUploadWork
     }
     if (events.length > 0) {
       const keyedEvents = events.map((record, index) => ({ record, eventKey: `${batchId}:${index}` }));
-      await postOtlpLogBatch(env, webResourceAttributes(env, webMetadata), "@botiverse/raft-web", keyedEvents);
+      await postOtlpLogBatch(env, webResourceAttributes(env, webMetadata), "@botiverse/raft-web", keyedEvents, "web_events");
     }
   }
 
@@ -98,20 +99,7 @@ async function postWebTraceBatch(
   },
 ): Promise<void> {
   const endpoint = normalizeOtlpTracesEndpoint(env.TRACE_INGEST_OTLP_ENDPOINT ?? "");
-  const fetchImpl = env.TRACE_INGEST_FETCH ?? fetch;
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    ...(env.TRACE_INGEST_OTLP_AUTHORIZATION ? { Authorization: env.TRACE_INGEST_OTLP_AUTHORIZATION } : {}),
-  };
-  const response = await fetchImpl(endpoint, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(toWebOtlpPayload(env, records, metadata)),
-  });
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`OTLP HTTP ${response.status}${body ? `: ${body.slice(0, 200)}` : ""}`);
-  }
+  await postOtlpJson(env, "web", endpoint, toWebOtlpPayload(env, records, metadata), records.length);
 }
 
 function webResourceAttributes(

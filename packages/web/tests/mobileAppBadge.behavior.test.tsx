@@ -107,13 +107,14 @@ test("a user who has not seen the mobile app gets a dot on Help and on the row",
   // these as `h-2.5 w-2.5` / `h-1 w-1` — the primitive emits the `size-*`
   // shorthand, which is the same box. Asserting the doc's spelling failed
   // against correct markup, so this pins what the component actually renders.)
+  // Raft Design System: the attention mark is the 9px square pixel (`lg`).
   assert.ok(
-    rowDot.className.includes("size-2.5"),
-    `the menu-row dot must be the canonical 10px: ${rowDot.className}`,
+    rowDot.className.includes("size-[9px]"),
+    `the menu-row dot must be the canonical 9px pixel: ${rowDot.className}`,
   );
   assert.ok(
-    !rowDot.className.includes("size-1 "),
-    `the menu-row dot must not fall back to the compact 4px: ${rowDot.className}`,
+    !rowDot.className.includes("size-1.5 "),
+    `the menu-row dot must not fall back to the compact 6px: ${rowDot.className}`,
   );
 });
 

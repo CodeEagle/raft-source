@@ -42,6 +42,7 @@ import {
   __setSearchServiceDepsForTests,
   MESSAGE_SEARCH_RELEVANCE_ESTIMATED_CANDIDATE_LIMIT,
   MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT,
+  MESSAGE_SEARCH_RECENT_COLLECT_FIRST_TEXT_MATCH_LIMIT,
 } from "../services/searchService";
 import { openTestApp } from "../test/integration/app";
 import { COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY } from "../services/featureFlagService";
@@ -1332,7 +1333,7 @@ test("POST /messages does not report a transaction-pending row as durable when a
     const degraded = span.events[degradedIndex]!;
     assert.equal(degraded.attrs?.persistence_state, "transaction_pending");
     assert.equal(degraded.attrs?.durable_message_present, false);
-    assert.equal(degraded.attrs?.failure_policy, "continue_within_transaction");
+    assert.equal(degraded.attrs?.failure_policy, "rollback_savepoint_and_continue");
     assert.equal(JSON.stringify(degraded.attrs).includes("select from"), false);
   } finally {
     __resetMessageServiceDepsForTests();
@@ -4563,6 +4564,8 @@ test("GET /messages/search records success and failure diagnostics", async ({  }
     // A term this rare is within the corpus-wide cap, so recent sort collects text matches first.
     assert.equal(successQuerySpan.attrs?.query_plan_shape, "fts_recent_text_matches_first");
     assert.equal(successQuerySpan.attrs?.query_length_bucket, "short");
+    assert.equal(successQuerySpan.attrs?.query_script, "latin");
+    assert.equal(successQuerySpan.attrs?.query_term_count_bucket, "1");
     const recentProbeSpan = sink.getAllSpans().find((candidate) =>
       candidate.name === "server.db.query"
       && candidate.context.parentSpanId === successSpan.context.spanId
@@ -4767,6 +4770,127 @@ test("recent search on a term above the corpus-wide cap walks the server timelin
     assert.equal(narrowed.status, 200);
     assert.equal((await narrowed.json() as { results: unknown[] }).results.length, 1);
     assert.doesNotMatch(executed.at(-1) ?? "", /\bmessage_server_timeline\b/, "a channel filter already narrows the walk to that channel");
+  } finally {
+    __resetSearchServiceDepsForTests();
+    await app.close();
+  }
+});
+
+test("recent search collects text matches first only up to the recent cap; above it, it walks (prod 10-16 timeouts)", async ({ app }) => {
+  try {
+    const owner = await seedUser("search-recent-cap-owner@slock.test", "search-recent-cap-owner");
+    const server = await createServer("Search Recent Cap Server", "search-recent-cap-server", owner.id);
+    const channel = await createChannel(server.id, "search-recent-cap-channel");
+    await createMessage(channel.id, "user", owner.id, "recentcap searchable row");
+
+    const dialect = new PgDialect();
+    const executed: string[] = [];
+    let estimate = MESSAGE_SEARCH_RECENT_COLLECT_FIRST_TEXT_MATCH_LIMIT;
+    let timelineFlag = true;
+    __setSearchServiceDepsForTests({
+      isServerTimelineWalkEnabled: async () => timelineFlag,
+      executeSearchSql: (async (statement: SQL, options?: { signal?: AbortSignal }) => {
+        const rendered = dialect.sqlToQuery(statement).sql.replace(/\s+/g, " ").trim();
+        if (rendered.startsWith("EXPLAIN (FORMAT JSON)")) {
+          return { rows: [{ "QUERY PLAN": [{ Plan: { "Node Type": "Bitmap Heap Scan", "Plan Rows": estimate } }] }] };
+        }
+        if (rendered.includes("FROM pg_class")) return { rows: [{ corpus_rows: 1_000_000 }] };
+        executed.push(rendered);
+        return executeSearchSqlFromDb(statement, options);
+      }) as typeof executeSearchSqlFromDb,
+    });
+    const headers = authHeaders(await tokenForHuman(owner.email), server.id);
+    const search = async () => {
+      const res = await fetch(`${app.baseUrl}/api/messages/search?q=recentcap&sort=recent&limit=5`, { headers });
+      assert.equal(res.status, 200);
+      assert.equal((await res.json() as { results: unknown[] }).results.length, 1);
+      return executed.at(-1) ?? "";
+    };
+
+    // At the cap: collect the matches first.
+    assert.match(await search(), /\btext_matches AS MATERIALIZED\b/);
+    // One over (well below the 200k relevance cap, where these used to collect
+    // first and time out): walk this server's timeline...
+    estimate = MESSAGE_SEARCH_RECENT_COLLECT_FIRST_TEXT_MATCH_LIMIT + 1;
+    assert.ok(estimate < MESSAGE_SEARCH_RELEVANCE_ESTIMATED_TEXT_MATCH_LIMIT);
+    const walked = await search();
+    assert.match(walked, /\bFROM message_server_timeline t JOIN messages m ON m\.id = t\.message_id\b/);
+    assert.doesNotMatch(walked, /\btext_matches AS MATERIALIZED\b/);
+    // With the timeline flag off there is no budgeted walk, so the relevance
+    // cap still decides: this estimate collects first, as before.
+    timelineFlag = false;
+    const legacy = await search();
+    assert.doesNotMatch(legacy, /\bmessage_server_timeline\b/);
+    assert.match(legacy, /\btext_matches AS MATERIALIZED\b/);
+  } finally {
+    __resetSearchServiceDepsForTests();
+    await app.close();
+  }
+});
+
+test("the server timeline walk stops at its row budget: incomplete page, exact cursor continuation", async ({ app }) => {
+  try {
+    const owner = await seedUser("search-walk-budget-owner@slock.test", "search-walk-budget-owner");
+    const server = await createServer("Search Walk Budget Server", "search-walk-budget-server", owner.id);
+    const channel = await createChannel(server.id, "search-walk-budget-channel");
+    // Oldest first; newest first the timeline reads A B f1 f2 C f3 f4 f5.
+    for (const content of ["f5", "f4", "f3", "walkbudget C", "f2", "f1", "walkbudget B", "walkbudget A"]) {
+      await createMessage(channel.id, "user", owner.id, content);
+    }
+
+    const dialect = new PgDialect();
+    __setSearchServiceDepsForTests({
+      isServerTimelineWalkEnabled: async () => true,
+      walkTimelineRowBudget: 3,
+      executeSearchSql: (async (statement: SQL, options?: { signal?: AbortSignal }) => {
+        const rendered = dialect.sqlToQuery(statement).sql.replace(/\s+/g, " ").trim();
+        if (rendered.startsWith("EXPLAIN (FORMAT JSON)")) {
+          return { rows: [{ "QUERY PLAN": [{ Plan: { "Node Type": "Bitmap Heap Scan", "Plan Rows": MESSAGE_SEARCH_RECENT_COLLECT_FIRST_TEXT_MATCH_LIMIT + 1 } }] }] };
+        }
+        if (rendered.includes("FROM pg_class")) return { rows: [{ corpus_rows: 1_000_000 }] };
+        return executeSearchSqlFromDb(statement, options);
+      }) as typeof executeSearchSqlFromDb,
+    });
+    const headers = authHeaders(await tokenForHuman(owner.email), server.id);
+    type Page = { results: Array<{ content: string }>; hasMore: boolean; incomplete?: boolean; nextCursor?: string; searchedThrough?: string };
+    const search = async (cursor?: string): Promise<Page> => {
+      const res = await fetch(
+        `${app.baseUrl}/api/messages/search?q=walkbudget&sort=recent&limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`,
+        { headers },
+      );
+      assert.equal(res.status, 200);
+      return await res.json() as Page;
+    };
+
+    // Window A B f1: two matches, a full page; the cursor pages exactly.
+    const first = await search();
+    assert.deepEqual(first.results.map((r) => r.content), ["walkbudget A"]);
+    assert.equal(first.hasMore, true);
+    assert.equal(first.incomplete, undefined);
+    assert.ok(first.nextCursor);
+    // Window B f1 f2: the budget runs out before the page fills.
+    const second = await search(first.nextCursor);
+    assert.deepEqual(second.results.map((r) => r.content), ["walkbudget B"]);
+    assert.equal(second.hasMore, false);
+    assert.equal(second.incomplete, true, "C is older than the window: not all matches");
+    assert.equal((second as Page & { searchedMessages?: number }).searchedMessages, 3);
+    assert.ok(second.searchedThrough && !Number.isNaN(Date.parse(second.searchedThrough)));
+    assert.ok(second.nextCursor);
+    // Window C f3 f4: C is found below the last row read, nothing repeats.
+    const third = await search(second.nextCursor);
+    assert.deepEqual(third.results.map((r) => r.content), ["walkbudget C"]);
+    assert.equal(third.incomplete, true);
+    // Only f5 is left: no more than the budget, so the walk reads to the end.
+    const last = await search(third.nextCursor);
+    assert.deepEqual(last.results, []);
+    assert.equal(last.incomplete, undefined);
+    assert.equal(last.hasMore, false);
+    assert.equal(last.nextCursor, undefined);
+
+    const forged = await fetch(`${app.baseUrl}/api/messages/search?q=walkbudget&sort=recent&cursor=not-a-cursor`, { headers });
+    assert.equal(forged.status, 400);
+    const relevance = await fetch(`${app.baseUrl}/api/messages/search?q=walkbudget&sort=relevance&cursor=${encodeURIComponent(first.nextCursor!)}`, { headers });
+    assert.equal(relevance.status, 400, "a cursor only continues a recent search");
   } finally {
     __resetSearchServiceDepsForTests();
     await app.close();

@@ -47,7 +47,7 @@ export default function HistoryTopState({
       return (
         <div
           data-testid={noun === "messages" ? "list-loading-older" : "thread-loading-older"}
-          className="pb-2 text-center text-foreground-muted theme-brutal:text-black/50 font-mono text-xs"
+          className="pb-2 text-center font-mono text-mono-meta text-foreground-hint"
         >
           {formatMessage({ id: keys.loadingOlder })}
         </div>
@@ -58,8 +58,8 @@ export default function HistoryTopState({
 
   if (state === "history_limited") {
     return (
-      <div className="pb-2 text-center text-foreground-muted theme-brutal:text-black/50 font-mono text-xs">
-        <span className="inline-flex items-center gap-1.5 border border-line-muted theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white/70 px-2 py-1">
+      <div className="pb-2 text-center font-mono text-mono-meta text-foreground-hint">
+        <span className="inline-flex items-center gap-1.5 rounded-chip border border-line-hairline bg-layer-canvas px-2 py-1">
           <Lock size={12} />
           {formatMessage({ id: keys.limited })}
         </span>
@@ -68,7 +68,7 @@ export default function HistoryTopState({
   }
 
   return (
-    <div className="pb-2 text-center text-foreground-placeholder theme-brutal:text-black/40 font-mono text-xs">
+    <div className="pb-2 text-center font-mono text-mono-meta text-foreground-hint">
       {formatMessage({ id: keys.beginning })}
     </div>
   );

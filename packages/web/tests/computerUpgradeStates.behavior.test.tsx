@@ -23,7 +23,9 @@ import { isRemoteUpgradeSupported } from "@botiverse/raft-shared";
 // (copy rework, docs: computer-upgrade-copy-proposal §3-§7). Each asserts the
 // status sentence, which buttons show and whether they are enabled, and
 // whether the install-then-restart command block shows. The published Computer
-// version is 1.0.40 throughout; "too old" means below 1.0.37.
+// version is 1.0.48 throughout; "too old" means below 1.0.45
+// (COMPUTER_REMOTE_UPGRADE_MIN_VERSION). The 9b gating cases pin versions
+// around that threshold and mark an upgrade available explicitly.
 
 const initialAgentState = useAgentStore.getState();
 const initialMachineState = useMachineStore.getState();
@@ -39,7 +41,7 @@ afterEach(() => {
   useServerStore.setState(initialServerState, true);
 });
 
-const LATEST = "1.0.40";
+const LATEST = "1.0.48";
 
 function server(role: Server["role"] = "owner"): Server {
   return {
@@ -84,7 +86,7 @@ function computer(overrides: Partial<Machine> = {}): Machine {
     daemonVersion: null,
     isComputer: true,
     computerAttachedByCurrentUser: true,
-    computerVersion: "1.0.38",
+    computerVersion: "1.0.46",
     computerUpgradeAvailable: false,
     remoteUpgradeSupported: true,
     computerBroadcastPolicy: policy("broadcast_disabled"),
@@ -96,9 +98,9 @@ function computer(overrides: Partial<Machine> = {}): Machine {
 }
 
 // Server shapes for the states the server can actually produce.
-const upToDateWebOff = () => computer({ computerVersion: "1.0.40" });
+const upToDateWebOff = () => computer({ computerVersion: "1.0.48" });
 const upToDateWebOn = () => computer({
-  computerVersion: "1.0.40",
+  computerVersion: "1.0.48",
   computerBroadcastPolicy: policy("already_current", LATEST),
 });
 const outdatedWebOn = (overrides: Partial<Machine> = {}) => computer({
@@ -115,7 +117,7 @@ const tooOldWebOn = () => computer({
 });
 const tooOldWebOff = () => computer({ computerVersion: "1.0.30", remoteUpgradeSupported: false });
 
-function request(state: MachineUpgradeRequest["state"], observedVersion: string | null = "1.0.38"): MachineUpgradeRequest {
+function request(state: MachineUpgradeRequest["state"], observedVersion: string | null = "1.0.46"): MachineUpgradeRequest {
   return {
     id: "request-1",
     targetVersion: LATEST,
@@ -207,7 +209,7 @@ test("1. up to date, web upgrade off: 'Up to date.', Restart only, no commands",
   // panel names the real defect.
   assert.equal(within(card()).queryByTestId("computer-upgrade-fresh-install") === null, true, "an up-to-date Computer gets no upgrade commands");
   assert.doesNotMatch(card().textContent ?? "", /eligible/, "an up-to-date Computer is not 'ineligible'");
-  assert.equal(versionRow(), `v1.0.40 · ${en["machine.detail.upToDate"]}`);
+  assert.equal(versionRow(), `v1.0.48 · ${en["machine.detail.upToDate"]}`);
   assert.ok(within(card()).getByText(en["machine.detail.upgradeStatus.upToDate"]));
   assert.deepEqual(actionButtons(), [RESTART]);
   assertNoCommands();
@@ -216,7 +218,7 @@ test("1. up to date, web upgrade off: 'Up to date.', Restart only, no commands",
 test("2. up to date, web upgrade on: 'Up to date.', Restart + disabled Up to date", () => {
   renderPanel(upToDateWebOn(), { webUpgrade: true });
 
-  assert.equal(versionRow(), `v1.0.40 · ${en["machine.detail.upToDate"]}`);
+  assert.equal(versionRow(), `v1.0.48 · ${en["machine.detail.upToDate"]}`);
   assert.ok(within(card()).getByText(en["machine.detail.upgradeStatus.upToDate"]));
   assert.deepEqual(actionButtons(), [RESTART, { label: en["machine.detail.upToDate"], disabled: true }]);
   assertNoCommands();
@@ -227,7 +229,7 @@ test("2. up to date, web upgrade on: 'Up to date.', Restart + disabled Up to dat
 test("3. new version, web upgrade on: one-click Upgrade, no commands", () => {
   renderPanel(outdatedWebOn(), { webUpgrade: true });
 
-  assert.equal(versionRow(), `v1.0.38 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
+  assert.equal(versionRow(), `v1.0.46 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
   assert.ok(within(card()).getByText(fmt(en["machine.detail.upgradeStatus.available"], { version: LATEST })));
   assert.deepEqual(actionButtons(), [RESTART, UPGRADE]);
   assertNoCommands();
@@ -236,18 +238,18 @@ test("3. new version, web upgrade on: one-click Upgrade, no commands", () => {
 // 4-6 are one state: a new version exists and the one-click web upgrade is
 // not offered (web upgrade off, or this version is too old for it). Each
 // input stays a fixture; the expected card is shared.
-const RUN_COMMANDS = "v1.0.40 is available. Run these two commands on that machine to upgrade:";
+const RUN_COMMANDS = "v1.0.48 is available. Run these two commands on that machine to upgrade:";
 
 test("4-6. shared runCommands sentence copy (en + zh)", () => {
   assert.equal(fmt(en["machine.detail.upgradeStatus.runCommands"], { version: LATEST }), RUN_COMMANDS);
   assert.equal(
     fmt(zh["machine.detail.upgradeStatus.runCommands"], { version: LATEST }),
-    "有新版本 v1.0.40。在那台机器上运行下面两条命令升级：",
+    "有新版本 v1.0.48。在那台机器上运行下面两条命令升级：",
   );
 });
 
 const NO_ONE_CLICK_CASES: Array<{ name: string; machine: () => Machine; webUpgrade: boolean; version: string }> = [
-  { name: "4. new version, web upgrade off", machine: outdatedWebOff, webUpgrade: false, version: "1.0.38" },
+  { name: "4. new version, web upgrade off", machine: outdatedWebOff, webUpgrade: false, version: "1.0.46" },
   { name: "5. too old for the web, web upgrade on", machine: tooOldWebOn, webUpgrade: true, version: "1.0.30" },
   { name: "6. too old, web upgrade off", machine: tooOldWebOff, webUpgrade: false, version: "1.0.30" },
 ];
@@ -273,7 +275,7 @@ for (const c of NO_ONE_CLICK_CASES) {
 test("7. can't check for a new version (release lookup failed for this machine): Restart only, no fresh install", () => {
   renderPanel(computer({ computerBroadcastPolicy: policy("hands_artifact_missing") }), { webUpgrade: true });
 
-  assert.equal(versionRow(), "v1.0.38");
+  assert.equal(versionRow(), "v1.0.46");
   assert.ok(within(card()).getByText(en["machine.detail.upgradeStatus.cannotCheck"]));
   assert.deepEqual(actionButtons(), [RESTART]);
   assertNoCommands();
@@ -282,7 +284,7 @@ test("7. can't check for a new version (release lookup failed for this machine):
 test("7b. can't check: no published version known to the web", () => {
   renderPanel(outdatedWebOff(), { latest: null });
 
-  assert.equal(versionRow(), "v1.0.38");
+  assert.equal(versionRow(), "v1.0.46");
   assert.ok(within(card()).getByText(en["machine.detail.upgradeStatus.cannotCheck"]));
   assert.deepEqual(actionButtons(), [RESTART]);
   assertNoCommands();
@@ -315,10 +317,10 @@ test("9. version unknown, web upgrade on: no 'This version can't be upgraded' ve
 // policy treats them as valid and orders them by SemVer (a prerelease sorts
 // below its release), so the web must not turn them into "Can't check".
 
-const STAGING_AHEAD = "1.0.41-staging.20261003090435.sha.4f9786e3e10a";
-const STAGING_SAME = "1.0.40-staging.20260930120000.sha.0123456789ab";
+const STAGING_AHEAD = "1.0.49-staging.20261003090435.sha.4f9786e3e10a";
+const STAGING_SAME = "1.0.48-staging.20260930120000.sha.0123456789ab";
 
-test("9b. staging build ahead of the latest release (1.0.41-staging.* vs 1.0.40): Up to date", () => {
+test("9b. staging build ahead of the latest release (1.0.49-staging.* vs 1.0.48): Up to date", () => {
   // What the server sends for it: web off -> gate closed; web on -> already_current.
   for (const webUpgrade of [false, true]) {
     cleanup();
@@ -336,9 +338,9 @@ test("9b. staging build ahead of the latest release (1.0.41-staging.* vs 1.0.40)
   }
 });
 
-const PRERELEASE_BELOW_RELEASE = [STAGING_SAME, "1.0.40-rc.1", "1.0.39-staging.20260925080000.sha.89abcdef0123", "1.0.38-constructed-wake-context.1"];
+const PRERELEASE_BELOW_RELEASE = [STAGING_SAME, "1.0.48-rc.1", "1.0.47-staging.20260925080000.sha.89abcdef0123", "1.0.46-constructed-wake-context.1"];
 for (const version of PRERELEASE_BELOW_RELEASE) {
-  test(`9b. prerelease below the release (${version} vs 1.0.40): a new version exists, the two commands`, () => {
+  test(`9b. prerelease below the release (${version} vs 1.0.48): a new version exists, the two commands`, () => {
     renderPanel(computer({ computerVersion: version, remoteUpgradeSupported: isRemoteUpgradeSupported(version) }));
 
     assert.equal(within(card()).getByTestId("computer-upgrade-status").textContent, RUN_COMMANDS);
@@ -356,8 +358,8 @@ const prereleaseWebOn = (version: string) => computer({
   computerBroadcastPolicy: policy("eligible", LATEST),
 });
 
-test("9b. prerelease of a release too old for the web (1.0.36-rc.1, 1.0.37-rc.1), web upgrade on: the two commands, no Upgrade", () => {
-  for (const version of ["1.0.36-rc.1", "1.0.37-rc.1"]) {
+test("9b. prerelease of a release too old for the web (1.0.36-rc.1, 1.0.44-rc.1, 1.0.45-rc.1), web upgrade on: the two commands, no Upgrade", () => {
+  for (const version of ["1.0.36-rc.1", "1.0.44-rc.1", "1.0.45-rc.1"]) {
     cleanup();
     renderPanel(prereleaseWebOn(version), { webUpgrade: true });
 
@@ -368,15 +370,15 @@ test("9b. prerelease of a release too old for the web (1.0.36-rc.1, 1.0.37-rc.1)
   }
 });
 
-test("9b. prerelease at or above the first web-upgradable release (1.0.38-rc.1), web upgrade on: one-click Upgrade", () => {
-  renderPanel(prereleaseWebOn("1.0.38-rc.1"), { webUpgrade: true });
+test("9b. prerelease at or above the first web-upgradable release (1.0.46-rc.1), web upgrade on: one-click Upgrade", () => {
+  renderPanel(prereleaseWebOn("1.0.46-rc.1"), { webUpgrade: true });
 
   assert.deepEqual(actionButtons(), [RESTART, UPGRADE]);
   assertNoCommands();
 });
 
 test("9b. a version that is not SemVer still reads as can't check", () => {
-  for (const version of ["1.0.x", "1.0.40-", "01.0.40", "1.0.40-rc.01"]) {
+  for (const version of ["1.0.x", "1.0.48-", "01.0.48", "1.0.48-rc.01"]) {
     cleanup();
     renderPanel(computer({ computerVersion: version, remoteUpgradeSupported: isRemoteUpgradeSupported(version) }));
     assert.equal(
@@ -391,18 +393,18 @@ test("9b. a version that is not SemVer still reads as can't check", () => {
 test("9b. a failed upgrade from a prerelease Computer keeps its failure line with the full version", () => {
   renderPanel(
     computer({
-      computerVersion: "1.0.40-rc.1",
-      remoteUpgradeSupported: isRemoteUpgradeSupported("1.0.40-rc.1"),
+      computerVersion: "1.0.48-rc.1",
+      remoteUpgradeSupported: isRemoteUpgradeSupported("1.0.48-rc.1"),
       computerBroadcastPolicy: policy("eligible", LATEST),
       computerUpgradeAvailable: true,
-      upgradeRequest: request("failed", "1.0.40-rc.1"),
+      upgradeRequest: request("failed", "1.0.48-rc.1"),
     }),
     { webUpgrade: true },
   );
 
   assert.equal(
     within(card()).getByTestId("computer-upgrade-request-outcome").textContent,
-    fmt(en["machine.detail.upgradeStatus.failed"], { version: "1.0.40-rc.1", command: "raft-computer status" }),
+    fmt(en["machine.detail.upgradeStatus.failed"], { version: "1.0.48-rc.1", command: "raft-computer status" }),
   );
 });
 
@@ -423,7 +425,7 @@ test("11. this upgrade failed: Upgrade is clickable again and the failure line n
   assert.deepEqual(actionButtons(), [RESTART, UPGRADE]);
   assert.equal(
     within(card()).getByTestId("computer-upgrade-request-outcome").textContent,
-    fmt(en["machine.detail.upgradeStatus.failed"], { version: "1.0.38", command: "raft-computer status" }),
+    fmt(en["machine.detail.upgradeStatus.failed"], { version: "1.0.46", command: "raft-computer status" }),
   );
   assertNoCommands();
 });
@@ -444,7 +446,7 @@ test("13. stale failure after a manual upgrade: hidden once the machine reached 
   // Behavior first (independent of the new copy keys), so RED on the old
   // panel names the real defect.
   assert.equal(within(card()).queryByTestId("computer-upgrade-request-outcome") === null, true, "stale failure line must be hidden");
-  assert.equal(card().textContent?.includes("1.0.38"), false, "no 'still on v1.0.38' next to v1.0.40");
+  assert.equal(card().textContent?.includes("1.0.46"), false, "no 'still on v1.0.46' next to v1.0.48");
   assert.ok(within(card()).getByText(en["machine.detail.upgradeStatus.upToDate"]));
   assertNoCommands();
 });
@@ -623,7 +625,7 @@ test("18. non-admin, new version: version row + 'ask an admin', no Actions", () 
   );
 
   assert.equal(screen.queryByTestId("computer-service-actions") === null, true);
-  assert.equal(versionRow(), `v1.0.38 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
+  assert.equal(versionRow(), `v1.0.46 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
   assert.ok(screen.getByText(fmt(en["machine.detail.upgradeStatus.askAdmin"], { version: LATEST })));
 });
 
@@ -641,7 +643,7 @@ test("19. restart request fails without a server message: the action is localize
 test("20. offline, admin: version row says a new version exists; offline card unchanged", () => {
   renderPanel(computer({ status: "offline", computerUpgradeAvailable: true, computerBroadcastPolicy: policy("eligible", LATEST) }));
 
-  assert.equal(versionRow(), `v1.0.38 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
+  assert.equal(versionRow(), `v1.0.46 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
   assert.ok(screen.getByTestId("computer-recovery-card"));
   assert.equal(screen.queryByTestId("computer-service-actions") === null, true);
 });
@@ -652,7 +654,7 @@ test("21. offline, non-admin: version row + admin-only line", () => {
     { role: "member" },
   );
 
-  assert.equal(versionRow(), `v1.0.38 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
+  assert.equal(versionRow(), `v1.0.46 · ${fmt(en["machine.detail.versionAvailable"], { version: LATEST })}`);
   assert.ok(screen.getByTestId("computer-recovery-card"));
   assert.equal(screen.queryByText(fmt(en["machine.detail.upgradeStatus.askAdmin"], { version: LATEST })) === null, true);
 });
@@ -668,7 +670,7 @@ test("21. offline, non-admin: version row + admin-only line", () => {
 test("23. zh: card title and delete strings say 计算机, consistent with the rest of the catalog", () => {
   renderPanel(upToDateWebOff(), { locale: "zh-cn" });
 
-  assert.equal(card().querySelector(".text-sm.font-bold")?.textContent, "计算机");
+  assert.equal(card().querySelector(".text-subhead.font-bold")?.textContent, "计算机");
   assert.equal(zh["machine.detail.deleteComputer"], "删除计算机");
   assert.equal(zh["machine.detail.cannotDeleteComputer"], "无法删除计算机");
   assert.ok(screen.getAllByText("删除计算机").length > 0, "delete card title and button");

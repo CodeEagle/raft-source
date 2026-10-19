@@ -4,7 +4,10 @@ import type { Server as SocketServer } from "socket.io";
 import {
   currentDate,
   setClockInterval,
+  type AgentMigrationHostedImportSummary,
+  type AgentMigrationHostedSkipReason,
   type AgentMigrationTransferSummary,
+  EXTERNAL_AGENT_RUNTIME_ID,
 } from "@botiverse/raft-shared";
 import { getDb, type DatabaseExecutor } from "../db/index";
 import {
@@ -203,13 +206,14 @@ function parseWirePathList(encoded: string | null): Array<{ path: string; value:
 
 /**
  * A workspace too big to move is the one failure the agent itself can act on.
- * State only what the source already measured while packing (no extra scan);
- * what to do about it is the agent's call.
+ * State only what the source already measured while packing (no extra scan),
+ * then the next step; which paths to remove is the agent's call.
  */
 export function formatAgentMigrationWorkspaceSizeLines(rawMessage: string | null | undefined): string[] {
   if (!rawMessage) return [];
   let measured: string;
   let largest: string;
+  let largestLabel = "Largest";
   if (rawMessage.startsWith("MIGRATION_OBJECT_STORE_ENTRY_COUNT_LIMIT_EXCEEDED:")) {
     const entryCount = Number(wireValue(rawMessage, "entryCount"));
     const maxEntries = Number(wireValue(rawMessage, "maxEntries"));
@@ -222,7 +226,10 @@ export function formatAgentMigrationWorkspaceSizeLines(rawMessage: string | null
     const actualBytes = Number(wireValue(rawMessage, "actualBytes"));
     const maxBytes = Number(wireValue(rawMessage, "maxBytes"));
     if (!Number.isSafeInteger(actualBytes) || !Number.isSafeInteger(maxBytes) || maxBytes <= 0) return [];
-    measured = `The workspace is ${formatReceiptBytes(actualBytes)}; the limit is ${formatReceiptBytes(maxBytes)}.`;
+    // The source stops packing at the limit, so actualBytes is a lower bound.
+    measured = `The workspace is over the ${formatReceiptBytes(maxBytes)} limit.`;
+    // Path sizes are uncompressed; the limit applies to the compressed bundle.
+    largestLabel = "Largest, before compression";
     largest = parseWirePathList(wireValue(rawMessage, "topEntries"))
       .map((entry) => `${entry.path} (${formatReceiptBytes(entry.value)})`)
       .join(", ");
@@ -230,8 +237,8 @@ export function formatAgentMigrationWorkspaceSizeLines(rawMessage: string | null
     return [];
   }
   return [
-    largest ? `${measured} Largest: ${largest}.` : measured,
-    "Paths listed in .raftmigrateignore are not moved.",
+    largest ? `${measured} ${largestLabel}: ${largest}.` : measured,
+    "To move it, delete what you no longer need or list it in .raftmigrateignore (listed paths are not moved), then ask for the migration to be retried.",
   ];
 }
 
@@ -288,10 +295,11 @@ async function enqueueAgentMigrationReceipt(
   now: Date,
   hooks: AgentMigrationReceiptEnqueueHooks = {},
 ): Promise<typeof messages.$inferSelect> {
+  // A hosted target has no machine name; the receipt text already names it.
   if (
     !migration.receiptChannelId
     || !migration.sourceMachineNameSnapshot
-    || !migration.targetMachineNameSnapshot
+    || (migration.targetKind === "computer" && !migration.targetMachineNameSnapshot)
   ) {
     throw new Error("MIGRATION_RECEIPT_CONTEXT_MISSING");
   }
@@ -371,6 +379,67 @@ async function enqueueAgentMigrationReceipt(
   return message;
 }
 
+// A hosted target has no machine name; receipts name the destination instead.
+const HOSTED_TARGET_RECEIPT_NAME = "the cloud";
+
+/**
+ * The failure reason of a hosted migration undone after the switch because the
+ * provider never created the agent: the agent is back on its Computer, so its
+ * receipt must not say the workspace moved.
+ */
+export const HOSTED_MIGRATION_NOT_CREATED_REASON = "HOSTED_AGENT_NOT_CREATED";
+
+const HOSTED_SKIP_REASON_LABELS: Record<AgentMigrationHostedSkipReason, string> = {
+  symlink: "symbolic links",
+  git: "git data",
+  raft_state: "Raft state files",
+  path_rule: "excluded paths",
+  reserved: "reserved names",
+  file_too_large: "files over the per-file limit",
+  not_text: "non-text files",
+  over_budget: "files past the size budget",
+  provider_rejected: "files the cloud refused (e.g. credential-like)",
+};
+
+export function formatHostedMigrationCompletedReceipt(input: {
+  sourceMachineName: string;
+  supportRef: string;
+  summary: AgentMigrationHostedImportSummary | null;
+  /** The source copy has not been archived yet (cleanup continues in the background). */
+  sourceCleanupPending?: boolean;
+}): string {
+  const { summary } = input;
+  const skipped = summary?.skipped.filter((group) => group.count > 0) ?? [];
+  const skippedLines = skipped.length > 0
+    ? [
+      `Not brought over: ${skipped.map((group) => {
+        const examples = group.largestPaths.length > 0 ? ` (e.g. ${group.largestPaths.slice(0, 3).join(", ")})` : "";
+        return `${group.count} ${HOSTED_SKIP_REASON_LABELS[group.reason]}, ${formatReceiptBytes(group.bytes)}${examples}`;
+      }).join("; ")}.`,
+      `The old workspace is archived on ${input.sourceMachineName} and kept for up to 30 days, so anything missing can be recovered from there.`,
+    ]
+    : [];
+  const cleanupLine = input.sourceCleanupPending
+    ? `The old copy on ${input.sourceMachineName} is still being cleaned up in the background; this does not affect the agent.`
+    : null;
+  return [
+    `Migration completed. Moved from ${input.sourceMachineName} to the cloud; you now run as a cloud agent.`,
+    `Migration support ref: ${input.supportRef}.`,
+    summary
+      ? `Brought over ${summary.importedFileCount} files (${formatReceiptBytes(summary.importedBytes)}).`
+      : "The workspace files were brought over.",
+    ...skippedLines,
+    `Your session context from ${input.sourceMachineName} did not come over; pick up from MEMORY.md and notes/.`,
+    "GitHub needs to be reconnected once for this agent. MCP connections are unchanged.",
+    cleanupLine,
+    "已迁移到云端：会话上下文没有带过来，请从 MEMORY.md 和 notes/ 继续；GitHub 需要重新连接一次。",
+  ].filter((line): line is string => line !== null).join("\n");
+}
+
+function receiptTargetName(migration: typeof agentMigrations.$inferSelect): string {
+  return migration.targetMachineNameSnapshot ?? HOSTED_TARGET_RECEIPT_NAME;
+}
+
 export async function enqueueAgentMigrationCompletedReceipt(
   executor: DatabaseExecutor,
   migration: typeof agentMigrations.$inferSelect,
@@ -378,15 +447,40 @@ export async function enqueueAgentMigrationCompletedReceipt(
   hooks: AgentMigrationReceiptEnqueueHooks = {},
 ): Promise<typeof messages.$inferSelect> {
   if (migration.state !== "completed") throw new Error("MIGRATION_RECEIPT_NOT_COMPLETED");
+  if (migration.targetKind === "hosted") throw new Error("MIGRATION_RECEIPT_HOSTED_NEEDS_SUMMARY");
   return enqueueAgentMigrationReceipt(
     executor,
     migration,
     "completed",
     formatAgentMigrationCompletedReceipt({
       sourceMachineName: migration.sourceMachineNameSnapshot,
-      targetMachineName: migration.targetMachineNameSnapshot,
+      targetMachineName: receiptTargetName(migration),
       supportRef: migration.supportRef,
       summary: migration.transferSummary,
+      sourceCleanupPending: !migration.sourceWorkspaceArchivedAt,
+    }),
+    now,
+    hooks,
+  );
+}
+
+/** The completed receipt of a hosted migration: what came over, what did not, and what to redo. */
+export async function enqueueHostedAgentMigrationCompletedReceipt(
+  executor: DatabaseExecutor,
+  migration: typeof agentMigrations.$inferSelect,
+  summary: AgentMigrationHostedImportSummary | null,
+  now: Date,
+  hooks: AgentMigrationReceiptEnqueueHooks = {},
+): Promise<typeof messages.$inferSelect> {
+  if (migration.state !== "completed" || migration.targetKind !== "hosted") throw new Error("MIGRATION_RECEIPT_NOT_COMPLETED");
+  return enqueueAgentMigrationReceipt(
+    executor,
+    migration,
+    "completed",
+    formatHostedMigrationCompletedReceipt({
+      sourceMachineName: migration.sourceMachineNameSnapshot,
+      supportRef: migration.supportRef,
+      summary,
       sourceCleanupPending: !migration.sourceWorkspaceArchivedAt,
     }),
     now,
@@ -410,7 +504,7 @@ export async function enqueueAgentMigrationCanceledReceipt(
     formatAgentMigrationTerminalReceipt({
       kind: "canceled",
       sourceMachineName: migration.sourceMachineNameSnapshot,
-      targetMachineName: migration.targetMachineNameSnapshot,
+      targetMachineName: receiptTargetName(migration),
       supportRef: migration.supportRef,
       reason: migration.cancelReason,
       needsAttention: Boolean(migration.cancelNeedsAttentionAt),
@@ -434,11 +528,13 @@ export async function enqueueAgentMigrationFailedReceipt(
     formatAgentMigrationTerminalReceipt({
       kind: "failed",
       sourceMachineName: migration.sourceMachineNameSnapshot,
-      targetMachineName: migration.targetMachineNameSnapshot,
+      targetMachineName: receiptTargetName(migration),
       supportRef: migration.supportRef,
       reason: migration.failureReason ?? migration.transportErrorCode,
       detail: migration.transportErrorMessage,
-      flipped: migration.flippedAt !== null,
+      // A hosted switch undone because the provider never created the agent
+      // leaves it on its Computer, as before the switch.
+      flipped: migration.flippedAt !== null && migration.failureReason !== HOSTED_MIGRATION_NOT_CREATED_REASON,
     }),
     now,
     hooks,
@@ -465,7 +561,7 @@ export async function enqueueAgentMigrationAbortedReceipt(
     formatAgentMigrationTerminalReceipt({
       kind: "aborted",
       sourceMachineName: migration.sourceMachineNameSnapshot,
-      targetMachineName: migration.targetMachineNameSnapshot,
+      targetMachineName: receiptTargetName(migration),
       supportRef: migration.supportRef,
       reason: migration.abortReason,
       flipped: migration.flippedAt !== null,
@@ -499,7 +595,7 @@ export async function drainAgentMigrationReceiptOutbox(input: {
   const now = input.now ?? currentDate();
   const staleLockedAt = new Date(now.getTime() - (input.staleLeaseMs ?? DEFAULT_STALE_LEASE_MS));
   const batchSize = input.batchSize ?? DEFAULT_BATCH_SIZE;
-  const scanned = await db.select({ row: agentMigrationReceiptOutbox, machineId: agents.machineId })
+  const scanned = await db.select({ row: agentMigrationReceiptOutbox, machineId: agents.machineId, runtime: agents.runtime })
     .from(agentMigrationReceiptOutbox)
     .leftJoin(agents, eq(agents.id, agentMigrationReceiptOutbox.agentId))
     .where(or(
@@ -524,8 +620,13 @@ export async function drainAgentMigrationReceiptOutbox(input: {
   };
 
   const candidates: Array<typeof agentMigrationReceiptOutbox.$inferSelect> = [];
-  for (const { row, machineId } of scanned) {
-    const status = await statusOf(machineId);
+  // An agent that moved to Raft hosted has no Computer: the provider receives
+  // its messages (and holds them until its workspace import lands).
+  const hostedAgentIds = new Set<string>();
+  for (const { row, machineId, runtime } of scanned) {
+    const hosted = !machineId && runtime === EXTERNAL_AGENT_RUNTIME_ID;
+    if (hosted) hostedAgentIds.add(row.agentId);
+    const status = hosted ? "online" : await statusOf(machineId);
     if (status === "offline") {
       if (row.attemptCount > 0) {
         // Failures while the computer is gone say nothing about delivery once
@@ -590,11 +691,13 @@ export async function drainAgentMigrationReceiptOutbox(input: {
         },
         persistedMessage: message,
         targetAgentIds: [claimed.agentId],
-        awaitAgentDelivery: true,
+        // A daemon acknowledges its queue; the hosted provider is reached by
+        // its own push outbox, so there is no queue receipt to wait for.
+        awaitAgentDelivery: !hostedAgentIds.has(claimed.agentId),
         bypassAgentMute: true,
         agentDeliveryOptions: {
           intrinsic: true,
-          requireQueueReceipt: true,
+          requireQueueReceipt: !hostedAgentIds.has(claimed.agentId),
         },
       });
       await input.afterBroadcast?.(message.id);

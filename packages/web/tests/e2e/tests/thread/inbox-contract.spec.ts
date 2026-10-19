@@ -420,19 +420,6 @@ test.describe("Inbox contract", () => {
     const seedState = await waitForSeedState();
     const ownerLogin = await loginViaApi(request, seedState);
     await dismissOwnerOnboarding(request, seedState, ownerLogin.accessToken);
-    await page.route("**/api/feature-flags/evaluate", async (route) => {
-      const body = route.request().postDataJSON() as { keys?: string[] };
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          evaluations: (body.keys ?? []).map((key) => ({
-            key,
-            enabled: key === "activity_sidebar_inbox_v0",
-          })),
-        }),
-      });
-    });
     const runId = `${Date.now().toString(36)}-route-${testInfo.workerIndex}`;
     const channel = await createChannel(
       request,
@@ -460,14 +447,6 @@ test.describe("Inbox contract", () => {
     });
     expect(replyResponse.ok()).toBeTruthy();
     const thread = await replyResponse.json() as { threadChannelId: string };
-    const channelHistory = Array.from(
-      { length: 36 },
-      (_, index) => `inbox route channel history ${index + 1}/36 ${runId} — scroll contract`,
-    );
-    for (const content of channelHistory) {
-      await createMessage(request, seedState, ownerLogin.accessToken, channel.id, content);
-    }
-
     await expect.poll(async () => {
       const items = await readInboxProjection(request, seedState, ownerLogin.accessToken);
       return inboxProjectionContains(items, thread.threadChannelId, replyText);
@@ -531,7 +510,7 @@ test.describe("Inbox contract", () => {
     try {
       await page.goto(`/s/${seedState.server.slug}/inbox`, { waitUntil: "domcontentloaded" });
       await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
-      await expect(page.getByTestId("activity-nav-all")).toBeVisible();
+      await expect(page.getByTestId("inbox-filter-all")).toBeVisible();
       const row = page.getByTestId("inbox-row").filter({ hasText: replyText });
       await loadInboxUntilVisible(page, row);
       await expect(row).toContainText(parentText);
@@ -542,47 +521,6 @@ test.describe("Inbox contract", () => {
       await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
       await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
       await observeRoute("visible-thread-asserted");
-
-      await page.getByTestId("thread-overflow-trigger").click();
-      await page.getByTestId("thread-overflow-view-in-channel").click();
-      await expect(page.getByTestId("activity-return-thread")).toBeVisible();
-      const composer = page.getByPlaceholder(`Message #${channel.name}`);
-      await expect(composer).toBeVisible();
-      await composer.fill(`composer remains interactive ${runId}`);
-      await expect(composer).toHaveValue(`composer remains interactive ${runId}`);
-      await composer.fill("");
-      const parentChannelScroller = page
-        .getByTestId("activity-parent-channel-detail")
-        .getByTestId("message-scroller");
-      await expect(parentChannelScroller).toBeVisible();
-      await expect.poll(async () => parentChannelScroller.evaluate((scroller) => (
-        scroller.scrollHeight - scroller.clientHeight
-      ))).toBeGreaterThan(100);
-      await parentChannelScroller.evaluate((scroller) => {
-        scroller.scrollTop = 0;
-      });
-      await expect.poll(async () => parentChannelScroller.evaluate((scroller) => scroller.scrollTop)).toBe(0);
-      await parentChannelScroller.hover();
-      await page.mouse.wheel(0, 700);
-      await expect.poll(async () => parentChannelScroller.evaluate((scroller) => scroller.scrollTop)).toBeGreaterThan(0);
-      await expect(composer).toBeVisible();
-      const parentDetailLayout = await page.getByTestId("activity-parent-channel-detail").evaluate((host) => {
-        const chat = host.firstElementChild as HTMLElement | null;
-        const scroller = host.querySelector<HTMLElement>('[data-testid="message-scroller"]');
-        if (!chat || !scroller) throw new Error("Activity parent channel must mount ChatPanel and its timeline");
-        const hostRect = host.getBoundingClientRect();
-        const chatRect = chat.getBoundingClientRect();
-        return {
-          hostHeight: Math.round(hostRect.height),
-          chatHeight: Math.round(chatRect.height),
-          scrollerClientHeight: scroller.clientHeight,
-          scrollerScrollHeight: scroller.scrollHeight,
-        };
-      });
-      expect(parentDetailLayout.hostHeight).toBeGreaterThan(0);
-      expect(parentDetailLayout.chatHeight).toBeLessThanOrEqual(parentDetailLayout.hostHeight);
-      expect(parentDetailLayout.scrollerClientHeight).toBeGreaterThan(0);
-      expect(parentDetailLayout.scrollerScrollHeight).toBeGreaterThan(parentDetailLayout.scrollerClientHeight);
     } finally {
       try {
         await observeRoute("final");

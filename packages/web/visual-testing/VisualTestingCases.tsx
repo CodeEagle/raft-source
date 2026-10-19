@@ -23,7 +23,11 @@ import {
   Textarea,
   TextareaCounter,
   Checkbox,
-} from "raft-ui";
+  CheckboxIndicator,
+  Input,
+  Skeleton,
+  ListRowGroup,
+} from "@botiverse/raft-ui";
 import LoginPage from "../src/components/auth/LoginPage";
 import RegisterPage from "../src/components/auth/RegisterPage";
 import AccountIdentitySetupPage from "../src/components/auth/AccountIdentitySetupPage";
@@ -48,14 +52,13 @@ import MessageSearchPage from "../src/components/search/MessageSearchPage";
 import AttentionDot from "../src/components/ui/AttentionDot";
 import AvatarListRow from "../src/components/ui/AvatarListRow";
 import AvatarSlot from "../src/components/ui/AvatarSlot";
-import CheckMarker from "../src/components/ui/CheckMarker";
 import FormField from "../src/components/ui/FormField";
 import MenuItem from "../src/components/ui/MenuItem";
 import ProgressBar from "../src/components/ui/ProgressBar";
 import SectionHeader from "../src/components/ui/SectionHeader";
 import SectionEyebrow from "../src/components/ui/SectionEyebrow";
-import SelectionPopover from "../src/components/ui/SelectionPopover";
-import Skeleton, { SkeletonRow } from "../src/components/ui/Skeleton";
+import { SelectionPopoverPanel } from "../src/components/ui/SelectionPopover";
+import { SkeletonRow } from "../src/components/ui/Skeleton";
 import SlugInput from "../src/components/ui/SlugInput";
 import StatusDot from "../src/components/ui/StatusDot";
 import SurfaceListItem from "../src/components/ui/SurfaceListItem";
@@ -835,10 +838,9 @@ const SETTINGS_CASES: Record<string, SettingsVisualCase> = {
   "screens.settings.server-danger-modal": { id: "screens.settings.server-danger-modal", tab: "server" },
 };
 
-// Elegant-register cases are addressed as "<base-id>.elegant" so the harness can
-// pair them (react-elegant <-> android-elegant) by id. The suffix selects the
-// elegant theme (see requestedTheme) and is stripped here so the case dispatches
-// to the same base view as its brutal sibling.
+// Cases may still be addressed as "<base-id>.elegant": the capture harness pairs
+// registers by id. The suffix no longer selects anything (the app has one
+// visual family) and is stripped so the case dispatches to its base view.
 const ELEGANT_CASE_SUFFIX = ".elegant";
 
 function requestedRawCaseId(): string {
@@ -853,14 +855,12 @@ function requestedCaseId(): string {
     : raw;
 }
 
-// Root theme for the capture: elegant when the case id carries the .elegant
-// suffix (or an explicit ?theme=elegant); brutal otherwise. Driven at the app
-// root (main.tsx) so a single ThemeProvider owns data-theme — no nested
-// provider whose syncDom effect could race the root's.
-export function requestedTheme(): "brutal" | "elegant" {
+// The capture's mode (`?theme=dark`, light otherwise), applied at the app root
+// (main.tsx) so a single ThemeProvider owns the mode class — no nested provider
+// whose syncDom effect could race the root's.
+export function requestedMode(): "light" | "dark" {
   const params = new URLSearchParams(window.location.search);
-  if (params.get("theme") === "elegant") return "elegant";
-  return requestedRawCaseId().endsWith(ELEGANT_CASE_SUFFIX) ? "elegant" : "brutal";
+  return params.get("theme") === "dark" ? "dark" : "light";
 }
 
 function primeVisualStores(caseConfig: ComposerVisualCase) {
@@ -2236,7 +2236,7 @@ function InviteHumanVisualCaseView({ caseConfig }: { caseConfig: InviteHumanVisu
   }, [caseConfig.guestEnabled]);
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         <InviteHumanDialog onClose={noop} />
       </div>
@@ -2285,8 +2285,8 @@ export default function VisualTestingCases() {
   // Body/viewport-selector cases would otherwise screenshot the composer and
   // publish a plausible-looking but wrong baseline.
   return (
-    <main className="min-h-screen bg-white p-6 font-display text-black">
-      <div data-visual-unknown-case={caseId} className="border-2 border-black p-4 text-sm font-bold">
+    <main className="min-h-screen bg-layer-canvas p-6 font-display text-foreground">
+      <div data-visual-unknown-case={caseId} className="rounded-container border-[1.5px] border-line-strong p-4 text-callout font-bold">
         Unknown visual case id: {caseId}. Register it in VisualTestingCases.tsx before capturing.
       </div>
     </main>
@@ -2297,7 +2297,7 @@ function ComposerVisualCaseView({ caseConfig }: { caseConfig: ComposerVisualCase
   useMemo(() => primeVisualStores(caseConfig), [caseConfig]);
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div
         data-visual-case={caseConfig.visualCaseAttr}
         data-visual-case-id={caseConfig.id}
@@ -2345,7 +2345,7 @@ function AuthVisualCaseView({ caseConfig }: { caseConfig: AuthVisualCase }) {
     });
   }, []);
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         {caseConfig.mode === "register" ? (
           <RegisterPage onSwitchToLogin={noop} />
@@ -2372,7 +2372,7 @@ function AgentDetailVisualCaseView({ caseConfig }: { caseConfig: AgentDetailVisu
   }
   const agent = useAgentStore.getState().agents[0];
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         <AgentDetailPanel agent={agent} onClose={noop} />
       </div>
@@ -2385,7 +2385,7 @@ function MembersHumanDetailRouteVisualCaseView({ caseConfig }: { caseConfig: Age
   if (!ready) return null;
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         <Routes>
           <Route path="/s/:serverSlug/*" element={<MainLayout />} />
@@ -2404,7 +2404,7 @@ function HomeLoadingRouteVisualCaseView({ caseConfig }: { caseConfig: HomeLoadin
   // the full 844px viewport — that keeps the MobileTabBar pinned to the
   // bottom edge exactly like the real App.tsx shell does post-login.
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div
         data-visual-case={caseConfig.id}
         style={{ width: 390, height: 844, overflow: "hidden", display: "flex", flexDirection: "column" }}
@@ -2427,7 +2427,7 @@ function LoginSigningVisualCaseView({ caseConfig }: { caseConfig: LoginSigningVi
   // login screen. The email/password values come from the manifest's fill
   // interactions; loading:true comes from primeLoginSigningStores.
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div
         data-visual-case={caseConfig.id}
         style={{ width: 390, height: 844, overflow: "hidden", display: "flex", flexDirection: "column" }}
@@ -2454,7 +2454,7 @@ function MembersAgentDetailRouteVisualCaseView({ caseConfig }: { caseConfig: Age
   if (!ready) return null;
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         <Routes>
           <Route path="/s/:serverSlug/*" element={<MainLayout />} />
@@ -2467,7 +2467,7 @@ function MembersAgentDetailRouteVisualCaseView({ caseConfig }: { caseConfig: Age
 function CreateAgentVisualCaseView({ caseConfig }: { caseConfig: CreateAgentVisualCase }) {
   useMemo(() => primeCreateAgentStores(caseConfig), [caseConfig]);
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} data-visual-runtime={caseConfig.runtime}>
         {/* `onboardingShell` is not optional in practice. Production never renders
             `onboarding` without it: the real setup gate (ServerSetupProjectionGate)
@@ -2495,7 +2495,7 @@ const PREFILLED_CHANNEL_HUMAN_IDS = ["visual-human-designer"];
 function CreateChannelVisualCaseView({ caseConfig }: { caseConfig: CreateChannelVisualCase }) {
   useMemo(() => primeCreateChannelStores(), []);
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         {/* Values follow the manifest variant prefilled-members: name
             android-artifacts, description "Build reports, screenshots,
@@ -2927,34 +2927,32 @@ const THREAD_MESSAGE_MD_LATEST_RELEASE_FIXTURE: VisualMessageRowFixture = {
 // Narrow (260px) markdown wrap net: the body mirrors the Android shared
 // `md_wrap_slice1` thread fixture byte-for-byte so the diff isolates the
 // inline-box line-wrap bug where a channel/task chip wraps to the next
-// line. Mentions (@artin @Mahua @赵梓淇), channel #raft-mobile-reconcile,
-// and task #787 all chip; PR #791 stays plain (not a known task).
+// line. Synthetic mentions, channel, task, and body content keep this public
+// fixture free of real collaboration metadata.
 const THREAD_MESSAGE_MD_WRAP_SLICE1: Message = {
   id: "msg_md_wrap_slice1_visual",
   channelId: "channel-markdown",
   senderType: "agent",
-  senderId: fxCindy.id,
-  senderName: fxCindy.displayName,
+  senderId: "synthetic-visual-bot",
+  senderName: "Visual Bot",
   content:
-    "@artin **slice-1 已合入 main** —— PR #791 squash → `80e3162da`。\n\n" +
-    "- 重跑那个 flaky job **绿了**（`realtimeReadStatePreservesPartialSummaryAndReconcilesAcceptedRewind` 重跑即过，坐实是 flake 不是我的），Android/OHOS host/OHOS shared 三端 compile+test 全绿、sign-off 过、iOS skip。\n" +
-    "- **披露 merge actor**：走 `gh` 身份 `bytemain`（≠ commit author `HanXin`），squash-merge、删了分支。\n" +
-    "- **AD2 的 mapper 解耦设计点**按你说的转 post-merge follow-up，我留着 observer-routed 方案等他定。\n" +
-    "- 我另外给 @Mahua 报了那个 flaky 测试（#787 的，main 上间歇误挂无关 PR）。\n\n" +
-    "**数据流接线地基这块落了。** 下一步 V2 归一化信封在 #raft-mobile-reconcile 跟 @赵梓淇 对齐字段（他是 canonical DRI）——赵定了形状我就落 mobile V2，然后翻 eligibility 就到你能\"试效果\"那步。",
+    "**Synthetic slice is ready** — this message is generated for visual testing only.\n\n" +
+    "- The synthetic CI job **passed** after a repeat check (`demo-retry-check`), and Android/OHOS host/shared checks are all green.\n" +
+    "- **Synthetic merge record**: an automated test identity completed the sample merge; no production release is involved.\n" +
+    "- Feature flag `demo_sync_v1` **stays off by default**; enabling it records only local demo state and remains invisible to users.\n" +
+    "- The **data-flow sample** stays in the fixture for cross-platform rendering comparison in #demo-visual-testing.\n\n" +
+    "**Sample data is ready.** Next, @DemoUser can compare the synthetic envelope in task #101 and continue the cross-platform check without importing real collaboration content.",
   mentions: [
-    { type: "user", id: fxOwner.id, name: fxOwner.name },
-    { type: "user", id: "human-mahua", name: "Mahua" },
-    { type: "user", id: "human-zhaoziqi", name: "赵梓淇" },
+    { type: "user", id: "synthetic-demo-user", name: "DemoUser" },
   ],
   threadId: "thread-msg-md-wrap-slice1-visual",
   createdAt: "2026-07-13T05:55:00.000Z",
 };
 
 const RECONCILE_FIXTURE_CHANNEL: Channel = {
-  id: "channel-raft-mobile-reconcile",
-  name: "raft-mobile-reconcile",
-  description: "Mobile V2 canonical envelope reconcile",
+  id: "channel-demo-visual-testing",
+  name: "demo-visual-testing",
+  description: "Synthetic visual fixture comparison",
   type: "channel",
   createdAt: "2026-06-18T00:00:00.000Z",
 };
@@ -3130,7 +3128,7 @@ function ThreadForwardModalVisualCaseView({ caseConfig }: { caseConfig: DirectVi
   }, []);
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         <ForwardComposerDialog
           sourceMessages={FORWARD_SOURCE_MESSAGES}
@@ -3160,7 +3158,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-files") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, height: 360, overflow: "hidden" }}>
           <ChannelFilesPanel channel={THREAD_FILES_CHANNEL} />
         </div>
@@ -3170,10 +3168,10 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "external-identity-detail") {
     return (
-      <main className="min-h-screen bg-fill-muted p-6 font-display text-black">
+      <main className="min-h-screen bg-layer-sidebar p-6 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
-          className="flex h-[640px] w-[380px] flex-col overflow-hidden border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black"
+          className="flex h-[640px] w-[380px] flex-col overflow-hidden border border-line-seam bg-layer-canvas"
         >
           <ExternalIdentityDetailPanel
             profile={EXTERNAL_IDENTITY_PROFILE}
@@ -3186,7 +3184,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "saved-results") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 342, height: 620, overflow: "hidden" }}>
           <SavedPanel />
         </div>
@@ -3196,7 +3194,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "activity-results") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 342, height: 620, overflow: "hidden" }}>
           <ThreadsInbox />
         </div>
@@ -3209,8 +3207,8 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
     // content-sized wrapper — fixed heights clipped element crops before
     // (tasks #351/#353). Task rows come from shared tasksFixture.json.
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
-        <div data-visual-case={caseConfig.id} style={{ width: 390, background: "white" }}>
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
+        <div data-visual-case={caseConfig.id} style={{ width: 390, background: "var(--layer-canvas)" }}>
           <TasksPanel />
         </div>
       </main>
@@ -3225,14 +3223,14 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
     // crop — same containment approach as the composer suggestion cases
     // (task #353).
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
             width: 342,
             height: 260,
             boxSizing: "border-box",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3245,7 +3243,6 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             onToggle={noop}
             badgeStatus="in-progress"
             badgeClassName=""
-            uppercase={false}
             dropdownMinWidth="min-w-[140px]"
             dropdownAlign="left"
             dropdownTestId="task-status-menu"
@@ -3257,7 +3254,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "tokens") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 342, height: 620, overflow: "hidden" }}>
           <PaletteAuditPage />
         </div>
@@ -3267,7 +3264,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-segmented-control") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3275,7 +3272,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             minHeight: 96,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3300,7 +3297,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-button") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3308,7 +3305,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 150,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3319,8 +3316,8 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
               <Button size="sm" variant="accent">Delete</Button>
             </div>
             <div className="flex items-center gap-3">
-              <Button size="xs" variant="information">Add</Button>
-              <Button size="md" variant="success">Continue</Button>
+              <Button size="sm" variant="information">Add</Button>
+              <Button size="sm" variant="success">Continue</Button>
               <Button size="sm" variant="muted" disabled>Disabled</Button>
             </div>
           </div>
@@ -3331,7 +3328,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-card") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3339,12 +3336,12 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 190,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div
-            className="card-brutal text-black"
+            className="rounded-container border border-line-hairline bg-layer-card text-foreground"
             style={{ width: 310, boxSizing: "border-box", padding: "14px" }}
           >
             <div className="flex flex-col gap-2">
@@ -3352,7 +3349,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
                 Channel settings
               </div>
               <div
-                className="text-neutral-500 card-register-muted"
+                className="text-foreground-muted"
                 style={{ fontSize: 12, lineHeight: "16px" }}
               >
                 Control who can post and how the channel appears to members.
@@ -3367,7 +3364,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-form-field") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         {/* Fixed 342x296 frame (capture-contract, XiShi run 30837350660): 296px contains all
             three states + bottom padding and matches the Android UI_FORM_FIELD_CROP so both
             registers capture the same comparable extent. The old fixed 274px was too short (it
@@ -3379,19 +3376,19 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 296,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div className="flex flex-col gap-3">
-            <FormField label="Email" labelStyle="plain" required htmlFor="visual-email">
-              <input id="visual-email" className="input-brutal w-full" value="cindy@slock.ai" readOnly />
+            <FormField label="Email" required htmlFor="visual-email">
+              <Input id="visual-email" value="cindy@slock.ai" readOnly />
             </FormField>
             <FormField label="Description" optional hint="Shown in channel discovery.">
-              <input className="input-brutal w-full" value="Visual parity fixture" readOnly />
+              <Input value="Visual parity fixture" readOnly />
             </FormField>
             <FormField label="Server Name" size="compact" error="Name is required">
-              <input className="input-brutal w-full !border-brutal-red ring-2 ring-brutal-red/60" value="" readOnly />
+              <Input data-invalid value="" readOnly />
             </FormField>
           </div>
         </div>
@@ -3401,7 +3398,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-textarea") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         {/* Fixed 342x252 frame (capture-contract, XiShi source-derived H=252dp): the old 240px
             dropped the 2nd textarea's error row on iOS. 252 matches the Android UI_TEXTAREA_CROP
             so both providers + both registers capture the same extent with all rows + padding. */}
@@ -3412,7 +3409,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 252,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3426,7 +3423,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
               aria-describedby="visual-prejoin-error"
             />
             <div className="flex items-start justify-between gap-3">
-              <p id="visual-prejoin-error" role="alert" className="text-xs text-danger theme-brutal:text-brutal-red">
+              <p id="visual-prejoin-error" role="alert" className="text-caption font-semibold text-danger-strong">
                 Agreement body must be shorter.
               </p>
               <TextareaCounter value="This agreement copy is too long for the configured limit." limit={40} />
@@ -3439,7 +3436,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-checkbox") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3447,7 +3444,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 132,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3457,11 +3454,11 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
               <span>As Task selected</span>
             </label>
             <label className="flex items-center gap-2">
-              <Checkbox checked={false} readOnly size="md" />
+              <Checkbox checked={false} readOnly />
               <span>Permission row unchecked</span>
             </label>
             <label className="flex items-center gap-2 opacity-60">
-              <Checkbox checked disabled size="md" />
+              <Checkbox checked disabled />
               <span>Disabled checked</span>
             </label>
           </div>
@@ -3472,7 +3469,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-check-marker") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3480,21 +3477,21 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 112,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div className="flex flex-col gap-3 text-sm font-bold">
             <div className="flex items-center gap-3">
-              <CheckMarker checked size="sm" />
+              <CheckboxIndicator checked />
               <span>Square checked</span>
             </div>
             <div className="flex items-center gap-3">
-              <CheckMarker checked={false} size="md" />
+              <CheckboxIndicator checked={false} />
               <span>Square unchecked</span>
             </div>
             <div className="flex items-center gap-3">
-              <CheckMarker checked shape="circle" size="lg" tone="yellow-fill" />
+              <CheckboxIndicator checked shape="circle" />
               <span>Circle yellow</span>
             </div>
           </div>
@@ -3505,7 +3502,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-attention-dot") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3513,14 +3510,14 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 80,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div className="flex items-center gap-5 text-sm font-bold">
             <span className="flex items-center gap-2"><AttentionDot />Unread</span>
             <span className="flex items-center gap-2"><AttentionDot size="sm" />Compact</span>
-            <span className="flex items-center gap-2"><AttentionDot tone="bg-brutal-orange" />Warning</span>
+            <span className="flex items-center gap-2"><AttentionDot tone="bg-presence-error" />Warning</span>
           </div>
         </div>
       </main>
@@ -3529,7 +3526,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-status-dot") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3537,15 +3534,15 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 92,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div className="flex flex-col gap-3 text-sm font-bold">
             <div className="flex items-center gap-3">
-              <StatusDot tone="bg-brutal-lime" />
-              <StatusDot tone="bg-brutal-orange" size="sm" />
-              <StatusDot tone="bg-gray-400" size="lg" />
+              <StatusDot presence="online" />
+              <StatusDot presence="error" size="sm" />
+              <StatusDot presence="offline" size="lg" />
               <StatusDot external />
             </div>
           </div>
@@ -3556,7 +3553,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-progress-bar") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3564,12 +3561,12 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 124,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div className="flex flex-col gap-4">
-            <ProgressBar value={64} label="Downloading update" showPercent tone="pink" />
+            <ProgressBar value={64} label="Downloading update" showPercent />
             <ProgressBar value={28} label="Verifying package" showPercent tone="cyan" />
           </div>
         </div>
@@ -3579,7 +3576,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-skeleton") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3587,7 +3584,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 150,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3595,7 +3592,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             <SkeletonRow avatar avatarClassName="size-5" className="gap-3" lineWidths={SKELETON_LINE_WIDTHS} />
             <Skeleton variant="block" className="h-12 w-full" />
             <div className="flex items-center gap-3">
-              <Skeleton variant="circle" className="size-8" />
+              <Skeleton variant="block" className="size-8" />
               <Skeleton variant="line" className="w-40" />
             </div>
           </div>
@@ -3606,7 +3603,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-spinner") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3614,7 +3611,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 92,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3634,7 +3631,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-slug-input") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3642,7 +3639,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 122,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3657,7 +3654,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-section-eyebrow") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3665,14 +3662,14 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 92,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div className="flex flex-col gap-3">
             <SectionEyebrow as="div">Recent Activity</SectionEyebrow>
-            <SectionEyebrow as="div" className="!text-black">Applications</SectionEyebrow>
-            <SectionEyebrow as="label" htmlFor="visual-eyebrow-field" className="bg-white/50 px-2 py-1">
+            <SectionEyebrow as="div" tone="ink">Applications</SectionEyebrow>
+            <SectionEyebrow as="label" htmlFor="visual-eyebrow-field" className="bg-fill-muted px-2 py-1">
               Choose Avatar
             </SectionEyebrow>
           </div>
@@ -3683,7 +3680,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-selection-popover") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3691,11 +3688,13 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 252,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
-          <SelectionPopover
+          {/* The bare panel: `SelectionPopover` positions itself and must sit
+              inside a raft-ui <Popover>; this case places the list itself. */}
+          <SelectionPopoverPanel
             title="Channels"
             showClear
             onClear={noop}
@@ -3703,7 +3702,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             search="des"
             onSearchChange={noop}
             searchPlaceholder="Search channels"
-            className="w-full overflow-hidden border-2 border-black bg-white shadow-brutal"
+            className="w-full overflow-hidden rounded-container border border-line-seam bg-layer-popover shadow-float"
             options={SELECTION_POPOVER_OPTIONS}
           />
         </div>
@@ -3713,7 +3712,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-menu-item") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         {/* Content-sized: a fixed height clipped the divider/disabled rows out
             of the element crop (task #351). */}
         <div
@@ -3721,15 +3720,15 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
           style={{
             width: 342,
             boxSizing: "border-box",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
-          <div className="w-full overflow-hidden border-2 border-black bg-white shadow-brutal">
-            <MenuItem trailing={<span className="font-mono text-xs text-black/40">⌘K</span>}>Open Channel</MenuItem>
+          <div className="w-full overflow-hidden rounded-container border border-line-seam bg-layer-popover shadow-float">
+            <MenuItem trailing={<span className="font-mono text-mono-meta text-foreground-hint">⌘K</span>}>Open Channel</MenuItem>
             <MenuItem>Mark as Read</MenuItem>
             <MenuItem disabled>Archive unavailable</MenuItem>
-            <MenuItem className="border-t border-black/10">Delete Message</MenuItem>
+            <MenuItem className="border-t border-line-hairline">Delete Message</MenuItem>
           </div>
         </div>
       </main>
@@ -3738,7 +3737,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-select") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3746,7 +3745,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 194,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3790,7 +3789,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-badge") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3798,7 +3797,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 92,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
@@ -3807,7 +3806,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             <Badge variant="success">Installed</Badge>
             <Badge variant="warning">Update</Badge>
             <Badge variant="muted">Built In</Badge>
-            <Badge variant="danger" uppercase={false}>task #273</Badge>
+            <Badge variant="danger">task #273</Badge>
             <Badge render={<button type="button" />} variant="accent">Install</Badge>
           </div>
         </div>
@@ -3817,7 +3816,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-section-header") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3825,15 +3824,15 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 88,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <SectionHeader
             label="Applications"
             count={3}
-            action={<Button size="xs" variant="outline">Add</Button>}
-            className="border-b-2 border-black pb-2"
+            action={<Button size="sm" variant="outline">Add</Button>}
+            className="border-b border-line-seam pb-2"
           />
         </div>
       </main>
@@ -3842,7 +3841,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-surface-list-item") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3850,18 +3849,18 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 182,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
           <div className="flex flex-col gap-3">
             <SurfaceListItem interactive={false}>
-              <div className="text-sm font-bold text-black">Private app</div>
-              <div className="mt-1 font-mono text-xs text-black/50">Available to this server</div>
+              <div className="text-callout font-bold text-foreground">Private app</div>
+              <div className="mt-1 font-mono text-mono-meta text-foreground-muted">Available to this server</div>
             </SurfaceListItem>
             <SurfaceListItem selected interactive={false}>
-              <div className="text-sm font-bold text-black">Active integration</div>
-              <div className="mt-1 font-mono text-xs text-black/50">Selected list item state</div>
+              <div className="text-callout font-bold text-foreground">Active integration</div>
+              <div className="mt-1 font-mono text-mono-meta text-foreground-muted">Selected list item state</div>
             </SurfaceListItem>
           </div>
         </div>
@@ -3871,7 +3870,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "ui-avatar-list-row") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3879,25 +3878,26 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 168,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "16px",
           }}
         >
-          <div className="flex flex-col gap-3">
+          {/* Product use: AvatarListRow is a raft-ui ListRow inside a ListRowGroup. */}
+          <ListRowGroup>
             <AvatarListRow
-              avatar={<AvatarSlot context="surface-list" type="human" humanPlaceholder />}
+              avatar={<AvatarSlot context="list-row" type="human" humanPlaceholder />}
               name="Cindy"
               subtitle="Claude Code"
               rightContent={<Badge variant="success">Online</Badge>}
             />
             <AvatarListRow
-              avatar={<AvatarSlot context="surface-list" type="human" humanPlaceholder />}
+              avatar={<AvatarSlot context="list-row" type="human" humanPlaceholder />}
               name="Product UX Designer"
               subtitle="product@slock.ai"
-              rightContent={<Button size="xs" variant="outline">Open</Button>}
+              rightContent={<Button size="sm" variant="outline">Open</Button>}
               selected
             />
-          </div>
+          </ListRowGroup>
         </div>
       </main>
     );
@@ -3905,7 +3905,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "notification-center") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div
           data-visual-case={caseConfig.id}
           style={{
@@ -3913,7 +3913,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
             height: 844,
             boxSizing: "border-box",
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             padding: "48px 16px 0",
           }}
         >
@@ -3924,7 +3924,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message") {
     return (
-      <main className="min-h-screen bg-white p-4 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-4 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_FIXTURE} />
         </div>
@@ -3934,7 +3934,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-deleted-human") {
     return (
-      <main className="min-h-screen bg-white p-4 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-4 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_DELETED_HUMAN_FIXTURE} />
         </div>
@@ -3945,7 +3945,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
   if (caseConfig.kind === "thread-message-menu") {
     const fixture = caseConfig.id.endsWith(".task") ? THREAD_MESSAGE_MENU_TASK_FIXTURE : THREAD_MESSAGE_MENU_FIXTURE;
     return (
-      <main className="min-h-screen bg-white p-4 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-4 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, height: 420, overflow: "hidden" }}>
           <VisualMessageRow fixture={fixture} />
         </div>
@@ -3959,7 +3959,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-rich") {
     return (
-      <main className="min-h-screen bg-white p-4 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-4 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 342, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_RICH_FIXTURE} />
         </div>
@@ -3969,7 +3969,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-long-inline-code") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         {/* 390px matches the Android capture, which crops the full 390dp screen
             width — at 342 the Android row's right edge was cut and every wrap
             point shifted (task #400 width alignment). p-0 (not the usual p-4)
@@ -3983,7 +3983,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-md-link-ref") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         {/* 390px matches the Android capture crop (full 390dp screen width),
             same width contract as the long-inline-code case (task #400). */}
         <div data-visual-case={caseConfig.id} style={{ width: 390, overflow: "hidden" }}>
@@ -3995,7 +3995,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-md-latest-release") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_MD_LATEST_RELEASE_FIXTURE} />
         </div>
@@ -4005,7 +4005,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-md-wrap-slice1") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         {/* 260px narrow column (viewport width 260) forces a channel/task chip
             to wrap to the next line — the whole point of this case. overflow
             hidden so the column matches the Android 260dp fixture crop. */}
@@ -4018,7 +4018,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-md-wrap-clarify") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 260, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_MD_WRAP_CLARIFY_FIXTURE} />
         </div>
@@ -4028,7 +4028,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-md-wrap-adjacent") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_MD_WRAP_ADJACENT_FIXTURE} />
         </div>
@@ -4038,7 +4038,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-md-wrap-status606") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_MD_WRAP_STATUS606_FIXTURE} />
         </div>
@@ -4048,7 +4048,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "thread-message-md-wrap-task607") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 260, overflow: "hidden" }}>
           <VisualMessageRow fixture={THREAD_MESSAGE_MD_WRAP_TASK607_FIXTURE} />
         </div>
@@ -4069,7 +4069,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
     // (the #566 regression). Comment data comes from the spec's
     // /attachments/att-anchor-1/comments stub.
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
           <AttachmentCommentsPanel
             attachmentId="att-anchor-1"
@@ -4084,7 +4084,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "channel-settings") {
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
         <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
           <EditChannelDialog
             channelId="channel-design"
@@ -4099,7 +4099,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
 
   if (caseConfig.kind === "channel-members") {
     return (
-      <main className="min-h-screen bg-white p-4 font-display text-black">
+      <main className="min-h-screen bg-layer-canvas p-4 font-display text-foreground">
         <div data-visual-case={caseConfig.id}>
           <ChannelMembers channelId="channel-design" />
         </div>
@@ -4108,7 +4108,7 @@ function DirectVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCase }) 
   }
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         <MessageSearchPage />
       </div>
@@ -4155,7 +4155,7 @@ function ThreadMessageShareSelectionVisualCaseView({ caseConfig }: { caseConfig:
   const channels = useChannelStore.getState().channels;
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div
         data-visual-case={caseConfig.id}
         style={{
@@ -4164,7 +4164,7 @@ function ThreadMessageShareSelectionVisualCaseView({ caseConfig }: { caseConfig:
           overflow: "hidden",
           display: "flex",
           flexDirection: "column",
-          background: "white",
+          background: "var(--layer-canvas)",
         }}
       >
         <div style={{ flex: "1 1 auto", overflow: "hidden", padding: "16px 16px 0" }}>
@@ -4201,8 +4201,8 @@ function NavigationTabbarVisualCaseView({ caseConfig }: { caseConfig: DirectVisu
   // 390x844 shell anchored React's bar at the bottom while Android captured
   // a top-anchored strip, so diffs compared empty space (task #351).
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
-      <div data-visual-case={caseConfig.id} style={{ width: 390, background: "white" }}>
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
+      <div data-visual-case={caseConfig.id} style={{ width: 390, background: "var(--layer-canvas)" }}>
         <MobileTabBar />
       </div>
     </main>
@@ -4215,14 +4215,14 @@ function HomeTitlebarVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCa
   if (!ready) return null;
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div
         data-visual-case={caseConfig.id}
         style={{
           width: 390,
           height: 844,
           overflow: "hidden",
-          background: "white",
+          background: "var(--layer-canvas)",
         }}
       >
         <div
@@ -4230,7 +4230,7 @@ function HomeTitlebarVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCa
             width: 342,
             height: 110,
             overflow: "hidden",
-            background: "white",
+            background: "var(--layer-canvas)",
             boxSizing: "border-box",
             paddingTop: 48,
           }}
@@ -4254,10 +4254,10 @@ function ThreadHeaderVisualCaseView({ caseConfig }: { caseConfig: DirectVisualCa
   // tab strip. The previous unconstrained wrapper captured the full-screen
   // panel, so React and Android compared whole screens (task #351).
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div
         data-visual-case={caseConfig.id}
-        style={{ width: 390, height: 120, overflow: "hidden", background: "white" }}
+        style={{ width: 390, height: 120, overflow: "hidden", background: "var(--layer-canvas)" }}
       >
         <ChatPanel
           channel={channel}
@@ -4276,8 +4276,8 @@ function SettingsVisualCaseView({ caseConfig }: { caseConfig: SettingsVisualCase
     if (!rootReady) return null;
 
     return (
-      <main className="min-h-screen bg-white p-0 font-display text-black">
-        <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden", background: "white" }}>
+      <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
+        <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden", background: "var(--layer-canvas)" }}>
           <Sidebar mobileInline />
         </div>
       </main>
@@ -4300,12 +4300,12 @@ function SettingsVisualCaseView({ caseConfig }: { caseConfig: SettingsVisualCase
   // to content height and the whole route is captured.
   if (caseConfig.fullHeight) {
     return (
-      <main className="bg-white p-0 font-display text-black">
+      <main className="bg-layer-canvas p-0 font-display text-foreground">
         <style>{`html, body { height: auto !important; overflow: visible !important; } #root { position: static !important; height: auto !important; overflow: visible !important; display: block !important; }`}</style>
         <div data-visual-case={caseConfig.id} style={{ width: 390 }}>
           {/* Same content chrome SettingsPanel wraps tab content with, minus
               the flex-1/overflow-y-auto clamp so it grows to content height. */}
-          <div className="bg-white px-5 py-4">
+          <div className="bg-layer-canvas px-5 py-4">
             <IntegrationsSection />
           </div>
         </div>
@@ -4314,7 +4314,7 @@ function SettingsVisualCaseView({ caseConfig }: { caseConfig: SettingsVisualCase
   }
 
   return (
-    <main className="min-h-screen bg-white p-0 font-display text-black">
+    <main className="min-h-screen bg-layer-canvas p-0 font-display text-foreground">
       <div data-visual-case={caseConfig.id} style={{ width: 390, height: 844, overflow: "hidden" }}>
         <SettingsPanel
           tab={caseConfig.tab}

@@ -81,9 +81,9 @@ test("invalid/expired token surfaces an error and does not clear the session", a
   fireEvent.change(confirmPassword, { target: { value: "brand-new-pass-123" } });
   fireEvent.submit(container.querySelector("form")!);
 
-  // The error banner is `<Banner … className="mb-4 font-bold">{error}</Banner>`.
+  // The error is the raft-ui Banner (`data-slot="banner"`) above the form.
   await waitFor(() => {
-    const banner = container.querySelector(".mb-4.font-bold");
+    const banner = container.querySelector('[data-slot="banner"]');
     assert.ok(banner && banner.textContent && banner.textContent.trim().length > 0, "a failure must surface an error banner");
   });
   assert.equal(useAuthStore.getState().user, userA, "a failed reset must not disturb the session");

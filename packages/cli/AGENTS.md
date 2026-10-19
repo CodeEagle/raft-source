@@ -74,6 +74,8 @@ The system prompt carries only a short command list with one-line descriptions. 
 
 CLI commands should use the shared client in `src/client.ts` (it selects the transport from `AgentContext.clientMode`) and helpers from `@botiverse/raft-shared` rather than hand-rolling `/internal/*` requests per command.
 
+Import shared values from `@botiverse/raft-shared/src/agentCliSurface` (add a re-export there from the defining module when you need a new one); only `import type` may use the root `@botiverse/raft-shared`. The root index loads ~80 modules the CLI never uses, and every `raft` call parses whatever the bundle contains. `src/sharedImports.test.ts` enforces this.
+
 ## v0 Boundary
 
 **In scope**: the MCP-parity command families (message, task, channel, reminder, mention, inbox), agent self-service commands (`channel join/leave/create/mute`, `thread unfollow`, `agent list/login`), and the extended surfaces (integration, knowledge, action, attachment, profile, server, app). The authoritative command list is the registry in `src/main.ts`.

@@ -130,7 +130,7 @@ test("mobile Computers list renders one full-state row dot with its target versi
   const row = container.querySelector(`[data-testid="computer-list-item-${machine.id}"]`);
   assert.ok(row);
   assert.equal(row.querySelectorAll('[data-testid^="computer-status-dot-"]').length, 1);
-  assert.match(row.querySelector<HTMLElement>(`[data-testid="computer-status-dot-${machine.id}"]`)?.className ?? "", /bg-brutal-pink/);
+  assert.match(row.querySelector<HTMLElement>(`[data-testid="computer-status-dot-${machine.id}"]`)?.className ?? "", /(?:^|\s)bg-attention(?:\s|$)/);
   assert.match(row.textContent ?? "", /→ v0\.0\.50/);
   await React.act(async () => root.unmount());
   container.remove();
@@ -295,7 +295,8 @@ test("ComputerRow keeps exactly one icon dot across managed and legacy status co
 
   const normal = await renderRow(baseComputer.id);
   const normalDot = normal.container.querySelector(`[data-testid="computer-status-dot-${baseComputer.id}"]`);
-  assert.ok(normalDot?.className.includes("bg-brutal-lime"));
+  // A presence light is raft-ui Status `presence` (its own data-presence).
+  assert.equal(normalDot?.getAttribute("data-presence"), "online");
   assert.equal(normalDot?.getAttribute("title"), null);
   assert.ok(normalDot?.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.equal(normal.container.querySelectorAll('[data-testid^="computer-status-dot-"]').length, 1);
@@ -304,7 +305,7 @@ test("ComputerRow keeps exactly one icon dot across managed and legacy status co
 
   const upgrade = await renderRow(upgradeComputer.id);
   const upgradeDot = upgrade.container.querySelector(`[data-testid="computer-status-dot-${upgradeComputer.id}"]`);
-  assert.ok(upgradeDot?.className.includes("bg-brutal-pink"));
+  assert.ok(upgradeDot?.className.split(/\s+/).includes("bg-attention"));
   assert.equal(upgradeDot?.getAttribute("title"), null);
   assert.ok(upgradeDot?.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.equal(upgrade.container.querySelectorAll('[data-testid^="computer-status-dot-"]').length, 1);
@@ -313,7 +314,8 @@ test("ComputerRow keeps exactly one icon dot across managed and legacy status co
 
   const offline = await renderRow(offlineComputer.id);
   const offlineDot = offline.container.querySelector(`[data-testid="computer-status-dot-${offlineComputer.id}"]`);
-  assert.ok(offlineDot?.className.includes("bg-gray-400"));
+  // A presence light is raft-ui Status `presence` (its own data-presence).
+  assert.equal(offlineDot?.getAttribute("data-presence"), "offline");
   assert.equal(offlineDot?.getAttribute("title"), null);
   assert.ok(offlineDot?.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.equal(offline.container.querySelectorAll('[data-testid^="computer-status-dot-"]').length, 1);
@@ -322,7 +324,7 @@ test("ComputerRow keeps exactly one icon dot across managed and legacy status co
 
   const offlineUpgrade = await renderRow(offlineUpgradeComputer.id);
   const offlineUpgradeDot = offlineUpgrade.container.querySelector(`[data-testid="computer-status-dot-${offlineUpgradeComputer.id}"]`);
-  assert.ok(offlineUpgradeDot?.className.includes("bg-brutal-pink"));
+  assert.ok(offlineUpgradeDot?.className.split(/\s+/).includes("bg-attention"));
   assert.equal(offlineUpgradeDot?.getAttribute("title"), null);
   assert.ok(offlineUpgradeDot?.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.match(offlineUpgrade.container.textContent ?? "", /computer offline/);
@@ -332,14 +334,16 @@ test("ComputerRow keeps exactly one icon dot across managed and legacy status co
 
   const legacyOnlineRow = await renderRow(legacyOnline.id);
   const legacyOnlineDot = legacyOnlineRow.container.querySelector(`[data-testid="computer-status-dot-${legacyOnline.id}"]`);
-  assert.ok(legacyOnlineDot?.className.includes("bg-brutal-lime"));
+  // A presence light is raft-ui Status `presence` (its own data-presence).
+  assert.equal(legacyOnlineDot?.getAttribute("data-presence"), "online");
   assert.equal(legacyOnlineRow.container.querySelectorAll('[data-testid^="computer-status-dot-"]').length, 1);
   await React.act(async () => legacyOnlineRow.root.unmount());
   legacyOnlineRow.container.remove();
 
   const legacyOfflineRow = await renderRow(legacyOffline.id);
   const legacyOfflineDot = legacyOfflineRow.container.querySelector(`[data-testid="computer-status-dot-${legacyOffline.id}"]`);
-  assert.ok(legacyOfflineDot?.className.includes("bg-gray-400"));
+  // A presence light is raft-ui Status `presence` (its own data-presence).
+  assert.equal(legacyOfflineDot?.getAttribute("data-presence"), "offline");
   assert.equal(legacyOfflineRow.container.querySelectorAll('[data-testid^="computer-status-dot-"]').length, 1);
   await React.act(async () => legacyOfflineRow.root.unmount());
   legacyOfflineRow.container.remove();

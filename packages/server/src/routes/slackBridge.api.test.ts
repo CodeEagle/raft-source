@@ -392,6 +392,7 @@ function provisioningResponse(stage: SlackBridgeSetupStage): SlackBridgeProvisio
         bindings: [],
         audiences: [],
         lastVerifiedAt: null,
+        agentMentionSync: null,
         failingSurface: stage === "connect" ? "install" : null,
       },
     },

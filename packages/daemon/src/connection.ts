@@ -14,6 +14,7 @@ import {
   type TraceContext,
   type TraceStatus,
   type Tracer,
+  RAFT_SERVER_CAPABILITIES_HEADER,
 } from "@botiverse/raft-shared";
 import { logger } from "./logger";
 import { buildWebSocketOptions } from "./proxy";
@@ -49,6 +50,14 @@ export interface WebSocketLike {
   on(event: "close", listener: (code: number, reasonBuffer: Buffer) => void): unknown;
   on(event: "error", listener: (err: Error) => void): unknown;
   on(event: "unexpected-response", listener: (request: ClientRequest, response: IncomingMessage) => void): unknown;
+  /** task #1268: the 101 response, emitted by `ws` before `open`; carries `RAFT_SERVER_CAPABILITIES_HEADER`. */
+  on(event: "upgrade", listener: (response: IncomingMessage) => void): unknown;
+}
+
+/** task #1268: parse the space/comma-separated capability header value(s); unknown shapes yield []. */
+export function parseServerCapabilitiesHeader(value: string | string[] | undefined): string[] {
+  const raw = Array.isArray(value) ? value.join(" ") : value ?? "";
+  return [...new Set(raw.split(/[\s,]+/).map((token) => token.trim()).filter(Boolean))];
 }
 
 export const systemClock: Clock = {
@@ -118,6 +127,21 @@ function normalizeHandshakeReason(value: string | string[] | undefined): string 
   return trimmed;
 }
 
+// CloudFront names the edge location (PoP) that served a request, e.g.
+// `NRT57-P7`. Fleet-wide 1006 waves are suspected to follow particular PoPs,
+// so connect and disconnect traces carry it. Absent (direct or local
+// connection) -> null; anything that is not a short PoP code -> invalid_header.
+const CLOUDFRONT_POP_HEADER = "x-amz-cf-pop";
+
+function normalizeCfPopHeader(value: string | string[] | undefined): string | null {
+  const raw = Array.isArray(value) ? value[0] : value;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  if (!/^[a-z0-9-]{1,32}$/i.test(trimmed)) return "invalid_header";
+  return trimmed;
+}
+
 function durationMsBucket(ms: number | null | undefined): string {
   if (ms == null || !Number.isFinite(ms) || ms < 0) return "unknown";
   if (ms === 0) return "0";
@@ -179,6 +203,16 @@ function sequenceOf(msg: MachineToServerMessage): number {
 }
 
 export class DaemonConnection {
+  /** task #1268: server capabilities read from the current connection's 101 response header. */
+  private handshakeServerCapabilitiesValue: string[] = [];
+  get handshakeServerCapabilities(): readonly string[] {
+    return this.handshakeServerCapabilitiesValue;
+  }
+  /** CloudFront PoP from the current connection's handshake response; null when absent. */
+  private cfPopValue: string | null = null;
+  get cfPop(): string | null {
+    return this.cfPopValue;
+  }
   private ws: WebSocketLike | null = null;
   private options: ConnectionOptions;
   private readonly clock: Clock;
@@ -373,7 +407,16 @@ export class DaemonConnection {
 
     const ws: WebSocketLike = this.options.wsFactory ? this.options.wsFactory(wsUrl, wsOptions) : new WebSocket(wsUrl, wsOptions);
     this.ws = ws;
+    // task #1268: capabilities are per connection; a previous connection's header
+    // must never describe this one.
+    this.handshakeServerCapabilitiesValue = [];
+    this.cfPopValue = null;
     let handshakeRejected = false;
+    ws.on("upgrade", (response) => {
+      if (this.ws !== ws) return;
+      this.handshakeServerCapabilitiesValue = parseServerCapabilitiesHeader(response.headers[RAFT_SERVER_CAPABILITIES_HEADER]);
+      this.cfPopValue = normalizeCfPopHeader(response.headers[CLOUDFRONT_POP_HEADER]);
+    });
     this.armConnectTimeout(ws, connectStartedAt, connectAttempt);
 
     ws.on("open", () => {
@@ -384,7 +427,7 @@ export class DaemonConnection {
         return;
       }
       this.clearConnectTimeout();
-      logger.info("[Daemon] Connected to server");
+      logger.info(`[Daemon] Connected to server${this.cfPopLogField()}`);
       this.reconnectAttempt = 0;
       // Reset backoff
       this.reconnectDelay = this.options.minReconnectDelayMs ?? 1000;
@@ -392,6 +435,7 @@ export class DaemonConnection {
       this.resetWatchdog();
       connectAttempt.end("ok", {
         outcome: "connected",
+        cf_pop: this.cfPopValue,
         inbound_watchdog_ms: this.options.inboundWatchdogMs ?? INBOUND_WATCHDOG_MS,
       });
       this.flushPendingSessionInvalidations(ws);
@@ -443,7 +487,7 @@ export class DaemonConnection {
       this.clearWatchdog();
       const reason = reasonBuffer.toString("utf8");
       logger.warn(
-        `[Daemon] Disconnected from server (code=${code}, reason=${JSON.stringify(reason)}, reconnecting=${this.shouldConnect})`,
+        `[Daemon] Disconnected from server (code=${code}, reason=${JSON.stringify(reason)}, reconnecting=${this.shouldConnect}${this.cfPopLogField()})`,
       );
       this.trace("daemon.connection.disconnected", {
         close_code: code,
@@ -452,6 +496,7 @@ export class DaemonConnection {
         reconnect_attempt: this.reconnectAttempt,
         last_inbound_message_kind: this.lastInboundMessageKind,
         last_inbound_age_ms_bucket: this.lastInboundAgeBucket(),
+        cf_pop: this.cfPopValue,
       }, this.shouldConnect ? "cancelled" : "ok");
       if (code === MACHINE_DUPLICATE_CONNECTION_CLOSE_CODE) this.noteDuplicateMachineClose(reason);
       this.options.onDisconnect();
@@ -465,11 +510,13 @@ export class DaemonConnection {
       const reason = normalizeHandshakeReason(response.headers["slock-reason"]);
       const statusCode = response.statusCode ?? 0;
       const reasonText = reason ? `, slock_reason=${reason}` : "";
-      logger.error(`[Daemon] WebSocket handshake rejected (status=${statusCode}${reasonText})`);
+      this.cfPopValue = normalizeCfPopHeader(response.headers[CLOUDFRONT_POP_HEADER]);
+      logger.error(`[Daemon] WebSocket handshake rejected (status=${statusCode}${reasonText}${this.cfPopLogField()})`);
       this.trace("daemon.connection.handshake_rejected", {
         status_code: statusCode,
         slock_reason_present: Boolean(reason),
         slock_reason: reason,
+        cf_pop: this.cfPopValue,
       }, "error", connectAttempt.context);
       connectAttempt.end("error", { outcome: "handshake_rejected", status_code: statusCode });
       if (isTerminalMigratedKeyRejection(statusCode, reason)) {
@@ -501,6 +548,7 @@ export class DaemonConnection {
       logger.error(`[Daemon] WebSocket error: ${err.message}`);
       this.trace("daemon.connection.error", {
         error_class: err.name || "Error",
+        cf_pop: this.cfPopValue,
       }, "error", connectAttempt.isOpen ? connectAttempt.context : null);
       connectAttempt.end("error", { outcome: "error", error_class: err.name || "Error" });
       // 'close' will fire after this
@@ -613,6 +661,7 @@ export class DaemonConnection {
           last_inbound_age_ms_bucket: this.lastInboundAgeBucket(),
           ws_ready_state: this.ws.readyState,
           reconnecting: this.shouldConnect,
+          cf_pop: this.cfPopValue,
         });
         try {
           this.ws.send(JSON.stringify({ type: "ping" } satisfies MachineToServerMessage));
@@ -630,7 +679,7 @@ export class DaemonConnection {
         return;
       }
 
-      logger.warn(`[Daemon] No inbound traffic after liveness probe — forcing reconnect`);
+      logger.warn(`[Daemon] No inbound traffic after liveness probe — forcing reconnect${this.cfPopLogField()}`);
       this.trace("daemon.connection.watchdog_timeout", {
         inbound_watchdog_ms: ms,
         probe_in_flight: this.inboundProbeInFlight,
@@ -638,6 +687,7 @@ export class DaemonConnection {
         last_inbound_age_ms_bucket: this.lastInboundAgeBucket(),
         ws_ready_state: this.ws?.readyState ?? null,
         reconnecting: this.shouldConnect,
+        cf_pop: this.cfPopValue,
       }, "error");
       try { this.ws?.terminate(); } catch { /* ignore */ }
       // The close event will fire and scheduleReconnect() will run.
@@ -824,6 +874,11 @@ export class DaemonConnection {
       probe_id_present: Boolean(msg.probeId),
       send_path: sendPath,
     });
+  }
+
+  /** Log suffix naming the CloudFront PoP; empty when the connection has none. */
+  private cfPopLogField(): string {
+    return this.cfPopValue ? `, cf_pop=${this.cfPopValue}` : "";
   }
 
   private lastInboundAgeBucket(): string {

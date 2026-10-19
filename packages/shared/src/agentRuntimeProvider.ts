@@ -62,6 +62,18 @@ export interface AgentHostedRuntimeSummary {
   attemptCount: number;
   nextAttemptAt: string | null;
   activatedAt: string | null;
+  /**
+   * The provider refused the picked model (`unknown_model` / `model_locked`):
+   * a retry must name the model again (`POST .../hosted-runtime/retry {model}`).
+   */
+  retryNeedsModel: boolean;
+  /**
+   * Workspace import after create (hosted Cindy's seed, a migrated
+   * workspace); null when the agent has none. `failed` waits for a manual
+   * retry, which re-imports without creating the agent again. Optional for
+   * older servers.
+   */
+  import?: { state: "pending" | "done" | "failed"; error: AgentRuntimeProvisionError | null } | null;
 }
 
 /** One model a hosted-runtime provider offers (its `USER_MODELS`): what to show and the id to store. */
@@ -70,6 +82,29 @@ export interface HostedAgentModelOption {
   label: string;
   provider: string;
 }
+
+/**
+ * `GET /api/agent-runtime-providers/:kind/models`: the models a new hosted
+ * agent on this server can start on (the provider's `GET /provision/models`).
+ * `default` is the deployment's default, what an agent that picked nothing
+ * runs on. While `locked`, an administrator decides the model: a create or
+ * retry must not name one.
+ */
+export interface HostedRuntimeModelsView {
+  models: HostedAgentModelOption[];
+  default: string | null;
+  defaultLabel: string | null;
+  locked: boolean;
+  /**
+   * Whether this server may pick a model (`antiproton_model_picker`). When
+   * false, Raft decides (`HOSTED_DEFAULT_MODEL`) and clients show no picker.
+   * Absent from older servers: treat as true.
+   */
+  picker?: boolean;
+}
+
+/** The model every hosted agent starts on where the server may not pick one. */
+export const HOSTED_DEFAULT_MODEL = "deepseek-flash";
 
 /**
  * `GET|PUT /api/agents/:id/hosted-runtime/model`: the models the provider
@@ -86,6 +121,41 @@ export interface HostedAgentModelView {
   label: string | null;
   source: "default" | "chosen" | "admin";
   locked: boolean;
+  /** Whether this server may pick a model (`antiproton_model_picker`); absent from older servers: true. */
+  picker?: boolean;
+}
+
+/**
+ * A server's spend on its hosted runtime provider, as the provider reports it
+ * (`GET /api/billing/hosted-runtime-usage`, antiproton `GET /provision/usage`).
+ * Estimated and display-only: Raft stores no copy and nothing bills from it.
+ * `today` is the reading the provider enforces its daily limit with; `refusing`
+ * means a model call would be refused now (the server's limit or the
+ * platform's). `limitUsd: null` = exempt or no server limit. Days are UTC.
+ */
+export interface HostedRuntimeSpendView {
+  currency: string;
+  estimated: boolean;
+  today: {
+    day: string;
+    spentUsd: number;
+    limitUsd: number | null;
+    exempt: boolean;
+    platformLimitReached: boolean;
+    refusing: boolean;
+    resetsAt: string;
+  };
+  from: string;
+  to: string;
+  bucket: "day" | "month";
+  totalUsd: number;
+  /** Only periods with usage, newest first. `unpriced` lists usage not counted in `totalUsd`. */
+  periods: Array<{ start: string; totalUsd: number; unpriced: string[] }>;
+  /**
+   * By spend, largest first. `agentId` is the Raft agent; `null` gathers spend
+   * of agents Raft no longer has (deleted), as one entry.
+   */
+  agents: Array<{ agentId: string | null; name: string | null; totalUsd: number }>;
 }
 
 /**

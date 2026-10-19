@@ -1,4 +1,5 @@
-import { formatDmPeerRef, isDmPeerKind, parseDmPeerRef, type DmPeerKind } from "@botiverse/raft-shared";
+import type { DmPeerKind } from "@botiverse/raft-shared";
+import { formatDmPeerRef, isDmPeerKind, parseDmPeerRef } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { CliError } from "../core/errors";
 

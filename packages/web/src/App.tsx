@@ -1,7 +1,7 @@
-import { Button, Card } from "raft-ui";
+import { Button, Card } from "@botiverse/raft-ui";
 import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { usePreviewApiTarget } from "./hooks/usePreviewApiTarget";
-import { Routes, Route, Navigate, useParams, useNavigate, useLocation } from "react-router-dom";
+import { Routes, Route, Navigate, useParams, useNavigate, useLocation, matchPath } from "react-router-dom";
 import { useAuthStore } from "./store/authStore";
 import { useIntl } from "react-intl";
 import { useLocale } from "./i18n/LocaleProvider";
@@ -27,6 +27,7 @@ import api from "./api/client";
 import PaletteAuditPage from "./pages/PaletteAuditPage";
 import AccountBootstrapPreviewPage from "./pages/AccountBootstrapPreviewPage";
 import ServerSetupComputerRuntimePreviewPage from "./pages/ServerSetupComputerRuntimePreviewPage";
+import DisplayStylePreviewPage from "./pages/DisplayStylePreviewPage";
 import ServerSetupProjectionGate from "./components/onboarding/ServerSetupProjectionGate";
 import LoginPage from "./components/auth/LoginPage";
 import RegisterPage from "./components/auth/RegisterPage";
@@ -110,6 +111,7 @@ function getUrlParams() {
   const joinMatch = window.location.pathname.match(/^\/join\/([^/?#]+)/);
   return {
     authCallback: params.get("auth_callback"),
+    appLoginHandoff: !!matchPath("/login/app", window.location.pathname),
     verifyToken: params.get("verify"),
     resetToken: params.get("reset"),
     inviteToken: params.get("invite") || joinMatch?.[1] || null,
@@ -150,6 +152,8 @@ function openServerPicker() {
 }
 
 function EnvironmentDevOverlay() {
+  const { pathname } = useLocation();
+  const isRaftBench = !!matchPath("/s/:serverSlug/raftbench", pathname);
   const previewApiTarget = usePreviewApiTarget(deploymentEnv === "web-preview");
   const [open, setOpen] = useState(false);
   const [hidden, setHidden] = useState(false);
@@ -199,12 +203,12 @@ function EnvironmentDevOverlay() {
           size="icon-sm"
           aria-hidden="true"
           data-dev-overlay-handle
-          className="flex size-6 touch-none select-none items-center justify-center border border-line-strong text-sm leading-none shadow-raft-sm theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm cursor-grab active:cursor-grabbing"
+          className="flex size-6 touch-none select-none items-center justify-center text-sm leading-none cursor-grab active:cursor-grabbing"
         >
           <Settings2 size={12} strokeWidth={2.5} />
         </Button>
       )}
-      className="fixed z-40 w-max max-w-[calc(100vw-1rem)] font-display"
+      className={`fixed z-40 w-max max-w-[calc(100vw-1rem)] font-display${isRaftBench ? " max-md:hidden" : ""}`}
       title={triggerTitle}
       testId="raftdev-debug-overlay"
     >
@@ -215,7 +219,7 @@ function EnvironmentDevOverlay() {
         data-dev-overlay-handle
         onClick={isSlockdev ? togglePanel : undefined}
         aria-label={triggerTitle}
-        className={`size-7 touch-none select-none border border-line-strong shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm cursor-grab active:cursor-grabbing`}
+        className="size-7 touch-none select-none cursor-grab active:cursor-grabbing"
         data-testid="raftdev-debug-trigger"
       >
         <Settings2 size={14} strokeWidth={2.5} aria-hidden="true" />
@@ -273,10 +277,10 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
   if (import.meta.env?.VITE_SLOCKDEV_HIDE_PANEL === "1") return null;
 
   return (
-    <div className="w-72 max-w-[calc(100vw-1rem)] overflow-y-auto bg-layer-panel p-3 text-xs text-foreground-strong shadow-raft-sm theme-brutal:bg-white theme-brutal:shadow-brutal">
+    <div className="w-72 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-container bg-layer-popover p-3 text-xs text-foreground shadow-float ring-1 ring-line-seam">
           <div className="mb-2 flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <div className="font-bold uppercase tracking-widest text-foreground-strong">
+              <div className="text-footnote font-bold text-foreground">
                 {formatMessage({ id: "devTools.overlay.panelTitle" })}
               </div>
               <div className="mt-0.5 text-foreground-muted">
@@ -289,7 +293,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
             <Button
               type="button"
               onClick={onClose}
-              size="icon-xs"
+              size="icon-sm"
               variant="ghost"
               aria-label={formatMessage({ id: "common.close" })}
               data-testid="raftdev-debug-close"
@@ -301,8 +305,8 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
 
           {previewDescription ? (
             <Tooltip content={previewDescription}>
-              <details className="mb-2 rounded-md border border-line-muted bg-primary-soft p-2 theme-brutal:rounded-none theme-brutal:bg-soft-signal/20">
-                <summary className="cursor-pointer select-none text-[10px] font-bold uppercase tracking-widest text-foreground-muted">
+              <details className="mb-2 rounded-control border border-line-hairline bg-fill-muted p-2">
+                <summary className="cursor-pointer select-none text-caption font-bold text-foreground-muted">
                   Preview description
                 </summary>
                 <p className="mt-1 max-h-24 overflow-y-auto whitespace-pre-wrap break-words text-foreground-muted">
@@ -419,10 +423,10 @@ export function ServerAccessDeniedPage() {
   }, [goToFallback]);
 
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-canvas px-4 font-display safe-top safe-bottom theme-brutal:bg-brutal-cream">
-      <Card className="w-full max-w-md border border-line-muted bg-layer-panel p-6 shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal">
-        <h1 className="text-2xl font-black text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "pages.serverNotFound.title" })}</h1>
-        <p className="mt-3 text-sm leading-6 text-foreground-muted theme-brutal:text-black/70">
+    <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar px-4 font-display safe-top safe-bottom">
+      <Card className="w-full max-w-md p-6">
+        <h1 className="text-title text-foreground">{formatMessage({ id: "pages.serverNotFound.title" })}</h1>
+        <p className="mt-3 text-callout text-foreground-muted">
           {fallbackServer
             ? formatMessage(
                 { id: "pages.serverNotFound.redirectingToServer" },
@@ -433,10 +437,9 @@ export function ServerAccessDeniedPage() {
         <div className="mt-5">
           <Button
             variant="outline"
-            size="md"
+            size="lg"
             type="button"
             onClick={goToFallback}
-            className="font-bold"
           >
             {fallbackServer
               ? formatMessage({ id: "pages.serverNotFound.goToMyServer" })
@@ -447,6 +450,7 @@ export function ServerAccessDeniedPage() {
     </div>
   );
 }
+
 
 export function ServerResolver() {
   const { formatMessage } = useIntl();
@@ -608,8 +612,8 @@ export function ServerResolver() {
 
   if (loading) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center bg-brutal-cream font-display safe-top">
-        <div className="text-xl font-bold">{formatMessage({ id: "pages.app.loadingServers" })}</div>
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar font-display safe-top">
+        <div className="text-headline text-foreground-muted">{formatMessage({ id: "pages.app.loadingServers" })}</div>
       </div>
     );
   }
@@ -617,8 +621,8 @@ export function ServerResolver() {
   if (!server) {
     if (missingCommunitySlug && communityJoinFlow.joiningCommunitySlug === missingCommunitySlug) {
       return (
-        <div className="flex min-h-0 flex-1 items-center justify-center bg-brutal-cream font-display safe-top">
-          <div className="text-xl font-bold">{formatMessage({ id: "pages.app.joiningCommunity" })}</div>
+        <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar font-display safe-top">
+          <div className="text-headline text-foreground-muted">{formatMessage({ id: "pages.app.joiningCommunity" })}</div>
         </div>
       );
     }
@@ -642,8 +646,8 @@ export function ServerResolver() {
 
   if (!current || current.id !== server.id) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center bg-brutal-cream font-display safe-top">
-        <div className="text-xl font-bold">{formatMessage({ id: "common.loading" })}</div>
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar font-display safe-top">
+        <div className="text-headline text-foreground-muted">{formatMessage({ id: "common.loading" })}</div>
       </div>
     );
   }
@@ -669,7 +673,7 @@ export function ServerResolver() {
     if (!generation) return <Navigate to={`/s/${server.slug}`} replace />;
     return (
       <main
-        className="relative flex min-h-0 flex-1 bg-brutal-cream font-display safe-top safe-bottom"
+        className="relative flex min-h-0 flex-1 bg-layer-sidebar font-display safe-top safe-bottom"
         data-testid="native-onboarding-web-surface"
       >
         <ServerSetupProjectionGate
@@ -705,8 +709,8 @@ export function ServerSelectionPage() {
 
   if (loading) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center bg-brutal-cream font-display safe-top">
-        <div className="text-xl font-bold">{formatMessage({ id: "pages.app.loadingServers" })}</div>
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar font-display safe-top">
+        <div className="text-headline text-foreground-muted">{formatMessage({ id: "pages.app.loadingServers" })}</div>
       </div>
     );
   }
@@ -747,8 +751,8 @@ export function ServerRedirect() {
 
   if (loading) {
     return (
-      <div className="flex min-h-0 flex-1 items-center justify-center bg-brutal-cream font-display safe-top">
-        <div className="text-xl font-bold">{formatMessage({ id: "pages.app.loadingServers" })}</div>
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar font-display safe-top">
+        <div className="text-headline text-foreground-muted">{formatMessage({ id: "pages.app.loadingServers" })}</div>
       </div>
     );
   }
@@ -798,8 +802,8 @@ function ignoreAuthEntry() {}
 export function AuthBootstrapStatus({ view }: { view: "loading" | "restoring" }) {
   const { formatMessage } = useIntl();
   return (
-    <div className="flex min-h-0 flex-1 items-center justify-center bg-brutal-cream font-display safe-top">
-      <div className="text-xl font-bold">
+    <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar font-display safe-top">
+      <div className="text-headline text-foreground-muted">
         {view === "restoring"
           ? formatMessage({ id: "auth.bootstrap.restoringSession" })
           : formatMessage({ id: "common.loading" })}
@@ -834,6 +838,8 @@ export function AppShell() {
   const urlParamsRef = useMemo(() => getUrlParams(), []);
   const [inviteToken, setInviteToken] = useState<string | null>(urlParamsRef.inviteToken);
   const urlParams = useMemo(() => ({ ...urlParamsRef, inviteToken }), [urlParamsRef, inviteToken]);
+
+  const appLoginHandoff = !!matchPath("/login/app", location.pathname);
 
   // Load user on mount
   useEffect(() => {
@@ -998,13 +1004,17 @@ export function AppShell() {
     if (authenticatedUserId && publicServerSlug) setPublicViewDismissed(false);
   }, [authenticatedUserId, publicServerSlug]);
 
+  // App handoff and OAuth completion need account identity, not the workspace.
+  // The callback navigates to its return URL once authentication completes.
+  const deferServerBootstrap = appLoginHandoff || urlParamsRef.authCallback === "social";
+
   // Identity setup is account-global and must complete before any server data
   // or pending invite side effects are loaded.
   useEffect(() => {
-    if (user && !profileSetupRequired) {
+    if (user && !profileSetupRequired && !deferServerBootstrap) {
       loadServers();
     }
-  }, [user, profileSetupRequired, loadServers]);
+  }, [user, profileSetupRequired, deferServerBootstrap, loadServers]);
 
   // Single boot entry for the cross-server unread summary. Components keep
   // only their event/interval triggers (LeftRail: prefs + local-unread edge;
@@ -1013,15 +1023,16 @@ export function AppShell() {
   const serversCount = useServerStore((s) => s.servers.length);
   const loadServerUnreadSummary = useServerStore((s) => s.loadServerUnreadSummary);
   useEffect(() => {
-    if (!user || serversCount === 0) return;
+    if (!user || serversCount === 0 || deferServerBootstrap) return;
     void loadServerUnreadSummary();
-  }, [user, serversCount, loadServerUnreadSummary]);
+  }, [user, serversCount, deferServerBootstrap, loadServerUnreadSummary]);
 
   // Precise PWA resume: restore the last deep location on cold start from `/`.
   // Only active once the user is authenticated and there's no pending invite,
   // so it doesn't fight with login / email-verification / invite redirects.
   const hasPendingInvite = !!localStorage.getItem(PENDING_INVITE_STORAGE_KEY);
   const canResumeLocation = !!user
+    && !deferServerBootstrap
     && user.emailVerified
     && !profileSetupRequired
     && !urlParams.inviteToken
@@ -1047,7 +1058,7 @@ export function AppShell() {
     // oxlint react-doctor/no-chain-state-updates statically rejects listing
     // urlParams.resetToken as a dep. Depending on the mount-frozen ref avoids that
     // while keeping exhaustive-deps satisfied.
-    if (urlParamsRef.resetToken) return;
+    if (urlParamsRef.resetToken || urlParamsRef.appLoginHandoff) return;
     const pendingInviteRedirect = takePendingInviteRedirectPath();
     if (!pendingInviteRedirect) return;
 
@@ -1166,10 +1177,12 @@ export function AppShell() {
     content = <EmailVerificationPage initialToken={urlParams.verifyToken} />;
   } else if (profileSetupRequired) {
     content = <AccountIdentitySetupPage />;
+  } else if (appLoginHandoff) {
+    content = <AppLoginPage />;
   } else if (serverLoading) {
     content = (
-      <div className="flex min-h-0 flex-1 items-center justify-center bg-brutal-cream font-display safe-top">
-        <div className="text-xl font-bold">{formatMessage({ id: "pages.app.loadingServers" })}</div>
+      <div className="flex min-h-0 flex-1 items-center justify-center bg-layer-sidebar font-display safe-top">
+        <div className="text-headline text-foreground-muted">{formatMessage({ id: "pages.app.loadingServers" })}</div>
       </div>
     );
   } else if (publicServerSlug && !publicViewDismissed && !servers.some((server) => server.slug === publicServerSlug)) {
@@ -1192,7 +1205,6 @@ export function AppShell() {
         <Route path="/login-with-slock/setup" element={<HumanLoginSetupPage />} />
         <Route path="/login-with-slock-human/setup" element={<HumanLoginSetupPage />} />
         <Route path="/login/device" element={<DeviceLoginPage />} />
-        <Route path="/login/app" element={<AppLoginPage />} />
         <Route path={INTEGRATION_INVITE_ROUTE} element={<IntegrationInvitePage />} />
         <Route path="/connections/callback" element={<AgentConnectionCallbackPage />} />
         <Route path="/servers" element={<ServerSelectionPage />} />
@@ -1233,6 +1245,10 @@ function App() {
       <Route
         path="/dev/server-setup"
         element={import.meta.env.DEV ? <ServerSetupComputerRuntimePreviewPage /> : <Navigate to="/" replace />}
+      />
+      <Route
+        path="/dev/display-style"
+        element={import.meta.env.DEV ? <DisplayStylePreviewPage /> : <Navigate to="/" replace />}
       />
       {/* Public utility routes must render outside the authenticated shell.
           Place them before the catch-all, which would otherwise swallow them

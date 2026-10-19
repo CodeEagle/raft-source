@@ -50,6 +50,27 @@ export const agentJwtIssuanceCounter = new Counter({
   registers: [register],
 });
 
+// Which verifier accepted or rejected an `sk_agent_*` key: `hmac` (fast
+// path), `argon2` (legacy rows / secret unset / wrong key), or
+// `argon2_rehmac` (the stored HMAC was from an older secret; argon2 accepted
+// the key and the HMAC was rewritten). Tracks HMAC backfill coverage
+// before the argon2 hash can be dropped.
+export const agentCredentialVerifyTotal = new Counter({
+  name: "slock_agent_credential_verify_total",
+  help: "sk_agent_* key verifications by verifier path and outcome",
+  labelNames: ["path", "outcome"] as const,
+  registers: [register],
+});
+
+// Same paths as above for `sk_computer_*` keys on /daemon/connect and
+// /internal/computer/*, counted per candidate row verified.
+export const computerCredentialVerifyTotal = new Counter({
+  name: "slock_computer_credential_verify_total",
+  help: "sk_computer_* key verifications by verifier path and outcome",
+  labelNames: ["path", "outcome"] as const,
+  registers: [register],
+});
+
 // ---------------------------------------------------------------------------
 // Socket.io metrics
 // ---------------------------------------------------------------------------
@@ -136,6 +157,34 @@ export const risingWaveUnavailableResponsesTotal = new Counter({
 });
 
 /**
+ * Responses served from the last good result because RisingWave was
+ * overloaded (routes/rwStaleRead.ts), per surface.
+ */
+export const risingWaveStaleResponsesTotal = new Counter({
+  name: "slock_risingwave_stale_responses_total",
+  help: "Responses served from the last good result while RisingWave was overloaded",
+  labelNames: ["surface"] as const,
+  registers: [register],
+});
+
+/** Bodies not remembered by routes/rwStaleRead.ts because they exceeded RW_STALE_MAX_VALUE_BYTES. */
+export const risingWaveStaleCacheSkippedTotal = new Counter({
+  name: "slock_rw_stale_cache_skipped_total",
+  help: "Response bodies too large to remember for the RisingWave stale fallback",
+  labelNames: ["surface"] as const,
+  registers: [register],
+});
+
+/** Size of each body remembered by routes/rwStaleRead.ts, per surface. */
+export const risingWaveStaleCacheWriteBytes = new Histogram({
+  name: "slock_rw_stale_cache_write_bytes",
+  help: "Bytes of each response body remembered for the RisingWave stale fallback",
+  labelNames: ["surface"] as const,
+  buckets: [512, 2_048, 8_192, 32_768, 131_072, 524_288],
+  registers: [register],
+});
+
+/**
  * End-to-end request duration for the main Express app.
  * Uses the same low-cardinality labels as request totals.
  * The 2 s bucket is the SLO v1 latency threshold (task #431): "share of /api
@@ -192,7 +241,10 @@ export const agentDeliveryAckSeconds = new Histogram({
  * converted_to_wake (daemon rejected delivery, server started the agent),
  * replica_shutdown, parked_expired (machine stayed offline past the parked
  * max age, 30 min), held_expired (a mention that reached the daemon was not
- * settled within 30 min; its arrival already counted).
+ * settled within 30 min; its arrival already counted), acked_after_gave_up
+ * (the ack arrived within 10 min after this replica gave up: the daemon did
+ * get it, so real non-delivery is gave_up minus acked_after_gave_up; an extra
+ * event on an already-ended record, so leave it out of sums over outcomes).
  * conn_age (gave_up and dropped only, "n/a" otherwise): age of this replica's
  * connection to the machine when the record failed: "<1h", "1-6h", ">6h",
  * "none" if the machine is not connected here, or "unknown" for a connection
@@ -415,6 +467,42 @@ export const dbPoolConnectPermitWait = new Histogram({
   help: "Time a new PostgreSQL connection waited for a connect permit",
   labelNames: ["pool"] as const,
   buckets: [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10],
+  registers: [register],
+});
+
+// Background `SELECT 1` once per second per endpoint (db/latencyProbe.ts).
+// Buckets are fine below 2 s to match the ~1.4 s Neon pauses and the ~1.6 s
+// ceiling on slow queries (task #442). Timeouts and errors are counted
+// separately and never observed into the histogram.
+export const dbProbeDuration = new Histogram({
+  name: "slock_db_probe_duration_seconds",
+  help: "Round trip of the background SELECT 1 probe on the primary, by endpoint",
+  labelNames: ["endpoint"] as const, // pooled, direct
+  buckets: [0.1, 0.25, 0.5, 1, 1.5, 2, 5],
+  registers: [register],
+});
+
+export const dbProbeTimeoutsTotal = new Counter({
+  name: "slock_db_probe_timeouts_total",
+  help: "Background SELECT 1 probes that hit the 5 s timeout, by endpoint",
+  labelNames: ["endpoint"] as const,
+  registers: [register],
+});
+
+// Probes that had to open a new connection first (after a failure, or the
+// first probe). Their round trip includes TCP + TLS, so they are counted here
+// instead of being observed into slock_db_probe_duration_seconds.
+export const dbProbeReconnectsTotal = new Counter({
+  name: "slock_db_probe_reconnects_total",
+  help: "Background SELECT 1 probes that opened a new connection (not observed into the duration histogram), by endpoint",
+  labelNames: ["endpoint"] as const,
+  registers: [register],
+});
+
+export const dbProbeErrorsTotal = new Counter({
+  name: "slock_db_probe_errors_total",
+  help: "Background SELECT 1 probes that failed other than by timeout, by endpoint",
+  labelNames: ["endpoint"] as const,
   registers: [register],
 });
 

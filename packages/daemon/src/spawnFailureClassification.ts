@@ -151,6 +151,16 @@ export function classifySpawnFailure(error: unknown): SpawnFailureClassification
         userMessage: "This agent's runtime session failed context compaction several times in a row: its conversation no longer fits the model, so resuming it cannot succeed. "
           + formatRuntimeResetSessionGuidance(),
       };
+    case "session_runtime_mismatch":
+      // task #1258: the detail is the typed error's own sentence (which major
+      // made the session, which is installed); nothing from provider output.
+      return {
+        reason,
+        detail,
+        userMessage: `${detail}. Sessions do not carry across runtime major versions, so automatic restarts are paused. `
+          + formatRuntimeResetSessionGuidance()
+          + " Alternatively, install the runtime version line the session was created with and restart the agent.",
+      };
     case "runtime_login_required":
       return {
         reason,

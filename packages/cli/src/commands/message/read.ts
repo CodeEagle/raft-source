@@ -15,7 +15,9 @@ import { CliError } from "../../core/errors";
 import { writeText, adoptCliReplyText } from "../../core/renderer";
 import { apiFailureError } from "../_apiFailure";
 import { PEER_KIND_OPTION, requireTargetAlias, type TargetAliasOpts } from "../_target";
-import { formatHistory } from "./_format";
+import { channelCardForRead } from "../../ax/channelCard";
+import { peerCardForRead } from "../../ax/peerCard";
+import { formatChannelCard, formatHistory, formatPeerCard } from "./_format";
 import { elideSeenSenders } from "./_senderElision";
 import { getConsumedExactSeqs, getConsumedSeq, recordHistoryReadWindow } from "./_consumedSeqState";
 
@@ -113,7 +115,7 @@ export const messageReadCommand = defineCommand(
     name: "read",
     description: "Read message history for a channel, DM, or thread",
     options: [
-      { flags: "--target <target>", description: "Target: '#channel', 'dm:@peer', '#channel:threadId', 'dm:@peer:threadId', 'agent-event:eventId'" },
+      { flags: "--target <target>", description: "Target: '#channel', 'dm:@peer', '#channel:shortid', 'dm:@peer:shortid' (a thread: shortid is its root message's msg=, as in replyTarget), 'agent-event:eventId'" },
       { flags: "--channel <target>", description: "Legacy alias for --target (accepted during transition)" },
       PEER_KIND_OPTION,
       { flags: "--before <idOrSeq>", description: "Return messages strictly before this anchor (pure-decimal values are seqs)" },
@@ -166,6 +168,14 @@ export const messageReadCommand = defineCommand(
     const senders = elideSeenSenders(printed, agentContext.agentId);
     const elidedByMessage = new Map(printed.map((m, index) => [m, senders.messages[index]]));
     const displayData = { ...res.data, messages: allMessages.map((m) => elidedByMessage.get(m) ?? m) };
+    // The channel's card goes first the first time this context reads the
+    // channel (or a thread in it), and again after it changed.
+    const channelCard = channelCardForRead(res.data.channel_card, agentContext.agentId);
+    if (channelCard.card) writeText(ctx.io, formatChannelCard(channelCard.card.card, channelCard.card.changed));
+    // A DM's peer card, when this context has seen nothing of them (sender
+    // elision above already claimed a message that shows them).
+    const peerCard = peerCardForRead(res.data.peer_card, printed, agentContext.agentId);
+    if (peerCard.card) writeText(ctx.io, formatPeerCard(peerCard.card.card));
     writeText(
       ctx.io, adoptCliReplyText(
       `${formatHistory(readOpts.channel, displayData, {
@@ -177,6 +187,8 @@ export const messageReadCommand = defineCommand(
       })}\n`,
     ));
     await senders.settle(ctx.io);
+    await channelCard.settle(ctx.io);
+    await peerCard.settle(ctx.io);
     // What the window consumed (the FH-001 full-body advance contract: target
     // identity from the resolver, `--around` and gapped windows record exact
     // seqs only, old-server boundary inference) is the shared seen policy

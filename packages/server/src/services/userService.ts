@@ -128,6 +128,19 @@ export class EmailLoginRejectedError extends Error {
   }
 }
 
+/**
+ * A social login whose verified email already belongs to an account that has
+ * no identity for this provider. The message is the user-facing sentence older
+ * clients and the `email already exists` classifiers still match; `userId` is
+ * the existing account, so a client that opted in can link inline instead.
+ */
+export class SocialEmailConflictError extends Error {
+  constructor(public readonly userId: string, provider: SocialAuthProvider) {
+    super(`An account with this email already exists. Sign in with email and password first, then connect ${getProviderLabel(provider)} in Settings.`);
+    this.name = "SocialEmailConflictError";
+  }
+}
+
 export class PasswordCredentialRequiredError extends Error {
   readonly code = "PASSWORD_CREDENTIAL_REQUIRED";
 
@@ -387,7 +400,20 @@ export async function markEmailVerifiedForTest(userId: string): Promise<void> {
   await db.update(users).set({ emailVerified: true }).where(eq(users.id, userId));
 }
 
-export async function authenticateUser(email: string, password: string) {
+export async function authenticateUser(
+  email: string,
+  password: string,
+  options: {
+    /**
+     * Pending social link (task #1304). `prepare` runs after the password
+     * verifies, outside the lock; the step it returns runs inside the locked
+     * transaction, after the hash is revalidated and before the session is
+     * created. A credential rejected at any point leaves no link behind, and
+     * a failed session rolls the link back.
+     */
+    prepareLink?: (userId: string) => Promise<(tx: DatabaseExecutor) => Promise<() => Promise<void>>>;
+  } = {},
+) {
   const db = getDb();
 
   const [user] = await db.select().from(users).where(eq(users.email, normalizeEmail(email)));
@@ -408,13 +434,20 @@ export async function authenticateUser(email: string, password: string) {
   if (!valid) {
     throw new EmailLoginRejectedError("password_mismatch");
   }
+  const linkInLock = await options.prepareLink?.(user.id);
 
   // Argon2 is deliberately outside the lock. Revalidate its exact hash under
   // the same user lock held by password changes and session issuance.
-  return db.transaction(async (tx) => {
+  let afterCommit: (() => Promise<void>) | undefined;
+  const result = await db.transaction(async (tx) => {
     const [current] = await tx.select().from(users).where(eq(users.id, user.id)).for("update");
     if (!current || current.retiredAt) throw new EmailLoginRejectedError("user_retired");
     if (current.passwordHash !== user.passwordHash) throw new EmailLoginRejectedError("password_mismatch");
+    let linked: typeof current | undefined;
+    if (linkInLock) {
+      afterCommit = await linkInLock(tx);
+      [linked] = await tx.select().from(users).where(eq(users.id, user.id));
+    }
     if (!current.passwordCredentialEstablishedAt) {
       await tx.update(users).set({
         passwordCredentialEstablishedAt: currentDate(),
@@ -426,12 +459,14 @@ export async function authenticateUser(email: string, password: string) {
     const session = await createSession(user.id, tx);
     return {
       user: toPublicUser({
-        ...current,
+        ...(linked ?? current),
         profileSetupProvider: await getProfileSetupProvider(tx, user.id),
       }),
       session,
     };
   });
+  await afterCommit?.();
+  return result;
 }
 
 export async function retireStagingSelfAccount(userId: string, actorUserId: string, capability: string) {
@@ -767,10 +802,13 @@ async function upsertSocialIdentityTx(
   });
 }
 
-export async function linkSocialIdentity(userId: string, profile: SocialAuthProfile) {
+/**
+ * The checks and avatar fetch for a social link that must run outside any
+ * transaction. Pass the result to linkSocialIdentityTx.
+ */
+export async function prepareSocialLink(userId: string, profile: SocialAuthProfile) {
   const db = getDb();
   assertUsableSocialProfile(profile);
-  let shouldStartOnboardingJourney = false;
   const [currentUser] = await db.select({
     avatarUrl: users.avatarUrl,
   }).from(users).where(eq(users.id, userId));
@@ -784,57 +822,76 @@ export async function linkSocialIdentity(userId: string, profile: SocialAuthProf
   if (existingEmailUser && existingEmailUser.id !== userId) {
     throw new Error(`This ${getProviderLabel(profile.provider)} account email belongs to another Raft account`);
   }
-  const materializedAvatarUrl = await materializeSocialAvatar(currentUser.avatarUrl, profile);
+  return { materializedAvatarUrl: await materializeSocialAvatar(currentUser.avatarUrl, profile) };
+}
+
+/**
+ * Link inside the caller's transaction. Returns what to run after commit.
+ */
+export async function linkSocialIdentityTx(
+  transaction: DatabaseExecutor,
+  userId: string,
+  profile: SocialAuthProfile,
+  prepared: { materializedAvatarUrl: string | null },
+) {
+  const normalizedEmail = normalizeEmail(profile.email);
+  const [user] = await transaction.select({
+    id: users.id,
+    email: users.email,
+    avatarUrl: users.avatarUrl,
+    emailVerified: users.emailVerified,
+  }).from(users).where(eq(users.id, userId)).for("update");
+
+  if (!user) {
+    throw new Error("User not found");
+  }
+
+  const [conflictingEmailUser] = await transaction.select({
+    id: users.id,
+  }).from(users).where(eq(users.email, normalizedEmail));
+
+  if (conflictingEmailUser && conflictingEmailUser.id !== userId) {
+    throw new Error(`This ${getProviderLabel(profile.provider)} account email belongs to another Raft account`);
+  }
 
   try {
-    const linkedUser = await db.transaction(async (transaction) => {
-      const [user] = await transaction.select({
-        id: users.id,
-        email: users.email,
-        avatarUrl: users.avatarUrl,
-        emailVerified: users.emailVerified,
-      }).from(users).where(eq(users.id, userId)).for("update");
-
-      if (!user) {
-        throw new Error("User not found");
-      }
-
-      const [conflictingEmailUser] = await transaction.select({
-        id: users.id,
-      }).from(users).where(eq(users.email, normalizedEmail));
-
-      if (conflictingEmailUser && conflictingEmailUser.id !== userId) {
-        throw new Error(`This ${getProviderLabel(profile.provider)} account email belongs to another Raft account`);
-      }
-
-      await upsertSocialIdentityTx(transaction, userId, profile);
-
-      const shouldVerifyEmail = normalizeEmail(user.email) === normalizedEmail;
-      shouldStartOnboardingJourney = shouldVerifyEmail && !user.emailVerified;
-      await transaction.update(users).set({
-        avatarUrl: chooseSocialAvatarUrl(user.avatarUrl, materializedAvatarUrl),
-        emailVerified: shouldVerifyEmail ? true : user.emailVerified,
-        updatedAt: new Date(),
-      }).where(eq(users.id, userId));
-
-      return getPublicUserByIdTx(transaction, userId);
-    });
-
-    if (!linkedUser) {
-      throw new Error("Failed to link social account");
-    }
-
-    if (shouldStartOnboardingJourney) {
-      await enqueueOnboardingEmailJourneyFailOpen(linkedUser);
-    }
-
-    return linkedUser;
+    await upsertSocialIdentityTx(transaction, userId, profile);
   } catch (err) {
     if (isUniqueViolation(err)) {
       throw new Error(`This ${getProviderLabel(profile.provider)} account was linked concurrently. Please try again.`);
     }
     throw err;
   }
+
+  const shouldVerifyEmail = normalizeEmail(user.email) === normalizedEmail;
+  const shouldStartOnboardingJourney = shouldVerifyEmail && !user.emailVerified;
+  await transaction.update(users).set({
+    avatarUrl: chooseSocialAvatarUrl(user.avatarUrl, prepared.materializedAvatarUrl),
+    emailVerified: shouldVerifyEmail ? true : user.emailVerified,
+    updatedAt: new Date(),
+  }).where(eq(users.id, userId));
+
+  const linkedUser = await getPublicUserByIdTx(transaction, userId);
+  if (!linkedUser) {
+    throw new Error("Failed to link social account");
+  }
+  return {
+    linkedUser,
+    afterCommit: async () => {
+      if (shouldStartOnboardingJourney) {
+        await enqueueOnboardingEmailJourneyFailOpen(linkedUser);
+      }
+    },
+  };
+}
+
+export async function linkSocialIdentity(userId: string, profile: SocialAuthProfile) {
+  const prepared = await prepareSocialLink(userId, profile);
+  const { linkedUser, afterCommit } = await getDb().transaction(
+    (transaction) => linkSocialIdentityTx(transaction, userId, profile, prepared),
+  );
+  await afterCommit();
+  return linkedUser;
 }
 
 export async function findExistingSocialLoginUser(profile: SocialAuthProfile): Promise<PublicUser | null> {
@@ -872,7 +929,7 @@ export async function findExistingSocialLoginUser(profile: SocialAuthProfile): P
 
   const [existingEmailUser] = await db.select({ id: users.id }).from(users).where(eq(users.email, normalizedEmail));
   if (existingEmailUser) {
-    throw new Error(`An account with this email already exists. Sign in with email and password first, then connect ${getProviderLabel(profile.provider)} in Settings.`);
+    throw new SocialEmailConflictError(existingEmailUser.id, profile.provider);
   }
 
   assertRegistrationEnabled();

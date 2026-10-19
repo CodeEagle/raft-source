@@ -27,7 +27,7 @@ function sourceFilesUnder(path: string): string[] {
 test("time format setting uses the canonical segmented control", () => {
   const source = readSource("src/components/settings/SettingsPanel.tsx");
 
-  assert.match(source, /import \{[\s\S]*SegmentedControl,?[\s\S]*SegmentedControlItem,?[\s\S]*SegmentedControlLabel,?[\s\S]*\} from "raft-ui";/);
+  assert.match(source, /import \{[\s\S]*SegmentedControl,?[\s\S]*SegmentedControlItem,?[\s\S]*SegmentedControlLabel,?[\s\S]*\} from "@botiverse\/raft-ui";/);
   // Time-format aria migrated to react-intl (settings big-files phase).
   assert.match(source, /aria-label=\{formatMessage\(\{ id: "settings\.dateTime\.timeFormatAria" \}\)\}/);
   assert.match(source, /data-testid="time-format-12h"/);
@@ -83,29 +83,33 @@ test("business selects use raft-ui directly without the deprecated local adapter
     "src/pages/IntegrationInvitePage.tsx",
   ]) {
     const source = readSource(sourcePath);
-    assert.match(source, /from "raft-ui";/, `${sourcePath} should import raft-ui directly`);
+    assert.match(source, /from "@botiverse\/raft-ui";/, `${sourcePath} should import raft-ui directly`);
     assert.match(source, /<Select[\s>]/, `${sourcePath} should render raft-ui Select at the business callsite`);
     assert.doesNotMatch(source, /from "\.\.?\/(?:\.\.\/)?components\/Select"|from "\.\.\/Select"|from "\.\.\/components\/Select"/);
   }
   // Per stdrc msg=32e323aa + msg=832c2c02 + msg=b0b92c1c (2026-05-25):
   // SelectionPopover / InlineBadgeEditor dropdown) keeps no yellow-fill
-  // selected rows while search/filter popovers continue to use soft-signal hover.
-  assert.doesNotMatch(popoverSource, /bg-soft-signal(?!\/30)/);
-  assert.match(popoverSource, /hover:bg-soft-signal\/30/);
+  // selected rows (the trailing check marks the value) while search/filter
+  // popovers share one hover token — the Raft Design System yellow-soft menu
+  // highlight.
+  assert.doesNotMatch(popoverSource, /bg-palette-yellow/);
+  assert.doesNotMatch(popoverSource, /\bbg-primary(?!-soft)/);
+  assert.match(popoverSource, /hover:bg-brand-soft/);
 });
 
 test("SettingsPanel and ReportIssueDialog use raft-ui Checkbox without the retired local shell", () => {
-  // The local ui/Checkbox shell (sr-only native input + CheckMarker) was
-  // deleted once every consumer moved onto raft-ui's Checkbox (Base UI
-  // span[role=checkbox] + hidden native input). CheckMarker stays — it is
-  // used directly by MessageInput / ChannelMembers / MachineDetailPanel.
+  // The local ui/Checkbox shell was deleted once every consumer moved onto
+  // raft-ui's Checkbox (Base UI span[role=checkbox] + hidden native input).
+  // A decorative box beside a control that owns the state is raft-ui's
+  // CheckboxIndicator, never a local copy of it.
   assert.equal(existsSync(resolve(repoRoot, "src/components/ui/Checkbox.tsx")), false);
+  assert.equal(existsSync(resolve(repoRoot, "src/components/ui/CheckMarker.tsx")), false);
   for (const sourcePath of [
     "src/components/settings/SettingsPanel.tsx",
     "src/components/agent/ReportIssueDialog.tsx",
   ]) {
     const source = readSource(sourcePath);
-    assert.match(source, /from "raft-ui";/, `${sourcePath} should import Checkbox from raft-ui`);
+    assert.match(source, /from "@botiverse\/raft-ui";/, `${sourcePath} should import Checkbox from raft-ui`);
     assert.match(source, /<Checkbox[\s>]/, `${sourcePath} should render raft-ui Checkbox at the business callsite`);
     assert.doesNotMatch(source, /\.\.\/ui\/Checkbox"|from "\.\.\/\.\.\/ui\/Checkbox"/);
   }

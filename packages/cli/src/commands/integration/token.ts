@@ -114,7 +114,7 @@ export const integrationTokenCommand = defineCommand({
   description: "Deliver a five-minute Agent JWT to a child process through private FD 3; never print the token",
   arguments: ["[args...]"],
   options: [
-    { flags: "--service <client-key>", description: "Exact registered Server-local client key enabled by the platform operator" },
+    { flags: "--service <client-key>", description: "Exact registered client key of an enabled App owned by or installed on this Server" },
     { flags: "--exec <program>", description: "Trusted receiving program; read the token from RAFT_INTEGRATION_TOKEN_FD (3)" },
     { flags: "--timeout <seconds>", description: "Receiver deadline, 1–300 seconds (default 300)" },
   ],

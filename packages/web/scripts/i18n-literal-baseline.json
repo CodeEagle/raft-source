@@ -72,22 +72,6 @@
     "reason": "Dev tools entry that clears last-server and returns to the picker."
   },
   {
-    "path": "src/components/actions/ActionCard.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "@",
-    "count": 2,
-    "classification": "protocol",
-    "reason": "Protocol prefix for @handle agent refs in ActionCard details."
-  },
-  {
-    "path": "src/components/actions/ActionCard.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "#",
-    "count": 1,
-    "classification": "protocol",
-    "reason": "Protocol prefix for #channel refs in ActionCard details."
-  },
-  {
     "path": "src/components/agent/AgentDetailPanel.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "@",
@@ -163,7 +147,7 @@
     "path": "src/components/layout/Sidebar.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
     "source": "\"99+\"",
-    "count": 5,
+    "count": 2,
     "classification": "protocol",
     "reason": "User-visible unread overflow protocol (unread>99 ? \"99+\"); fixed badge notation, not technical."
   },
@@ -570,14 +554,6 @@
   {
     "path": "src/pages/PaletteAuditPage.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "(&quot;@mentioned&quot;)",
-    "count": 1,
-    "classification": "code_example",
-    "reason": "Quoted @mentioned state term in PaletteAudit documentation; keep as code/term example."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
     "source": "@stdrc",
     "count": 1,
     "classification": "user_data_example",
@@ -590,30 +566,6 @@
     "count": 1,
     "classification": "technical",
     "reason": "Tailwind CSS directive shown as implementation documentation."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "&quot;CTA&quot;",
-    "count": 1,
-    "classification": "code_example",
-    "reason": "Quoted design-semantic term CTA in PaletteAudit documentation; keep as code/term example."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "&quot;destructive&quot;",
-    "count": 1,
-    "classification": "code_example",
-    "reason": "Quoted design-semantic term destructive in PaletteAudit documentation; keep as code/term example."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "#E08585",
-    "count": 1,
-    "classification": "technical",
-    "reason": "Hex color value shown in the palette implementation audit."
   },
   {
     "path": "src/pages/PaletteAuditPage.tsx",
@@ -654,30 +606,6 @@
     "count": 1,
     "classification": "internal_dev",
     "reason": "PaletteAudit CTA button sample mirroring product copy for visual audit only."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "bg-brutal-lavender/40",
-    "count": 1,
-    "classification": "technical",
-    "reason": "Tailwind utility class shown as implementation documentation."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "brutal-pink",
-    "count": 1,
-    "classification": "technical",
-    "reason": "Theme token name shown in the palette implementation audit."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "brutal-red",
-    "count": 1,
-    "classification": "technical",
-    "reason": "Theme token name shown in the palette implementation audit."
   },
   {
     "path": "src/pages/PaletteAuditPage.tsx",
@@ -738,14 +666,6 @@
   {
     "path": "src/pages/PaletteAuditPage.tsx",
     "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "getActivityDotClass()",
-    "count": 1,
-    "classification": "technical",
-    "reason": "Function identifier shown as source-reference documentation."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
     "source": "Hover Me",
     "count": 1,
     "classification": "internal_dev",
@@ -758,14 +678,6 @@
     "count": 1,
     "classification": "internal_dev",
     "reason": "PaletteAudit in-review task badge sample; audit page only."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "MentionLink.tsx:27",
-    "count": 1,
-    "classification": "technical",
-    "reason": "Source file and line reference shown in the palette implementation audit."
   },
   {
     "path": "src/pages/PaletteAuditPage.tsx",
@@ -838,14 +750,6 @@
     "count": 1,
     "classification": "protocol",
     "reason": "PaletteAudit invalid task-ref sample; keep protocol spelling."
-  },
-  {
-    "path": "src/pages/PaletteAuditPage.tsx",
-    "rule": "formatjs/no-literal-string-in-jsx",
-    "source": "The",
-    "count": 1,
-    "classification": "internal_dev",
-    "reason": "Residual English article fragment left in PaletteAudit documentation after partial i18n."
   },
   {
     "path": "src/pages/PaletteAuditPage.tsx",

@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { FeedbackProvider, FeedbackWorkspace } from "@botiverse/hands-feedback-react";
 import type { HandsFeedbackTransport } from "@botiverse/hands-feedback-react";
-import { ThemeProvider, Button, Lightbox, LightboxContent, LightboxClose, LightboxStage, LightboxMedia } from "raft-ui";
+import { ThemeProvider, Button, Lightbox, LightboxContent, LightboxClose, LightboxStage, LightboxMedia } from "@botiverse/raft-ui";
 import { createHandsFeedbackTransport } from "../createHandsFeedbackTransport";
+import { FEEDBACK_SDK_THEME } from "../feedbackSdkTheme";
 import { FEEDBACK_SESSION_UPDATED, createNativeFeedbackClient, emitFeedbackEvent, readFeedbackHost, sameFeedbackSession } from "./host";
 import type { FeedbackHost, FeedbackHostEvent } from "./host";
 import { createDiagnosticsSubmission } from "./diagnostics";
@@ -17,8 +18,7 @@ function FeedbackPage({ host, authPending, onTerminal }: { host: FeedbackHost; a
   const [diagnosticsState, setDiagnosticsState] = useState<DiagnosticsState>({ phase: "idle" });
   const [withoutDiagnostics, setWithoutDiagnostics] = useState(false);
   const diagnosticsDialog = useRef<HTMLDivElement | null>(null);
-  // Focus only after the asynchronous status dialog has mounted.
-  // oxlint-disable-next-line react-doctor/no-event-handler
+  // oxlint-disable-next-line react-doctor/no-event-handler -- Native diagnostics callbacks change the phase asynchronously; focus needs the dialog DOM committed by React, which a submit/click handler cannot guarantee.
   useEffect(() => { if (diagnosticsState.phase !== "idle") diagnosticsDialog.current?.focus(); }, [diagnosticsState.phase]);
   const diagnosticsActions = useRef<DiagnosticsActions | null>(null);
   const skipDiagnostics = useCallback(() => diagnosticsActions.current?.skip(), []);
@@ -61,8 +61,7 @@ function FeedbackPage({ host, authPending, onTerminal }: { host: FeedbackHost; a
   useEffect(() => () => { alive.current = false; attachmentController.abort(); }, [attachmentController]);
   const [preview, setPreview] = useState<string | null>(null);
   const [error, setError] = useState(false);
-  // Object URLs must also be released when the native view is destroyed.
-  // oxlint-disable-next-line react-doctor/no-event-handler
+  // oxlint-disable-next-line react-doctor/no-event-handler -- React cleanup revokes the previous preview on replacement and unmount, including native WebView teardown without a close event.
   useEffect(() => () => { if (preview) URL.revokeObjectURL(preview); }, [preview]);
   const showAttachment = useCallback(async ({ ticketId, attachmentId }: { ticketId: string; attachmentId: string }) => {
     setError(false);
@@ -76,11 +75,11 @@ function FeedbackPage({ host, authPending, onTerminal }: { host: FeedbackHost; a
   const changePreview = useCallback((open: boolean) => { if (!open) setPreview(null); }, []);
   const messages = __RAFT_FEEDBACK_COPY__[host.session.locale];
   const sdkMessages = useMemo(() => ({ errorUnauthorized: messages[authPending ? "feedback.native.authRequired" : "feedback.native.authRestored"] }), [messages, authPending]);
-  return <ThemeProvider theme={host.session.theme} mode={host.session.mode}>
+  return <ThemeProvider mode={host.session.mode}>
     <div className="feedback-entry">
       {withoutDiagnostics && <p className="feedback-diagnostics-notice" role="status">{messages["feedback.native.diagnostics.unavailable"]}</p>}
       {error && <p role="alert">{messages["settings.about.feedbackAttachmentOpenError"]}</p>}
-      <div inert={diagnosticsState.phase !== "idle" || undefined} style={{ height: "100%" }}><FeedbackProvider transport={transport} locale={host.session.locale} theme={host.session.theme} messages={sdkMessages}>
+      <div inert={diagnosticsState.phase !== "idle" || undefined} style={{ height: "100%" }}><FeedbackProvider transport={transport} locale={host.session.locale} theme={FEEDBACK_SDK_THEME} messages={sdkMessages}>
         <FeedbackWorkspace enablePullToRefresh hideHeaderTitle onOpenAttachment={openAttachment} onOpenPendingAttachment={openPending} />
       </FeedbackProvider></div>
       {diagnosticsState.phase !== "idle" && <div className="feedback-diagnostics-status" ref={diagnosticsDialog} tabIndex={-1} role="dialog" aria-modal="true" aria-label={messages["feedback.native.diagnosticsTitle"]}>
@@ -88,11 +87,11 @@ function FeedbackPage({ host, authPending, onTerminal }: { host: FeedbackHost; a
           <p role="status">{messages[diagnosticsState.phase === "failed" && diagnosticsState.rejected ? "feedback.native.diagnostics.rejected" : `feedback.native.diagnostics.${diagnosticsState.phase}`]}</p>
           {diagnosticsState.phase === "preparing" && <progress aria-label={messages["feedback.native.diagnostics.preparing"]} />}
           {diagnosticsState.phase === "uploading" && <progress max={diagnosticsState.total} value={diagnosticsState.sent} aria-label={messages["feedback.native.diagnostics.uploading"]} />}
-          {(diagnosticsState.phase === "preparing" || diagnosticsState.phase === "uploading") && <Button type="button" onClick={skipDiagnostics}>{messages["feedback.native.diagnostics.skip"]}</Button>}
+          {(diagnosticsState.phase === "preparing" || diagnosticsState.phase === "uploading") && <Button size="lg" type="button" onClick={skipDiagnostics}>{messages["feedback.native.diagnostics.skip"]}</Button>}
           {diagnosticsState.phase === "failed" && <>
-            <Button type="button" onClick={returnToEdit}>{messages["feedback.native.diagnostics.edit"]}</Button>
-            <Button type="button" onClick={retrySubmission}>{messages["feedback.native.diagnostics.retry"]}</Button>
-            {diagnosticsState.canOmit && <Button type="button" onClick={omitDiagnostics}>{messages["feedback.native.diagnostics.omit"]}</Button>}
+            <Button size="lg" type="button" onClick={returnToEdit}>{messages["feedback.native.diagnostics.edit"]}</Button>
+            <Button size="lg" type="button" onClick={retrySubmission}>{messages["feedback.native.diagnostics.retry"]}</Button>
+            {diagnosticsState.canOmit && <Button size="lg" type="button" onClick={omitDiagnostics}>{messages["feedback.native.diagnostics.omit"]}</Button>}
           </>}
         </div>
       </div>}
@@ -122,7 +121,7 @@ function FeedbackEntry() {
   // No login UI, token storage, main App, account bootstrap or server load.
   const session = host?.session ?? lastHost.current?.session;
   const locale = session?.locale ?? (navigator.language.startsWith("zh") ? "zh-CN" : "en");
-  return <ThemeProvider theme={session?.theme ?? "elegant"} mode={session?.mode ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")}>
+  return <ThemeProvider mode={session?.mode ?? (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light")}>
     {host ? <><div inert={authPending || undefined}><FeedbackPage host={host} authPending={authPending} onTerminal={onTerminal} /></div>{authPending && <p className="feedback-host-status feedback-auth-status" role="status">{__RAFT_FEEDBACK_COPY__[locale]["feedback.native.authRequired"]}</p>}</> : <p className="feedback-host-status" role="status">{__RAFT_FEEDBACK_COPY__[locale]["feedback.native.hostRequired"]}</p>}
   </ThemeProvider>;
 }

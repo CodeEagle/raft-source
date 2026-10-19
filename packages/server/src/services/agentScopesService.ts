@@ -20,7 +20,7 @@
 
 import { eq, inArray } from "drizzle-orm";
 import { getDb, withDbTraceAttributes, type DatabaseExecutor } from "../db/index";
-import { agentScopes, agents } from "../db/schema";
+import { agentScopes, agents, raftbenchServiceAgents } from "../db/schema";
 import {
   AGENT_GRANTABLE_SCOPES,
   hasScope as hasScopeShared,
@@ -35,6 +35,9 @@ export class AgentScopesNotFoundError extends Error {
     super(`Agent ${agentId} not found`);
     this.name = "AgentScopesNotFoundError";
   }
+}
+export class DedicatedAgentScopeError extends Error {
+  constructor() { super("This RaftBench service agent can only hold its dedicated read scopes; default or write scopes are unavailable."); }
 }
 
 function completeDefaultScopes(raw: readonly string[] | null | undefined): AgentGrantableScope[] {
@@ -103,6 +106,11 @@ export async function updateAgentScopes(
 ): Promise<AgentScopeSet> {
   const db = options.executor ?? getDb();
   const sanitized = sanitizeGrantedScopes(args.scopes);
+  const [dedicated] = await db.select({ agentId: raftbenchServiceAgents.agentId })
+    .from(raftbenchServiceAgents).where(eq(raftbenchServiceAgents.agentId, args.agentId));
+  if (dedicated && sanitized.some(scope => !["server:read", "channel:read", "message:read"].includes(scope))) {
+    throw new DedicatedAgentScopeError();
+  }
 
   const agentRow = await findAgentScopeTarget(args.agentId, db);
 
@@ -156,6 +164,9 @@ export async function resetAgentScopesToDefault(args: {
   updatedByUserId: string;
 }, options: { executor?: DatabaseExecutor } = {}): Promise<AgentScopeSet> {
   const db = options.executor ?? getDb();
+  const [dedicated] = await db.select({ agentId: raftbenchServiceAgents.agentId })
+    .from(raftbenchServiceAgents).where(eq(raftbenchServiceAgents.agentId, args.agentId));
+  if (dedicated) throw new DedicatedAgentScopeError();
   const agentRow = await findAgentScopeTarget(args.agentId, db);
   const existing = await db.query.agentScopes.findFirst({
     where: eq(agentScopes.agentId, args.agentId),

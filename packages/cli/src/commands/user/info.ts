@@ -6,7 +6,7 @@ import {
   AGENT_API_USER_CHANNELS_DEFAULT_LIMIT,
   AGENT_API_USER_CHANNELS_MAX_LIMIT,
   userInfo,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { createAgentApiContractSurfaceClient, createCliOperationFailures } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

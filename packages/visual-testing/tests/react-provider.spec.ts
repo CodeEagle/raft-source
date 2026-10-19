@@ -46,7 +46,7 @@ const GOOGLE_FONT_CSS_URL =
 // font CSS, so the run stays offline and deterministic. Copy the URL verbatim
 // from packages/web/node_modules/raft-ui/dist/fonts.css when raft-ui changes it.
 const RAFT_UI_FONT_CSS_URL =
-  "https://fonts.googleapis.com/css2?family=Geist:wght@400..700&family=Geist+Mono:wght@300..700&family=Hanken+Grotesk:wght@300..700&family=Inter:wght@400;500;600;700&display=swap";
+  "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&family=Space+Mono:wght@400;700&display=swap";
 const GOOGLE_FONT_CSS_URLS = new Set([
   GOOGLE_FONT_CSS_URL,
   "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap",

@@ -3,7 +3,8 @@ import { cleanup, render } from "@testing-library/react";
 import Modal from "../src/components/Modal";
 import DismissBackdrop from "../src/components/ui/DismissBackdrop";
 import Lightbox from "../src/components/ui/Lightbox";
-import SelectionPopover from "../src/components/ui/SelectionPopover";
+import { Popover } from "@botiverse/raft-ui";
+import SelectionPopover, { SelectionPopoverPanel } from "../src/components/ui/SelectionPopover";
 import { DISMISS_LAYER_ATTR } from "../src/components/ui/dismissLayer";
 import { TestIntlProvider } from "./helpers/intl";
 
@@ -32,6 +33,14 @@ test("Lightbox's backdrop root carries the marker even when callers pass extra a
 });
 
 test("SelectionPopover (shared picker popup) carries the marker on its root", () => {
-  render(<TestIntlProvider><SelectionPopover title="t" options={[]} /></TestIntlProvider>);
+  // It is the positioned content of a raft-ui Popover, portalled while open.
+  render(<TestIntlProvider><Popover open><SelectionPopover title="t" options={[]} /></Popover></TestIntlProvider>);
+  const layer = document.querySelector(`[${DISMISS_LAYER_ATTR}]`);
+  assert.ok(layer);
+  assert.equal(layer!.getAttribute("data-slot"), "popover-content");
+});
+
+test("SelectionPopoverPanel (the bare panel a caller places itself) carries the marker", () => {
+  render(<TestIntlProvider><SelectionPopoverPanel title="t" options={[]} /></TestIntlProvider>);
   assert.ok(document.querySelector(`[${DISMISS_LAYER_ATTR}]`));
 });

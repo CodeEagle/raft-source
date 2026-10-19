@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
-test("standalone CJS bundle derives Codex OAuth without an adjacent SDK module tree", async () => {
+test("standalone CJS bundle derives Codex and Pi session OAuth without an adjacent SDK module tree", async () => {
   const dir = await mkdtemp(join(tmpdir(), "raft-oauth-bundle-"));
   try {
     const entry = fileURLToPath(new URL("../../../daemon/src/bundledPiOAuth.ts", import.meta.url));

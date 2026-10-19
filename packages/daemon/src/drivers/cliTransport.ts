@@ -1,4 +1,5 @@
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { ambientProcessEnv } from "../processEnvPatch";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { hydrateRuntimeConfig, kPromotedSlotPath, resolveLiveExecutablePath, runtimeConfigToLaunchFields, type AgentConfig } from "@botiverse/raft-shared";
@@ -561,8 +562,8 @@ export function writeOpencliWrapper(
   // notably NOT the Electron flag, which would be a guess about a host we
   // could not identify.
   const nodeHost = hostKind === "electron" || hostKind === "node"
-    ? resolveNodeHostLaunch({ env: process.env, execIsElectron, seaProbe })
-    : { command: liveHostExecutablePath(), env: process.env };
+    ? resolveNodeHostLaunch({ env: ambientProcessEnv(), execIsElectron, seaProbe })
+    : { command: liveHostExecutablePath(), env: ambientProcessEnv() };
   const electronNodeMode = execIsElectron && nodeHost.env.ELECTRON_RUN_AS_NODE === "1";
   const fallbacks = deriveOpencliFallbackCandidates(opencliBinPath);
   // If the resolved path is already gone, bake the best existing fallback as
@@ -733,6 +734,16 @@ export function toolEnvFromSpawnEnv(
   return env;
 }
 
+/** PATH from an env object; on Windows the name matches in any case. */
+function readEnvPath(env: Record<string, string | undefined> | undefined, caseInsensitive: boolean): string | undefined {
+  if (!env) return undefined;
+  if (!caseInsensitive) return env.PATH;
+  for (const [key, value] of Object.entries(env)) {
+    if (key.toLowerCase() === "path" && value !== undefined) return value;
+  }
+  return undefined;
+}
+
 export async function prepareCliTransport(
   ctx: SpawnContext,
   extraEnv: Record<string, string | undefined> = {},
@@ -764,8 +775,8 @@ export async function prepareCliTransport(
   // separate Node host.
   const hostKind = detectNodeHostKind({ execIsElectron, seaProbe });
   const nodeHost = hostKind === "electron" || hostKind === "node"
-    ? resolveNodeHostLaunch({ env: process.env, execIsElectron, seaProbe })
-    : { command: liveHostExecutablePath(), env: process.env };
+    ? resolveNodeHostLaunch({ env: ambientProcessEnv(), execIsElectron, seaProbe })
+    : { command: liveHostExecutablePath(), env: ambientProcessEnv() };
   const electronNodeMode = execIsElectron && nodeHost.env.ELECTRON_RUN_AS_NODE === "1";
   // slockCliPath is the path to the bundled `slock` CLI script, OR the literal
   // `__cli` sentinel for a SEA single-binary Computer (the daemon re-execs
@@ -815,6 +826,7 @@ export async function prepareCliTransport(
     runtime: ctx.config.runtime,
     resumeSessionId: ctx.config.sessionId,
     passiveAx: configPassiveAx(ctx.config),
+    plan: ctx.contextGeneration,
   });
   const launchCreatedAtFile = path.join(slockDir, LAUNCH_CREATED_AT_FILENAME);
   if (!existsSync(launchCreatedAtFile)) {
@@ -852,7 +864,6 @@ export async function prepareCliTransport(
       tracer: ctx.tracer,
       daemonVersion: ctx.daemonVersion,
       computerVersion: ctx.computerVersion,
-      passiveAx: configPassiveAx(ctx.config),
     });
     const launchPart = buildCliTransportLaunchPart(ctx.launchId);
     const proxyTokenDir = path.join(slockHome, "agent-proxy-tokens", safePathPart(ctx.agentId));
@@ -1026,9 +1037,18 @@ export async function prepareCliTransport(
   // the agent's configured env vars, then the daemon's own PATH. Prefixing
   // process.env.PATH unconditionally discarded an agent-configured PATH — the
   // documented workaround for a minimal service PATH (slock#8610).
-  const basePath = extraEnv.PATH ?? launchRuntimeFields.envVars?.PATH ?? process.env.PATH ?? "";
+  // The daemon's own env, never a Pi session-create patch in flight (task #28).
+  const daemonEnv = ambientProcessEnv();
+  // Windows env names are case-insensitive, but ambientProcessEnv() is a plain
+  // copy whose key is usually `Path`: reading `.PATH` there found nothing and
+  // left the runtime with only the wrapper dir on its PATH.
+  const caseInsensitive = platform === "win32";
+  const basePath = readEnvPath(extraEnv, caseInsensitive)
+    ?? readEnvPath(launchRuntimeFields.envVars ?? undefined, caseInsensitive)
+    ?? readEnvPath(daemonEnv, caseInsensitive)
+    ?? "";
   const spawnEnv: Record<string, string | undefined> = {
-    ...process.env,
+    ...daemonEnv,
     FORCE_COLOR: "0",
     ...(launchRuntimeFields.envVars || {}),
     ...extraEnv,
@@ -1043,6 +1063,13 @@ export async function prepareCliTransport(
     [SLOCK_CLI_TRANSPORT_DIR_ENV]: slockDir,
     PATH: `${slockDir}${path.delimiter}${basePath}`,
   };
+  if (caseInsensitive) {
+    // One PATH only: a child given both `Path` and `PATH` keeps whichever
+    // sorts first, which is `PATH` here, but leave no second copy to pick.
+    for (const key of Object.keys(spawnEnv)) {
+      if (key !== "PATH" && key.toLowerCase() === "path") delete spawnEnv[key];
+    }
+  }
   delete spawnEnv.SLOCK_AGENT_TOKEN;
   // RFC §9.1 step 3 — never let raw agent credentials leak via the runtime
   // env. The daemon-owned wrapper receives only a daemon-owned proxy token file

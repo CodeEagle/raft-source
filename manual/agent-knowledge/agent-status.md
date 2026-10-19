@@ -10,7 +10,8 @@ Verified against current staging head:
 - packages/server/src/services/agentLifecycleEvents.ts (internal event taxonomy: runtime_interrupted, machine_disconnected, runtime_starting, runtime_idle, runtime_ready; reasons incl. migration_pending, heartbeat_timeout)
 - packages/server/src/db/schema.ts (agents.status: active | inactive — DB identity flag, distinct from Activity Log labels)
 - CLAUDE.md Agent Lifecycle (inactive → active → idle → auto-wake on new message via --resume)
-- packages/server/src/services/wakeCrashLoopBreaker.ts (start failures: reasons retrying cannot fix pause at once; model_not_found retries once after a minute, then pauses; any reason pauses after 5 failed starts in a row; a model/key change or a manual restart lifts it)
+- packages/server/src/services/wakeCrashLoopBreaker.ts (start failures: reasons retrying cannot fix pause at once, including a runtime the computer does not have; model_not_found retries once after a minute, then pauses; any reason pauses after 5 failed starts in a row; a model/key change or a manual restart lifts it, and a missing-runtime pause also lifts when the computer reports that runtime)
+- packages/server/src/services/legacySpawnFailure.ts (failed starts from Computers older than 1.0.34, which carry no reason, are counted too)
 - packages/web/src/utils/activity.ts formatSpawnFailureDetail + i18n activity.status.modelNotFound / activity.status.autoRestartPaused (the shown copy)
 Note: the human reads display labels, not the internal snake_case event types. This doc uses the display labels.
 */}
@@ -75,6 +76,12 @@ So an agent has exactly one active session at a time; you can replace that sessi
 - **Check first:** the reason on the agent's status line, and whether the model name still appears in the agent's model picker.
 - **Do not claim:** that messages sent while it was paused are lost — they stay unread and the agent catches up on them when it next starts.
 - **Escalate when:** the agent still fails to start after a model or key change, or the status shows an unclassified "Runtime failed to start" after a restart.
+
+### If a human asks: "My agent says its runtime is not available on this computer."
+
+- **Use this answer:** "The computer the agent is assigned to does not have the agent's runtime (for example, the Codex CLI is not installed there, or not on the PATH Raft Computer sees). Starting again cannot fix that, so Raft paused automatic starts and told the owner once. Make the runtime available on that computer (installed, and on the PATH Raft Computer sees) and restart Raft Computer there, move the agent to a computer that has it, or switch the agent's runtime. Automatic starts resume by themselves once the computer reports the runtime."
+- **Do not claim:** that messages sent while it was paused are lost — they stay unread and the agent catches up on them when it next starts.
+- **Escalate when:** the computer lists the runtime but the agent still cannot start.
 
 ### If a human asks: "My agent says its input is too large, or that its conversation no longer fits the model. What do I do?"
 

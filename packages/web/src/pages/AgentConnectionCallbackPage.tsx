@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { Link, useLocation } from "react-router-dom";
+import { Card } from "@botiverse/raft-ui";
 import { AGENT_CONNECTION_PENDING_ID_RE, isAgentConnectionProvider } from "@botiverse/raft-shared";
 import type { AgentConnectionProvider, AgentConnectionStatusView } from "@botiverse/raft-shared";
 import api from "../api/client";
@@ -149,36 +150,36 @@ export default function AgentConnectionCallbackPage() {
 
   return (
     <div
-      className="h-full min-h-0 overflow-y-auto bg-layer-canvas-muted font-display text-foreground-strong safe-top safe-bottom theme-brutal:bg-brutal-cream theme-brutal:text-black"
+      className="h-full min-h-0 overflow-y-auto bg-layer-sidebar font-display text-foreground safe-top safe-bottom"
       data-testid="agent-connection-callback-page"
       data-kind={view.kind}
       data-confirm={confirm.kind}
     >
       <div className="mx-auto flex min-h-full w-full max-w-xl flex-col justify-center px-4 py-8">
-        <div className="space-y-4 rounded-lg border border-line-muted bg-layer-panel p-5 shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal">
+        <Card className="block space-y-4 p-5">
           <div>
             <SectionEyebrow as="div">{formatMessage({ id: "pages.agentConnectionCallback.eyebrow" })}</SectionEyebrow>
-            <h1 className="mt-2 text-2xl font-black">{formatMessage({ id: "pages.agentConnectionCallback.title" })}</h1>
+            <h1 className="mt-1 text-title">{formatMessage({ id: "pages.agentConnectionCallback.title" })}</h1>
           </div>
           <Banner intent={intent} withIcon>
             <span data-testid="agent-connection-callback-message">{message}</span>
           </Banner>
           {reason && (
-            <p className="text-sm text-foreground-muted theme-brutal:text-black/70" data-testid="agent-connection-callback-reason">
+            <p className="text-callout text-foreground-muted" data-testid="agent-connection-callback-reason">
               {formatMessage({ id: "pages.agentConnectionCallback.providerReason" }, { reason })}
             </p>
           )}
           {foreignConnected && (
-            <p className="text-sm text-foreground-muted theme-brutal:text-black/70" data-testid="agent-connection-callback-disconnect-advice">
+            <p className="text-callout text-foreground-muted" data-testid="agent-connection-callback-disconnect-advice">
               {formatMessage({ id: "pages.agentConnectionCallback.foreignConnected" })}
             </p>
           )}
           {agentHref && (
-            <Link to={agentHref} className="inline-block text-sm font-bold underline">
+            <Link to={agentHref} className="inline-block rounded-control text-footnote font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus">
               {formatMessage({ id: "pages.agentConnectionCallback.backToAgent" })}
             </Link>
           )}
-        </div>
+        </Card>
       </div>
     </div>
   );

@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import { createConnection, type AddressInfo, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { BUILTIN_RUNTIME_HOST_PROVIDER_ENV_SCRUB_KEYS, eventsForSpan, providerRequestId, RUNTIME_CONFIG_VERSION } from "@botiverse/raft-shared";
+import { BUILTIN_RUNTIME_HOST_PROVIDER_ENV_SCRUB_KEYS, eventsForSpan, PI_BUILTIN_PROVIDER_CONNECTION_PROBES, providerRequestId, RUNTIME_CONFIG_VERSION } from "@botiverse/raft-shared";
 import fc from "fast-check";
 import {
   BuiltInDriver,
@@ -18,6 +18,9 @@ import {
   buildPiSessionDir,
   configureBuiltInGatewayCustomModel,
   createPiAgentSessionForContext,
+  findAnthropicGatewayThinkingContract,
+  resolveBuiltInThinkingLevel,
+  type AnthropicGatewayThinkingContract,
   createPiSdkEventMappingState,
   detectPiModels,
   detectPiModelsFromRegistry,
@@ -41,7 +44,7 @@ import {
   type AgentSession,
   type AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
-import { InMemoryCredentialStore, type Model } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, clampThinkingLevel, getSupportedThinkingLevels, type Model } from "@earendil-works/pi-ai";
 import { streamSimple as streamSimpleOpenAICompletions } from "@earendil-works/pi-ai/api/openai-completions";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { streamSimple as streamSimpleAnthropicMessages } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -1598,7 +1601,7 @@ test("SDK event mapping emits tool calls and waits for agent_settled before daem
 
   assert.deepEqual(events, [
     { kind: "session_init", sessionId: "pi-session-42" },
-    { kind: "tool_call", name: "bash", input: { command: "pwd" } },
+    { kind: "tool_call", name: "bash", input: { command: "pwd" }, callId: "tool-1" },
     { kind: "turn_end", sessionId: "pi-session-42" },
   ]);
 });
@@ -2591,7 +2594,7 @@ test("Pi library egress traverses both interception faces, and apiKey seeding pr
   } as never;
 
   try {
-    // --- POSITIVE CONTROL: real 1.1.0 OAuth flow, real fetch, pointed at loopback -------------
+    // --- POSITIVE CONTROL: real 1.3.0 OAuth flow, real fetch, pointed at loopback -------------
     process.env.KIMI_CODE_OAUTH_HOST = `http://127.0.0.1:${port}`;
     const { kimiCodingProvider } = await import("@earendil-works/pi-ai/providers/kimi-coding");
     const provider = kimiCodingProvider() as unknown as {
@@ -2663,6 +2666,84 @@ test("Pi library egress traverses both interception faces, and apiKey seeding pr
   }
 });
 
+test("kimi-coding preset uses OpenAI Chat Completions after the Pi 1.3.0 provider switch", { timeout: 10_000 }, async () => {
+  // Pi 1.3.0 moved the kimi-coding provider from Anthropic Messages
+  // (`https://api.kimi.com/coding`) to OpenAI Chat Completions
+  // (`https://api.kimi.com/coding/v1`). Both halves matter for Built-in agents on
+  // Kimi For Coding: the generated probe entry drives the picker / connection
+  // probe, and the resolved catalog model drives the launch. Assert the entry,
+  // then the resolved model, then the actual request shape against loopback.
+  assert.deepEqual(PI_BUILTIN_PROVIDER_CONNECTION_PROBES["kimi-coding"], {
+    api: "openai-completions",
+    baseUrl: "https://api.kimi.com/coding/v1",
+    headers: {},
+  });
+
+  const registry = await freshBuiltInModelRegistry();
+  const runtimeConfig = {
+    version: RUNTIME_CONFIG_VERSION,
+    runtime: "builtin",
+    provider: { kind: "preset", providerId: "kimi-coding", apiKey: "preset-kimi" },
+    hostUserState: "forbidden",
+    model: { kind: "preset", id: "kimi-coding/kimi-for-coding" },
+    mode: { kind: "default" },
+  } as const;
+  const model = resolvePiModelFromRegistry("kimi-coding/kimi-for-coding", registry, runtimeConfig as never);
+  assert.ok(model, "the kimi-coding preset model must resolve from the SDK catalog");
+  assert.equal(model.api, "openai-completions", "kimi-coding must resolve to the Chat Completions api");
+  assert.equal(model.baseUrl, "https://api.kimi.com/coding/v1", "kimi-coding must resolve to the /v1 base URL");
+
+  // Pick the transport the resolved api selects, so a regression back to
+  // anthropic-messages fails the wire assertions instead of being bypassed.
+  const seen: Array<{ method?: string; url?: string; body: string; headers: Record<string, string | string[] | undefined> }> = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk) => { body += chunk; });
+    req.on("end", () => {
+      seen.push({ method: req.method, url: req.url, body, headers: req.headers });
+      if (req.method === "OPTIONS") {
+        res.writeHead(204).end();
+        return;
+      }
+      res.writeHead(200, { "Content-Type": "text/event-stream" }).end("data: [DONE]\n\n");
+    });
+  });
+  const port = await listenOnLoopback(server);
+  // The address comes from the catalog (asserted above); only the base URL is
+  // swapped to loopback here so the wire shape is pinned without real egress.
+  const loopbackModel = { ...model, baseUrl: `http://127.0.0.1:${port}/v1` };
+  const context = normalizeContext({ messages: [{ role: "user", content: "ping", timestamp: 1 }] });
+  try {
+    const result = model.api === "openai-completions"
+      ? await streamSimpleOpenAICompletions(
+          loopbackModel as Model<"openai-completions">,
+          context,
+          { apiKey: "sk-kimi-coding-test" },
+        ).result()
+      : await streamSimpleAnthropicMessages(
+          loopbackModel as Model<"anthropic-messages">,
+          context,
+          { apiKey: "sk-kimi-coding-test" },
+        ).result();
+    assert.ok(result.stopReason.length > 0, "the stream must settle");
+
+    const request = seen.find((entry) => entry.method === "POST");
+    assert.ok(request, "the provider must POST the completion");
+    assert.equal(request.url, "/v1/chat/completions", "kimi-coding must POST to the Chat Completions path");
+    assert.match(
+      String(request.headers.authorization ?? ""),
+      /^Bearer /u,
+      "a Chat Completions bearer header must be sent",
+    );
+    assert.equal(request.headers["anthropic-version"], undefined, "the Anthropic Messages header must not come back");
+    const payload = JSON.parse(request.body) as { model?: unknown; messages?: unknown };
+    assert.equal(typeof payload.model, "string");
+    assert.ok(Array.isArray(payload.messages), "a Chat Completions body carries a messages array");
+  } finally {
+    await closeServer(server);
+  }
+});
+
 test("pi pin is the version this offline guarantee was verified against", () => {
   // The offline guarantee now lives in upstream code, so nothing in this repo fails when a future
   // 0.8x.y moves it. This anchor forces a human decision at bump time: change the pin and this
@@ -2699,10 +2780,24 @@ test("pi pin is the version this offline guarantee was verified against", () => 
   //   `synchronizeCredentialState` and `refreshProviderAvailability` are byte-identical and
   //   `allowNetwork: false` still appears exactly 6 times in each. The seeding path is untouched.
   //
+  //   1.1.0 -> 1.2.0 was re-verified the same way: the whole model-runtime.js diff is 17 lines
+  //   and is confined to provider catalog construction -- `openrouter` is now wrapped with
+  //   `withPersonalizedCatalog(provider, personalizeOpenRouterCatalog, ...)` (the new import from
+  //   `@earendil-works/pi-ai/providers/openrouter`), with the builtin-provider loop refactored to
+  //   match. `synchronizeCredentialState` and `refreshProviderAvailability` are byte-identical,
+  //   and `allowNetwork: false` still appears exactly 6 times in each. The seeding path is
+  //   untouched, so the offline guarantee holds.
+  //
+  //   1.2.0 -> 1.3.0 was re-verified and is the strongest form: `diff` of
+  //   dist/core/model-runtime.js between the two packed artifacts is EMPTY (byte-identical), so
+  //   `synchronizeCredentialState`, `refreshProviderAvailability` and every `allowNetwork: false`
+  //   site (6 each) are unchanged. The 1.3.0 changes live elsewhere in the package (kimi-coding's
+  //   Chat Completions move, catalog personalization), not on the credential/availability path.
+  //
   // Then update VERIFIED_AGAINST *and* the three sibling 0.8x.y labels below (the positive-control
   // comment, the "never triggers a remote model refresh (pi X)" test name, and its comment) --
   // otherwise they assert a version nobody re-checked.
-  const VERIFIED_AGAINST = "1.1.0";
+  const VERIFIED_AGAINST = "1.3.0";
   const pkg = JSON.parse(
     readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
   ) as { dependencies: Record<string, string> };
@@ -2719,8 +2814,8 @@ test("pi pin is the version this offline guarantee was verified against", () => 
   }
 });
 
-test("Pi auth seeding never triggers a remote model refresh (pi 1.1.0)", async () => {
-  // Under 1.1.0 the offline guarantee lives inside the library: credential synchronization
+test("Pi auth seeding never triggers a remote model refresh (pi 1.3.0)", async () => {
+  // Under 1.3.0 the offline guarantee lives inside the library: credential synchronization
   // refreshes with allowNetwork:false and reconciles only local catalog/composition/availability.
   // Our side of the contract is that seeding issues NO refresh of its own — remote freshness is a
   // separate, deliberate caller decision. This counts refreshes rather than inspecting arguments,
@@ -4221,4 +4316,372 @@ test("task #365: a launch that turns stale while pi waits for the env-patch lock
   } finally {
     console.info = info;
   }
+});
+
+// ---------------------------------------------------------------------------
+// Built-in Pi × Anthropic-compatible gateway: exact-pair thinking contracts
+// (MiniMax M3.1 report, 2026-10-13)
+// ---------------------------------------------------------------------------
+
+function anthropicGatewayConfig(baseUrl: string, name: string, reasoningEffort: string | null = null) {
+  return {
+    version: RUNTIME_CONFIG_VERSION,
+    runtime: "builtin",
+    provider: { kind: "gateway", providerId: "anthropic-compatible", baseUrl, apiKey: "gateway-test-key" },
+    hostUserState: "forbidden",
+    model: { kind: "custom", name },
+    mode: { kind: "default" },
+    ...(reasoningEffort ? { reasoningEffort } : {}),
+  } as const;
+}
+
+test("MiniMax-M3.1-Flash-Preview on its documented hosts registers the adaptive-thinking contract; nothing else inherits it", async () => {
+  for (const baseUrl of ["https://api.minimax.cn/anthropic", "https://api.minimax.io/anthropic", "https://API.MINIMAX.CN/anthropic/"]) {
+    const registry = await freshBuiltInModelRegistry();
+    const config = anthropicGatewayConfig(baseUrl, "MiniMax-M3.1-Flash-Preview");
+    configureBuiltInGatewayCustomModel(registry, config, null);
+    const model = resolvePiModelFromRegistry("MiniMax-M3.1-Flash-Preview", registry, config, null) as Model<"anthropic-messages"> | undefined;
+    assert.ok(model, baseUrl);
+    assert.equal(model.compat?.forceAdaptiveThinking, true, baseUrl);
+    assert.deepEqual(model.thinkingLevelMap, { off: null, minimal: "low", low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" });
+    assert.deepEqual(getSupportedThinkingLevels(model), ["minimal", "low", "medium", "high", "xhigh", "max"], "off is not selectable: the upstream rejects disabled");
+    assert.equal(clampThinkingLevel(model, "max"), "max", "Max is not clamped down to high");
+    assert.equal(clampThinkingLevel(model, "xhigh"), "xhigh");
+  }
+
+  // Controls: same id on an undocumented host, another id on a documented host, a different path, an unparsable URL.
+  for (const [baseUrl, name] of [
+    ["https://api.minimaxi.com/anthropic", "MiniMax-M3.1-Flash-Preview"],
+    ["https://gateway.example.test/anthropic", "MiniMax-M3.1-Flash-Preview"],
+    ["https://api.minimax.cn/anthropic", "MiniMax-M3"],
+    ["https://api.minimax.cn/v1", "MiniMax-M3.1-Flash-Preview"],
+    ["https://api.minimax.cn/anthropic", "minimax-m3.1-flash-preview"],
+    ["not a url", "MiniMax-M3.1-Flash-Preview"],
+  ] as const) {
+    assert.equal(findAnthropicGatewayThinkingContract(baseUrl, name), undefined, `${baseUrl} ${name}`);
+    const registry = await freshBuiltInModelRegistry();
+    const config = anthropicGatewayConfig(baseUrl, name);
+    configureBuiltInGatewayCustomModel(registry, config, null);
+    const model = resolvePiModelFromRegistry(name, registry, config, null) as Model<"anthropic-messages"> | undefined;
+    assert.ok(model, `${baseUrl} ${name}`);
+    assert.equal(model.compat, undefined, `${baseUrl} ${name}: no contract inherited`);
+    assert.equal(model.thinkingLevelMap, undefined, `${baseUrl} ${name}`);
+    assert.equal(clampThinkingLevel(model, "max"), "high", `${baseUrl} ${name}: today's clamp stays`);
+  }
+});
+
+test("an Anthropic-compatible gateway inherits the SDK catalog entry only for the exact endpoint + id pair", async () => {
+  const registry = await freshBuiltInModelRegistry();
+  const catalog = registry.getAll().find((model) => model.api === "anthropic-messages" && model.id === "MiniMax-M3" && model.provider === "minimax-cn");
+  assert.ok(catalog, "fixture precondition: the SDK catalog knows minimax-cn/MiniMax-M3");
+  const config = anthropicGatewayConfig(`${catalog.baseUrl}/`, "MiniMax-M3");
+  configureBuiltInGatewayCustomModel(registry, config, null);
+  const model = resolvePiModelFromRegistry("MiniMax-M3", registry, config, null);
+  assert.equal(model?.provider, "anthropic", "registered under the gateway provider, not the catalog provider");
+  assert.equal(model?.contextWindow, catalog.contextWindow);
+  assert.equal(model?.maxTokens, catalog.maxTokens);
+  assert.deepEqual(model?.input, catalog.input);
+
+  const other = await freshBuiltInModelRegistry();
+  const otherConfig = anthropicGatewayConfig("https://gateway.example.test/anthropic", "MiniMax-M3");
+  configureBuiltInGatewayCustomModel(other, otherConfig, null);
+  const unknown = resolvePiModelFromRegistry("MiniMax-M3", other, otherConfig, null);
+  assert.equal(unknown?.contextWindow, 200_000, "an unknown endpoint keeps the gateway defaults");
+  assert.equal(unknown?.compat, undefined);
+
+  // A catalog preset (its own registry: registering a gateway model replaces
+  // that provider's catalog entries, as it always did) is untouched by this change.
+  const presetRegistry = await freshBuiltInModelRegistry();
+  const presetConfig = { ...config, model: { kind: "preset", id: "anthropic/claude-fable-5" } } as any;
+  const preset = resolvePiModelFromRegistry("anthropic/claude-fable-5", presetRegistry, presetConfig, null) as Model<"anthropic-messages"> | undefined;
+  assert.equal(preset?.provider, "anthropic");
+  assert.equal(preset?.compat?.forceAdaptiveThinking, true);
+  assert.equal(configureBuiltInGatewayCustomModel(presetRegistry, presetConfig, null).thinkingContract, null, "presets never take a gateway contract");
+});
+
+test("resolveBuiltInThinkingLevel: unset effort takes the contract's documented default only for a contract model, and otherwise stays exactly what it was", async () => {
+  const registry = await freshBuiltInModelRegistry();
+  const contractConfig = anthropicGatewayConfig("https://api.minimax.cn/anthropic", "MiniMax-M3.1-Flash-Preview");
+  const { thinkingContract } = configureBuiltInGatewayCustomModel(registry, contractConfig, null);
+  assert.ok(thinkingContract, "the documented pair registers with its contract");
+  assert.equal(resolveBuiltInThinkingLevel(null, thinkingContract), "max");
+  assert.equal(resolveBuiltInThinkingLevel(undefined, thinkingContract), "max");
+  assert.equal(resolveBuiltInThinkingLevel("high", thinkingContract), "high", "an explicit choice passes through");
+  assert.equal(resolveBuiltInThinkingLevel("max", thinkingContract), "max");
+
+  const plain = await freshBuiltInModelRegistry();
+  const plainConfig = anthropicGatewayConfig("https://gateway.example.test/anthropic", "MiniMax-M3.1-Flash-Preview");
+  assert.equal(configureBuiltInGatewayCustomModel(plain, plainConfig, null).thinkingContract, null, "no contract for an unknown endpoint");
+  // The launch fields carry `null` for an unset effort and the SDK clamps null
+  // to its first supported level ("off"): that value must reach the SDK unchanged.
+  assert.strictEqual(resolveBuiltInThinkingLevel(null, null), null as unknown as undefined);
+  assert.strictEqual(resolveBuiltInThinkingLevel(undefined, null), undefined);
+  assert.equal(resolveBuiltInThinkingLevel("max", null), "max");
+
+  const catalog = await freshBuiltInModelRegistry();
+  const catalogConfig = anthropicGatewayConfig("https://api.minimaxi.com/anthropic", "MiniMax-M3");
+  assert.equal(configureBuiltInGatewayCustomModel(catalog, catalogConfig, null).thinkingContract, null, "a catalog pair is the SDK's business");
+
+  const openai = await freshBuiltInModelRegistry();
+  const openaiConfig = { ...plainConfig, provider: { kind: "gateway", providerId: "openai-compatible", baseUrl: "https://api.minimax.cn/v1", apiKey: "k" } } as const;
+  assert.equal(configureBuiltInGatewayCustomModel(openai, openaiConfig, null).thinkingContract, null);
+});
+
+/** A loopback Anthropic Messages server that records request bodies and answers one short text turn. */
+function startFakeAnthropicServer(): { server: Server; bodies: Array<Record<string, any>>; paths: string[] } {
+  const bodies: Array<Record<string, any>> = [];
+  const paths: string[] = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      paths.push(req.url ?? "");
+      try {
+        bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      } catch {
+        bodies.push({ unparsable: true });
+      }
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      const send = (event: string, data: Record<string, unknown>) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      send("message_start", { type: "message_start", message: { id: "msg_fake", type: "message", role: "assistant", model: bodies[bodies.length - 1]?.model ?? "fake", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } });
+      send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } });
+      send("content_block_stop", { type: "content_block_stop", index: 0 });
+      send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } });
+      send("message_stop", { type: "message_stop" });
+      res.end();
+    });
+  });
+  return { server, bodies, paths };
+}
+
+/**
+ * Drive a real built-in session (registry → clamp → streamSimple → HTTP) for
+ * one prompt and return the first request body the gateway received.
+ */
+async function captureBuiltInAnthropicRequest(input: {
+  modelName: string;
+  reasoningEffort: string | null;
+  contract: AnthropicGatewayThinkingContract | null;
+}): Promise<Record<string, any>> {
+  const root = mkdtempSync(path.join(os.tmpdir(), "slock-pi-anthropic-contract-"));
+  const workingDirectory = path.join(root, "workspace");
+  mkdirSync(workingDirectory, { recursive: true });
+  const fake = startFakeAnthropicServer();
+  const port = await listenOnLoopback(fake.server);
+  const baseUrl = `http://127.0.0.1:${port}/anthropic`;
+  let session: AgentSession | undefined;
+  try {
+    session = await createPiAgentSessionForContext(
+      makeSpawnContext({
+        runtime: "builtin",
+        model: input.modelName,
+        reasoningEffort: input.reasoningEffort,
+        runtimeConfig: anthropicGatewayConfig(baseUrl, input.modelName, input.reasoningEffort),
+      }, { workingDirectory, launchId: `launch-anthropic-contract-${port}` }),
+      `builtin-anthropic-contract-${port}`,
+      {
+        agentDir: buildBuiltInAgentDir(workingDirectory),
+        sessionDir: buildBuiltInSessionDir(workingDirectory),
+        agentDirSource: "managed_builtin",
+        exposeLaunchEnvToTools: false,
+        isolateHostProviderEnv: true,
+        thinkingContracts: input.contract
+          ? [{ endpoint: baseUrl, modelId: input.modelName, contract: input.contract }]
+          : [],
+      },
+    );
+    await session.prompt("contract proof");
+    assert.equal(fake.paths.length, 1);
+    assert.ok(fake.paths[0]!.startsWith("/anthropic/v1/messages"), fake.paths[0]);
+    assert.equal(fake.bodies.length, 1);
+    return fake.bodies[0]!;
+  } finally {
+    session?.dispose();
+    await closeServer(fake.server);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+const M31_CONTRACT = findAnthropicGatewayThinkingContract("https://api.minimax.cn/anthropic", "MiniMax-M3.1-Flash-Preview")!;
+
+test("real built-in chain: a contract model's default turn asks for adaptive thinking at the documented default effort, never disabled", { timeout: 20_000 }, async () => {
+  const body = await captureBuiltInAnthropicRequest({ modelName: "MiniMax-M3.1-Flash-Preview", reasoningEffort: null, contract: M31_CONTRACT });
+  assert.equal(body.model, "MiniMax-M3.1-Flash-Preview");
+  assert.equal(body.thinking?.type, "adaptive", JSON.stringify(body.thinking));
+  assert.equal(body.output_config?.effort, "max");
+  assert.equal(JSON.stringify(body).includes("disabled"), false);
+  assert.equal(body.thinking?.budget_tokens, undefined);
+});
+
+test("real built-in chain: Max on a contract model reaches the wire as adaptive + effort max; high stays high", { timeout: 30_000 }, async () => {
+  const max = await captureBuiltInAnthropicRequest({ modelName: "MiniMax-M3.1-Flash-Preview", reasoningEffort: "max", contract: M31_CONTRACT });
+  assert.equal(max.thinking?.type, "adaptive");
+  assert.equal(max.output_config?.effort, "max", "not clamped to high");
+  const high = await captureBuiltInAnthropicRequest({ modelName: "MiniMax-M3.1-Flash-Preview", reasoningEffort: "high", contract: M31_CONTRACT });
+  assert.equal(high.thinking?.type, "adaptive");
+  assert.equal(high.output_config?.effort, "high");
+});
+
+test("real built-in chain, control: the same model id without a contract keeps today's requests (disabled by default, budget thinking for Max)", { timeout: 30_000 }, async () => {
+  const dflt = await captureBuiltInAnthropicRequest({ modelName: "MiniMax-M3.1-Flash-Preview", reasoningEffort: null, contract: null });
+  assert.equal(dflt.thinking?.type, "disabled", JSON.stringify(dflt.thinking));
+  assert.equal(dflt.output_config, undefined);
+  const max = await captureBuiltInAnthropicRequest({ modelName: "MiniMax-M3.1-Flash-Preview", reasoningEffort: "max", contract: null });
+  assert.equal(max.thinking?.type, "enabled", JSON.stringify(max.thinking));
+  assert.equal(typeof max.thinking?.budget_tokens, "number");
+  assert.equal(max.output_config, undefined);
+});
+
+/** Like startFakeAnthropicServer, but the first turn answers with a signed thinking block and a bash tool call. */
+function startFakeAnthropicToolServer(): { server: Server; bodies: Array<Record<string, any>> } {
+  const bodies: Array<Record<string, any>> = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      const send = (event: string, data: Record<string, unknown>) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      send("message_start", { type: "message_start", message: { id: `msg_${bodies.length}`, type: "message", role: "assistant", model: "MiniMax-M3.1-Flash-Preview", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } });
+      if (bodies.length === 1) {
+        send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } });
+        send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "thinking_delta", thinking: "plan: run echo" } });
+        send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "signature_delta", signature: "sig-turn-1" } });
+        send("content_block_stop", { type: "content_block_stop", index: 0 });
+        send("content_block_start", { type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "toolu_1", name: "bash", input: {} } });
+        send("content_block_delta", { type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: JSON.stringify({ command: "echo tool-proof" }) } });
+        send("content_block_stop", { type: "content_block_stop", index: 1 });
+        send("message_delta", { type: "message_delta", delta: { stop_reason: "tool_use", stop_sequence: null }, usage: { output_tokens: 2 } });
+      } else {
+        send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+        send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "done" } });
+        send("content_block_stop", { type: "content_block_stop", index: 0 });
+        send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } });
+      }
+      send("message_stop", { type: "message_stop" });
+      res.end();
+    });
+  });
+  return { server, bodies };
+}
+
+test("real built-in chain: a tool round trip on a contract model replays the signed thinking block and keeps adaptive thinking on the second request", { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "slock-pi-anthropic-contract-tools-"));
+  const workingDirectory = path.join(root, "workspace");
+  mkdirSync(workingDirectory, { recursive: true });
+  const fake = startFakeAnthropicToolServer();
+  const port = await listenOnLoopback(fake.server);
+  const baseUrl = `http://127.0.0.1:${port}/anthropic`;
+  let session: AgentSession | undefined;
+  try {
+    session = await createPiAgentSessionForContext(
+      makeSpawnContext({
+        runtime: "builtin",
+        model: "MiniMax-M3.1-Flash-Preview",
+        reasoningEffort: "max",
+        runtimeConfig: anthropicGatewayConfig(baseUrl, "MiniMax-M3.1-Flash-Preview", "max"),
+      }, { workingDirectory, launchId: `launch-anthropic-contract-tools-${port}` }),
+      `builtin-anthropic-contract-tools-${port}`,
+      {
+        agentDir: buildBuiltInAgentDir(workingDirectory),
+        sessionDir: buildBuiltInSessionDir(workingDirectory),
+        agentDirSource: "managed_builtin",
+        exposeLaunchEnvToTools: false,
+        isolateHostProviderEnv: true,
+        thinkingContracts: [{ endpoint: baseUrl, modelId: "MiniMax-M3.1-Flash-Preview", contract: M31_CONTRACT }],
+      },
+    );
+    await session.prompt("tool proof");
+    assert.equal(fake.bodies.length, 2, "tool call, then the follow-up request");
+    for (const body of fake.bodies) {
+      assert.equal(body.thinking?.type, "adaptive");
+      assert.equal(body.output_config?.effort, "max");
+    }
+    const second = fake.bodies[1]!;
+    const assistant = second.messages.find((message: any) => message.role === "assistant");
+    assert.ok(assistant, JSON.stringify(second.messages));
+    const thinking = assistant.content.find((block: any) => block.type === "thinking");
+    assert.deepEqual({ thinking: thinking?.thinking, signature: thinking?.signature }, { thinking: "plan: run echo", signature: "sig-turn-1" }, "the signed thinking block is replayed verbatim");
+    assert.ok(assistant.content.some((block: any) => block.type === "tool_use" && block.name === "bash"));
+    const toolResult = second.messages.at(-1)?.content?.find?.((block: any) => block.type === "tool_result");
+    assert.ok(toolResult, "the tool result goes back on the second request");
+    assert.match(JSON.stringify(toolResult), /tool-proof/);
+  } finally {
+    session?.dispose();
+    await closeServer(fake.server);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("real built-in chain: a relaunch resumes the Pi session and sends the earlier turn back (Pi SDK upgrade check)", { timeout: 30_000 }, async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "slock-pi-resume-"));
+  const workingDirectory = path.join(root, "workspace");
+  mkdirSync(workingDirectory, { recursive: true });
+  const bodies: Array<Record<string, any>> = [];
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => {
+      bodies.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
+      res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
+      const send = (event: string, data: Record<string, unknown>) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      send("message_start", { type: "message_start", message: { id: `msg_${bodies.length}`, type: "message", role: "assistant", model: "resume-model", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 1, output_tokens: 0 } } });
+      send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: `reply-${bodies.length}` } });
+      send("content_block_stop", { type: "content_block_stop", index: 0 });
+      send("message_delta", { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 1 } });
+      send("message_stop", { type: "message_stop" });
+      res.end();
+    });
+  });
+  const port = await listenOnLoopback(server);
+  const baseUrl = `http://127.0.0.1:${port}/anthropic`;
+  const sessionId = `builtin-resume-${port}`;
+  const launch = (launchSessionId: string | null, launchId: string) => createPiAgentSessionForContext(
+    makeSpawnContext({
+      runtime: "builtin",
+      model: "resume-model",
+      sessionId: launchSessionId,
+      runtimeConfig: anthropicGatewayConfig(baseUrl, "resume-model"),
+    }, { workingDirectory, launchId }),
+    sessionId,
+    {
+      agentDir: buildBuiltInAgentDir(workingDirectory),
+      sessionDir: buildBuiltInSessionDir(workingDirectory),
+      agentDirSource: "managed_builtin",
+      exposeLaunchEnvToTools: false,
+      isolateHostProviderEnv: true,
+    },
+  );
+  let first: AgentSession | undefined;
+  let second: AgentSession | undefined;
+  try {
+    first = await launch(null, `launch-resume-1-${port}`);
+    await first.prompt("first turn");
+    first.dispose();
+    first = undefined;
+
+    second = await launch(sessionId, `launch-resume-2-${port}`);
+    await second.prompt("second turn");
+    assert.equal(bodies.length, 2);
+    const history = JSON.stringify(bodies[1]!.messages);
+    assert.match(history, /first turn/, "the resumed session sends the first launch's prompt");
+    assert.match(history, /reply-1/, "and its reply");
+    assert.match(history, /second turn/);
+  } finally {
+    first?.dispose();
+    second?.dispose();
+    await closeServer(server);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #17: Pi tool ends carry the call id, Pi's own duration, and a non-zero bash exit as an ok call with the exit code", () => {
+  const state = createPiSdkEventMappingState("pi-session-17");
+  state.sessionAnnounced = true;
+  const end = (extra: Record<string, unknown>) => mapPiSdkEventToParsedEvents({ type: "tool_execution_end", toolCallId: "call-7", toolName: "bash", ...extra } as unknown as AgentSessionEvent, state);
+  assert.deepEqual(end({ isError: false, durationMs: 1200, result: { content: [] } }), [{ kind: "tool_output", name: "bash", callId: "call-7", ok: true, durationMs: 1200 }]);
+  assert.deepEqual(end({ isError: true, durationMs: 900, result: { structuredContent: { exit_code: 1, output: "" } } }), [{ kind: "tool_output", name: "bash", callId: "call-7", ok: true, exitCode: 1, durationMs: 900 }]);
+  assert.deepEqual(end({ isError: true, result: { content: [{ type: "text", text: "Command timed out" }] } }), [{ kind: "tool_output", name: "bash", callId: "call-7", ok: false }]);
 });

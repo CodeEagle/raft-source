@@ -148,7 +148,7 @@ test("dedicated Native surface shows loading, then a retryable error, and recove
   await waitFor(() => assert.ok(screen.getByText("We couldn't load onboarding for this server.")));
 
   shouldFail = false;
-  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try Again" }));
   assert.ok(screen.getByTestId("native-onboarding-loading"));
   await waitFor(() => assert.ok(screen.getByRole("heading", { name: "Connect a computer" })));
   assert.equal(screen.queryByTestId("native-onboarding-unavailable"), null);
@@ -172,7 +172,7 @@ test("dedicated Native surface renders a non-empty phase:null state without waki
 
   renderGate("webview:1", true);
   await waitFor(() => assert.ok(screen.getByText("Onboarding isn't available for this account yet.")));
-  assert.ok(screen.getByRole("button", { name: "Try again" }));
+  assert.ok(screen.getByRole("button", { name: "Try Again" }));
   assert.deepEqual(calls, []);
 });
 

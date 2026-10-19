@@ -7,7 +7,7 @@ const srcRoot = resolve(import.meta.dirname, "../src");
 /**
  * Elegant palette call-site guard (task #623).
  *
- * `--primary-50..950` and `--accent-50..950` and `--color-soft-signal` only
+ * `--brand-50..950` and `--attention-50..950` and `--color-palette-yellow` only
  * exist as the brutal palette (the numeric scales are defined in the default
  * / brutal scope only). Any call site that renders them without a
  * `theme-brutal:` guard paints brutal yellow/pink inside the elegant family —
@@ -28,15 +28,15 @@ const srcRoot = resolve(import.meta.dirname, "../src");
 
 const INTENTIONAL: ReadonlyArray<readonly [file: string, reason: string]> = [
   ["components/layout/LeftRail.tsx", "brand signature strip — intentional across all themes (Grace ruling)"],
-  ["components/auth/ServerCreatePreview.tsx", "onboarding brutal mock (A1)"],
-  ["components/auth/AccountIdentitySetupPage.tsx", "onboarding brutal mock (A1)"],
-  ["components/onboarding/ServerSetupHandoffStep.tsx", "onboarding brutal mock (A1)"],
-  ["pages/PaletteAuditPage.tsx", "brutal palette audit page — the yellow is the content"],
+  ["components/settings/ThemePresetCard.tsx", "Brutal theme card preview: must look Brutal under every theme (task #247)"],
   ["components/ConfirmDialog.tsx", "legacy class-string → rui variant map (keys are identifiers, not rendered)"],
   ["index.css", "token table (definitions + global ::selection now on the semantic pair)"],
 ];
 
-const TOKEN = /(?:^|[\s"'`({[])((?:[a-z-]+(?:\/[a-z-]+)?:)*)((?:bg|text|border|ring|fill|stroke|outline|shadow|decoration|divide|from|to|via|caret|accent|placeholder)-)(soft-signal|primary-(?:50|[1-9]00|950)|accent-(?:50|[1-9]00|950))/g;
+// raft-ui 0.7.0 renamed `primary-*` → `brand-*`, `accent-*` → `attention-*`
+// and `soft-signal` → `palette-yellow`; the former names stay as deprecated
+// aliases, so both spellings are scanned.
+const TOKEN = /(?:^|[\s"'`({[])((?:[a-z-]+(?:\/[a-z-]+)?:)*)((?:bg|text|border|ring|fill|stroke|outline|shadow|decoration|divide|from|to|via|caret|accent|placeholder)-)(palette-yellow|soft-signal|(?:brand|primary|attention|accent)-(?:50|[1-9]00|950))/g;
 
 function isCommentLine(line: string): boolean {
   const trimmed = line.trim();
@@ -78,20 +78,28 @@ function walk(dir: string): string[] {
 }
 
 test("CONTROL: the scanner flags an unguarded palette token", () => {
-  assert.deepEqual(findElegantPaletteOffenders('className="bg-soft-signal/30"'), [
-    "bg-soft-signal",
+  assert.deepEqual(findElegantPaletteOffenders('className="bg-palette-yellow/30"'), [
+    "bg-palette-yellow",
   ]);
-  assert.deepEqual(findElegantPaletteOffenders('className="hover:bg-primary-400"'), [
-    "hover:bg-primary-400",
+  assert.deepEqual(findElegantPaletteOffenders('className="hover:bg-brand-400"'), [
+    "hover:bg-brand-400",
   ]);
-  assert.deepEqual(findElegantPaletteOffenders('className="text-primary-950/70"'), [
-    "text-primary-950",
+  assert.deepEqual(findElegantPaletteOffenders('className="text-brand-950/70"'), [
+    "text-brand-950",
+  ]);
+  // The deprecated aliases still render the same palette.
+  assert.deepEqual(
+    findElegantPaletteOffenders('className="bg-soft-signal hover:bg-primary-400 text-accent-700"'),
+    ["bg-soft-signal", "hover:bg-primary-400", "text-accent-700"],
+  );
+  assert.deepEqual(findElegantPaletteOffenders('className="bg-attention-400"'), [
+    "bg-attention-400",
   ]);
   // …and clears every allowed shape.
-  assert.deepEqual(findElegantPaletteOffenders('className="theme-brutal:bg-primary-400"'), []);
-  assert.deepEqual(findElegantPaletteOffenders("// historic: bg-soft-signal/30 hover"), []);
+  assert.deepEqual(findElegantPaletteOffenders('className="theme-brutal:bg-brand-400"'), []);
+  assert.deepEqual(findElegantPaletteOffenders("// historic: bg-palette-yellow/30 hover"), []);
   assert.deepEqual(
-    findElegantPaletteOffenders('className={`${isBrutal ? "bg-primary-400" : "bg-primary-soft"}`}'),
+    findElegantPaletteOffenders('className={`${isBrutal ? "bg-brand-400" : "bg-brand-soft"}`}'),
     [],
   );
 });

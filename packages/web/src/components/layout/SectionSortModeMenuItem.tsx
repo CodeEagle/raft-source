@@ -16,7 +16,9 @@ export function SectionSortModeMenuItem({ mode, checked, onSelect }: {
     <MenuItem
       role="menuitemradio"
       aria-checked={checked}
-      trailing={checked ? <Check size={14} /> : null}
+      trailing={checked ? <Check size={16} /> : null}
+      // DS Menu: the current value is a check and bold, never a fill.
+      className={checked ? "font-bold" : ""}
       onClick={select}
     >
       {formatMessage({ id: SIDEBAR_SORT_LABEL_ID[mode] })}

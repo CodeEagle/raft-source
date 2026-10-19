@@ -1,9 +1,12 @@
 import { X } from "lucide-react";
-import { Button } from "raft-ui";
-import type { ButtonProps } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
+import type { ButtonProps } from "@botiverse/raft-ui";
 import { useIntl } from "react-intl";
 
-/** Dismissal is a quiet icon action; the primary action owns the filled button. */
+/** Dismissal is a quiet icon action; the primary action owns the filled button.
+ *  Raft Design System › IconButton: a borderless ink glyph whose hover/press is
+ *  the pressed wash — the raft-ui ghost recipe draws exactly that, so only
+ *  layout classes travel through `className`. */
 export default function CloseButton({ children, className = "", ...props }: ButtonProps) {
   const { formatMessage } = useIntl();
   return (
@@ -13,7 +16,7 @@ export default function CloseButton({ children, className = "", ...props }: Butt
       size="icon-sm"
       aria-label={formatMessage({ id: "common.close" })}
       {...props}
-      className={`text-foreground-muted hover:bg-fill-muted hover:text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:shadow-brutal-sm theme-brutal:bg-white theme-brutal:text-black ${className}`}
+      className={className}
     >
       {children ?? <X size={16} />}
     </Button>

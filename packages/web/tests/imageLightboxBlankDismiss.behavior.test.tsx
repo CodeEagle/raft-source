@@ -146,12 +146,14 @@ test("ImageLightbox mounts a flow header, flexible stage, bounded image, and com
 
     const download = screen.getByRole("button", { name: "Download" });
     const close = screen.getByRole("button", { name: "Close" });
+    // Raft Design System › Panel head: the title bar's tools are the raft-ui
+    // ghost panel actions (44 square, 22px glyph), not compact boxed buttons.
     for (const control of [download, close]) {
-      assert.ok(control.classList.contains("size-7"));
+      assert.equal(control.getAttribute("data-slot"), "panel-action");
       const icon = control.querySelector("svg");
-      assert.ok(icon, "compact control must render its Lucide icon");
-      assert.equal(icon.getAttribute("width"), "14");
-      assert.equal(icon.getAttribute("height"), "14");
+      assert.ok(icon, "header control must render its Lucide icon");
+      assert.equal(icon.getAttribute("width"), "22");
+      assert.equal(icon.getAttribute("height"), "22");
     }
 
     fireEvent.click(download);

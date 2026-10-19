@@ -1,7 +1,6 @@
 import { isThreadMaximized, useUIStore } from "../../store/uiStore";
 import FeedbackUnreadDot from "../../feedback/FeedbackUnreadDot";
-import CloseButton from "../ui/CloseButton";
-import { ACTIVITY_SIDEBAR_INBOX_FLAG_KEY, useServerFeatureFlag } from "../../store/serverFeatureFlags";
+import Tooltip from "../ui/Tooltip";
 import { useContext, useState, useEffect, useEffectEvent, useLayoutEffect, useCallback, useMemo, useRef, Suspense, lazy } from "react";
 import {
   AppShellMainSlot,
@@ -9,13 +8,17 @@ import {
   AppShellRoot,
   AppShellSidebarSlot,
   Badge,
-  Button,
+  DialogSurface,
+  PanelAction,
+  PanelActions,
+  PanelHeader as PanelHead,
+  ThreadIcon,
   MobileNavItem,
   MobileNavLabel,
   MobileNavRoot,
   Skeleton,
   toast,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import {
   getThreadPanelDynamicMax,
   SIDEBAR_PANEL_BOUNDS,
@@ -26,7 +29,7 @@ import { useResizablePanel } from "../../hooks/useResizablePanel";
 import { MASTER_DETAIL_COMPACT_PANEL_BOUNDS, resolveMasterDetailPanelWidth } from "./masterDetailPanelSizing";
 import { Routes, Route, Navigate, UNSAFE_NavigationContext as NavigationContext, useParams, useNavigate, useLocation } from "react-router-dom";
 import { useRecordRecentConversation } from "../search/useRecordRecentConversation";
-import { FormattedMessage, useIntl } from "react-intl";
+import { useIntl } from "react-intl";
 import { useChannelStore } from "../../store/channelStore";
 import { useAgentStore } from "../../store/agentStore";
 import { useMessageStore } from "../../store/messageStore";
@@ -44,6 +47,10 @@ import Sidebar from "./Sidebar";
 import { isHostShell } from "../../embed";
 import { useEmbedParamsKeeper } from "../../hooks/useEmbedParamsKeeper";
 import { LeftRail } from "./LeftRail";
+import { ShellTopBar } from "../topbar/ShellTopBar";
+import { useTopBarHost } from "../topbar/topBarHostContext";
+import { shouldShowTopBar } from "../topbar/topBarVisibility";
+import { isElectronDesktopShell } from "../../utils/desktopShell";
 import { useTabRouteMemory } from "../../hooks/useTabRouteMemory";
 import { useRailLegacyRedirect } from "../../hooks/useRailLegacyRedirect";
 import { useMobileNav } from "../../hooks/useMobileNav";
@@ -76,18 +83,16 @@ import {
   routeGlobalSearchShortcut,
   SEARCH_FOCUS_REQUEST_EVENT,
 } from "../../utils/searchFocusRequest";
-import { ArrowLeft, CheckSquare, GitBranch, Home, Settings, Users, X } from "lucide-react";
+import { ArrowLeft, CheckSquare, Home, Settings, Users, X } from "lucide-react";
 import api from "../../api/client";
 import type { HumanProfile } from "../member/HumanDetailPanel";
 import { resolveHumanProfile } from "../member/resolveHumanProfile";
 import { canRenderAgentDetail } from "../agent/agentDetailAvailability";
 import { getCachedAgentProfile } from "../profile/profileFallbackCache";
-import { useMobileBack } from "../../hooks/useAppNavigate";
+import { useAppNavigate, useMobileBack } from "../../hooks/useAppNavigate";
 import PanelHeader from "../ui/PanelHeader";
 import { ContentSlotThreadPanel } from "./ContentSlotThreadPanel";
-import { InboxThreadContentRoute } from "./InboxThreadContentRoute";
-import LiveAgentActivityBar, { useClearLiveAgentActivityOnServerChange } from "./LiveAgentActivityBar";
-import MobileBottomBarStack from "./MobileBottomBarStack";
+import { useClearLiveAgentActivityOnServerChange } from "./WorkingNowSummary";
 import Modal from "../Modal";
 import { legacySettingsRouteRedirectSlug } from "../settings/settingsNavigation";
 import { isChangePasswordSettingsIntent } from "../../utils/changePasswordNavigation";
@@ -99,13 +104,16 @@ import {
   parseThreadRefHandoff,
   resolveThreadTargetByShortId,
 } from "../../utils/threadRefNavigation";
-import { isElectronDesktopShell } from "../../utils/desktopShell";
 import { buildSidebarDisclosureRestoreState } from "./sidebarChannelFocus";
-import { useAppTheme, useOptionalAppTheme } from "../../hooks/useAppTheme";
+import { useAppTheme } from "../../hooks/useAppTheme";
+import {
+  RAFT_DARK_PAPER_CHROME_COLOR,
+  RAFT_DARK_THEME_CHROME_COLOR,
+  RAFT_LIGHT_PAPER_CHROME_COLOR,
+  RAFT_LIGHT_THEME_CHROME_COLOR,
+} from "../../theme/appThemeChrome";
 import { observeProfileOpenE2eImport } from "../../utils/profileOpenE2eTimeline";
 
-const THEME_CHROME_YELLOW = "#FFD440";
-const THEME_CHROME_WHITE = "#FFFFFF";
 const MOBILE_TAB_BAR_SAFE_BOTTOM = "min(env(safe-area-inset-bottom, 0px), 34px)";
 const IN_FLOW_TAB_BAR_STYLE = { paddingBottom: MOBILE_TAB_BAR_SAFE_BOTTOM };
 const SHRINK_PANEL_HEADER_CONTAINER_PROPS = { className: "shrink-0" };
@@ -119,6 +127,7 @@ const AgentDetailPanel = lazy(() => observeProfileOpenE2eImport(
 const AgentUnavailablePanel = lazy(() => import("../agent/AgentUnavailablePanel"));
 const MachineDetailPanel = lazy(() => import("../machine/MachineDetailPanel"));
 const HumanDetailPanel = lazy(() => import("../member/HumanDetailPanel"));
+const RaftBenchPage = lazy(() => import("../../raftbench/RaftBenchPage"));
 const SettingsPanel = lazy(() => import("../settings/SettingsPanel"));
 const MemberGraphSection = lazy(() => import("../settings/MemberGraphSection"));
 const ReleaseNotesPanel = lazy(() => import("../settings/ReleaseNotesPanel"));
@@ -171,7 +180,7 @@ function useMobileTabBarVisible(): boolean {
   const isMembersDetail = path.startsWith(`${pathBase}/members/`);
   const isComputerDetail = path.startsWith(`${pathBase}/computer/`) || path.startsWith(`${pathBase}/machine/`);
   const isComputersList = path === `${pathBase}/computers` || path.startsWith(`${pathBase}/computers/`);
-  const isSettingsDetail = path.startsWith(`${pathBase}/settings/`) || path.startsWith(`${pathBase}/release-notes`);
+  const isSettingsDetail = path.startsWith(`${pathBase}/settings/`) || path.startsWith(`${pathBase}/release-notes`) || path.replace(/\/$/, "") === `${pathBase}/raftbench`;
   // Inbox/legacy Threads + Saved are level-2 pushes from Chat tab — same iOS NavigationView
   // model as channel/DM detail. stdrc 2026-05-02 #proj-uiux:648f8735 0a4084eb:
   // "在移动端点击 Threads 和 Saved 出来的页面，没有覆盖掉 Tab Bar" — fix to
@@ -200,9 +209,6 @@ export function MobileTabBar() {
   const serverRole = useServerStore((s) => s.current?.role);
   const visible = useMobileTabBarVisible();
   const { selectTab } = useMobileNav();
-  // Optional theme: MobileTabBar also renders in isolated embeds and unit
-  // tests without the app theme provider — those keep the in-flow brutal bar.
-  const appTheme = useOptionalAppTheme();
   // Display-language (react-intl) — layout namespace. Called BEFORE the
   // host-shell / visibility early-returns below so the hook order is stable.
   const { formatMessage } = useIntl();
@@ -221,7 +227,8 @@ export function MobileTabBar() {
   // Home / Tasks / Members / Settings. Search is a Home drill-in on mobile,
   // not a top-level tab. Computers is reachable from inside Settings; it is
   // not a top-level tab on mobile.
-  const isSettings = path.startsWith(`${pathBase}/settings`)
+  const isSettings = path.replace(/\/$/, "") === `${pathBase}/raftbench`
+    || path.startsWith(`${pathBase}/settings`)
     || path.startsWith(`${pathBase}/release-notes`)
     || path === `${pathBase}/computers`
     || path.startsWith(`${pathBase}/computers/`)
@@ -241,13 +248,17 @@ export function MobileTabBar() {
   // (stdrc 2026-05-09 #proj-mobile:b1c622e5 task #11 — sub-pages hide the
   // tab bar; restoring sub-page on tab tap traps the user without a path
   // back to root.)
+  const tapTab = (tab: MobileTabId, active: boolean) => () => {
+    trackNavEntrySelected(tab === "chat" ? "home" : tab, "mobile_tab_bar", active);
+    selectTab(tab);
+  };
   const tabs = [
-    { id: "chat", label: formatMessage({ id: "layout.mobileTabBar.home" }), icon: Home, active: isChat, onClick: () => selectTab("chat") },
-    { id: "tasks", label: formatMessage({ id: "layout.mobileTabBar.tasks" }), icon: CheckSquare, active: isTasks, onClick: () => selectTab("tasks") },
+    { id: "chat", label: formatMessage({ id: "layout.mobileTabBar.home" }), icon: Home, active: isChat, onClick: tapTab("chat", isChat) },
+    { id: "tasks", label: formatMessage({ id: "layout.mobileTabBar.tasks" }), icon: CheckSquare, active: isTasks, onClick: tapTab("tasks", isTasks) },
     ...(serverRole === "guest" ? [] : [
-      { id: "members", label: formatMessage({ id: "layout.mobileTabBar.members" }), icon: Users, active: isMembers, onClick: () => selectTab("members") },
+      { id: "members", label: formatMessage({ id: "layout.mobileTabBar.members" }), icon: Users, active: isMembers, onClick: tapTab("members", isMembers) },
     ]),
-    { id: "settings", label: formatMessage({ id: "layout.mobileTabBar.settings" }), icon: Settings, active: isSettings, onClick: () => selectTab("settings") },
+    { id: "settings", label: formatMessage({ id: "layout.mobileTabBar.settings" }), icon: Settings, active: isSettings, onClick: tapTab("settings", isSettings) },
   ];
 
   // In-flow (not fixed): the bar is the last child of the MainLayout flex
@@ -258,18 +269,11 @@ export function MobileTabBar() {
   // mobile Safari because `fixed; bottom:0` anchors to layout viewport which
   // doesn't shrink with the keyboard. Safe-area is added via padding-bottom,
   // capped at the iPhone home-indicator inset so bad PWA/browser reports do
-  // not create a large blank strip below the tabs.
-  // Elegant themes float the bar over the content (task #678): the capsule is
-  // positioned by the `mobile-bottom-bar-overlay` column in
-  // MobileBottomBarStack, so it takes no layout row here, and the recipe's own
-  // margins carry the safe-area spacing. Brutal keeps the in-flow edge bar and
-  // the capped safe-area padding.
-  const floatingTabBar = appTheme !== null && appTheme.preset !== "brutal";
+  // not create a large blank strip below the tabs. (Raft Design System ›
+  // TabBar: an edge bar on the card surface with a seam on top; nothing is
+  // stacked above it.)
   return (
-    <MobileNavRoot
-      className={floatingTabBar ? "pointer-events-auto md:hidden" : "md:hidden shrink-0"}
-      style={floatingTabBar ? undefined : IN_FLOW_TAB_BAR_STYLE}
-    >
+    <MobileNavRoot className="md:hidden shrink-0" style={IN_FLOW_TAB_BAR_STYLE}>
       {tabs.map((tab) => (
         <MobileNavItem
           key={tab.id}
@@ -278,11 +282,11 @@ export function MobileTabBar() {
           onClick={tab.onClick}
           aria-label={tab.label}
         >
-          {/* Short-viewport icon hiding (stdrc task #93) is a BRUTAL-only
-              adaptation: brutal items keep their text label, while elegant
-              items are icon-only (the label is sr-only) — hiding the icon
-              there blanks the whole tab bar (task #707). */}
-          <tab.icon className="theme-brutal:[@media(max-height:600px)]:hidden" />
+          {/* The icon stays in short windows too: Raft DS › TabBar marks the
+              selected tab by the yellow sticker around its icon, so hiding
+              the icon (the old Brutal short-viewport adaptation) would hide
+              which tab you are on. */}
+          <tab.icon />
           <MobileNavLabel>{tab.label}</MobileNavLabel>
           {tab.id === "settings" && <FeedbackUnreadDot className="absolute top-1 right-2" />}
         </MobileNavItem>
@@ -294,11 +298,13 @@ export function MobileTabBar() {
 import AddMachineDialog from "../machine/AddMachineDialog";
 import CreateAgentDialog from "../agent/CreateAgentDialog";
 import { usePageViewTracking } from "../../analytics/pageViews";
+import { trackNavEntrySelected } from "../../analytics/navigation";
+import type { MobileTabId } from "../../store/mobileNavStore";
 import JointChannelLinkIntent from "../channel/JointChannelLinkIntent";
 import AnnouncementModal from "../AnnouncementModal";
 import MessageSearchPage from "../search/MessageSearchPage";
 import SearchOverlay from "../search/SearchOverlay";
-import { overlayCloseTarget, rememberNonSearchLocation, resolveSearchOverlayBackground } from "../search/searchOverlayLocation";
+import { isSearchOverlayEnabled, overlayCloseTarget, rememberNonSearchLocation, resolveSearchOverlayBackground } from "../search/searchOverlayLocation";
 import PwaInstallPrompt from "../pwa/PwaInstallPrompt";
 
 /** Channel content body — used by both /channel/:channelId AND the
@@ -443,7 +449,7 @@ function OverlayPanelFallback({ testId }: { testId?: string } = {}) {
   const { formatMessage } = useIntl();
   return (
     <div
-      className="absolute inset-0 z-30 flex items-center justify-center bg-layer-panel text-foreground-muted font-display text-lg font-bold md:relative md:inset-auto md:z-auto md:flex-1 md:border-l md:border-line-muted theme-brutal:bg-white theme-brutal:md:border-l-2 theme-brutal:md:border-black"
+      className="absolute inset-0 z-30 flex items-center justify-center bg-layer-canvas text-foreground-muted font-display text-lg font-bold md:relative md:inset-auto md:z-auto md:flex-1 md:border-l md:border-line-seam"
       data-testid={testId}
     >
       {formatMessage({ id: "layout.main.loading" })}
@@ -621,13 +627,11 @@ function MemberGraphRoute() {
     <div className="flex min-h-0 flex-1 flex-col">
       <PanelHeader
         title={formatMessage({ id: "layout.memberGraph.title" })}
-        titleSuffix={<Badge.Experimental className="-translate-y-px" />}
-        icon={<GitBranch size={18} />}
-        iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
+        titleSuffix={<Badge.Experimental />}
         onMobileBack={onMobileBack}
         mobileBackProps={mobileBackProps}
       />
-      <div className="flex-1 overflow-y-auto bg-layer-panel px-5 py-4 theme-brutal:bg-white">
+      <div className="flex-1 overflow-y-auto bg-layer-canvas px-5 py-4">
         <Suspense fallback={<PanelFallback />}>
           <MemberGraphSection sectionLabel={formatMessage({ id: "layout.memberGraph.connectionsSectionLabel" })} />
         </Suspense>
@@ -714,44 +718,18 @@ function SearchContentRoute() {
  *  rail-vs-sidebar placement A/B was dropped 2026-06-30 (stdrc) — Activity is
  *  always the rail master/detail surface now. */
 function InboxContentRoute() {
-  const { enabled: newInbox } = useServerFeatureFlag(ACTIVITY_SIDEBAR_INBOX_FLAG_KEY);
-  const [returnThread, setReturnThread] = useState<InboxReturnThread | null>(null);
   const slot = useSearchContentStore((s) => s.slot);
   const closeSlot = useSearchContentStore((s) => s.close);
   if (!slot) {
     return <Suspense fallback={<PanelFallback />}><ThreadsInbox /></Suspense>;
   }
   if (slot.kind === "thread") {
-    return (
-      <InboxThreadContentRoute
-        slot={slot}
-        closeSlot={closeSlot}
-        canOpenParentChannel={newInbox}
-        setReturnThread={setReturnThread}
-      />
-    );
-  }
-  if (newInbox && returnThread && slot.id === returnThread.channelId && (slot.kind === "channel" || slot.kind === "dm")) {
-    return <div className="flex h-full min-h-0 flex-col">
-      <button type="button" className="shrink-0 border-b border-line-muted bg-layer-panel px-4 py-2 text-left text-sm text-foreground theme-brutal:border-black/20 theme-brutal:bg-white theme-brutal:text-black" data-testid="activity-return-thread" onClick={() => {
-        void useThreadStore.getState().openThread({ parentChannelId: returnThread.channelId, parentMessageId: returnThread.messageId, initialThreadChannelId: returnThread.slot.id });
-        useSearchContentStore.getState().open(returnThread.slot);
-        setReturnThread(null);
-      }}><ArrowLeft aria-hidden="true" className="mr-2 inline h-4 w-4" /><FormattedMessage id="message.threadPanel.thread" /></button>
-      <div
-        className="flex min-h-0 flex-1 flex-col overflow-hidden"
-        data-testid="activity-parent-channel-detail"
-      >
-        {renderContentSlot(slot, closeSlot)}
-      </div>
-    </div>;
+    return <ActivityThreadContentRoute slot={slot} closeSlot={closeSlot} />;
   }
   return renderContentSlot(slot, closeSlot);
 }
 
-export type InboxReturnThread = { slot: SearchContentSlot; channelId: string; messageId: string };
-
-export function ActivityThreadContentRoute({ slot, closeSlot, onOpenParentChannel }: { slot: SearchContentSlot; closeSlot: () => void; onOpenParentChannel?: (channelId: string, messageId: string) => void }) {
+export function ActivityThreadContentRoute({ slot, closeSlot }: { slot: SearchContentSlot; closeSlot: () => void }) {
   const { formatMessage } = useIntl();
   const consumeMessageFocus = useSearchContentStore((s) => s.consumeMessageFocus);
   type ActivityThreadIdentity = {
@@ -815,7 +793,7 @@ export function ActivityThreadContentRoute({ slot, closeSlot, onOpenParentChanne
 
   if (!panelThreadIdentity) {
     return (
-      <div className="flex h-full min-h-0 w-full flex-col bg-layer-panel theme-brutal:bg-white">
+      <div className="flex h-full min-h-0 w-full flex-col bg-layer-canvas">
         <PanelHeader title={formatMessage({ id: "message.threadPanel.thread" })} containerProps={SHRINK_PANEL_HEADER_CONTAINER_PROPS} />
         <div className="flex flex-1 items-center justify-center p-6">
           <div className="text-foreground-muted font-mono text-sm">
@@ -832,7 +810,6 @@ export function ActivityThreadContentRoute({ slot, closeSlot, onOpenParentChanne
     <ThreadPanel
       presentation="side"
       threadIdentity={panelThreadIdentity}
-      onOpenParentChannel={onOpenParentChannel}
       onFocusedMessageConsumed={handleFocusedMessageConsumed}
       onClose={closeSlot}
     />
@@ -943,7 +920,7 @@ function ComputersRoute() {
  *  - "side"         — chat col 4: full-row overlay until the chat row can fit
  *                     both pane minimums; otherwise an inline column with a
  *                     persisted width and left-edge resize handle.
- *  - "modal"        — bordered card with shadow-brutal, fixed centered size.
+ *  - "modal"        — bordered card with standard shadow-float, fixed centered size.
  *                     Caller wraps in <Modal> for backdrop + ESC.
  *  - "mobile-modal" — full-screen overlay (no Modal wrapper); back chevron is
  *                     the close affordance.
@@ -1012,34 +989,36 @@ function channelSigil(name: string): string {
  *  the bar is the part that must always answer "where am I, and how do I get
  *  out". The title stays in the scroll region because a long one cannot be
  *  bounded by a fixed bar. */
+const NON_INTERACTIVE_TOOLTIP_PROPS = { className: "pointer-events-none" };
+
 function TaskModalBar({
   task,
   onClose,
+  onViewInThread,
   mobile = false,
 }: {
   task: Task;
   onClose: () => void;
+  /** Absent when the task has no thread to show (legacy tasks, or a task
+   *  whose anchor is itself a thread reply). */
+  onViewInThread?: () => void;
   mobile?: boolean;
 }) {
   const { formatMessage } = useIntl();
   return (
-    // items-center, not items-start: the X is one control weighed against the
-    // whole two-line block, so it centres on that block. I had left items-start
-    // from when the bar was a single line, which parked the X against the first
-    // line's top edge.
-    <div className="flex shrink-0 items-center gap-3 border-b border-line-muted bg-layer-panel px-4 py-2 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white">
+    // raft-ui PanelHeader owns the edges, as on every other panel head: the
+    // last glyph 20px from the edge on desktop, and on a phone the Back
+    // mirrors the last action, 3px from the edge. Its row is centred, so the X is
+    // weighed against the whole two-line block, not its first line.
+    <PanelHead>
       {mobile && (
-        <Button
-          type="button"
+        <PanelAction
           onClick={onClose}
           aria-label={formatMessage({ id: "task.modal.close" })}
           data-testid="task-modal-mobile-back"
-          size="icon-sm"
-          variant="outline"
-          className="size-7 shrink-0"
         >
-          <ArrowLeft size={14} />
-        </Button>
+          <ArrowLeft />
+        </PanelAction>
       )}
       {/* Two lines so the bar has body: where this lives, then what it is.
           Both are stable facts — the task's own title stays in the scrolling
@@ -1052,18 +1031,37 @@ function TaskModalBar({
           {formatMessage({ id: "task.modal.taskWithNumber" }, { taskNumber: task.taskNumber })}
         </div>
       </div>
-      {!mobile && (
-        <CloseButton
-          type="button"
-          onClick={onClose}
-          aria-label={formatMessage({ id: "task.modal.close" })}
-          data-testid="task-modal-close"
-          className=" flex size-7 shrink-0 items-center justify-center "
-        >
-          <X size={14} />
-        </CloseButton>
+      {(onViewInThread || !mobile) && (
+        <PanelActions>
+          {/* Icon-only, the same quiet control as Close beside it — the shape
+              the legacy task panel's "View in channel" already uses (Artea). */}
+          {onViewInThread && (
+            <Tooltip
+              content={formatMessage({ id: "task.modal.viewInThread" })}
+              disableHoverablePopup
+              contentProps={NON_INTERACTIVE_TOOLTIP_PROPS}
+            >
+              <PanelAction
+                onClick={onViewInThread}
+                aria-label={formatMessage({ id: "task.modal.viewInThread" })}
+                data-testid="task-modal-view-in-thread"
+              >
+                <ThreadIcon />
+              </PanelAction>
+            </Tooltip>
+          )}
+          {!mobile && (
+            <PanelAction
+              onClick={onClose}
+              aria-label={formatMessage({ id: "task.modal.close" })}
+              data-testid="task-modal-close"
+            >
+              <X />
+            </PanelAction>
+          )}
+        </PanelActions>
       )}
-    </div>
+    </PanelHead>
   );
 }
 
@@ -1090,6 +1088,26 @@ function ThreadPanelWrapper({ presentation = "side", allowMaximize = true }: { p
     : undefined, [isTaskSurface, taskModal]);
   const closeSurface = isTaskSurface && taskModal ? closeTaskModal : closeThread;
   const hostTask = useThreadHostTask(parentMessageId);
+  const nav = useAppNavigate();
+  const openThread = useThreadStore((s) => s.openThread);
+  const threadChannelId = taskModal?.threadChannelId ?? null;
+  // "View in thread": leave the task surface for the ordinary side thread of
+  // the same message — the reading the thread icon gives. Same two steps as a
+  // thread ref (utils/refTarget.ts): land on the message, then open its
+  // replies with the THREAD intent, so this never re-opens the task modal.
+  const viewInThread = useCallback(() => {
+    if (!hostTask) return;
+    closeSurface();
+    if (hostTask.channelType === "dm") nav.toDmMessage(hostTask.channelId, hostTask.messageId);
+    else nav.toMessage(hostTask.channelId, hostTask.messageId);
+    void openThread({
+      parentChannelId: hostTask.channelId,
+      parentMessageId: hostTask.messageId,
+      threadChannelId,
+      intent: "thread",
+    });
+  }, [closeSurface, hostTask, nav, openThread, threadChannelId]);
+  const canViewInThread = !!hostTask && !hostTask.isLegacy && hostTask.channelType !== "thread";
   // The task sheet owns the current history entry. Close the store first so
   // the panel disappears synchronously, then consume the PUSH that opened it.
   // On a cold deep link there is no safe entry to pop, so the callback fallback
@@ -1103,27 +1121,27 @@ function ThreadPanelWrapper({ presentation = "side", allowMaximize = true }: { p
   // inside it. See #proj-task thread 3a4a72db.
   if (presentation === "modal") {
     return (
-      <div
-        className="flex h-[min(86vh,900px)] max-h-[calc(100dvh-2rem)] w-[min(960px,calc(100vw-2rem))] flex-col overflow-hidden rounded-lg border border-line-muted bg-layer-popover shadow-raft-xl theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
+      <DialogSurface
+        className="h-[min(86vh,900px)] max-h-[calc(100dvh-2rem)] w-[min(960px,calc(100vw-2rem))]"
         data-testid="task-thread-modal"
       >
-        {hostTask && <TaskModalBar task={hostTask} onClose={closeSurface} />}
+        {hostTask && <TaskModalBar task={hostTask} onClose={closeSurface} onViewInThread={canViewInThread ? viewInThread : undefined} />}
         <div className="flex min-h-0 flex-1 flex-col">
           <ThreadPanel key={parentMessageId} presentation="modal" threadIdentity={surfaceThreadIdentity} hideHeader={!!hostTask} hideParentMessage={!!hostTask}
-            parentSlot={hostTask ? <Suspense fallback={<div className="space-y-3 border-b border-line-muted bg-layer-panel p-4 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white"><Skeleton className="h-6 w-2/3" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-4/5" /></div>}><TaskModalHead task={hostTask} /></Suspense> : undefined} />
+            parentSlot={hostTask ? <Suspense fallback={<div className="space-y-3 border-b border-line-hairline bg-layer-canvas p-4"><Skeleton className="h-6 w-2/3" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-4/5" /></div>}><TaskModalHead task={hostTask} /></Suspense> : undefined} />
         </div>
-      </div>
+      </DialogSurface>
     );
   }
   if (presentation === "mobile-modal") {
     return (
-      <div className="absolute inset-0 z-30 flex flex-col bg-layer-panel theme-brutal:bg-white" data-testid="task-thread-modal">
+      <div className="absolute inset-0 z-30 flex flex-col bg-layer-canvas" data-testid="task-thread-modal">
         {hostTask && (
-          <TaskModalBar task={hostTask} onClose={mobileTaskBack} mobile />
+          <TaskModalBar task={hostTask} onClose={mobileTaskBack} onViewInThread={canViewInThread ? viewInThread : undefined} mobile />
         )}
         <div className="flex min-h-0 flex-1 flex-col">
           <ThreadPanel key={parentMessageId} presentation="mobile-modal" threadIdentity={surfaceThreadIdentity} hideHeader={!!hostTask} hideParentMessage={!!hostTask}
-            parentSlot={hostTask ? <Suspense fallback={<div className="space-y-3 border-b border-line-muted bg-layer-panel p-4 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white"><Skeleton className="h-6 w-2/3" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-4/5" /></div>}><TaskModalHead task={hostTask} /></Suspense> : undefined} />
+            parentSlot={hostTask ? <Suspense fallback={<div className="space-y-3 border-b border-line-hairline bg-layer-canvas p-4"><Skeleton className="h-6 w-2/3" /><Skeleton className="h-4 w-full" /><Skeleton className="h-4 w-4/5" /></div>}><TaskModalHead task={hostTask} /></Suspense> : undefined} />
         </div>
       </div>
     );
@@ -1169,7 +1187,7 @@ function SideThreadColumn({ allowMaximize }: { allowMaximize: boolean }) {
   return (
     <div
       ref={panelRef}
-      className="thread-side-column flex flex-col bg-layer-card theme-brutal:bg-white"
+      className="thread-side-column flex flex-col bg-layer-canvas"
       data-testid="thread-side-column"
       style={{ "--thread-panel-width": `${width}px` } as React.CSSProperties}
     >
@@ -1373,6 +1391,14 @@ function useRightPanelUrlSync() {
   const location = useLocation();
   const navigate = useNavigate();
   const locationRef = useRef({ pathname: location.pathname, search: location.search });
+  // Search-overlay mode: the URL is the overlay's own /search?q=… and carries no
+  // panel params, while the thread/profile panels stay mounted for the frozen
+  // background. Reading that URL would close the open thread (and closing the
+  // overlay would reopen it from scratch, refetch and flash "loading" — task
+  // #763); writing to it would put panel params on the search URL. So the sync
+  // is isolated while overlaying, like useSearchContentUrlSync, and resumes
+  // against the background URL the overlay closes back to.
+  const isSearchOverlay = resolveSearchOverlayBackground(location) !== null;
 
   // Keep a router-snapshot fallback for non-browser tests. Browser store→URL
   // sync reads `window.location.*` directly so close/open updates merge with
@@ -1391,9 +1417,10 @@ function useRightPanelUrlSync() {
     // React can still flush an older URL→store effect after a fast close has
     // already replaced the live URL. Ignore those stale snapshots so a removed
     // ?thread= param cannot reopen the just-closed panel.
+    if (isSearchOverlay) return;
     if (!isCurrentRightPanelSearchSnapshot(location.search)) return;
     syncRightPanelStoresFromSearch(location.search);
-  }, [location.pathname, location.search]);
+  }, [location.pathname, location.search, isSearchOverlay]);
 
   // Store → URL: update query params when panel state changes.
   // Panels stack: both ?thread= and ?profile= can coexist. Adding a panel
@@ -1427,6 +1454,7 @@ function useRightPanelUrlSync() {
   }, [navigate]);
 
   useEffect(() => {
+    if (isSearchOverlay) return;
     const unsubThread = subscribeRightPanelThreadAnchor(() => {
       // The URL derives only from the parent anchor. Thread fetch completion,
       // summaries, unread counts, and reply previews can arrive while a
@@ -1452,12 +1480,13 @@ function useRightPanelUrlSync() {
       syncUrl("auto");
     });
     return () => { unsubThread(); unsubProfile(); unsubLegacyTask(); };
-  }, [syncUrl]);
+  }, [syncUrl, isSearchOverlay]);
 
   // Re-add panel params after react-router navigation changes the pathname
   useEffect(() => {
+    if (isSearchOverlay) return;
     syncUrl("replace");
-  }, [location.pathname, syncUrl]);
+  }, [location.pathname, syncUrl, isSearchOverlay]);
 }
 
 // Two-way URL sync for the content master/detail (task #311 stdrc msg=b61ab472).
@@ -1570,7 +1599,7 @@ export default function MainLayout() {
   // every surface switches to the reported names together.
   useEffect(() => watchModelLabelCatalog(), []);
   const { formatMessage } = useIntl();
-  const { preset: appThemePreset } = useAppTheme();
+  const { resolvedMode } = useAppTheme();
   useEmbedParamsKeeper();
   useRightPanelUrlSync();
   useSearchContentUrlSync();
@@ -1600,6 +1629,8 @@ export default function MainLayout() {
   // history traversal) get one synthesized from searchFrom / the last
   // non-search location / server home instead of rendering the full page.
   const backgroundLocation = resolveSearchOverlayBackground(location);
+  // The content column the web search overlay sits at the top of (SearchOverlay).
+  const contentColumnRef = useRef<HTMLDivElement | null>(null);
   usePageViewTracking(location.pathname);
   useEffect(() => {
     rememberNonSearchLocation({ pathname: location.pathname, search: location.search });
@@ -1755,22 +1786,24 @@ export default function MainLayout() {
         event.preventDefault();
         if (!serverSlug) return;
         const searchPath = `/s/${serverSlug}/search`;
-        routeGlobalSearchShortcut({
+        const outcome = routeGlobalSearchShortcut({
           pathname: location.pathname,
           searchPath,
           focusMountedSearch: () => document.dispatchEvent(new Event(SEARCH_FOCUS_REQUEST_EVENT)),
           navigateToSearch: () => navigate(`/s/${serverSlug}/search`, {
             state: {
               searchFrom: `${location.pathname}${location.search}`,
-              // Desktop: float the search over the current view (⌘K overlay);
-              // web omits this and keeps the full-page /search behaviour. A minimal
-              // {pathname,search} avoids nesting the location.state chain.
-              ...(isElectronDesktopShell()
+              // Float the search over the current view (⌘K overlay) wherever the
+              // overlay is on (desktop shell, desktop-width web); phones keep the
+              // full-page /search. A minimal {pathname,search} avoids nesting the
+              // location.state chain.
+              ...(isSearchOverlayEnabled()
                 ? { backgroundLocation: { pathname: location.pathname, search: location.search } }
                 : {}),
             },
           }),
         });
+        trackNavEntrySelected("search", "keyboard_shortcut", outcome === "focused");
         return;
       }
     };
@@ -1855,7 +1888,7 @@ export default function MainLayout() {
   // is tracked as 311c follow-up).
   const searchMasterDetail = isContentRoute && searchSlotOpen && isDesktop;
   const masterDetailShellClassName = searchMasterDetail
-    ? `flex flex-col border-r border-line-muted ${isInboxRoute ? "theme-brutal:border-black" : "theme-brutal:border-r-2 theme-brutal:border-black"}`
+    ? "flex flex-col border-r border-line-seam"
     : "";
   // When a content route has three visible work panes, col 2 swaps from
   // searchPanelWidth (wide master) to searchPanelCompactWidth (independent
@@ -1870,12 +1903,15 @@ export default function MainLayout() {
   const searchColTwoCompact = contentRouteThreadOverlayOpen || contentRouteProfileOverlayOpen;
   const hideSidebar = isTasksRoute || (isContentRoute && !searchMasterDetail);
   const isMobileTabRoot = mobileShowSidebarInline || (!isDesktop && isTasksRoute);
-  // Brutal keeps the iOS-standalone chrome buckets (tab roots yellow, detail
-  // routes white) and paints them on the shell wrapper. Elegant shells stay
-  // transparent instead: the tab bar floats over the page as a capsule and the
-  // remaining safe areas show the page itself (task #678).
-  const browserChromeColor = !isDesktop && !isMobileTabRoot ? THEME_CHROME_WHITE : THEME_CHROME_YELLOW;
-  const shellBackgroundColor = appThemePreset === "brutal" && !isDesktop ? browserChromeColor : undefined;
+  // iOS-standalone chrome buckets (Raft Design System › NavBar): a tab root's
+  // top bar is the frame (yellow in light, #0d0d0b in dark), a pushed detail's
+  // header is paper. The shell wrapper paints the same surface above the
+  // safe-area inset and `meta[theme-color]` follows it.
+  const mobileDetailChrome = !isDesktop && !isMobileTabRoot;
+  const browserChromeColor = mobileDetailChrome
+    ? (resolvedMode === "dark" ? RAFT_DARK_PAPER_CHROME_COLOR : RAFT_LIGHT_PAPER_CHROME_COLOR)
+    : (resolvedMode === "dark" ? RAFT_DARK_THEME_CHROME_COLOR : RAFT_LIGHT_THEME_CHROME_COLOR);
+  const shellBackgroundColor = isDesktop ? undefined : mobileDetailChrome ? "var(--layer-canvas)" : "var(--layer-frame)";
   const shellStyle = useMemo(
     () => ({ paddingTop: "env(safe-area-inset-top, 0px)", backgroundColor: shellBackgroundColor }),
     [shellBackgroundColor],
@@ -1885,14 +1921,25 @@ export default function MainLayout() {
   const closeSearchOverlay = useCallback(() => {
     if (backgroundLocation) navigate(overlayCloseTarget(backgroundLocation));
   }, [backgroundLocation, navigate]);
-  const mobileTabBarVisible = useMobileTabBarVisible();
 
   useLayoutEffect(() => {
-    if (appThemePreset !== "brutal") return;
     const themeColor = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
     if (!themeColor) return;
     themeColor.content = browserChromeColor;
-  }, [appThemePreset, browserChromeColor]);
+  }, [browserChromeColor]);
+
+  // The top bar (workspace switcher + search) spans the window at desktop
+  // width. The desktop shell draws its own title bar, and the host-shell embed
+  // owns its chrome, so neither gets a second one. A shell that instead hands
+  // its chrome to this bar (topBarHostContext.ts) gets it at any width: the
+  // row is then the window's title bar and drag region.
+  const topBarHosted = useTopBarHost() !== null;
+  const showTopBar = shouldShowTopBar({
+    hosted: topBarHosted,
+    desktopWidth: isDesktop,
+    hostShell: isHostShell(),
+    electronShell: isElectronDesktopShell(),
+  });
 
   return (
     <AppShellRoot
@@ -1902,12 +1949,9 @@ export default function MainLayout() {
       // - mobile detail routes still update theme-color and this wrapper to match
       //   their white top surface
       className="min-h-0 flex-1 flex-col font-display"
-      // iOS standalone: in brutal the wrapper above the safe-area inset paints
-      // the route's chrome colour itself. The recipe's brutal variant hardcodes
-      // `max-md:bg-white`, which used to win over the route colour, so the
-      // status-bar strip read white while `meta[theme-color]` said yellow
-      // (task #638, ios-standalone-chrome spec). Elegant stays transparent so
-      // the floating tab bar sits on the page; desktop keeps the recipe canvas.
+      // iOS standalone: the wrapper above the safe-area inset paints the
+      // route's chrome colour itself, so the status-bar strip matches
+      // `meta[theme-color]` (task #638, ios-standalone-chrome spec).
       style={shellStyle}
     >
       {/* System notifications live in the Notification Center popup, hung off the LeftRail
@@ -1918,6 +1962,8 @@ export default function MainLayout() {
           list visible without stealing layout height. */}
       <PwaInstallPrompt />
 
+      {showTopBar ? <ShellTopBar /> : null}
+
       <div className="flex min-h-0 flex-1">
         {/* Left rail — desktop only. Hosts server switcher (top), sidebar tab
             icons (Chat/Members), and Settings (bottom). On mobile the
@@ -1926,7 +1972,7 @@ export default function MainLayout() {
         <AppShellRailSlot>
           <LeftRail
             hidden={mobileShowSidebarInline}
-            thinDivider={isActivityRoute}
+            topBar={showTopBar}
           />
         </AppShellRailSlot>
 
@@ -1945,7 +1991,7 @@ export default function MainLayout() {
           <div
             // stdrc 2026-05-02 #proj-uiux:95e25b5b ec1523d9: invert
             // sidebar/main relationship — sidebar uses warm cream
-            // (`bg-brutal-cream`), main panel uses bright white. After
+            // (`bg-palette-cream`), main panel uses bright white. After
             // research-driven iterations through paper/yellow/cool-gray
             // candidates, the cleanest hierarchy is the inversion:
             // LeftRail (yellow) → Sidebar (cream) → Main (white).
@@ -1967,7 +2013,7 @@ export default function MainLayout() {
             // uses h-full on its own root so adding flex flex-col to the
             // wrapper doesn't change its layout — but we still scope it to
             // master-detail to keep the non-search wrapper byte-identical.
-            className={`relative h-full min-w-0 bg-layer-canvas-muted theme-brutal:bg-brutal-cream ${mobileShowSidebarInline ? "flex-1" : "shrink-0"} ${masterDetailShellClassName}`}
+            className={`relative h-full min-w-0 ${mobileShowSidebarInline ? "flex-1 bg-layer-canvas" : "shrink-0 bg-layer-sidebar"} ${masterDetailShellClassName}`}
             style={
               mobileShowSidebarInline
                 ? undefined
@@ -1987,16 +2033,14 @@ export default function MainLayout() {
               // Col 2 master list: the Activity list on /inbox, the search
               // results on /search — same master/detail slot drives col 3.
               isInboxRoute ? (
-                <Suspense fallback={<PanelFallback />}><ThreadsInbox compactActivitySidebar /></Suspense>
+                <Suspense fallback={<PanelFallback />}><ThreadsInbox /></Suspense>
               ) : (
                 <MessageSearchPage />
               )
             ) : (
               <Sidebar
                 mobileInline={mobileShowSidebarInline}
-                bottomSlot={isDesktop && !hideSidebar ? (
-                  <LiveAgentActivityBar />
-                ) : undefined}
+                hideTitle={showTopBar}
               />
             )}
             {/* Resize handle (desktop only). Search master/detail at lg+
@@ -2051,12 +2095,17 @@ export default function MainLayout() {
           className={`relative ${mobileShowSidebarInline ? "hidden" : "flex"}`}
         >
           <div
+            ref={contentColumnRef}
             className="thread-layout-container flex min-h-0 min-w-0 flex-1"
             data-testid="thread-layout-container"
             data-thread-maximized={isThreadMaximized(threadMaximized, threadParentMessageIdForLayout, threadParentConversationId, currentConversationId, profileOpenForLayout) ? "true" : "false"}
           >
+            {/* overflow-clip, not overflow-hidden: a hidden box is still a
+                scroll container, so focusing anything that pokes past it
+                (scrollIntoView, an autofocused field) slid the whole page
+                sideways. A clipped box cannot scroll at all. */}
             <div
-              className="thread-main-column flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden"
+              className="thread-main-column flex min-h-0 min-w-0 flex-1 flex-col overflow-clip"
               data-testid="thread-main-column"
             >
               <Routes location={backgroundLocation ?? location}>
@@ -2072,6 +2121,7 @@ export default function MainLayout() {
                 <Route path="members" element={<EmptyRoute />} />
                 <Route path="computers" element={<ComputersRoute />} />
                 <Route path="search" element={<SearchContentRoute />} />
+                <Route path="raftbench" element={<Suspense fallback={<PanelFallback />}><RaftBenchPage /></Suspense>} />
                 <Route path="settings/:tab?/*" element={<SettingsRoute />} />
                 <Route path="activity" element={<InboxContentRoute />} />
                 {/* Legacy /inbox + /threads → /activity (stdrc renamed the route
@@ -2093,16 +2143,7 @@ export default function MainLayout() {
         </AppShellMainSlot>
       </div>
 
-      {/* Brutal keeps the mobile bottom bars in normal flow so the activity
-          strip cannot overlap or leave a gap above the tab bar. Elegant floats
-          them over the content so the page scrolls behind the capsule
-          (task #678). */}
-      <MobileBottomBarStack
-        showLiveActivity={!isDesktop && mobileTabBarVisible}
-        liveActivity={<LiveAgentActivityBar />}
-        tabBar={<MobileTabBar />}
-        floating={!isDesktop && appThemePreset !== "brutal"}
-      />
+      <MobileTabBar />
       {currentServerId && serverSlug ? (
         <ServerSetupProjectionGate
           serverId={currentServerId}
@@ -2124,7 +2165,7 @@ export default function MainLayout() {
           background channel. Dismiss (Esc/backdrop) navigates back to it. A hit
           selection navigates away on its own (clearing backgroundLocation). */}
       {backgroundLocation ? (
-        <SearchOverlay onClose={closeSearchOverlay} />
+        <SearchOverlay onClose={closeSearchOverlay} contentColumnRef={showTopBar ? null : contentColumnRef} />
       ) : null}
     </AppShellRoot>
   );
@@ -2136,5 +2177,6 @@ export const __testInternals = {
   AgentById,
   DefaultRoute,
   renderContentSlot,
+  useRightPanelUrlSync,
   useSearchContentUrlSync,
 };

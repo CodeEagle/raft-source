@@ -1,8 +1,8 @@
-import "./helpers/installResizeObserver";
 import assert from "node:assert/strict";
 import { useState } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { Popover } from "@botiverse/raft-ui";
 import ServerSwitcherMenu from "../src/components/ui/ServerSwitcherMenu";
 import { TestIntlProvider } from "./helpers/intl";
 import { useServerStore } from "../src/store/serverStore";
@@ -41,7 +41,9 @@ function renderMenu(role: ServerRole) {
   return render(
     <MemoryRouter initialEntries={["/s/alpha"]}>
       <TestIntlProvider>
-        <ServerSwitcherMenu open onClose={() => {}} serverUnreadCounts={{}} />
+        <Popover open>
+          <ServerSwitcherMenu onClose={() => {}} serverUnreadCounts={{}} />
+        </Popover>
       </TestIntlProvider>
     </MemoryRouter>,
   );
@@ -65,15 +67,18 @@ test("a member without invite capability does not see the invite entry", () => {
   );
 });
 
-test("clicking Invite opens the invite dialog and it survives the menu closing", () => {
+test("clicking Invite opens the invite dialog and it survives the menu closing", async () => {
   // The menu dismisses itself on invite click (onClose), so the dialog — a child
-  // of this component — must stay mounted after `open` flips to false.
+  // of this component, beside the popup — must stay mounted after the
+  // popover's `open` flips to false.
   function Harness() {
     const [open, setOpen] = useState(true);
     return (
       <MemoryRouter initialEntries={["/s/alpha"]}>
         <TestIntlProvider>
-          <ServerSwitcherMenu open={open} onClose={() => setOpen(false)} serverUnreadCounts={{}} />
+          <Popover open={open} onOpenChange={setOpen}>
+            <ServerSwitcherMenu onClose={() => setOpen(false)} serverUnreadCounts={{}} />
+          </Popover>
         </TestIntlProvider>
       </MemoryRouter>
     );
@@ -85,7 +90,7 @@ test("clicking Invite opens the invite dialog and it survives the menu closing",
   fireEvent.click(screen.getByTestId("server-switcher-invite"));
 
   // Menu itself is gone (open=false) but the dialog persists.
-  assert.equal(screen.queryByTestId("server-switcher-menu"), null, "menu closed on invite click");
+  await waitFor(() => assert.equal(screen.queryByTestId("server-switcher-menu"), null, "menu closed on invite click"));
   assert.ok(
     screen.getByRole("heading", { name: "Invite Human" }),
     "invite dialog must stay mounted after the menu closes",

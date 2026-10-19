@@ -1,3 +1,4 @@
+import { applyReadStateUpdate } from "./applyReadStateUpdate";
 /**
  * Socket bridge -- the L1 subscription home of RFC 037 (S3 target shape).
  *
@@ -45,12 +46,8 @@ import type {
   NotificationPrefsUpdate,
 } from "./notificationPrefsSyncDomain";
 import {
-  consumeReadStateUpdate,
   normalizeReadStateUpdated,
   normalizeReadStateUpdatedBulk,
-} from "./readStateSync";
-import type {
-  ReadStateUpdate,
 } from "./readStateSync";
 import { releaseActivityReadHoldForMessage } from "./activityReadState";
 import {
@@ -76,6 +73,7 @@ import {
 import { requestThreadAgentFollowers } from "./threadAgentFollowerStore";
 import { useThreadStore } from "./threadStore";
 import { notifyAllChannelMembersChanged } from "./channelMemberEvents";
+import { createCoalescedRefresh } from "../utils/coalescedRefresh";
 
 export interface SocketLike {
   on(event: string, handler: (...args: unknown[]) => void): unknown;
@@ -302,8 +300,31 @@ function loadInboxReset(opts: { background?: boolean } = {}) {
   void useInboxStore.getState().loadInbox({ reset: true, background: opts.background });
 }
 
+/** A live thread reply that mentions the user lights the parent channel's thread @ mark. */
+function replyMentionsCurrentUser(reply: Message | undefined): boolean {
+  const currentUserId = useMessageStore.getState().currentUserId;
+  if (!reply || !currentUserId) return false;
+  return (reply.mentions ?? []).some((mention) => mention.type === "user" && mention.id === currentUserId);
+}
+
 function loadFollowedThreads() {
   void useThreadStore.getState().loadFollowedThreads();
+}
+
+// A reply into a followed thread that is not in the local list (e.g. the
+// server auto-followed it) reloads the list. In a busy channel that is one
+// reload per reply, so replies within this window share one reload, and a
+// hidden page defers it until it is visible again.
+const FOLLOWED_THREADS_REFRESH_DELAY_MS = 1500;
+const followedThreadsRefresh = createCoalescedRefresh({
+  run: loadFollowedThreads,
+  delayMs: FOLLOWED_THREADS_REFRESH_DELAY_MS,
+  isVisible: () => typeof document === "undefined" || document.visibilityState === "visible",
+});
+
+/** Test seam: drop any scheduled or deferred followed-thread reload. */
+export function __cancelFollowedThreadsRefreshForTests(): void {
+  followedThreadsRefresh.cancel();
 }
 
 // Boot unread/inbox fallback. rooms:joined is the authoritative owner of the
@@ -460,23 +481,6 @@ export function buildMainLayoutSocketBindings(
     useMessageStore.getState().updateMessage(msg);
   };
 
-  const applyReadStateUpdate = (update: ReadStateUpdate) => {
-    const currentServerId = useServerStore.getState().current?.id;
-    if (update.serverId !== currentServerId) return;
-    if (consumeReadStateUpdate(update) !== "accepted") return;
-    const projection = useMessageStore.getState().applyReadStateProjection(update.scopeId);
-    if (!projection.complete) {
-      // This tab cannot count the thread's unread from loaded replies (read in
-      // another tab, Activity "mark all read"); use the server's count so the
-      // channel "N new" badge does not keep a stale number.
-      if (update.unreadCount !== undefined) {
-        useThreadStore.getState().applyServerThreadUnread(update.scopeId, update.unreadCount);
-      }
-      return;
-    }
-    useInboxStore.getState().applyReadStateProjection(update.scopeId, projection);
-    useThreadStore.getState().applyReadStateProjection(update.scopeId, projection);
-  };
 
   const readStateUpdated = (payload: unknown) => {
     const update = normalizeReadStateUpdated(payload);
@@ -607,12 +611,13 @@ export function buildMainLayoutSocketBindings(
 
   const machineCapabilities = (data: {
     machineId: string;
-    runtimes: string[];
+    runtimes?: string[];
     runtimeVersions?: Record<string, string>;
     hostname?: string;
     os?: string;
     daemonVersion?: string;
     computerVersion?: string | null;
+    runtimeDetection?: { status: "pending" | "complete" | "incomplete"; unfinishedRuntimes?: string[]; reason?: "deadline" | "child_failed" | "cancelled"; updatedAtMs?: number } | null;
   }) => {
     useMachineStore
       .getState()
@@ -624,6 +629,7 @@ export function buildMainLayoutSocketBindings(
         data.daemonVersion,
         data.computerVersion,
         data.runtimeVersions,
+        data.runtimeDetection,
       );
   };
 
@@ -815,9 +821,13 @@ export function buildMainLayoutSocketBindings(
                 replyCount: snapshot.scope.replyCount,
                 lastReplyAt: presentation.lastReplyAt,
                 ...(isOpen ? {} : { unreadCount }),
+                ...(!isOpen && replyMentionsCurrentUser(presentation.latestReply) ? { hasMention: true } : {}),
+                ...(!isOpen && followed.unreadCount === 0 && presentation.latestReply
+                  ? { firstUnreadMessageId: presentation.latestReply.id }
+                  : {}),
               });
             } else {
-              state.loadFollowedThreads();
+              followedThreadsRefresh.request();
             }
             if (presentation.latestReply) {
               releaseActivityReadHoldForLiveMessage(presentation.latestReply);
@@ -881,11 +891,16 @@ export function buildMainLayoutSocketBindings(
         replyCount: effectiveReplyCount,
         lastReplyAt: data.lastReplyAt,
         ...(isOpen ? {} : { unreadCount: followed.unreadCount + 1 }),
+        ...(!isOpen && replyMentionsCurrentUser(data.latestReply) ? { hasMention: true } : {}),
+        // A reply into a fully read thread is its first unread one.
+        ...(!isOpen && followed.unreadCount === 0 && data.latestReply
+          ? { firstUnreadMessageId: data.latestReply.id }
+          : {}),
       });
     } else {
       // The backend can auto-follow a thread for the current user when
       // another actor creates or replies in it; refresh sidebar state.
-      threadState.loadFollowedThreads();
+      followedThreadsRefresh.request();
     }
     if (data.latestReply) releaseActivityReadHoldForLiveMessage(data.latestReply);
     const suppressActivity = data.latestReply
@@ -1215,6 +1230,8 @@ function attachMainLayoutRecoveryBridge(
   };
 
   const recoverLiveSession = () => {
+    // A followed-thread reload asked for while the page was hidden runs now.
+    if (document.visibilityState === "visible") followedThreadsRefresh.flushIfPending();
     const plan = getLiveSessionRecoveryPlan({
       visible: document.visibilityState === "visible",
       online: navigator.onLine,

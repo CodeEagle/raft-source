@@ -3,6 +3,7 @@ import http from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fetch as undiciFetch } from "undici";
 import {
   RUNTIME_CONFIG_VERSION,
   type AgentConfig,
@@ -100,7 +101,6 @@ async function waitForActivity(
 }
 
 function installManagedRunnerMintFetch(): () => void {
-  const originalFetch = globalThis.fetch;
   return installDaemonFetchMockForTests((async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     const method = init?.method ?? (input instanceof Request ? input.method : "GET");
@@ -118,11 +118,12 @@ function installManagedRunnerMintFetch(): () => void {
     }
     // Other calls to the fake Raft server (for example the managed MCP tool
     // catalog) fail the way an unreachable server would instead of leaving the
-    // process; everything else, i.e. the local provider servers, goes through.
+    // process; everything else, i.e. the local provider servers, goes through
+    // the daemon's own undici, matching the dispatcher daemonFetch attached.
     if (url.startsWith("https://daemon.example.com/")) {
       throw new TypeError(`fetch failed: ${method} ${url} is not served by this test`);
     }
-    return originalFetch(input, init);
+    return undiciFetch(input as Parameters<typeof undiciFetch>[0], init as Parameters<typeof undiciFetch>[1]) as unknown as Promise<Response>;
   }) as typeof fetch);
 }
 

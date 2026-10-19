@@ -157,8 +157,13 @@ test("a stored thread draft moves into the single gray preview entry", async () 
 
   assert.equal(
     container.querySelector('[data-message-affordance="inline-thread-replies-count"]')?.textContent,
-    "2 replies · 1 new · Draft ›",
+    "2 replies1 · Draft",
     "MessageItem passes both the unread summary and stored draft state into the consolidated entry",
+  );
+  assert.equal(
+    container.querySelector('[data-message-affordance="inline-thread-replies-new-count"]')?.getAttribute("aria-label"),
+    "1 new",
+    "new replies are the DS pink count sticker, announced as the new count",
   );
   assert.ok(
     container.querySelector('[data-message-affordance="inline-thread-replies-draft-icon"]'),
@@ -356,7 +361,7 @@ test("the count leads the neutral preview surface and clicking any reply opens t
   assert.equal(surface.firstElementChild, countLabel, "the reply count sits above the three preview rows");
   assert.equal(countLabel.tagName, "SPAN", "the surface must not contain a nested button");
   assert.match(countLabel.className, /text-foreground-muted/, "the secondary thread action uses a themed neutral instead of an attention color");
-  assert.match(countLabel.className, /group-hover:text-foreground-strong/, "hover strengthens the action within the active theme");
+  assert.doesNotMatch(countLabel.className, /text-attention|text-brand|text-info/, "no attention colour on the read count");
 
   const previewBody = Array.from(surface.querySelectorAll("span"))
     .find((element) => element.textContent === "inline reply 2");
@@ -405,7 +410,7 @@ test("more than three replies always labels the authoritative total in English a
   const english = renderWithIntl(<InlineThreadReplies {...props} />);
   assert.equal(
     english.container.querySelector('[data-message-affordance="inline-thread-replies-count"]')?.textContent,
-    "5 replies ›",
+    "5 replies",
     "preview truncation does not change the header from the authoritative total",
   );
   english.unmount();
@@ -413,7 +418,7 @@ test("more than three replies always labels the authoritative total in English a
   const chinese = renderWithIntl(<InlineThreadReplies {...props} />, { locale: "zh-cn" });
   assert.equal(
     chinese.container.querySelector('[data-message-affordance="inline-thread-replies-count"]')?.textContent,
-    "5 条回复 ›",
+    "5 条回复",
     "the localized header uses the same authoritative total",
   );
 });
@@ -430,16 +435,24 @@ test("the gray header preserves unread and draft states in English and Chinese",
   const english = renderWithIntl(<InlineThreadReplies {...props} />);
   assert.equal(
     english.container.querySelector('[data-message-affordance="inline-thread-replies-count"]')?.textContent,
-    "5 replies · 2 new · Draft ›",
+    "5 replies2 · Draft",
     "the single gray entry inherits both status signals from the removed white badge",
+  );
+  assert.equal(
+    english.container.querySelector('[data-message-affordance="inline-thread-replies-new-count"]')?.getAttribute("aria-label"),
+    "2 new",
   );
   english.unmount();
 
   const chinese = renderWithIntl(<InlineThreadReplies {...props} />, { locale: "zh-cn" });
   assert.equal(
     chinese.container.querySelector('[data-message-affordance="inline-thread-replies-count"]')?.textContent,
-    "5 条回复 · 2 条新回复 · 草稿 ›",
+    "5 条回复2 · 草稿",
     "unread and draft status copy stays localized in the consolidated entry",
+  );
+  assert.equal(
+    chinese.container.querySelector('[data-message-affordance="inline-thread-replies-new-count"]')?.getAttribute("aria-label"),
+    "2 条新回复",
   );
   assert.ok(
     chinese.container.querySelector('[data-message-affordance="inline-thread-replies-draft-icon"]'),

@@ -1,6 +1,7 @@
 import { defineConfig } from "tsdown";
 
-// Three build configs produce the published layout exactly:
+// Three build configs produce the published layout exactly (each also emits
+// `agent.*` for the `./agent` entry, plus shared chunks):
 //   1. ESM bundle → dist/esm/index.js
 //   2. CJS bundle → dist/cjs/index.cjs (node platform keeps the .cjs
 //      fixed extension, which matches package.json `main`/`exports.require`)
@@ -15,9 +16,15 @@ import { defineConfig } from "tsdown";
 // specifier, so a bare "zod" would leave `zod/v4/...` subpath imports external.
 const alwaysBundle = [/^zod(\/|$)/, /^@botiverse\/raft-shared(\/|$)/];
 
+// Two public entries, `.` (program layer) and `./agent` (agent layer), built
+// together in each config so code they share lands in one shared chunk: a
+// class or Symbol (RaftSdkConfigurationError, SeenFrontier, the
+// raftbenchFailedReport brand) is then the same value from either entry.
+const entry = { index: "src/index.ts", agent: "src/agent.ts" };
+
 export default defineConfig([
   {
-    entry: ["src/index.ts"],
+    entry,
     format: "esm",
     platform: "node",
     outDir: "dist/esm",
@@ -28,7 +35,7 @@ export default defineConfig([
     deps: { alwaysBundle },
   },
   {
-    entry: ["src/index.ts"],
+    entry,
     format: "cjs",
     platform: "node",
     outDir: "dist/cjs",
@@ -37,7 +44,7 @@ export default defineConfig([
     deps: { alwaysBundle },
   },
   {
-    entry: ["src/index.ts"],
+    entry,
     format: "esm",
     platform: "node",
     outDir: "dist",

@@ -2,7 +2,7 @@
 // → POST /internal/agent-api/tasks/unclaim
 
 import type { Command } from "commander";
-import { type AgentApiTaskUnclaimBody } from "@botiverse/raft-shared";
+import type { AgentApiTaskUnclaimBody } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

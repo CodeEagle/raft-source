@@ -776,6 +776,12 @@ messageRouter.get("/search", async (req, res) => {
       res.status(400).json({ error: "Invalid search sort" });
       return;
     }
+    const rawCursor = typeof req.query.cursor === "string" && req.query.cursor ? req.query.cursor : undefined;
+    const cursor = rawCursor === undefined ? undefined : searchService.parseMessageSearchWalkCursor(rawCursor);
+    if (cursor === null || (cursor && (!query || sort !== "recent"))) {
+      res.status(400).json({ error: "Invalid search cursor" });
+      return;
+    }
     const hasMeaningfulFilter = Boolean(channelId || senderId || senderType || mentionTarget || after || before);
     if (!query && !hasMeaningfulFilter) {
       addTraceEvent("message_search.response.ready", {
@@ -836,6 +842,7 @@ messageRouter.get("/search", async (req, res) => {
       sort: query ? sort : "recent",
       limit,
       offset,
+      cursor,
       signal: requestAbort.signal,
       allowedRootChannelIds: guestVisibleChannelIds,
     });

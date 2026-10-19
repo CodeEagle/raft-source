@@ -1,6 +1,12 @@
+import { AppSetupFields, AppSetupPanel, AppSetupRequirement } from "../integrations/AppSetup";
 import { AppWhenToUseField } from "./AppWhenToUseField";
-import { AgentJwtSettings } from "./AgentJwtSettings";
-import { ToggleGroup, ToggleGroupItem, Checkbox, Textarea, TextareaCounter, Skeleton,
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+  Checkbox,
+  Textarea,
+  TextareaCounter,
+  Skeleton,
   Badge,
   Button,
   Card,
@@ -19,14 +25,24 @@ import { ToggleGroup, ToggleGroupItem, Checkbox, Textarea, TextareaCounter, Skel
   SegmentedControlLabel,
   Switch,
   Panel,
-  useThemeFamily } from "raft-ui";
+  Separator,
+  DialogSurface,
+  FormSection,
+  Popover,
+  PopoverTrigger,
+  IconTile,
+  ListRowGroup,
+  ListRow,
+  ListRowBody,
+  ListRowDescription,
+  ListRowTitle,
+} from "@botiverse/raft-ui";
 import CloseButton from "../ui/CloseButton";
 import Tooltip from "../ui/Tooltip";
-import { useCallback, useState, useEffect, useEffectEvent, useMemo, useReducer, useRef } from "react";
+import { Fragment, useCallback, useState, useEffect, useEffectEvent, useMemo, useReducer, useRef } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Settings,
   ChevronRight,
   Check,
   Copy,
@@ -56,13 +72,15 @@ import {
   LayoutGrid,
   List,
   Smartphone,
-  Globe2,
+  Monitor,
+  Globe,
   Hash,
 } from "lucide-react";
 import MobileDownloadQr from "./MobileDownloadQr";
+import DesktopDownloadOptions from "./DesktopDownloadOptions";
 import { MOBILE_DOWNLOAD_CHOOSER_PATH, mobileDownloadUrl } from "../../utils/mobileDownloadUrl";
 import { getApiErrorResponse } from "../../utils/apiErrorResponse";
-import {
+import { normalizeAppSetupUrl,
   DEFAULT_BILLING_INTERVAL,
   DOWNGRADE_GRACE_PERIOD_DAYS,
   OAUTH_CLIENT_CATEGORIES,
@@ -100,8 +118,9 @@ import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import ConfirmDialog from "../ConfirmDialog";
 import Modal from "../Modal";
 import Banner from "../ui/Banner";
+import { FormDialog } from "../ui/FormDialog";
 import api from "../../api/client";
-import { shareableWebOrigin } from "../../utils/desktopShell";
+import { isElectronDesktopShell, shareableWebOrigin } from "../../utils/desktopShell";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import type { MessageId } from "../../i18n/messages";
@@ -130,6 +149,7 @@ import { UsageDataSettingsCard, WorkspaceProductAnalyticsSection } from "./Usage
 import CopyButton from "../ui/CopyButton";
 import FormField from "../ui/FormField";
 import AvatarSlot from "../ui/AvatarSlot";
+import AvatarEditVeil from "../ui/AvatarEditVeil";
 import SelectionPopover from "../ui/SelectionPopover";
 import SurfaceListItem from "../ui/SurfaceListItem";
 import SlugInput, { PrefixedInput } from "../ui/SlugInput";
@@ -154,6 +174,7 @@ import MessageItem from "../message/MessageItem";
 import type { MentionEntry } from "../message/MessageItem";
 import { PwaInstallSettingsCard } from "../pwa/PwaInstallPrompt";
 import ArchivedChannelsSection from "./ArchivedChannelsSection";
+import ArchivedAgentsSection from "./ArchivedAgentsSection";
 import IMBridgesSettingsSection from "./IMBridgesSettingsSection";
 import { isSlackBridgeSurfaceEnabled } from "./slackBridgeVisibility";
 import { useAuthProviders } from "../../hooks/useAuthProviders";
@@ -211,7 +232,6 @@ import type {
   ConnectedAppsTab,
 } from "./SettingsSegmentedControls";
 import {
-  SETTINGS_ICON_BY_ID,
   SETTINGS_TAB_TITLE_ID,
   canOpenSettingsTab,
   normalizeSettingsTab,
@@ -238,7 +258,6 @@ import { PlanSectionContent } from "./PlanSectionContent";
 import { DeclaredScopeToggle } from "./DeclaredScopeToggle";
 import { InstalledConnectedAppItem } from "./InstalledConnectedAppItem";
 import { RegisteredConnectedAppItem } from "./RegisteredConnectedAppItem";
-import { ConnectedAppEditorRailButton } from "./ConnectedAppEditorRailButton";
 import {
   AppNotificationRequestSummary,
   DeveloperAppNotifications,
@@ -336,13 +355,13 @@ export function SocialProviderIcon({ providerId }: { providerId: SocialAuthProvi
   }
   if (providerId === "apple") {
     return (
-      <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-foreground-strong theme-brutal:text-black">
+      <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-foreground">
         <AppleLogo className="size-4" />
       </span>
     );
   }
   return (
-    <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-foreground-strong theme-brutal:text-black">
+    <span className="inline-flex size-[18px] shrink-0 items-center justify-center text-foreground">
       <GitHubLogo className="size-4" />
     </span>
   );
@@ -362,7 +381,6 @@ export function AccountSection({
   const updateProfile = useAuthStore((s) => s.updateProfile);
   const uploadAvatar = useAuthStore((s) => s.uploadAvatar);
   const { providers } = useAuthProviders();
-  const themeFamily = useThemeFamily();
 
   const [displayName, setDisplayName] = useState(user?.displayName || "");
   const [savedDisplayName, setSavedDisplayName] = useState(user?.displayName || "");
@@ -621,19 +639,13 @@ export function AccountSection({
           avatar={
             <Tooltip content={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}>
             <label
-              className={`group relative flex size-16 shrink-0 items-center justify-center ${
- avatarSaving ? "cursor-not-allowed opacity-70" : ""
- }`}
-              aria-label={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
+              className={`group/avatar-edit relative flex shrink-0 rounded-sticker has-[:focus-visible]:shadow-focus ${avatarSaving ? "cursor-not-allowed opacity-70" : ""}`}
             >
-              <AvatarSlot context="profile-tile" type="human" humanAvatarUrl={user?.avatarUrl} email={user?.email} />
-              <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-                <Upload size={18} className="text-white" />
-              </div>
               <input
                 type="file"
                 accept={PROFILE_AVATAR_ACCEPT}
-                className="hidden"
+                className="peer/avatar-edit sr-only"
+                aria-label={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
                 disabled={avatarSaving}
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -641,25 +653,26 @@ export function AccountSection({
                   if (file) void handleUploadAvatar(file);
                 }}
               />
+              <AvatarSlot context="profile-tile" type="human" humanAvatarUrl={user?.avatarUrl} email={user?.email} />
+              <AvatarEditVeil busy={avatarSaving} />
             </label>
             </Tooltip>
           }
         >
           {avatarError ? (
-            <p className="text-xs font-bold text-brutal-red" role="alert">{avatarError}</p>
+            <p className="text-caption text-danger-strong" role="alert">{avatarError}</p>
           ) : null}
           {/* Profile form */}
           <form onSubmit={handleSaveProfile} className="space-y-3">
-            <FormField label={formatMessage({ id: "settings.account.displayNameLabel" })} labelStyle="plain" size="compact">
+            <FormField label={formatMessage({ id: "settings.account.displayNameLabel" })} size="compact">
               <Input
                 data-testid="account-profile-display-name-input"
                 type="text"
                 value={displayName}
                 onChange={handleDisplayNameChange}
-                className={themeFamily === "brutal" ? "p-2 text-sm" : "text-sm"}
               />
             </FormField>
-            <FormField label={formatMessage({ id: "settings.account.usernameLabel" })} labelStyle="plain" size="compact">
+            <FormField label={formatMessage({ id: "settings.account.usernameLabel" })} size="compact">
               <PrefixedInput
                 data-testid="account-profile-username-input"
                 type="text"
@@ -668,19 +681,19 @@ export function AccountSection({
                 aria-readonly="true"
                 tabIndex={-1}
                 prefix="@"
-                className="border-line-muted bg-fill-muted shadow-none focus-within:shadow-none"
-                inputClassName="cursor-default text-sm text-foreground-muted"
+                className="border-line-hairline bg-fill-muted shadow-none focus-within:shadow-none"
+                inputClassName="cursor-default text-foreground-muted"
               />
             </FormField>
-            <FormField label={formatMessage({ id: "settings.account.emailLabel" })} labelStyle="plain" size="compact">
+            <FormField label={formatMessage({ id: "settings.account.emailLabel" })} size="compact">
               <div className="flex items-center gap-2">
-                <span className="font-mono text-sm">{user?.email}</span>
+                <span className="min-w-0 truncate font-mono text-mono-code text-foreground">{user?.email}</span>
                 {user?.emailVerified ? (
-                  <Badge variant="success" appearance="soft" uppercase>
+                  <Badge variant="success" appearance="soft">
                     <Shield size={10} /> {formatMessage({ id: "settings.account.verified" })}
                   </Badge>
                 ) : (
-                  <Badge variant="warning" appearance="soft" uppercase>
+                  <Badge variant="warning" appearance="soft">
                     {formatMessage({ id: "settings.account.unverified" })}
                   </Badge>
                 )}
@@ -688,15 +701,14 @@ export function AccountSection({
             </FormField>
 
           {error && (
-            <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
+            <Banner intent="warning" density="sm">{error}</Banner>
           )}
 
             <Button
               type="submit"
               disabled={!profileDirty || saving}
               size="sm"
-              variant="outline"
-              className="flex items-center gap-1.5 disabled:cursor-not-allowed disabled:opacity-50"
+              variant="accent"
             >
               {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? (
                 <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
@@ -705,12 +717,12 @@ export function AccountSection({
           </form>
 
         {/* Divider */}
-        <div className="border-t-2 border-line-muted theme-brutal:border-black" />
+        <Separator />
 
         {visibleProviders.length > 0 && (
           <>
             <div>
-              <div className="mb-2 text-sm font-bold">{formatMessage({ id: "settings.account.connectedAccounts" })}</div>
+              <div className="mb-2 text-subhead font-semibold">{formatMessage({ id: "settings.account.connectedAccounts" })}</div>
               <div className="space-y-2">
                 {visibleProviders.map((provider) => (
                   <ProviderAccountRow
@@ -724,7 +736,7 @@ export function AccountSection({
                 ))}
               </div>
               {passwordSetupSentForProvider && (
-                <Banner intent="success" density="sm" className="mt-3 font-bold">
+                <Banner intent="success" density="sm" className="mt-3">
                   {formatMessage(
                     { id: "settings.account.passwordSetupSentForProvider" },
                     { label: passwordSetupSentForProvider.label },
@@ -733,22 +745,22 @@ export function AccountSection({
               )}
             </div>
 
-            <div className="border-t-2 border-line-muted theme-brutal:border-black" />
+            <Separator />
           </>
         )}
 
         {/* Password credential */}
         <div>
           {passwordChangeIntent && passwordConfigured === null ? (
-            <p className="text-xs text-foreground-muted theme-brutal:text-black/60" role="status">
+            <p className="text-footnote text-foreground-muted" role="status">
               {formatMessage({ id: "settings.account.loadingSignInMethods" })}
             </p>
           ) : passwordChangeIntent && passwordConfigured === false ? (
             <div className="space-y-2" data-testid="password-managed-by-provider">
-              <div className="text-sm font-bold">
+              <div className="text-subhead font-semibold">
                 {formatMessage({ id: "settings.account.passwordManagedTitle" })}
               </div>
-              <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
+              <p className="text-footnote text-foreground-muted">
                 {formatMessage(
                   { id: "settings.account.passwordManagedDescription" },
                   {
@@ -761,16 +773,16 @@ export function AccountSection({
           ) : passwordConfigured === false ? (
             <div className="space-y-3">
               <div>
-                <div className="text-sm font-bold">{formatMessage({ id: "settings.account.setPassword" })}</div>
-                <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">
+                <div className="text-subhead font-semibold">{formatMessage({ id: "settings.account.setPassword" })}</div>
+                <p className="mt-1 text-footnote text-foreground-muted">
                   {formatMessage({ id: "settings.account.setPasswordDescription" })}
                 </p>
               </div>
               {passwordSetupError && (
-                <Banner intent="warning" density="sm" className="font-bold">{passwordSetupError}</Banner>
+                <Banner intent="warning" density="sm">{passwordSetupError}</Banner>
               )}
               {passwordSetupEmailSent && !passwordSetupSentForProvider && (
-                <Banner intent="success" density="sm" className="font-bold">
+                <Banner intent="success" density="sm">
                   {formatMessage({ id: "settings.account.passwordSetupEmailSent" })}
                 </Banner>
               )}
@@ -789,11 +801,11 @@ export function AccountSection({
             <button
               type="button"
               onClick={() => setShowPasswordChange(!showPasswordChange)}
-              className="flex items-center gap-2 text-sm font-bold"
+              className="-mx-1 flex items-center gap-2 rounded-control px-1 text-subhead font-semibold text-foreground outline-none hover:bg-fill-pressed focus-visible:shadow-focus"
             >
               <ChevronRight
-                size={14}
-                className={`transition-transform ${passwordFormOpen ? "rotate-90" : ""}`}
+                size={16}
+                className={`text-foreground-hint transition-transform ${passwordFormOpen ? "rotate-90" : ""}`}
               />
               {formatMessage({ id: "settings.account.changePassword" })}
             </button>
@@ -801,7 +813,7 @@ export function AccountSection({
 
           {(!passwordChangeIntent || passwordConfigured === true) && passwordFormOpen && (
             <form onSubmit={handleChangePassword} className="mt-3 space-y-3">
-              <FormField label={formatMessage({ id: "settings.account.currentPassword" })} labelStyle="plain" size="compact">
+              <FormField label={formatMessage({ id: "settings.account.currentPassword" })} size="compact">
                 <Input
                   type="password"
                   name="current-password"
@@ -809,11 +821,11 @@ export function AccountSection({
                   aria-label={formatMessage({ id: "settings.account.currentPassword" })}
                   value={currentPassword}
                   onChange={handleCurrentPasswordChange}
-                  className="w-full text-sm"
+                  className="w-full"
                   required
                 />
               </FormField>
-              <FormField label={formatMessage({ id: "settings.account.newPassword" })} labelStyle="plain" size="compact">
+              <FormField label={formatMessage({ id: "settings.account.newPassword" })} size="compact">
                 <Input
                   type="password"
                   name="new-password"
@@ -821,12 +833,12 @@ export function AccountSection({
                   aria-label={formatMessage({ id: "settings.account.newPassword" })}
                   value={newPassword}
                   onChange={handleNewPasswordChange}
-                  className="w-full text-sm"
+                  className="w-full"
                   placeholder={formatMessage({ id: "settings.account.minCharsPlaceholder" })}
                   required
                 />
               </FormField>
-              <FormField label={formatMessage({ id: "settings.account.confirmPassword" })} labelStyle="plain" size="compact">
+              <FormField label={formatMessage({ id: "settings.account.confirmPassword" })} size="compact">
                 <Input
                   type="password"
                   name="confirm-password"
@@ -834,17 +846,17 @@ export function AccountSection({
                   aria-label={formatMessage({ id: "settings.account.confirmPassword" })}
                   value={confirmPassword}
                   onChange={handleConfirmPasswordChange}
-                  className="w-full text-sm"
+                  className="w-full"
                   required
                 />
               </FormField>
 
               {passwordError && (
-                <Banner intent="warning" density="sm" className="font-bold">{passwordError}</Banner>
+                <Banner intent="warning" density="sm">{passwordError}</Banner>
               )}
 
               {passwordSaved && (
-                <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-lime/30 p-2 text-xs font-bold">{formatMessage({ id: "settings.account.passwordUpdated" })}</div>
+                <Banner intent="success" density="sm" role="status">{formatMessage({ id: "settings.account.passwordUpdated" })}</Banner>
               )}
 
               <Button
@@ -889,8 +901,8 @@ export function AccountSection({
               ? "settings.account.sendingSetupEmail"
               : "settings.account.disconnecting",
           })}
-          confirmColor={pendingDisconnectRequiresPassword
-            ? "bg-brutal-pink"
+          confirmVariant={pendingDisconnectRequiresPassword
+            ? "accent"
             : undefined}
           chromeLocale="active"
           onConfirm={handleConfirmDisconnect}
@@ -921,27 +933,27 @@ function AccountSignOutSection() {
         label={formatMessage({ id: "settings.session.sectionLabel" })}
       />
 
-      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
+      <Card className="p-4">
         <div className="flex items-center justify-between">
           <div>
-            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+            <div className="text-subhead font-semibold text-foreground">
               {formatMessage({ id: "settings.session.logOutTitle" })}
             </div>
-            <p className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+            <p className="text-footnote text-foreground-muted mt-0.5">
               {formatMessage({ id: "settings.session.logOutDescription" })}
             </p>
           </div>
           <Button
-            variant="warning" size="md"
+            variant="warning" size="sm"
             type="button"
             onClick={handleOpenConfirm}
             data-testid="account-logout"
-            className="[@media(max-height:600px)]:py-1 flex items-center gap-1.5 shrink-0 ml-4"
+            className="ml-4 shrink-0"
           >
             {formatMessage({ id: "settings.session.logOutAction" })}
           </Button>
         </div>
-      </div>
+      </Card>
 
       {showConfirm && (
         <ConfirmDialog
@@ -949,7 +961,7 @@ function AccountSignOutSection() {
           message={formatMessage({ id: "settings.session.confirmMessage" })}
           confirmLabel={formatMessage({ id: "settings.session.confirmLabel" })}
           loadingLabel={formatMessage({ id: "settings.session.confirmLoadingLabel" })}
-          confirmColor="bg-brutal-orange"
+          confirmVariant="warning"
           confirmTestId="account-logout-confirm-button"
           onConfirm={handleConfirmLogout}
           onClose={handleCloseConfirm}
@@ -968,8 +980,17 @@ function NotificationsTabContent() {
   );
 }
 
-function LanguageRegionSection() {
+interface PublicTranslationSettingsContext {
+  serverId: string;
+  serverSlug: string;
+  translationEnabled: boolean;
+  translationAvailable: boolean;
+  browserLocalPreferences: boolean;
+}
+
+function LanguageRegionSection({ publicContext }: { publicContext?: PublicTranslationSettingsContext }) {
   const currentServer = useServerStore((s) => s.current);
+  const translationServerId = publicContext?.serverId ?? currentServer?.id;
   const settings = useTranslationStore((s) => s.settings);
   const settingsLoading = useTranslationStore((s) => s.settingsLoading);
   const settingsError = useTranslationStore((s) => s.settingsError);
@@ -1009,8 +1030,8 @@ function LanguageRegionSection() {
   );
 
   useEffect(() => {
-    void loadSettings(currentServer?.id);
-  }, [currentServer?.id, loadSettings]);
+    void loadSettings(translationServerId, publicContext);
+  }, [loadSettings, publicContext, translationServerId]);
 
   // oxlint-disable-next-line react-doctor/no-derived-state-effect
   useEffect(() => {
@@ -1046,7 +1067,7 @@ function LanguageRegionSection() {
     setTranslationDisplay(settings.preferredTranslationDisplay);
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setLanguageRegionSaved(false);
-  }, [currentServer?.id, savedTranslationTarget, savedTranslationMode, settings.preferredTranslationDisplay]);
+  }, [translationServerId, savedTranslationTarget, savedTranslationMode, settings.preferredTranslationDisplay]);
 
   // oxlint-disable-next-line react-doctor/no-derived-state-effect, react-doctor/no-cascading-set-state
   useEffect(() => {
@@ -1056,7 +1077,7 @@ function LanguageRegionSection() {
     setTimeFormat(savedTimeFormat);
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setDateTimeSaved(false);
-  }, [currentServer?.id, savedTimezone, savedTimeFormat]);
+  }, [translationServerId, savedTimezone, savedTimeFormat]);
 
   const languageOptions = useMemo(
     () => getTranslationLanguageOptions(settings.effectiveLanguage, formatMessage),
@@ -1179,7 +1200,7 @@ function LanguageRegionSection() {
     setTimeFormat(next);
   }, []);
 
-  if (!currentServer) return null;
+  if (!translationServerId) return null;
 
   return (
     <>
@@ -1190,13 +1211,13 @@ function LanguageRegionSection() {
           label={formatMessage({ id: "settings.language.sectionLabel" })}
         />
 
-        <form onSubmit={handleSaveLanguageRegion} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
+        <Card render={<form onSubmit={handleSaveLanguageRegion} />} className="block space-y-4 p-4">
           <div className="space-y-3">
             <div>
-              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+              <div className="text-subhead font-semibold text-foreground">
                 {formatMessage({ id: "settings.language.displayLanguageTitle" })}
               </div>
-              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+              <div className="text-footnote text-foreground-muted mt-0.5">
                 {formatMessage({ id: "settings.language.displayLanguageDescription" })}
               </div>
             </div>
@@ -1220,22 +1241,22 @@ function LanguageRegionSection() {
                 some pages may still be English while zh-cn is active. en never
                 shows this. Removed once all namespaces are migrated. */}
             {locale === "zh-cn" ? (
-              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5" data-testid="zh-coverage-notice">
+              <div className="text-footnote text-foreground-muted mt-0.5" data-testid="zh-coverage-notice">
                 {formatMessage({ id: "settings.language.zhCoverageNotice" })}
               </div>
             ) : null}
           </div>
           <div className="space-y-3">
             <div>
-              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.language.translationMode" })}</div>
-              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+              <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.language.translationMode" })}</div>
+              <div className="text-footnote text-foreground-muted mt-0.5">
                 {formatMessage({ id: "settings.language.translationModeDesc" })}
               </div>
               {/* The menu action needs the server gate AND a configured provider;
                   without this line the mode control silently does nothing. */}
               {!settingsLoading && !settings.available ? (
                 <div
-                  className="mt-1 text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange"
+                  className="mt-1 text-caption font-bold text-warning-strong"
                   data-testid="translation-unavailable-notice"
                 >
                   {formatMessage({
@@ -1269,8 +1290,8 @@ function LanguageRegionSection() {
           {translationMode !== "off" ? (
             <div className="space-y-3">
               <div>
-                <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.language.translationTarget" })}</div>
-                <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+                <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.language.translationTarget" })}</div>
+                <div className="text-footnote text-foreground-muted mt-0.5">
                   {formatMessage({ id: "settings.language.translationTargetDesc" }, { language: settings.effectiveLanguage?.toUpperCase() ?? "English" })}
                 </div>
               </div>
@@ -1296,8 +1317,8 @@ function LanguageRegionSection() {
           {translationMode !== "off" ? (
             <div className="space-y-3">
               <div>
-                <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.language.defaultView" })}</div>
-                <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+                <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.language.defaultView" })}</div>
+                <div className="text-footnote text-foreground-muted mt-0.5">
                   {formatMessage({ id: "settings.language.defaultViewDesc" })}
                 </div>
               </div>
@@ -1321,7 +1342,7 @@ function LanguageRegionSection() {
           ) : null}
 
           {(settingsError || languageError || translationDisplayError) && (
-            <Banner intent="warning" density="sm" className="font-bold">
+            <Banner intent="warning" density="sm">
               {translationDisplayError || languageError || settingsError}
             </Banner>
           )}
@@ -1335,7 +1356,7 @@ function LanguageRegionSection() {
               <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
             ) : formatMessage({ id: "settings.common.save" })}
           </Button>
-        </form>
+        </Card>
       </div>
 
       <div className="mb-6">
@@ -1345,11 +1366,11 @@ function LanguageRegionSection() {
           label={formatMessage({ id: "settings.dateTime.sectionLabel" })}
         />
 
-        <form onSubmit={handleSaveDateTime} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
+        <Card render={<form onSubmit={handleSaveDateTime} />} className="block space-y-4 p-4">
           <div className="space-y-3">
             <div>
-              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.dateTime.timezone" })}</div>
-              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+              <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.dateTime.timezone" })}</div>
+              <div className="text-footnote text-foreground-muted mt-0.5">
                 {formatMessage({ id: "settings.dateTime.timezoneDesc" })}
               </div>
             </div>
@@ -1370,8 +1391,8 @@ function LanguageRegionSection() {
               </SelectContent>
             </Select>
             <div>
-              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.dateTime.timeFormat" })}</div>
-              <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+              <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.dateTime.timeFormat" })}</div>
+              <div className="text-footnote text-foreground-muted mt-0.5">
                 {formatMessage({ id: "settings.dateTime.timeFormatDesc" })}
               </div>
             </div>
@@ -1391,7 +1412,7 @@ function LanguageRegionSection() {
           </div>
 
           {(settingsError || timezoneError || timeFormatError) && (
-            <Banner intent="warning" density="sm" className="font-bold">
+            <Banner intent="warning" density="sm">
               {timezoneError || timeFormatError || settingsError}
             </Banner>
           )}
@@ -1405,7 +1426,7 @@ function LanguageRegionSection() {
               <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
             ) : formatMessage({ id: "settings.common.save" })}
           </Button>
-        </form>
+        </Card>
       </div>
     </>
   );
@@ -1457,33 +1478,33 @@ function DesktopNativeNotificationsCard() {
         label={formatMessage({ id: "settings.notifications.desktop.sectionLabel" })}
       />
 
-      <div className="border border-line-muted bg-layer-card p-4 space-y-3 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm" data-testid="desktop-notifications-card">
+      <Card className="space-y-3 p-4" data-testid="desktop-notifications-card">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.notifications.desktop.title" })}</div>
-            <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+            <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.notifications.desktop.title" })}</div>
+            <div className="text-footnote text-foreground-muted mt-0.5">
               {formatMessage({ id: "settings.notifications.desktop.description" })}
             </div>
           </div>
-          <span className="inline-flex shrink-0 border border-line-strong bg-primary-soft px-2 py-1 text-[10px] font-bold uppercase text-primary-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
+          <Badge appearance="soft" variant={available ? "default" : "muted"}>
             {formatMessage({ id: available ? "settings.notifications.desktop.statusSystemManaged" : "settings.notifications.desktop.statusUnavailable" })}
-          </span>
+          </Badge>
         </div>
 
-        <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
+        <div className="text-footnote text-foreground-muted">
           {formatMessage({ id: available ? "settings.notifications.desktop.systemHint" : "settings.notifications.desktop.unavailableHint" })}
         </div>
 
         {error && (
-          <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
+          <Banner intent="warning" density="sm">{error}</Banner>
         )}
         {message && (
-          <div className="border border-line-muted bg-success-soft p-2 text-xs font-bold text-success-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-lime/30 theme-brutal:text-black">{message}</div>
+          <Banner intent="success" density="sm" role="status">{message}</Banner>
         )}
 
         <div className="flex gap-2">
           <Button
-            variant="success"
+            variant="outline"
             size="sm"
             type="button"
             onClick={handleTest}
@@ -1492,7 +1513,7 @@ function DesktopNativeNotificationsCard() {
             {formatMessage({ id: "settings.notifications.desktop.sendTest" })}
           </Button>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
@@ -1687,6 +1708,15 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
             : permission === "denied"
               ? formatMessage({ id: "settings.notifications.statusDenied" })
               : formatMessage({ id: "settings.notifications.statusDisabled" });
+  // Fixed status meanings: on is lime, a blocked permission is a problem
+  // (orange), everything else is neutral stone.
+  const statusTone = loading
+    ? "muted"
+    : subscribed && serverConfigured && permission !== "unsupported"
+      ? "success"
+      : permission === "denied"
+        ? "warning"
+        : "muted";
 
   return (
     <div>
@@ -1696,43 +1726,43 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
         label={formatMessage({ id: "settings.notifications.sectionLabel" })}
       />
 
-      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
+      <Card className="space-y-3 p-4">
         <div className="flex items-center justify-between gap-3">
           <div>
-            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.notifications.mainTitle" })}</div>
-            <div className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+            <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.notifications.mainTitle" })}</div>
+            <div className="text-footnote text-foreground-muted mt-0.5">
               {formatMessage({ id: "settings.notifications.mainDescription" })}
             </div>
           </div>
-          <Badge variant="muted" uppercase>
+          <Badge appearance="soft" variant={statusTone}>
             {statusLabel}
           </Badge>
         </div>
 
         {permission === "unsupported" && (
-          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
+          <div className="text-footnote text-foreground-muted">
             {formatMessage({ id: channel.kind === "unsupported" ? UNSUPPORTED_REASON_MESSAGE[channel.reason] : "settings.notifications.unsupportedHint" })}
           </div>
         )}
 
         {permission !== "unsupported" && !serverConfigured && !loading && (
-          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
+          <div className="text-footnote text-foreground-muted">
             {formatMessage({ id: "settings.notifications.notConfiguredHint" })}
           </div>
         )}
 
         {permission === "denied" && (
-          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">
+          <div className="text-footnote text-foreground-muted">
             {formatMessage({ id: "settings.notifications.deniedHint" })}
           </div>
         )}
 
         {error && (
-          <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
+          <Banner intent="warning" density="sm">{error}</Banner>
         )}
 
         {message && (
-          <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-lime/30 p-2 text-xs font-bold">{message}</div>
+          <Banner intent="success" density="sm" role="status">{message}</Banner>
         )}
 
         <div className="flex gap-2">
@@ -1746,7 +1776,7 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
                 {busy ? formatMessage({ id: "settings.notifications.disabling" }) : formatMessage({ id: "settings.notifications.disable" })}
               </Button>
               <Button
-                variant="success" size="sm" type="button"
+                variant="outline" size="sm" type="button"
                 onClick={handleSendTest}
                 disabled={busy || testing || permission === "unsupported" || !serverConfigured}
               >
@@ -1766,19 +1796,19 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
         </div>
 
         {currentServer && (
-          <div className="border-t-2 border-line-muted theme-brutal:border-black/20 pt-3">
+          <div>
+            <Separator className="mb-3" />
             <form onSubmit={handleSaveServerMute} className="space-y-3">
-              <label className={`flex items-start gap-3 ${loading || busy || testing || muting ? "opacity-60" : ""}`}>
+              <label className={`flex items-start gap-3 ${loading || busy || testing || muting ? "cursor-not-allowed" : ""}`}>
                 <Checkbox
-                  size="md"
                   checked={serverPushMuted}
                   disabled={loading || busy || testing || muting}
                   onCheckedChange={handleServerPushMutedChange}
                   className="mt-0.5"
                 />
                 <span className="min-w-0">
-                  <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.notifications.muteServerTitle" })}</span>
-                  <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+                  <span className={`block text-subhead font-semibold ${loading || busy || testing || muting ? "text-foreground-disabled" : "text-foreground"}`}>{formatMessage({ id: "settings.notifications.muteServerTitle" })}</span>
+                  <span className="block text-footnote text-foreground-muted mt-0.5">
                     {formatMessage({ id: "settings.notifications.muteServerDescription" }, { serverName: currentServer.name })}
                   </span>
                 </span>
@@ -1795,7 +1825,7 @@ function WebPushNotificationsCard({ channel }: { channel: Exclude<NotificationCh
             </form>
           </div>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
@@ -1819,6 +1849,8 @@ export interface JoinLinkRecord {
 }
 
 export interface OAuthClientRecord {
+  setupUrl?: string | null;
+  setupDescription?: string | null;
   id: string;
   serverId: string;
   clientId: string;
@@ -1965,17 +1997,13 @@ function ProfileSection() {
           canEdit ? (
             <Tooltip content={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}>
             <label
-              className={`group relative flex size-16 shrink-0 items-center justify-center ${avatarSaving ? "cursor-not-allowed opacity-70" : ""}`}
-              aria-label={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
+              className={`group/avatar-edit relative flex shrink-0 rounded-sticker has-[:focus-visible]:shadow-focus ${avatarSaving ? "cursor-not-allowed opacity-70" : ""}`}
             >
-              <AvatarSlot context="profile-tile" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={serverInitial} />
-              <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-                <Upload size={18} className="text-white" />
-              </span>
               <input
                 type="file"
                 accept={PROFILE_AVATAR_ACCEPT}
-                className="hidden"
+                className="peer/avatar-edit sr-only"
+                aria-label={avatarSaving ? formatMessage({ id: "settings.common.uploadingAvatar" }) : formatMessage({ id: "settings.common.uploadImage" })}
                 disabled={avatarSaving}
                 onChange={(e) => {
                   const file = e.target.files?.[0];
@@ -1983,18 +2011,20 @@ function ProfileSection() {
                   if (file) void handleUploadAvatar(file);
                 }}
               />
+              <AvatarSlot context="profile-tile" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={serverInitial} />
+              <AvatarEditVeil busy={avatarSaving} />
             </label>
             </Tooltip>
           ) : (
-            <AvatarSlot context="profile-tile" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={serverInitial} className="border-line-strong theme-brutal:border-black/30" />
+            <AvatarSlot context="profile-tile" type="server" serverAvatarUrl={server.avatarUrl} serverInitial={serverInitial} />
           )
         }
       >
         {avatarError ? (
-          <p className="text-xs font-bold text-brutal-red" role="alert">{avatarError}</p>
+          <p className="text-caption text-danger-strong" role="alert">{avatarError}</p>
         ) : null}
         <form onSubmit={handleSave} className="space-y-3">
-          <FormField label={formatMessage({ id: "settings.serverProfile.nameLabel" })} labelStyle="plain" size="compact">
+          <FormField label={formatMessage({ id: "settings.serverProfile.nameLabel" })} size="compact">
             {canEdit ? (
               <Input
                 data-testid="server-profile-name-input"
@@ -2002,32 +2032,32 @@ function ProfileSection() {
                 value={name}
                 onChange={handleNameChange}
                 maxLength={100}
-                className="w-full text-sm"
+                className="w-full"
               />
             ) : (
               <div
                 data-testid="server-profile-name-readonly"
-                className="w-full border border-line-muted bg-layer-inset p-2 text-sm font-mono text-foreground-muted theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-gray-50 theme-brutal:text-black/60"
+                className="flex min-h-11 w-full items-center rounded-control border border-line-hairline bg-fill-muted px-3 text-body text-foreground-muted"
               >
                 {server.name}
               </div>
             )}
           </FormField>
 
-          <FormField label={formatMessage({ id: "settings.serverProfile.slugLabel" })} labelStyle="plain" size="compact">
+          <FormField label={formatMessage({ id: "settings.serverProfile.slugLabel" })} size="compact">
             <SlugInput
               type="text"
               value={server.slug}
               readOnly
               aria-readonly="true"
               tabIndex={-1}
-              className="border-line-strong bg-layer-inset shadow-none focus-within:shadow-none theme-brutal:border-black/30 theme-brutal:bg-gray-50"
-              inputClassName="cursor-default text-sm text-foreground-muted theme-brutal:text-black/60"
+              className="border-line-hairline bg-fill-muted shadow-none focus-within:shadow-none"
+              inputClassName="cursor-default text-foreground-muted"
             />
           </FormField>
 
           {error && (
-            <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
+            <Banner intent="warning" density="sm">{error}</Banner>
           )}
 
           {canEdit && (
@@ -2053,6 +2083,7 @@ function ProfileSection() {
 interface PublicVisibilityReadback {
   publiclyVisible: boolean;
   publicGuestJoinEnabled: boolean;
+  publicSearchEnabled: boolean;
   slug: string;
   exposedChannels: Array<{ id: string; name: string; description: string | null }>;
 }
@@ -2072,6 +2103,7 @@ type PublicVisibilityUiAction =
   | { type: "saving" }
   | { type: "saved"; publiclyVisible: boolean; publicGuestJoinEnabled: boolean }
   | { type: "guestJoinSaved"; publicGuestJoinEnabled: boolean }
+  | { type: "searchSaved"; publicSearchEnabled: boolean }
   | { type: "confirm"; open: boolean };
 
 function publicVisibilityUiReducer(state: PublicVisibilityUiState, action: PublicVisibilityUiAction): PublicVisibilityUiState {
@@ -2094,6 +2126,11 @@ function publicVisibilityUiReducer(state: PublicVisibilityUiState, action: Publi
       saving: false,
       readback: state.readback ? { ...state.readback, publicGuestJoinEnabled: action.publicGuestJoinEnabled } : null,
     };
+    case "searchSaved": return {
+      ...state,
+      saving: false,
+      readback: state.readback ? { ...state.readback, publicSearchEnabled: action.publicSearchEnabled } : null,
+    };
     case "confirm": return { ...state, confirmOpen: action.open };
   }
 }
@@ -2109,22 +2146,25 @@ function PublicChannelList({ channels }: { channels: PublicVisibilityReadback["e
   const scrollFrameClass = "max-h-[7.5rem] overflow-y-scroll";
   if (channels.length === 0) {
     return (
-      <div className={`rounded-md border border-dashed border-line-muted bg-fill-muted/40 px-3 py-4 text-center text-xs text-foreground-muted theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/25 theme-brutal:bg-gray-50 theme-brutal:text-black/55 ${scrollFrameClass}`}>
+      <div className={`rounded-container border border-dashed border-line-hairline px-3 py-4 text-center text-footnote text-foreground-hint ${scrollFrameClass}`}>
         {formatMessage({ id: "settings.publicVisibility.emptyChannels" })}
       </div>
     );
   }
   return (
-    <ul className={`divide-y divide-line-hairline rounded-md border border-line-muted bg-layer-panel theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white ${scrollFrameClass}`} data-testid="public-visibility-channel-list">
-      {channels.map((channel) => (
-        <li key={channel.id} className="flex h-[3.625rem] items-start gap-3 px-3 py-2.5">
-          <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-md border border-line-muted bg-layer-inset text-foreground-strong theme-brutal:rounded-none theme-brutal:border-black theme-brutal:bg-brutal-cream" aria-hidden="true">
-            <Hash size={14} strokeWidth={2.5} />
-          </span>
+    <ul className={`rounded-container border border-line-hairline bg-layer-card ${scrollFrameClass}`} data-testid="public-visibility-channel-list">
+      {channels.map((channel, index) => (
+        <li key={channel.id} className="flex h-[3.625rem] flex-col">
+          {index > 0 ? <Separator className="shrink-0" /> : null}
+          <div className="flex min-h-0 flex-1 items-start gap-3 px-3 py-2.5">
+          <IconTile size="sm" className="mt-0.5">
+            <Hash strokeWidth={2} />
+          </IconTile>
           <span className="min-w-0 flex-1">
-            <span className="block truncate text-sm font-bold text-foreground-strong">{channel.name}</span>
-            {channel.description ? <span className="mt-0.5 block truncate text-xs text-foreground-muted">{channel.description}</span> : null}
+            <span className="block truncate text-subhead font-semibold text-foreground">{channel.name}</span>
+            {channel.description ? <span className="mt-0.5 block truncate text-footnote text-foreground-muted">{channel.description}</span> : null}
           </span>
+          </div>
         </li>
       ))}
     </ul>
@@ -2173,6 +2213,10 @@ export function PublicVisibilitySection() {
       const { data } = await api.patch<{ publiclyVisible: boolean; publicGuestJoinEnabled: boolean }>(`/servers/${serverId}/public-visibility`, { publiclyVisible });
       if (useServerStore.getState().current?.id !== serverId) return;
       dispatch({ type: "saved", publiclyVisible: data.publiclyVisible, publicGuestJoinEnabled: data.publicGuestJoinEnabled });
+      // The server list carries publicPageLive (the globe on the server
+      // avatar and on public channels). Members pick the change up on their
+      // next list refresh; the owner who just flipped it should not wait.
+      void useServerStore.getState().loadServers({ fresh: true });
     } catch (err: unknown) {
       if (useServerStore.getState().current?.id !== serverId) return;
       const response = getApiErrorResponse(err);
@@ -2198,6 +2242,28 @@ export function PublicVisibilitySection() {
       throw err;
     }
   }, [formatMessage, serverId]);
+
+  const updateSearch = useCallback(async (publicSearchEnabled: boolean) => {
+    if (!serverId) return;
+    dispatch({ type: "saving" });
+    try {
+      const { data } = await api.patch<{ publicSearchEnabled: boolean }>(
+        `/servers/${serverId}/public-search`,
+        { publicSearchEnabled },
+      );
+      if (useServerStore.getState().current?.id !== serverId) return;
+      dispatch({ type: "searchSaved", publicSearchEnabled: data.publicSearchEnabled });
+    } catch (err: unknown) {
+      if (useServerStore.getState().current?.id !== serverId) return;
+      const response = getApiErrorResponse(err);
+      dispatch({ type: "failed", error: response?.error || formatMessage({ id: "settings.publicVisibility.failedSearchUpdate" }) });
+      throw err;
+    }
+  }, [formatMessage, serverId]);
+
+  const handleSearchCheckedChange = useCallback((checked: boolean) => {
+    void updateSearch(checked).catch(() => {});
+  }, [updateSearch]);
 
   const handleVisibilityCheckedChange = useCallback((checked: boolean) => {
     if (checked) dispatch({ type: "confirm", open: true });
@@ -2227,21 +2293,25 @@ export function PublicVisibilitySection() {
     <div className="mb-6" data-testid="public-visibility-section">
       <SectionHeader
         className="mb-3"
-        icon={<Globe2 size={16} />}
+        icon={<Globe size={16} />}
         label={formatMessage({ id: "settings.publicVisibility.sectionLabel" })}
       />
-      <div className="space-y-4 rounded-lg border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
+      {/* Two levels (cindyz, #wg-rbac task #127): "Make this server public"
+          with its link and, under it, the Guest-join setting, which only
+          applies to a public server; then, after a divider, the channel list,
+          which is about the whole public server and sits at the first level. */}
+      <Card className="space-y-4 p-4">
+        <div className="space-y-4" data-testid="public-visibility-primary">
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h3 id="public-visibility-label" className="text-sm font-bold text-foreground-strong">
+            <h3 id="public-visibility-label" className="text-subhead font-semibold text-foreground">
               {formatMessage({ id: "settings.publicVisibility.title" })}
             </h3>
-            <p className="mt-1 text-xs leading-relaxed text-foreground-muted">
+            <p className="mt-1 text-footnote text-foreground-muted">
               {formatMessage({ id: "settings.publicVisibility.description" })}
             </p>
           </div>
           <Switch
-            size="md"
             checked={readback?.publiclyVisible === true}
             disabled={loading || saving || !readback}
             onCheckedChange={handleVisibilityCheckedChange}
@@ -2254,14 +2324,14 @@ export function PublicVisibilitySection() {
           <div data-testid="public-visibility-url">
             <label
               htmlFor="public-visibility-url-input"
-              className="mb-1 block text-xs font-bold uppercase tracking-wide text-foreground-muted"
+              className="mb-1.5 block text-footnote font-semibold text-foreground"
             >
               {formatMessage({ id: "settings.publicVisibility.publicUrl" })}
             </label>
             <div className="flex gap-2">
-              <input
+              <Input
                 id="public-visibility-url-input"
-                className="input-brutal h-10 min-w-0 flex-1 text-xs"
+                className="min-w-0 flex-1"
                 type="url"
                 value={publicUrl}
                 readOnly
@@ -2296,17 +2366,18 @@ export function PublicVisibilitySection() {
         ) : null}
 
         {serverGuestEnabled ? (
-          <div className="flex items-start justify-between gap-4 border-t border-line-hairline pt-4">
+          // Second level: indented under the setting it depends on, with a
+          // guide line instead of the divider that used to make it a sibling.
+          <div className="ml-1 flex items-start justify-between gap-4 border-l border-line-hairline pl-4" data-testid="public-guest-join-setting">
             <div className="min-w-0">
-              <h3 id="public-guest-join-label" className="text-sm font-bold text-foreground-strong">
+              <h3 id="public-guest-join-label" className="text-subhead font-semibold text-foreground">
                 {formatMessage({ id: "settings.publicVisibility.allowGuestJoin" })}
               </h3>
-              <p className="mt-1 text-xs leading-relaxed text-foreground-muted">
+              <p className="mt-1 text-footnote text-foreground-muted">
                 {formatMessage({ id: "settings.publicVisibility.allowGuestJoinDescription" })}
               </p>
             </div>
             <Switch
-              size="md"
               checked={readback?.publicGuestJoinEnabled === true}
               disabled={loading || saving || !readback || !readback.publiclyVisible}
               onCheckedChange={handleGuestJoinCheckedChange}
@@ -2316,35 +2387,56 @@ export function PublicVisibilitySection() {
           </div>
         ) : null}
 
-        <div>
-          <p className="mb-2 text-xs font-bold uppercase tracking-wide text-foreground-muted">
+        {/* Public server SEO: also second level. It never makes anything
+            readable; it only decides whether public content may be indexed. */}
+        <div className="ml-1 flex items-start justify-between gap-4 border-l border-line-hairline pl-4" data-testid="public-search-setting">
+          <div className="min-w-0">
+            <h3 id="public-search-label" className="text-subhead font-semibold text-foreground">
+              {formatMessage({ id: "settings.publicVisibility.allowSearch" })}
+            </h3>
+            <p className="mt-1 text-footnote text-foreground-muted">
+              {formatMessage({ id: "settings.publicVisibility.allowSearchDescription" })}
+            </p>
+          </div>
+          <Switch
+            checked={readback?.publiclyVisible === true && readback.publicSearchEnabled}
+            disabled={loading || saving || !readback || !readback.publiclyVisible}
+            onCheckedChange={handleSearchCheckedChange}
+            aria-labelledby="public-search-label"
+            data-testid="public-search-switch"
+          />
+        </div>
+        </div>
+
+        <div className="border-t border-line-hairline pt-4" data-testid="public-visibility-channels">
+          <h3 className="mb-2 text-subhead font-semibold text-foreground">
             {formatMessage({ id: "settings.publicVisibility.channelListLabel" })}
-          </p>
+          </h3>
           {loading ? (
-            <div className="h-16 animate-pulse rounded-md border border-line-muted bg-fill-muted/50 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-gray-100" data-testid="public-visibility-loading" />
+            <div className="h-16 animate-pulse rounded-container bg-fill-muted" data-testid="public-visibility-loading" />
           ) : <PublicChannelList channels={channels} />}
         </div>
 
-        {error ? <Banner intent="warning" density="sm" className="font-bold">{error}</Banner> : null}
-      </div>
+        {error ? <Banner intent="warning" density="sm">{error}</Banner> : null}
+      </Card>
 
       {confirmOpen ? (
         <ConfirmDialog
           title={formatMessage({ id: "settings.publicVisibility.confirmTitle" })}
           message={(
             <div className="space-y-4">
-              <p className="text-sm leading-relaxed text-foreground-strong">
+              <p className="text-callout text-foreground">
                 {formatMessage({ id: "settings.publicVisibility.confirmDescription" })}
               </p>
               <PublicChannelList channels={channels} />
-              <p className="text-xs leading-relaxed text-foreground-muted">
+              <p className="text-footnote text-foreground-muted">
                 {formatMessage({ id: "settings.publicVisibility.confirmAudienceChange" })}
               </p>
             </div>
           )}
           confirmLabel={formatMessage({ id: "settings.publicVisibility.confirmAction" })}
           loadingLabel={formatMessage({ id: "settings.publicVisibility.confirmSaving" })}
-          confirmColor="bg-brutal-pink"
+          confirmVariant="accent"
           confirmTestId="public-visibility-confirm-button"
           plainMessage
           maxWidthClass="max-w-lg"
@@ -2463,7 +2555,7 @@ function LabsSection() {
         count={activeReadback?.labs.length}
       />
 
-      <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+      <Card className="p-4">
         {loading ? (
           <div className="space-y-3">
             <Skeleton className="h-10 w-full" />
@@ -2471,41 +2563,44 @@ function LabsSection() {
             <Skeleton className="h-16 w-full" />
           </div>
         ) : unavailable ? (
-          <div className="flex items-start gap-3 text-sm text-foreground-muted theme-brutal:text-black/60">
-            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-foreground-muted theme-brutal:text-black/50" />
+          <div className="flex items-start gap-3">
+            <AlertTriangle size={16} className="mt-0.5 shrink-0 text-foreground-muted" />
             <div>
-              <div className="font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.labs.unavailableTitle" })}</div>
-              <div className="mt-1 text-xs leading-5">{formatMessage({ id: "settings.labs.unavailableDescription" })}</div>
+              <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.labs.unavailableTitle" })}</div>
+              <div className="mt-0.5 text-footnote text-foreground-muted">{formatMessage({ id: "settings.labs.unavailableDescription" })}</div>
             </div>
           </div>
         ) : activeReadback ? (
           <div className="space-y-4">
-            <div className="flex items-start justify-between gap-4 border-b-2 border-line-muted theme-brutal:border-black pb-4">
-              <div className="min-w-0">
-                <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.labs.masterTitle" })}</div>
-                {!authority.canSetMasterAccess && (
-                  <div className="mt-1 text-xs font-mono text-foreground-muted theme-brutal:text-black/45">
-                    {formatMessage({ id: "settings.labs.masterOwnerOnly" })}
-                  </div>
-                )}
+            <div>
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.labs.masterTitle" })}</div>
+                  {!authority.canSetMasterAccess && (
+                    <div className="mt-0.5 text-footnote text-foreground-muted">
+                      {formatMessage({ id: "settings.labs.masterOwnerOnly" })}
+                    </div>
+                  )}
+                </div>
+                <Switch
+                  checked={activeReadback.masterEnabled}
+                  disabled={!authority.canSetMasterAccess || activeSavingTarget != null}
+                  onCheckedChange={handleMasterChange}
+                  aria-label={formatMessage({ id: "settings.labs.masterTitle" })}
+                  className="mt-0.5 shrink-0"
+                />
               </div>
-              <Switch
-                size="md"
-                checked={activeReadback.masterEnabled}
-                disabled={!authority.canSetMasterAccess || activeSavingTarget != null}
-                onCheckedChange={handleMasterChange}
-                aria-label={formatMessage({ id: "settings.labs.masterTitle" })}
-                className="mt-0.5 shrink-0"
-              />
+              <Separator className="mt-4" />
             </div>
 
             {activeReadback.labs.length === 0 ? (
-              <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">{formatMessage({ id: "settings.labs.emptyState" })}</div>
+              <div className="text-footnote text-foreground-hint">{formatMessage({ id: "settings.labs.emptyState" })}</div>
             ) : (
-              <div className="divide-y-2 divide-black/10" data-testid="server-labs-list">
-                {activeReadback.labs.map((lab) => (
+              <div data-testid="server-labs-list">
+                {activeReadback.labs.map((lab, index) => (
+                  <Fragment key={lab.key}>
+                  {index > 0 ? <Separator /> : null}
                   <ServerLabRow
-                    key={lab.key}
                     lab={lab}
                     authority={authority}
                     masterEnabled={activeReadback.masterEnabled}
@@ -2513,29 +2608,30 @@ function LabsSection() {
                     saving={activeSavingTarget?.target === `lab:${lab.key}`}
                     onEnrollmentChange={handleEnrollmentChange}
                   />
+                  </Fragment>
                 ))}
               </div>
             )}
 
             {error && (
-              <Banner intent="warning" density="sm" className="font-bold">
+              <Banner intent="warning" density="sm">
                 {error}
               </Banner>
             )}
           </div>
         ) : error ? (
-          <Banner intent="warning" density="sm" className="font-bold">
+          <Banner intent="warning" density="sm">
             {error}
           </Banner>
         ) : null}
-      </div>
+      </Card>
     </div>
   );
 }
 
 type AdminRole = Extract<ServerRole, "owner" | "admin">;
 
-export function renderPrincipalAvatar(principal: ServerAdminSettingsPrincipal, context: "surface-list" | "compact-list") {
+export function renderPrincipalAvatar(principal: ServerAdminSettingsPrincipal, context: "list-row" | "compact-list") {
   return principal.kind === "human" ? (
     <AvatarSlot
       context={context}
@@ -2543,14 +2639,14 @@ export function renderPrincipalAvatar(principal: ServerAdminSettingsPrincipal, c
       humanAvatarUrl={principal.avatarUrl}
       gravatarHash={principal.gravatarHash}
       email={principal.email}
-      className={context === "surface-list" ? "self-start" : ""}
+      className={context === "list-row" ? "self-start" : ""}
     />
   ) : (
     <AvatarSlot
       context={context}
       type="agent"
       agentAvatarUrl={principal.avatarUrl}
-      className={context === "surface-list" ? "self-start" : ""}
+      className={context === "list-row" ? "self-start" : ""}
     />
   );
 }
@@ -2565,7 +2661,6 @@ function AdminsSection() {
   const updateAgent = useAgentStore((s) => s.updateAgent);
   const { role, capabilities } = useServerPermissions();
 
-  const pickerRef = useRef<HTMLDivElement>(null);
   const agents = useMemo(() => allAgents.filter((agent) => !agent.deletedAt), [allAgents]);
   const [selectedPrincipalKey, setSelectedPrincipalKey] = useState("");
   const [selectedRole, setSelectedRole] = useState<AdminRole>("admin");
@@ -2614,20 +2709,11 @@ function AdminsSection() {
     }
   }, [candidates, selectedPrincipalKey]);
 
-  useEffect(() => {
-    if (!principalPickerOpen) return;
-    // Reset search input when dropdown opens. Intentional reset-on-open, not
-    // prop-derived state.
-    // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
-    setAdminPrincipalSearch("");
-    const handleClickOutside = (event: MouseEvent) => {
-      if (pickerRef.current && !pickerRef.current.contains(event.target as Node)) {
-        setPrincipalPickerOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [principalPickerOpen]);
+  // Each opening starts from an empty search.
+  const handlePrincipalPickerOpenChange = useCallback((open: boolean) => {
+    if (open) setAdminPrincipalSearch("");
+    setPrincipalPickerOpen(open);
+  }, []);
 
   // List-dep default narrowing: when the candidate (or current admin's own
   // role) changes, the available admin role options shrink/grow; fall the
@@ -2730,28 +2816,34 @@ function AdminsSection() {
         count={admins.length}
       />
 
-      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
+      <Card className="space-y-4 p-4">
         <div>
-          <div className="mb-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.admins.addLabel" })}</div>
+          <div className="mb-1.5 text-footnote font-semibold text-foreground">{formatMessage({ id: "settings.admins.addLabel" })}</div>
           <div className="flex flex-col gap-2 sm:flex-row">
-            <div ref={pickerRef} className="relative min-w-0 sm:flex-[1_1_0%]">
-              <button
-                type="button"
-                data-testid="admin-principal-picker"
-                onClick={() => setPrincipalPickerOpen((open) => !open)}
-                disabled={candidates.length === 0 || savingPrincipalKey != null}
-                className="flex h-10 w-full min-w-0 items-center justify-between gap-2 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white px-3 text-left text-xs font-bold shadow-raft-sm theme-brutal:shadow-brutal-sm transition-colors hover:bg-primary-soft theme-brutal:hover:bg-soft-signal/30 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                <span className={`truncate ${selectedCandidate ? "text-foreground-strong theme-brutal:text-black" : "text-foreground-muted theme-brutal:text-black/45"}`}>
-                  {selectedCandidate
-                    ? selectedCandidate.kind === "human" && selectedCandidate.email
-                      ? `${getAdminPrincipalLabel(selectedCandidate, formatMessage)} · ${selectedCandidate.email}`
-                      : getAdminPrincipalLabel(selectedCandidate, formatMessage)
-                    : candidates.length > 0 ? formatMessage({ id: "settings.admins.membersSearchPlaceholder" }) : formatMessage({ id: "settings.admins.noMembers" })}
-                </span>
-                <ChevronRight size={14} className={`shrink-0 transition-transform ${principalPickerOpen ? "rotate-90" : ""}`} />
-              </button>
-              {principalPickerOpen && (
+            {/* raft-ui Popover: the list is placed in a portal under the
+                field, as wide as it, and kept on screen; the popover owns the
+                toggle, outside presses and Escape. */}
+            <div className="min-w-0 sm:flex-[1_1_0%]">
+              <Popover open={principalPickerOpen} onOpenChange={handlePrincipalPickerOpenChange}>
+                <PopoverTrigger
+                  render={(
+                    <button
+                      type="button"
+                      data-testid="admin-principal-picker"
+                      disabled={candidates.length === 0 || savingPrincipalKey != null}
+                      className="flex h-11 w-full min-w-0 items-center justify-between gap-2 rounded-control border-[1.5px] border-line-strong bg-layer-card pr-3 pl-3.5 text-left text-subhead font-semibold outline-none hover:press-overlay focus-visible:shadow-focus disabled:cursor-not-allowed disabled:border-line-hairline disabled:bg-fill-muted disabled:text-foreground-disabled"
+                    />
+                  )}
+                >
+                  <span className={`truncate ${selectedCandidate ? "text-foreground" : "font-medium text-foreground-hint"}`}>
+                    {selectedCandidate
+                      ? selectedCandidate.kind === "human" && selectedCandidate.email
+                        ? `${getAdminPrincipalLabel(selectedCandidate, formatMessage)} · ${selectedCandidate.email}`
+                        : getAdminPrincipalLabel(selectedCandidate, formatMessage)
+                      : candidates.length > 0 ? formatMessage({ id: "settings.admins.membersSearchPlaceholder" }) : formatMessage({ id: "settings.admins.noMembers" })}
+                  </span>
+                  <ChevronRight size={16} className={`shrink-0 text-foreground-hint transition-transform ${principalPickerOpen ? "rotate-90" : ""}`} />
+                </PopoverTrigger>
                 <SelectionPopover
                   title={formatMessage({ id: "settings.admins.membersPickerTitle" })}
                   width="trigger"
@@ -2764,7 +2856,7 @@ function AdminsSection() {
                   showClear={!!selectedCandidate}
                   onClear={handleClearPrincipal}
                 />
-              )}
+              </Popover>
             </div>
             <div className="sm:w-[120px] sm:shrink-0">
               <Select
@@ -2785,20 +2877,22 @@ function AdminsSection() {
               </Select>
             </div>
             <Button
-              variant="accent" size="sm"
+              variant="accent" size="lg"
               type="button"
               onClick={handlePromote}
               disabled={!selectedCandidate || selectedRoleOptions.length === 0 || savingPrincipalKey != null}
-              className="[@media(max-height:600px)]:py-1 sm:shrink-0"
+              className="sm:shrink-0"
             >
               {selectedCandidate && savingPrincipalKey === getAdminPrincipalKey(selectedCandidate) ? formatMessage({ id: "settings.common.saving" }) : formatMessage({ id: "settings.admins.updateRole" })}
             </Button>
           </div>
         </div>
 
-        <div className="border-t-2 border-line-muted theme-brutal:border-black pt-4">
+        <div>
+          <Separator className="mb-4" />
           {admins.length > 0 ? (
-            <div className="space-y-2">
+            // DS ListRow › `rf-list--inset`: one card, hairlines between rows.
+            <ListRowGroup>
               {admins.map((admin) => (
                 <AdminPrincipalRow
                   key={getAdminPrincipalKey(admin)}
@@ -2809,20 +2903,20 @@ function AdminsSection() {
                   onDemote={handleDemote}
                 />
               ))}
-            </div>
+            </ListRowGroup>
           ) : (
-            <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
+            <div className="text-footnote text-foreground-hint">
               {formatMessage({ id: "settings.admins.emptyState" })}
             </div>
           )}
         </div>
 
         {error && (
-          <Banner intent="warning" density="sm" className="font-bold">
+          <Banner intent="warning" density="sm">
             {error}
           </Banner>
         )}
-      </div>
+      </Card>
     </div>
   );
 }
@@ -2886,19 +2980,19 @@ function InvitesSection() {
         count={invites.length > 0 ? invites.length : null}
       />
 
-      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
+      <Card className="p-4">
         {invites.length > 0 ? (
-          <div className="space-y-1.5">
+          <div className="divide-y divide-line-hairline">
             {invites.map((invite) => (
               <PendingInviteRow key={invite.id} invite={invite} onRequestRevoke={setRevokeTarget} />
             ))}
           </div>
         ) : !loading ? (
-          <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
+          <div className="text-footnote text-foreground-hint">
             {formatMessage({ id: "settings.invites.emptyState" })}
           </div>
         ) : null}
-      </div>
+      </Card>
 
       {revokeTarget && (
         <ConfirmDialog
@@ -3012,10 +3106,10 @@ function JoinLinksSection() {
         count={links.length > 0 ? links.length : null}
       />
 
-      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
+      <Card className="p-4">
         <form onSubmit={handleCreate} className="space-y-3">
           <div className="grid gap-3 md:grid-cols-2">
-            <FormField label={formatMessage({ id: "settings.joinLinks.maxUses" })} labelStyle="plain" size="compact" htmlFor="join-link-max-uses">
+            <FormField label={formatMessage({ id: "settings.joinLinks.maxUses" })} size="compact" htmlFor="join-link-max-uses">
               <Input
                 id="join-link-max-uses"
                 type="number"
@@ -3023,42 +3117,41 @@ function JoinLinksSection() {
                 value={maxUses}
                 onChange={handleMaxUsesChange}
                 placeholder={formatMessage({ id: "settings.joinLinks.unlimited" })}
-                className="w-full text-sm"
+                className="w-full"
               />
             </FormField>
 
-            <FormField label={formatMessage({ id: "settings.joinLinks.expiresAt" })} labelStyle="plain" size="compact" htmlFor="join-link-expires-at">
+            <FormField label={formatMessage({ id: "settings.joinLinks.expiresAt" })} size="compact" htmlFor="join-link-expires-at">
               <Input
                 id="join-link-expires-at"
                 type="datetime-local"
                 value={expiresAt}
                 onChange={handleExpiresAtChange}
-                className="w-full text-sm"
+                className="w-full"
               />
             </FormField>
           </div>
 
           {createError && (
-            <Banner intent="warning" density="sm" className="font-bold">
+            <Banner intent="warning" density="sm">
               {createError}
             </Banner>
           )}
 
           <Button
-
-            variant="accent" size="sm"
+            variant="outline" size="sm"
             type="submit"
             disabled={creating}
-            className="flex items-center gap-1.5"
           >
             <Plus size={14} />
             {creating ? formatMessage({ id: "settings.joinLinks.creating" }) : formatMessage({ id: "settings.joinLinks.createLink" })}
           </Button>
         </form>
 
-        <div className="mt-4 border-t-2 border-line-muted theme-brutal:border-black pt-4">
+        <div className="mt-4">
+          <Separator className="mb-4" />
           {links.length > 0 ? (
-            <div className="space-y-2">
+            <div className="divide-y divide-line-hairline">
               {links.map((link) => (
                 <JoinLinkRow
                   key={link.id}
@@ -3071,12 +3164,12 @@ function JoinLinksSection() {
               ))}
             </div>
           ) : !loading ? (
-            <div className="text-xs text-foreground-muted theme-brutal:text-black/40 italic">
+            <div className="text-footnote text-foreground-hint">
               {formatMessage({ id: "settings.joinLinks.emptyState" })}
             </div>
           ) : null}
         </div>
-      </div>
+      </Card>
 
       {revokeTarget && (
         <ConfirmDialog
@@ -3236,14 +3329,14 @@ function OnboardingAgentSection() {
         label={formatMessage({ id: "settings.onboarding.sectionLabel" })}
       />
 
-      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4">
+      <Card className="p-4">
         <div className="space-y-4">
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 pr-0 sm:pr-4">
-              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+              <div className="text-subhead font-semibold text-foreground">
                 {formatMessage({ id: "settings.onboarding.humanAgentTitle" })}
               </div>
-              <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/60">
+              <div className="mt-0.5 text-footnote text-foreground-muted">
                 {formatMessage({ id: "settings.onboarding.humanAgentDescription" })}
               </div>
             </div>
@@ -3269,10 +3362,10 @@ function OnboardingAgentSection() {
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0 pr-0 sm:pr-4">
-              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+              <div className="text-subhead font-semibold text-foreground">
                 {formatMessage({ id: "settings.onboarding.greetingTitle" })}
               </div>
-              <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/60">
+              <div className="mt-0.5 text-footnote text-foreground-muted">
                 {formatMessage({ id: "settings.onboarding.greetingDescription" })}
               </div>
             </div>
@@ -3298,14 +3391,14 @@ function OnboardingAgentSection() {
         </div>
 
         {error && (
-          <Banner intent="warning" density="sm" className="mt-2 font-bold">
+          <Banner intent="warning" density="sm" className="mt-2">
             {error}
           </Banner>
         )}
 
         <div className="mt-2 flex items-center justify-between">
           {!canManageLinks && (
-            <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.onboarding.adminOnly" })}</div>
+            <div className="text-footnote text-foreground-hint">{formatMessage({ id: "settings.onboarding.adminOnly" })}</div>
           )}
           <Button
             variant="accent" size="sm"
@@ -3322,25 +3415,28 @@ function OnboardingAgentSection() {
             role would be a second opinion that can drift — hide it in one surface, leak it in
             another (@Jianwei's point). The projection alone decides. */}
         {setupProjection && setupProjection.phase !== "complete" && setupProjection.surface !== "none" ? (
-          <div className="mt-4 flex items-center justify-between border-t-2 border-line-muted theme-brutal:border-black pt-3">
-            <div>
-              <div className="text-xs font-bold">{formatMessage({ id: "settings.onboarding.serverSetupTitle" })}</div>
-              <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.onboarding.serverSetupDescription" })}</div>
+          <div className="mt-4">
+            <Separator className="mb-3" />
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.onboarding.serverSetupTitle" })}</div>
+                <div className="mt-0.5 text-footnote text-foreground-muted">{formatMessage({ id: "settings.onboarding.serverSetupDescription" })}</div>
+              </div>
+              <Button
+                variant="outline" size="sm"
+                type="button"
+                onClick={handleFinishSetup}
+                disabled={reopeningSetup}
+                className="ml-4 shrink-0"
+                data-testid="finish-server-setup"
+              >
+                {formatMessage({ id: reopeningSetup ? "settings.onboarding.openingSetup" : "settings.onboarding.finishSetup" })}
+                {!reopeningSetup && <ChevronRight size={14} />}
+              </Button>
             </div>
-            <Button
-              variant="outline" size="sm"
-              type="button"
-              onClick={handleFinishSetup}
-              disabled={reopeningSetup}
-              className="inline-flex items-center gap-1.5"
-              data-testid="finish-server-setup"
-            >
-              {formatMessage({ id: reopeningSetup ? "settings.onboarding.openingSetup" : "settings.onboarding.finishSetup" })}
-              {!reopeningSetup && <ChevronRight size={14} />}
-            </Button>
           </div>
         ) : null}
-      </div>
+      </Card>
     </div>
   );
 }
@@ -3398,25 +3494,24 @@ function MemberPermissionsSection() {
         label={formatMessage({ id: "settings.memberPermissions.sectionLabel" })}
       />
 
-      <form onSubmit={handleSave} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
-        <label className={`flex items-start gap-3 ${canEdit ? "" : "opacity-60"}`}>
+      <Card render={<form onSubmit={handleSave} />} className="block space-y-3 p-4">
+        <label className={`flex items-start gap-3 ${!canEdit ? "cursor-not-allowed" : ""}`}>
           <Checkbox
-            size="md"
             checked={hideHumansFromMembers}
             disabled={!canEdit || saving}
             onCheckedChange={handleHideHumansChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.memberPermissions.hideHumansTitle" })}</span>
-            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+            <span className={`block text-subhead font-semibold ${!canEdit ? "text-foreground-disabled" : "text-foreground"}`}>{formatMessage({ id: "settings.memberPermissions.hideHumansTitle" })}</span>
+            <span className="block text-footnote text-foreground-muted mt-0.5">
               {formatMessage({ id: "settings.memberPermissions.hideHumansDescription" })}
             </span>
           </span>
         </label>
 
         {error && (
-          <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
+          <Banner intent="warning" density="sm">{error}</Banner>
         )}
 
         {canEdit && (
@@ -3431,7 +3526,7 @@ function MemberPermissionsSection() {
             ) : formatMessage({ id: "settings.common.save" })}
           </Button>
         )}
-      </form>
+      </Card>
     </div>
   );
 }
@@ -3502,25 +3597,24 @@ function SystemChannelsSection() {
         label={formatMessage({ id: "settings.systemChannels.sectionLabel" })}
       />
 
-      <form onSubmit={handleSave} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
-        <label className={`flex items-start gap-3 ${saving ? "opacity-60" : ""}`}>
+      <Card render={<form onSubmit={handleSave} />} className="block space-y-3 p-4">
+        <label className={`flex items-start gap-3 ${saving ? "cursor-not-allowed" : ""}`}>
           <Checkbox
-            size="md"
             checked={allChannelHidden}
             disabled={saving}
             onCheckedChange={handleAllChannelHiddenChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.systemChannels.hideAllTitle" })}</span>
-            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+            <span className={`block text-subhead font-semibold ${saving ? "text-foreground-disabled" : "text-foreground"}`}>{formatMessage({ id: "settings.systemChannels.hideAllTitle" })}</span>
+            <span className="block text-footnote text-foreground-muted mt-0.5">
               {formatMessage({ id: "settings.systemChannels.hideAllDescription" })}
             </span>
           </span>
         </label>
 
         {error && (
-          <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
+          <Banner intent="warning" density="sm">{error}</Banner>
         )}
 
         <Button
@@ -3534,7 +3628,7 @@ function SystemChannelsSection() {
             <><Check size={14} /> {formatMessage({ id: "settings.common.saved" })}</>
           ) : formatMessage({ id: "settings.common.save" })}
         </Button>
-      </form>
+      </Card>
     </div>
   );
 }
@@ -3599,31 +3693,30 @@ function ServerTranslationSection() {
         label={formatMessage({ id: "settings.serverTranslation.sectionLabel" })}
       />
 
-      <form onSubmit={handleSave} className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-3">
-        <label className={`flex items-start gap-3 ${settingsLoading || !settings.canManageServerTranslation ? "opacity-60" : ""}`}>
+      <Card render={<form onSubmit={handleSave} />} className="block space-y-3 p-4">
+        <label className={`flex items-start gap-3 ${settingsLoading || !settings.canManageServerTranslation ? "cursor-not-allowed" : ""}`}>
           <Checkbox
-            size="md"
             checked={enabled}
             disabled={saving || settingsLoading || !settings.canManageServerTranslation}
             onCheckedChange={handleEnabledChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.serverTranslation.enableTitle" })}</span>
-            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+            <span className={`block text-subhead font-semibold ${settingsLoading || !settings.canManageServerTranslation ? "text-foreground-disabled" : "text-foreground"}`}>{formatMessage({ id: "settings.serverTranslation.enableTitle" })}</span>
+            <span className="block text-footnote text-foreground-muted mt-0.5">
               {formatMessage({ id: "settings.serverTranslation.enableDescription" })}
             </span>
           </span>
         </label>
 
         {showProviderWarning && (
-          <Banner intent="warning" density="sm" className="font-bold">
+          <Banner intent="warning" density="sm">
             {formatMessage({ id: "settings.serverTranslation.providerWarning" })}
           </Banner>
         )}
 
         {(settingsError || error) && (
-          <Banner intent="warning" density="sm" className="font-bold">{error || settingsError}</Banner>
+          <Banner intent="warning" density="sm">{error || settingsError}</Banner>
         )}
 
         {settings.canManageServerTranslation && (
@@ -3638,7 +3731,7 @@ function ServerTranslationSection() {
             ) : formatMessage({ id: "settings.common.save" })}
           </Button>
         )}
-      </form>
+      </Card>
     </div>
   );
 }
@@ -3654,10 +3747,8 @@ function PlanBillingLoadingSection() {
         icon={<CreditCard size={16} />}
         label={formatMessage({ id: "billing.planBilling" })}
       />
-      <div
-        className="mb-6 border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
-      >
-        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-4">
+      <Card className="mb-6">
+        <div className="border-b border-line-hairline px-4 py-4">
           <Skeleton variant="line" className="mb-2 h-5 w-32" />
           <Skeleton variant="line" className="h-4 w-64 max-w-full" />
         </div>
@@ -3669,7 +3760,7 @@ function PlanBillingLoadingSection() {
               <div className="space-y-3">
                 {[0, 1, 2].map((row) => (
                   <div key={row} className="flex items-start gap-3">
-                    <Skeleton variant="block" className="mt-0.5 h-4 w-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
+                    <Skeleton variant="block" className="mt-0.5 h-4 w-4" />
                     <Skeleton variant="line" className={row === 2 ? "w-3/5" : row === 1 ? "w-4/5" : "w-full"} />
                   </div>
                 ))}
@@ -3678,39 +3769,41 @@ function PlanBillingLoadingSection() {
           ))}
         </div>
 
-        <div className="border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
+        <Separator />
+        <div className="px-4 py-4">
           <div className="grid gap-3 sm:grid-cols-2">
             {(["billing.seat", "billing.messageHistory", "billing.fileUploads"] as const).map((label) => (
               <div key={label} className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/45">{formatMessage({ id: label })}</span>
+                <span className="text-footnote font-semibold text-foreground-muted">{formatMessage({ id: label })}</span>
                 <Skeleton variant="line" className="w-20" />
               </div>
             ))}
           </div>
         </div>
 
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
-          <Skeleton variant="block" className="h-8 w-28 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
-          <Skeleton variant="block" className="h-8 w-44 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
+        <Separator />
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4">
+          <Skeleton variant="block" className="h-8 w-28" />
+          <Skeleton variant="block" className="h-8 w-44" />
         </div>
-      </div>
+      </Card>
 
       <SectionHeader
         className="mb-3"
         icon={<Plus size={16} />}
         label={formatMessage({ id: "billing.managePlan" })}
       />
-      <div className="mb-6 grid gap-4 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm lg:grid-cols-[minmax(0,1fr)_280px]">
+      <Card className="mb-6 grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_280px]">
         <div>
           <Skeleton variant="line" className="mb-3 h-4 w-56 max-w-full" />
           <div className="flex flex-wrap items-center gap-3">
-            <Skeleton variant="block" className="h-8 w-24 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
+            <Skeleton variant="block" className="h-8 w-24" />
             <Skeleton variant="line" className="w-48 max-w-full" />
           </div>
-          <Skeleton variant="block" className="mt-4 h-8 w-32 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20" />
+          <Skeleton variant="block" className="mt-4 h-8 w-32" />
         </div>
 
-        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+        <Card className="p-4">
           <Skeleton variant="line" className="mb-4 h-3 w-32" />
           <div className="space-y-3">
             {[0, 1, 2].map((row) => (
@@ -3720,8 +3813,8 @@ function PlanBillingLoadingSection() {
               </div>
             ))}
           </div>
-        </div>
-      </div>
+        </Card>
+      </Card>
     </div>
   );
 }
@@ -3749,60 +3842,61 @@ export function DowngradeWarningCard({ server, usage }: { server: { planDowngrad
   const excessChannels = getFinitePlanLimitExcess(channelCount, limits.maxChannels);
 
   return (
-    <div className="mb-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-orange/20 shadow-raft-sm theme-brutal:shadow-brutal-sm p-4">
-      <div className="flex items-center gap-2 mb-2">
-        <AlertTriangle size={16} className="text-foreground-strong theme-brutal:text-black" />
-        <span className="text-sm font-bold">
-          {graceExpired ? formatMessage({ id: "billing.gracePeriodExpired" }) : formatMessage({ id: "billing.planDowngraded" })}
-        </span>
-      </div>
+    // A problem with a deadline: the orange warning banner (problems are
+    // orange; red is only for what cannot be undone).
+    <Banner
+      intent="warning"
+      withIcon
+      className="mb-4"
+      title={graceExpired ? formatMessage({ id: "billing.gracePeriodExpired" }) : formatMessage({ id: "billing.planDowngraded" })}
+    >
       {graceExpired ? (
-        <p className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono">
+        <p>
           {formatMessage({ id: "billing.theGracePeriodHasEndedExcessAgentsHaveBeenSt" })}
         </p>
       ) : (
         <>
-                <p className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono mb-2">
+                <p className="mb-2">
                   {formatMessage(
                     {
                       id: excessAgents === 0 && excessMachines === 0 && excessChannels === 0
                         ? "billing.graceAllWithinLimits"
                         : "billing.graceExcessWillStop",
                     },
-                    { days: daysLeft, b: (chunks) => <span key="b" className="font-bold text-foreground-strong theme-brutal:text-black">{chunks}</span> },
+                    { days: daysLeft, b: (chunks) => <span key="b" className="font-bold text-foreground">{chunks}</span> },
                   )}
                 </p>
           {(excessAgents > 0 || excessMachines > 0 || excessChannels > 0) && (
             <div className="space-y-1">
               {excessAgents > 0 && (
-                <div className="text-xs font-mono">
+                <div>
                   {formatMessage(
                       { id: "billing.agentsOverLimit" },
-                      { count: excessAgents, b: (chunks) => <span key="b" className="font-bold text-brutal-orange">{chunks}</span> },
-                    )} ({agentCount}/{limits.maxAgents})
+                      { count: excessAgents, b: (chunks) => <span key="b" className="font-bold text-foreground">{chunks}</span> },
+                    )} <span className="font-mono text-mono-meta">({agentCount}/{limits.maxAgents})</span>
                 </div>
               )}
               {excessMachines > 0 && (
-                <div className="text-xs font-mono">
+                <div>
                   {formatMessage(
                       { id: "billing.computersOverLimit" },
-                      { count: excessMachines, b: (chunks) => <span key="b" className="font-bold text-brutal-orange">{chunks}</span> },
-                    )} ({machineCount}/{limits.maxMachines})
+                      { count: excessMachines, b: (chunks) => <span key="b" className="font-bold text-foreground">{chunks}</span> },
+                    )} <span className="font-mono text-mono-meta">({machineCount}/{limits.maxMachines})</span>
                 </div>
               )}
               {excessChannels > 0 && (
-                <div className="text-xs font-mono">
+                <div>
                   {formatMessage(
                       { id: "billing.channelsOverLimit" },
-                      { count: excessChannels, b: (chunks) => <span key="b" className="font-bold text-brutal-orange">{chunks}</span> },
-                    )} ({channelCount}/{limits.maxChannels})
+                      { count: excessChannels, b: (chunks) => <span key="b" className="font-bold text-foreground">{chunks}</span> },
+                    )} <span className="font-mono text-mono-meta">({channelCount}/{limits.maxChannels})</span>
                 </div>
               )}
             </div>
           )}
         </>
       )}
-    </div>
+    </Banner>
   );
 }
 
@@ -3888,7 +3982,6 @@ function DangerActionCard({
   actionLabel,
   actionIcon,
   onAction,
-  actionSize = "md",
   testId,
   actionTestId,
 }: {
@@ -3897,31 +3990,30 @@ function DangerActionCard({
   actionLabel: string;
   actionIcon: ReactNode;
   onAction: () => void;
-  actionSize?: "sm" | "md";
   testId: string;
   actionTestId?: string;
 }) {
   return (
-    <div data-testid={testId} className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+    <Card data-testid={testId} className="p-4">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{title}</div>
-          <p className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/60">{description}</p>
+          <div className="text-subhead font-semibold text-foreground">{title}</div>
+          <p className="mt-0.5 text-footnote text-foreground-muted">{description}</p>
         </div>
         <Button
           type="button"
-          size={actionSize}
+          size="sm"
           
           variant="danger"
           onClick={onAction}
-          className="sm:ml-4"
+          className="shrink-0 self-start sm:ml-4 sm:self-auto"
           data-testid={actionTestId}
         >
           {actionIcon}
           {actionLabel}
         </Button>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -3958,24 +4050,24 @@ function DangerZoneSection() {
       />
 
       {canLeave && (
-        <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 mb-3">
+        <Card className="mb-3 p-4">
           <div className="flex items-center justify-between">
             <div>
-              <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.dangerZone.leaveServerTitle" })}</div>
-              <p className="text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+              <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.dangerZone.leaveServerTitle" })}</div>
+              <p className="text-footnote text-foreground-muted mt-0.5">
                 {formatMessage({ id: "settings.dangerZone.leaveServerDescription" })}
               </p>
             </div>
             <Button
-              variant="warning" size="md" type="button"
+              variant="warning" size="sm" type="button"
               data-testid="server-danger-leave-button"
               onClick={handleOpenLeave}
-              className="[@media(max-height:600px)]:py-1 flex items-center gap-1.5 shrink-0 ml-4"
+              className="ml-4 shrink-0"
             >
               {formatMessage({ id: "settings.dangerZone.leaveServer" })}
             </Button>
           </div>
-        </div>
+        </Card>
       )}
 
       {isOwner && (
@@ -3997,7 +4089,7 @@ function DangerZoneSection() {
           message={formatMessage({ id: "settings.dangerZone.leaveConfirmMessage" }, { serverName: server.name })}
           confirmLabel={formatMessage({ id: "settings.dangerZone.leaveServer" })}
           loadingLabel={formatMessage({ id: "settings.dangerZone.leaving" })}
-          confirmColor="bg-brutal-orange"
+          confirmVariant="warning"
           confirmTestId="server-leave-confirm-button"
           onConfirm={handleLeave}
           onClose={handleCloseLeave}
@@ -4013,7 +4105,7 @@ export type ConnectedAppStatus = "private" | "publish_requested" | "in_review" |
 export type ConnectedAppsViewMode = "grid" | "list";
 
 const CONNECTED_APPS_VIEW_MODE_STORAGE_KEY = "raft:connected-apps:view-mode";
-const CONNECTED_APP_EDITOR_SECTION_IDS = ["profile", "login", "permissions", "notifications", "distribution", "danger"] as const;
+const CONNECTED_APP_EDITOR_SECTION_IDS = ["profile", "login", "setup", "permissions", "notifications", "distribution", "danger"] as const;
 export type ConnectedAppEditorSectionId = typeof CONNECTED_APP_EDITOR_SECTION_IDS[number];
 
 export function canEditSourceOwnedConnectedApp(status: ConnectedAppStatus) {
@@ -4064,11 +4156,11 @@ export function ConnectedAppDistributionBadge({ status }: { status: ConnectedApp
   const { formatMessage } = useIntl();
   if (!status) return null;
   const label = formatMessage({ id: connectedAppOverviewDistributionLabel(status) });
-  if (status === "published") return <Badge variant="success" uppercase>{label}</Badge>;
+  if (status === "published") return <Badge appearance="soft" variant="success">{label}</Badge>;
   if (status === "publish_requested" || status === "in_review" || status === "unpublish_requested" || status === "rejected") {
-    return <Badge variant="warning" uppercase>{label}</Badge>;
+    return <Badge appearance="soft" variant="warning">{label}</Badge>;
   }
-  return <Badge appearance="outline" uppercase>{label}</Badge>;
+  return <Badge appearance="soft" variant="muted">{label}</Badge>;
 }
 
 function getInitialConnectedAppsViewMode(): ConnectedAppsViewMode {
@@ -4104,13 +4196,13 @@ function ConnectedAppsViewToggle({
       data-testid="connected-apps-view-toggle"
     >
       <Tooltip content={gridLabel}>
-      <ToggleGroupItem value="grid" aria-label={gridLabel} className="h-8 w-8 p-0" data-slot="toggle-group-item">
+      <ToggleGroupItem value="grid" aria-label={gridLabel} className="h-8 w-8" data-slot="toggle-group-item">
         <LayoutGrid size={16} />
       </ToggleGroupItem>
       </Tooltip>
       <Tooltip content={listLabel}>
-      <ToggleGroupItem value="list" aria-label={listLabel} className="h-8 w-8 p-0" data-slot="toggle-group-item">
-        <List size={17} />
+      <ToggleGroupItem value="list" aria-label={listLabel} className="h-8 w-8" data-slot="toggle-group-item">
+        <List size={16} />
       </ToggleGroupItem>
       </Tooltip>
     </ToggleGroup>
@@ -4131,50 +4223,75 @@ function AppNotificationsLabel() {
   );
 }
 
-function AppNotificationsEditorRailLabel() {
-  const { formatMessage } = useIntl();
-  return <span>{formatMessage({ id: "settings.connectedApps.section.webhook" })}</span>;
-}
-
+/**
+ * One part of the app editor: raft-ui's FormSection (small heading, its
+ * status as a quiet tag, a line on what it is for) with a stable anchor the
+ * editor's section list scrolls to.
+ */
 function ConnectedAppEditorSection({
   sectionId,
   title,
   description,
   status,
-  tone = "default",
   children,
 }: {
   sectionId: ConnectedAppEditorSectionId;
   title: ReactNode;
   description: string;
   status: string;
-  tone?: "default" | "warning";
   children: ReactNode;
 }) {
   return (
-    <Card
-      render={<section />}
+    <FormSection
       id={`connected-app-editor-${sectionId}`}
       data-testid={`connected-app-editor-section-${sectionId}`}
-      className={`scroll-mt-4 ${tone === "warning" ? "bg-warning-soft theme-brutal:bg-brutal-pink/15" : "bg-layer-canvas-muted theme-brutal:bg-brutal-cream/35"}`}
+      title={title}
+      status={status}
+      description={description}
     >
-      <div className="flex flex-col gap-2 border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-3 sm:flex-row sm:items-start sm:justify-between">
+      {children}
+    </FormSection>
+  );
+}
+
+/**
+ * An action inside an editor section (share link, publish request, client
+ * secret, delete): what it does on the left, its button on the right, and
+ * whatever it reveals (the share URL) underneath. Plain rows in the section,
+ * not cards inside a card.
+ */
+function ConnectedAppEditorActionRow({
+  title,
+  description,
+  action,
+  children,
+  testId,
+}: {
+  title: ReactNode;
+  description: ReactNode;
+  action: ReactNode;
+  children?: ReactNode;
+  testId?: string;
+}) {
+  return (
+    <div className="flex flex-col gap-3 [&+&]:mt-1" data-testid={testId}>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
         <div className="min-w-0">
-          <h3 className="flex flex-wrap items-center gap-2 text-base font-black text-foreground-strong theme-brutal:text-black">{title}</h3>
-          <p className="mt-0.5 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{description}</p>
+          <div className="text-subhead font-semibold text-foreground">{title}</div>
+          <div className="mt-0.5 text-footnote text-foreground-muted">{description}</div>
         </div>
-        <span className="w-fit shrink-0 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white px-2 py-1 font-mono text-[10px] font-black uppercase text-foreground-strong theme-brutal:text-black">
-          {status}
-        </span>
+        <div className="flex shrink-0 flex-wrap gap-2">{action}</div>
       </div>
-      <div className="space-y-4 bg-layer-panel theme-brutal:bg-white p-4">{children}</div>
-    </Card>
+      {children}
+    </div>
   );
 }
 
 type ConnectedAppCategory = OAuthClientCategory;
 
 type ConnectedAppListing = {
+  setupUrl?: string | null;
+  setupDescription?: string | null;
   id: string;
   clientId: string;
   name: string;
@@ -4200,6 +4317,8 @@ type ConnectedAppListing = {
 };
 
 export type InstalledConnectedApp = {
+  setupUrl?: string | null;
+  setupDescription?: string | null;
   id: string;
   clientId: string;
   name: string;
@@ -4229,8 +4348,8 @@ export function ConnectedAppOriginBadges({ app, className = "" }: { app: Install
   if (!app.privateShared && app.origin !== "private") return null;
   return (
     <div className={`flex flex-wrap items-center gap-1.5 ${className}`.trim()}>
-      {app.privateShared ? <Badge appearance="outline" uppercase>{formatMessage({ id: "settings.connectedApps.sharedBadge" })}</Badge> : null}
-      {app.origin === "private" ? <Badge variant="success" uppercase>{formatMessage({ id: "settings.connectedApps.thisServerBadge" })}</Badge> : null}
+      {app.privateShared ? <Badge appearance="soft">{formatMessage({ id: "settings.connectedApps.sharedBadge" })}</Badge> : null}
+      {app.origin === "private" ? <Badge appearance="soft" variant="information">{formatMessage({ id: "settings.connectedApps.thisServerBadge" })}</Badge> : null}
     </div>
   );
 }
@@ -4295,7 +4414,7 @@ export function ConnectedAppSummary({ description }: { description?: string | nu
   if (!text) return null;
   return (
     <Tooltip content={text}>
-    <div className="mt-1 line-clamp-2 break-words text-sm leading-snug text-foreground-muted theme-brutal:text-black/65">
+    <div className="mt-1 line-clamp-2 break-words text-callout text-foreground-muted">
       {text}
     </div>
     </Tooltip>
@@ -4312,10 +4431,10 @@ export function ConnectedAppMarketplaceInstallBadge({ badge }: { badge: Marketpl
   const { formatMessage } = useIntl();
   if (badge.kind === "none") return null;
   if (badge.kind === "new") {
-    return <Badge variant="warning" uppercase>{formatMessage({ id: "settings.connectedApps.marketplaceNew" })}</Badge>;
+    return <Badge appearance="soft" variant="information">{formatMessage({ id: "settings.connectedApps.marketplaceNew" })}</Badge>;
   }
   return (
-    <Badge appearance="outline" uppercase={false}>
+    <Badge appearance="outline">
       {formatMessage(
         { id: "settings.connectedApps.marketplaceInstallCount" },
         { count: MARKETPLACE_INSTALL_BUCKET_LABEL[badge.bucket] },
@@ -4327,11 +4446,10 @@ export function ConnectedAppMarketplaceInstallBadge({ badge }: { badge: Marketpl
 export function ConnectedAppLogo({ name, logoUrl, seed, size = "md" }: { name: string; logoUrl?: string | null; seed: string; size?: "sm" | "md" | "lg" }) {
   return (
     <AvatarSlot
-      context={size === "lg" ? "account-tile" : size === "md" ? "mention-card" : "surface-list"}
+      context={size === "lg" ? "account-tile" : size === "md" ? "mention-card" : "list-row"}
       type="app"
       appAvatarUrl={logoUrl}
       appInitials={initialsForApp(name || seed)}
-      className="shadow-raft-sm theme-brutal:shadow-brutal-sm"
     />
   );
 }
@@ -4347,7 +4465,7 @@ export function ConnectedAppUrlLink({ url, label, className = "" }: { url?: stri
       target="_blank"
       rel="noreferrer"
       onClick={(event) => event.stopPropagation()}
-      className={`inline-flex max-w-full min-w-0 items-center gap-1.5 text-xs font-mono font-bold text-foreground-muted underline decoration-2 underline-offset-2 hover:text-foreground-strong theme-brutal:text-black/55 theme-brutal:hover:text-black ${className}`.trim()}
+      className={`inline-flex max-w-full min-w-0 items-center gap-1.5 rounded-sticker font-mono text-mono-meta text-foreground-muted underline decoration-[1.5px] underline-offset-[3px] outline-none hover:text-foreground focus-visible:shadow-focus ${className}`.trim()}
     >
       <ExternalLink size={12} className="shrink-0" />
       <span className="min-w-0 truncate">{visibleLabel}</span>
@@ -4359,7 +4477,7 @@ export function ConnectedAppUrlLink({ url, label, className = "" }: { url?: stri
 function OAuthScopeNegativeCapabilityBlock({ className = "" }: { className?: string }) {
   const { formatMessage } = useIntl();
   return (
-    <div className={`border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-warning-soft theme-brutal:bg-soft-signal/25 p-3 text-xs font-bold leading-relaxed text-foreground-strong theme-brutal:text-black shadow-raft-sm theme-brutal:shadow-brutal-sm ${className}`.trim()}>
+    <div className={`rounded-container bg-warning-soft px-3 py-2.5 text-footnote font-semibold text-foreground ${className}`.trim()}>
       {formatMessage({ id: AGENT_INBOUND_NEGATIVE_CAPABILITY_ID })}
     </div>
   );
@@ -4387,9 +4505,9 @@ export function OAuthScopeList({
   return (
     <div className="space-y-3" data-testid="oauth-scope-list">
       {visibleScopes.length === 0 && (
-        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-panel theme-brutal:bg-white p-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/55">
+        <Card className="px-3 py-2 text-footnote text-foreground-muted">
           {formatMessage({ id: "settings.connectedApps.noGrantScopes" })}
-        </div>
+        </Card>
       )}
       {compact ? (
         <div className="flex flex-wrap gap-1.5">
@@ -4398,7 +4516,7 @@ export function OAuthScopeList({
             return (
               <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
               <span
-                className={`inline-flex items-center border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70 ${detail.requiresResource ? "bg-accent-soft/30 theme-brutal:bg-soft-signal/20" : ""}`}
+                className={`inline-flex items-center rounded-chip px-2 py-0.5 font-mono text-mono-meta text-foreground ${detail.requiresResource ? "bg-info-soft" : "bg-fill-muted"}`}
               >
                 {scope}
               </span>
@@ -4413,14 +4531,14 @@ export function OAuthScopeList({
             if (tierScopes.length === 0) return null;
             return (
               <div key={tier} className="space-y-2">
-                <div className="text-[10px] font-black uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: scopeGroupLabelId(tier) })}</div>
+                <SectionEyebrow as="div">{formatMessage({ id: scopeGroupLabelId(tier) })}</SectionEyebrow>
                 <div className="space-y-2">
                   {tierScopes.map((scope) => {
                     const detail = OAUTH_SCOPE_PRESENTATION[scope];
                     return (
-                      <div key={scope} className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-panel theme-brutal:bg-white p-2">
+                      <div key={scope} className="rounded-control border border-line-hairline bg-layer-card px-3 py-2">
                         <div className="flex flex-wrap items-center gap-2">
-                          <code className="break-all text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70">{scope}</code>
+                          <code className="break-all font-mono text-mono-meta text-foreground">{scope}</code>
                           {detail.requiresResource && <Badge appearance="outline">{formatMessage({ id: "settings.connectedApps.scopeRequiresResource" })}</Badge>}
                         </div>
                       </div>
@@ -4456,13 +4574,13 @@ function OAuthScopeSummaryPanel({
   return (
     <div className="space-y-2">
       <SectionEyebrow as="div">{title}</SectionEyebrow>
-      {description && <div className="mt-2 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{description}</div>}
-      <details open={defaultOpen} className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
-        <summary className="text-xs font-black text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.detail.declaredAccess" })}</summary>
+      {description && <div className="mt-2 text-footnote text-foreground-muted">{description}</div>}
+      <Card render={<details open={defaultOpen} />} className="block px-3 py-2">
+        <summary className="text-footnote font-semibold text-foreground">{formatMessage({ id: "settings.connectedApps.detail.declaredAccess" })}</summary>
         <div className="mt-2">
           <OAuthScopeList scopes={scopes} compact={compact} defaultToDeclared={defaultToDeclared} />
         </div>
-      </details>
+      </Card>
     </div>
   );
 }
@@ -4479,9 +4597,9 @@ function ConnectedAppDetailSection({
   tone?: "white" | "cream";
 }) {
   return (
-    <section className={`border border-line-muted theme-brutal:border-2 theme-brutal:border-black p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm ${tone === "cream" ? "bg-layer-canvas-muted theme-brutal:bg-brutal-cream" : "bg-layer-panel theme-brutal:bg-white"}`}>
+    <section className={`rounded-container border border-line-hairline p-4 ${tone === "cream" ? "bg-fill-muted" : "bg-layer-card"}`}>
       <SectionEyebrow as="div">{title}</SectionEyebrow>
-      {description && <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{description}</div>}
+      {description && <div className="mt-1 text-footnote text-foreground-muted">{description}</div>}
       <div className="mt-3">{children}</div>
     </section>
   );
@@ -4496,8 +4614,8 @@ function ConnectedAppDetailRow({
 }) {
   return (
     <div className="flex flex-col gap-1 py-2 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
-      <span className="shrink-0 text-foreground-muted theme-brutal:text-black/55">{label}</span>
-      <div className="min-w-0 text-left font-bold text-foreground-strong theme-brutal:text-black sm:text-right">{children}</div>
+      <span className="shrink-0 text-footnote text-foreground-muted">{label}</span>
+      <div className="min-w-0 text-left text-callout font-semibold text-foreground sm:text-right">{children}</div>
     </div>
   );
 }
@@ -4526,11 +4644,11 @@ export function DeclaredScopesPicker({
   }, [onChange, value]);
 
   return (
-    <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm" data-testid="connected-app-declared-scopes">
-      {value.includes("agent:read") ? <p className="mt-2 text-xs text-foreground-muted" data-testid="legacy-agent-login-scope">{formatMessage({ id: "settings.connectedApps.appPermissions.legacyLoginScope" })}</p> : null}
+    <Card className="p-3" data-testid="connected-app-declared-scopes">
+      {value.includes("agent:read") ? <p className="mt-2 text-footnote text-foreground-muted" data-testid="legacy-agent-login-scope">{formatMessage({ id: "settings.connectedApps.appPermissions.legacyLoginScope" })}</p> : null}
       <div className="mt-3 space-y-2">
-        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
-          <div className="text-xs font-black text-foreground-strong theme-brutal:text-black">
+        <div className="rounded-control bg-fill-muted p-3">
+          <div className="text-footnote font-semibold text-foreground">
             {formatMessage({ id: "settings.connectedApps.identitySection" })}
           </div>
           <div className="mt-2 flex flex-wrap gap-1.5">
@@ -4538,7 +4656,7 @@ export function DeclaredScopesPicker({
               const detail = OAUTH_SCOPE_PRESENTATION[scope];
               return (
                 <Tooltip key={scope} content={formatMessage({ id: detail.copyId })}>
-                <span className="inline-flex items-center border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70">
+                <span className="inline-flex min-h-8 items-center rounded-control border border-line-hairline bg-layer-card px-2.5 py-1 font-mono text-mono-meta text-foreground">
                   {scope}
                 </span>
                 </Tooltip>
@@ -4549,15 +4667,15 @@ export function DeclaredScopesPicker({
                 key={scope}
                 scope={scope}
                 checked={selected.has(scope)}
-                className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1 text-[11px] font-bold text-foreground-muted theme-brutal:text-black/70"
+                className="inline-flex min-h-8 items-center gap-2 rounded-control border border-line-hairline bg-layer-card px-2.5 py-1 font-mono text-mono-meta text-foreground"
                 onScopeChange={updateScope}
               />
             ))}
           </div>
         </div>
 
-        <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/15 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-2">
-          <div className="text-xs font-black text-foreground-strong theme-brutal:text-black">
+        <div className="rounded-control bg-fill-muted p-3">
+          <div className="text-footnote font-semibold text-foreground">
             {formatMessage({ id: "settings.connectedApps.agentMessagingSection" })}
           </div>
           <div className="mt-2 flex flex-wrap gap-2">
@@ -4566,19 +4684,19 @@ export function DeclaredScopesPicker({
                 key={scope}
                 scope={scope}
                 checked={selected.has(scope)}
-                className="inline-flex items-center gap-2 border border-line-strong theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white px-2 py-1.5 text-xs font-bold text-foreground-muted theme-brutal:text-black/70"
+                className="inline-flex min-h-8 items-center gap-2 rounded-control border border-line-hairline bg-layer-card px-2.5 py-1 font-mono text-mono-meta text-foreground"
                 onScopeChange={updateScope}
               />
             ))}
           </div>
           {hasAgentInboundOAuthScope(value) && (
-            <div className="mt-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/55">
+            <div className="mt-2 text-footnote text-foreground-muted">
               {formatMessage({ id: "settings.connectedApps.scopeRequiresResourceDetail" })}
             </div>
           )}
         </div>
       </div>
-    </div>
+    </Card>
   );
 }
 
@@ -4605,6 +4723,7 @@ function mapClientToMarketplaceApp(
     logoUrl: client.logoUrl,
     defaultLogoSeed: client.clientId,
     installed: !!client.installedAt,
+    setupUrl: client.setupUrl, setupDescription: client.setupDescription,
     official: client.official,
     marketplaceInstallBadge: client.marketplaceInstallBadge ?? { kind: "none" },
     allowedScopes: client.allowedScopes,
@@ -4638,13 +4757,6 @@ function emptyAppNotificationState(): AppNotificationsDeveloperState {
   };
 }
 
-export type ConnectedAppEditorRailSection = {
-  id: ConnectedAppEditorSectionId;
-  label: ReactNode;
-  status: string;
-  icon: ReactNode;
-};
-
 export function IntegrationsSection() {
   const { formatDate, formatMessage } = useIntl();
   const current = useServerStore((s) => s.current);
@@ -4670,7 +4782,6 @@ export function IntegrationsSection() {
   const [createdSecretClientId, setCreatedSecretClientId] = useState<string | null>(null);
   const [secretCopied, setSecretCopied] = useState(false);
   const [showRegisterDrawer, setShowRegisterDrawer] = useState(false);
-  const [appEditorSection, setAppEditorSection] = useState<ConnectedAppEditorSectionId>("profile");
   const [editingClient, setEditingClient] = useState<OAuthClientRecord | null>(null);
   const [savingClientId, setSavingClientId] = useState<string | null>(null);
   const [regeneratingClientId, setRegeneratingClientId] = useState<string | null>(null);
@@ -4685,6 +4796,9 @@ export function IntegrationsSection() {
   const [clientHomepageUrl, setClientHomepageUrl] = useState("");
   const [clientReturnUrl, setClientReturnUrl] = useState("");
   const [clientAgentManifestUrl, setClientAgentManifestUrl] = useState("");
+  const [clientSetupRequired, setClientSetupRequired] = useState(false);
+  const [clientSetupUrl, setClientSetupUrl] = useState("");
+  const [clientSetupDescription, setClientSetupDescription] = useState("");
   const [clientAllowedScopes, setClientAllowedScopes] = useState<RaftOAuthScopeId[]>([...DEFAULT_DECLARED_OAUTH_SCOPES]);
   const [appNotificationSelection, setAppNotificationSelection] = useState<AppNotificationSelection>({ groups: [], events: [] });
   const [appNotificationState, setAppNotificationState] = useState<AppNotificationsDeveloperState | null>(null);
@@ -4696,10 +4810,8 @@ export function IntegrationsSection() {
   const [shareLoading, setShareLoading] = useState(false);
   const [shareCopied, setShareCopied] = useState(false);
   const logoInputRef = useRef<HTMLInputElement | null>(null);
-  const appEditorRailRef = useRef<HTMLElement | null>(null);
-  const appEditorContentRef = useRef<HTMLDivElement | null>(null);
-  const secretCopyResetRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
-  const shareCopyResetRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+  const secretCopyResetRef = useRef<number | null>(null);
+  const shareCopyResetRef = useRef<number | null>(null);
 
   const serverId = current?.id;
   const load = useCallback(async () => {
@@ -4758,14 +4870,6 @@ export function IntegrationsSection() {
     };
   }, []);
 
-  useEffect(() => {
-    const rail = appEditorRailRef.current;
-    const active = rail?.querySelector<HTMLElement>(`[data-app-editor-section="${appEditorSection}"]`);
-    if (!rail || !active || rail.scrollWidth <= rail.clientWidth) return;
-    const left = active.offsetLeft - (rail.clientWidth - active.offsetWidth) / 2;
-    rail.scrollTo?.({ left: Math.max(0, left), behavior: "smooth" });
-  }, [appEditorSection]);
-
   const resetForm = useCallback(() => {
     setClientName("");
     setClientId("");
@@ -4774,6 +4878,7 @@ export function IntegrationsSection() {
     setClientHomepageUrl("");
     setClientReturnUrl("");
     setClientAgentManifestUrl("");
+    setClientSetupRequired(false); setClientSetupUrl(""); setClientSetupDescription("");
     setClientAllowedScopes([...DEFAULT_DECLARED_OAUTH_SCOPES]);
     setAppNotificationSelection({ groups: [], events: [] });
     setAppNotificationState(null);
@@ -4790,7 +4895,6 @@ export function IntegrationsSection() {
 
   const openRegisterDrawer = useCallback(() => {
     setEditingClient(null);
-    setAppEditorSection("profile");
     resetForm();
     setCreatedSecret(null);
     setCreatedSecretClientId(null);
@@ -4845,7 +4949,6 @@ export function IntegrationsSection() {
 
   const beginEditClient = useCallback((client: OAuthClientRecord) => {
     setEditingClient(client);
-    setAppEditorSection("profile");
     setClientName(client.name);
     setClientId(client.clientId);
     setClientDescription(client.description ?? "");
@@ -4853,6 +4956,7 @@ export function IntegrationsSection() {
     setClientHomepageUrl(client.homepageUrl ?? "");
     setClientReturnUrl(client.returnUrl ?? "");
     setClientAgentManifestUrl(client.agentManifestUrl ?? "");
+    setClientSetupRequired(Boolean(client.setupUrl)); setClientSetupUrl(client.setupUrl ?? ""); setClientSetupDescription(client.setupDescription ?? "");
     setClientAllowedScopes(normalizeDeclaredOAuthScopes(client.allowedScopes));
     setAppNotificationSelection({ groups: [], events: [] });
     setAppNotificationState(null);
@@ -4872,7 +4976,6 @@ export function IntegrationsSection() {
   const closeRegisterDrawer = useCallback(() => {
     setShowRegisterDrawer(false);
     setEditingClient(null);
-    setAppEditorSection("profile");
     setError("");
     resetShareState();
     resetForm();
@@ -4907,6 +5010,10 @@ export function IntegrationsSection() {
       setError(formatMessage({ id: "settings.connectedApps.whenToUseTooLong" }, { limit: APP_WHEN_TO_USE_MAX_CODE_POINTS }));
       return;
     }
+    if (clientSetupRequired) {
+      try { if (!normalizeAppSetupUrl(clientSetupUrl)) throw new Error("missing setup URL"); }
+      catch { setError(formatMessage({ id: "appSetup.invalidUrl" })); return; }
+    }
     setSubmitting(true);
     setSavingClientId(editingClient?.id ?? null);
     setError("");
@@ -4920,6 +5027,8 @@ export function IntegrationsSection() {
           homepageUrl: clientHomepageUrl || null,
           returnUrl: clientReturnUrl || null,
           agentManifestUrl: clientAgentManifestUrl || null,
+          setupUrl: clientSetupRequired ? clientSetupUrl : null,
+          setupDescription: clientSetupRequired ? clientSetupDescription : null,
           allowedScopes: clientAllowedScopes,
           category: clientCategory,
         });
@@ -4937,6 +5046,8 @@ export function IntegrationsSection() {
           homepageUrl: clientHomepageUrl || undefined,
           returnUrl: clientReturnUrl || undefined,
           agentManifestUrl: clientAgentManifestUrl || undefined,
+          setupUrl: clientSetupRequired ? clientSetupUrl : undefined,
+          setupDescription: clientSetupRequired ? clientSetupDescription : undefined,
           allowedScopes: clientAllowedScopes,
           category: clientCategory,
         });
@@ -4966,6 +5077,7 @@ export function IntegrationsSection() {
     appNotificationState,
     applyUpdatedClient,
     clientAgentManifestUrl,
+    clientSetupRequired, clientSetupUrl, clientSetupDescription,
     clientAllowedScopes,
     clientCategory,
     clientDescription,
@@ -5167,7 +5279,7 @@ export function IntegrationsSection() {
     setError("");
     try {
       await api.post(`/integrations/marketplace/${listing.id}/install`);
-      setSelectedListing(null);
+      setSelectedListing(listing.setupUrl ? { ...listing, installed: true } : null);
       await load();
     } catch (err: any) {
       setError(err.response?.data?.error || formatMessage({ id: "settings.connectedApps.failedInstall" }));
@@ -5236,6 +5348,7 @@ export function IntegrationsSection() {
       developer: renderMarketplaceText("developer_name", app.publisherServerName ?? app.publisherName ?? formatMessage({ id: "settings.connectedApps.thirdPartyDeveloper" })),
       description: renderMarketplaceText("description", app.description),
       homepageUrl: app.homepageUrl,
+      setupUrl: app.setupUrl, setupDescription: app.setupDescription,
       homepageDomain: getDomainFromUrl(app.homepageUrl),
       callbackDomain: getDomainFromUrl(app.returnUrl),
       logoUrl: app.logoUrl,
@@ -5256,6 +5369,7 @@ export function IntegrationsSection() {
       developer: formatMessage({ id: "settings.connectedApps.thisServer" }),
       description: app.description,
       homepageUrl: app.homepageUrl,
+      setupUrl: app.setupUrl, setupDescription: app.setupDescription,
       homepageDomain: getDomainFromUrl(app.homepageUrl),
       callbackDomain: getDomainFromUrl(app.returnUrl),
       logoUrl: app.logoUrl,
@@ -5317,11 +5431,11 @@ export function IntegrationsSection() {
   const renderClientSecretReveal = () => {
     if (!createdSecret) return null;
     return (
-      <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-brutal-lime/20 p-3 space-y-2">
+      <div className="space-y-2 rounded-container bg-success-soft p-3">
         <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.clientSecret" })}</SectionEyebrow>
-        <div className="text-sm text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.secretOnce" })}</div>
+        <div className="text-callout text-foreground">{formatMessage({ id: "settings.connectedApps.secretOnce" })}</div>
         <div className="flex items-center gap-2">
-          <div className="flex-1 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-2 font-mono text-xs break-all">{createdSecret}</div>
+          <div className="min-w-0 flex-1 break-all rounded-control border border-line-hairline bg-layer-card px-2.5 py-1.5 font-mono text-mono-meta text-foreground">{createdSecret}</div>
           <Tooltip content={secretCopied ? formatMessage({ id: "settings.connectedApps.copiedSecret" }) : formatMessage({ id: "settings.connectedApps.copySecret" })}>
           <Button
             variant="outline" size="icon-sm"
@@ -5360,44 +5474,21 @@ export function IntegrationsSection() {
           ? "settings.connectedApps.editor.status.setup"
           : "settings.connectedApps.editor.status.off" });
   const distributionStatus = formatMessage({ id: connectedAppDistributionStatus(editingClient?.publishStatus ?? null) });
-  const appEditorSections: ConnectedAppEditorRailSection[] = [
-    { id: "profile", label: formatMessage({ id: "settings.connectedApps.section.profile" }), status: profileStatus, icon: <User size={14} /> },
-    { id: "login", label: formatMessage({ id: "settings.connectedApps.section.loginWithRaft" }), status: loginStatus, icon: <Shield size={14} /> },
-    { id: "permissions", label: formatMessage({ id: "settings.connectedApps.section.appPermissions" }), status: appPermissionsStatus, icon: <Shield size={14} /> },
-    { id: "notifications", label: <AppNotificationsEditorRailLabel />, status: notificationsStatus, icon: <Bell size={14} /> },
-    { id: "distribution", label: formatMessage({ id: "settings.connectedApps.section.distribution" }), status: distributionStatus, icon: <Link2 size={14} /> },
-    { id: "danger", label: formatMessage({ id: "settings.connectedApps.section.dangerZone" }), status: formatMessage({ id: editingClient ? "settings.connectedApps.editor.dangerStatusRestricted" : "settings.connectedApps.editor.dangerStatusAvailableAfterSave" }), icon: <AlertTriangle size={14} /> },
-  ];
-  const scrollToAppEditorSection = useCallback((sectionId: ConnectedAppEditorSectionId) => {
-    setAppEditorSection(sectionId);
-    const content = appEditorContentRef.current;
-    const target = content?.querySelector<HTMLElement>(`#connected-app-editor-${sectionId}`);
-    if (!content || !target) return;
-    const top = target.getBoundingClientRect().top
-      - content.getBoundingClientRect().top
-      + content.scrollTop
-      - 16;
-    content.scrollTo?.({ top, behavior: "smooth" });
-  }, []);
-  const syncAppEditorSectionFromScroll = () => {
-    const content = appEditorContentRef.current;
-    if (!content) return;
-
-    let nextSection: ConnectedAppEditorSectionId = CONNECTED_APP_EDITOR_SECTION_IDS[0];
-    const atBottom = content.scrollHeight - content.scrollTop - content.clientHeight <= 2;
-    if (atBottom) {
-      nextSection = CONNECTED_APP_EDITOR_SECTION_IDS[CONNECTED_APP_EDITOR_SECTION_IDS.length - 1];
-    } else {
-      const activationLine = content.getBoundingClientRect().top + 16;
-      for (const sectionId of CONNECTED_APP_EDITOR_SECTION_IDS) {
-        const target = content.querySelector<HTMLElement>(`#connected-app-editor-${sectionId}`);
-        if (!target || target.getBoundingClientRect().top > activationLine) break;
-        nextSection = sectionId;
-      }
-    }
-    setAppEditorSection((current) => current === nextSection ? current : nextSection);
-  };
-
+  // The editor's section list, in the order the sections are drawn (a new
+  // app's form stops before Distribution and the Danger zone).
+  const appEditorSections = useMemo(() => [
+    { id: "connected-app-editor-profile", label: formatMessage({ id: "settings.connectedApps.section.profile" }) },
+    { id: "connected-app-editor-login", label: formatMessage({ id: "settings.connectedApps.section.loginWithRaft" }) },
+    { id: "connected-app-editor-setup", label: formatMessage({ id: "appSetup.title" }) },
+    { id: "connected-app-editor-permissions", label: formatMessage({ id: "settings.connectedApps.section.appPermissions" }) },
+    { id: "connected-app-editor-notifications", label: formatMessage({ id: "settings.connectedApps.section.webhook" }) },
+    ...(editingClient
+      ? [
+        { id: "connected-app-editor-distribution", label: formatMessage({ id: "settings.connectedApps.section.distribution" }) },
+        { id: "connected-app-editor-danger", label: formatMessage({ id: "settings.connectedApps.section.dangerZone" }) },
+      ]
+      : []),
+  ], [editingClient, formatMessage]);
   const handleConnectedAppsSearchChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setConnectedAppsSearch(event.target.value), []);
   const handleConnectedAppsCategoryChange = useCallback((value: string | null) => {
     if (value == null) return;
@@ -5434,6 +5525,8 @@ export function IntegrationsSection() {
   const handleClientWhenToUseChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientWhenToUse(event.target.value), []);
   const handleClientIdChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientId(event.target.value), []);
   const handleClientReturnUrlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientReturnUrl(event.target.value), []);
+  const handleClientSetupUrlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientSetupUrl(event.target.value), []);
+  const handleClientSetupDescriptionChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientSetupDescription(event.target.value), []);
   const handleClientAgentManifestUrlChange = useCallback((event: ChangeEvent<HTMLInputElement>) => setClientAgentManifestUrl(event.target.value), []);
   const handleAppNotificationStateChange = useCallback((next: AppNotificationsDeveloperState) => {
     setAppNotificationState(next);
@@ -5480,18 +5573,18 @@ export function IntegrationsSection() {
         label={connectedAppsLabel}
         action={canManage ? (
           <Button
-            variant="accent" size="sm" type="button" onClick={openRegisterDrawer} className="inline-flex items-center gap-1.5">
+            variant="accent" size="sm" type="button" onClick={openRegisterDrawer}>
             <Plus size={14} />
             {formatMessage({ id: "settings.connectedApps.registerApp" })}
           </Button>
         ) : undefined}
       />
 
-      <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+      <Card className="p-4">
         <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
           <div>
-            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.title" })}</div>
-            <div className="mt-1 max-w-2xl text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
+            <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.connectedApps.title" })}</div>
+            <div className="mt-1 max-w-2xl text-footnote text-foreground-muted">
               {formatMessage({
                 id: canManage
                   ? "settings.connectedApps.sectionDescriptionManage"
@@ -5499,12 +5592,12 @@ export function IntegrationsSection() {
               })}
             </div>
             {!canManage && (
-              <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
+              <div className="mt-1 text-footnote text-foreground-muted">
                 {formatMessage({ id: "settings.connectedApps.adminOnlyNote" })}
               </div>
             )}
           </div>
-          {loading && <div className="text-xs font-bold text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.common.loading" })}</div>}
+          {loading && <div className="text-footnote text-foreground-hint">{formatMessage({ id: "settings.common.loading" })}</div>}
         </div>
         <ConnectedAppsTabSegmentedControl
           value={activeTab}
@@ -5512,27 +5605,27 @@ export function IntegrationsSection() {
           className="mt-4"
           onValueChange={setActiveTab}
         />
-      </div>
+      </Card>
 
       <div className="grid items-stretch gap-2 sm:grid-cols-[minmax(0,1fr)_auto] md:grid-cols-[minmax(0,1fr)_220px_auto]" data-testid="connected-apps-filters">
-        <div className="relative h-10 min-h-10">
+        <div className="relative h-11 min-h-11">
           <Input
             type="search"
             value={connectedAppsSearch}
             onChange={handleConnectedAppsSearchChange}
             placeholder={formatMessage({ id: "settings.connectedApps.searchApps" })}
             aria-label={formatMessage({ id: "settings.connectedApps.searchAppsAriaLabel" })}
-            className="box-border h-10 min-h-10 w-full text-sm"
+            className="box-border h-11 min-h-11 w-full"
             data-testid="connected-apps-search"
           />
         </div>
-        <div className="h-10 min-h-10 min-w-0 sm:col-span-1 md:w-[220px]">
+        <div className="h-11 min-h-11 min-w-0 sm:col-span-1 md:w-[220px]">
           <Select
             value={connectedAppsCategory}
             onValueChange={handleConnectedAppsCategoryChange}
             items={connectedAppsCategoryItems}
           >
-            <SelectTrigger className="box-border h-10 min-h-10 w-full" data-testid="connected-apps-category-filter" aria-label={formatMessage({ id: "settings.connectedApps.filterByCategoryAriaLabel" })}>
+            <SelectTrigger className="box-border h-11 min-h-11 w-full" data-testid="connected-apps-category-filter" aria-label={formatMessage({ id: "settings.connectedApps.filterByCategoryAriaLabel" })}>
               <SelectValue placeholder={formatMessage({ id: "settings.connectedApps.categoryLabel" })} />
               <SelectIcon />
             </SelectTrigger>
@@ -5541,7 +5634,7 @@ export function IntegrationsSection() {
             </SelectContent>
           </Select>
         </div>
-        <div className="flex h-10 min-h-10 items-center justify-end sm:col-start-2 sm:row-start-1 md:col-start-3">
+        <div className="flex h-11 min-h-11 items-center justify-end sm:col-start-2 sm:row-start-1 md:col-start-3">
           <ConnectedAppsViewToggle value={connectedAppsViewMode} onValueChange={updateConnectedAppsViewMode} />
         </div>
       </div>
@@ -5558,22 +5651,21 @@ export function IntegrationsSection() {
             data-view={connectedAppsViewMode}
           >
             {marketplaceApps.map((app) => (
-              <button
+              <Card
                 key={app.id}
-                type="button"
-                onClick={() => setSelectedListing(app)}
-                className={`w-full border border-line-muted bg-layer-panel p-3 text-left shadow-raft-sm transition-shadow hover:shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm theme-brutal:hover:shadow-brutal ${
- connectedAppsViewMode === "grid" ? "flex h-full flex-col" : "flex items-center gap-3"
+                render={<button type="button" onClick={() => setSelectedListing(app)} />}
+                className={`w-full p-3 text-left outline-none hover:press-overlay focus-visible:shadow-focus ${
+ connectedAppsViewMode === "grid" ? "h-full" : "flex-row items-center gap-3"
  }`}
               >
                 <div className="flex items-start gap-3">
                   <ConnectedAppLogo name={app.name} logoUrl={app.logoUrl} seed={app.defaultLogoSeed} />
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
-                      <div className="font-bold text-foreground-strong theme-brutal:text-black">{app.name}</div>
+                      <div className="text-body font-semibold text-foreground">{app.name}</div>
                       <ConnectedAppMarketplaceInstallBadge badge={app.marketplaceInstallBadge} />
                     </div>
-                    <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" }), developer: app.developer })}</div>
+                    <div className="mt-0.5 text-footnote text-foreground-muted">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[app.category] ?? "settings.connectedApps.categoryOther" }), developer: app.developer })}</div>
                     {connectedAppsViewMode === "list" && (
                       <ConnectedAppSummary description={app.description} />
                     )}
@@ -5581,22 +5673,22 @@ export function IntegrationsSection() {
                 </div>
                 <div className={`${connectedAppsViewMode === "grid" ? "mt-auto pt-3" : "ml-auto"} flex items-center justify-end gap-2`}>
                   {app.installed ? (
-                    <Badge variant="success" uppercase>{formatMessage({ id: "settings.connectedApps.installed" })}</Badge>
+                    <Badge appearance="soft" variant="success">{formatMessage({ id: "settings.connectedApps.installed" })}</Badge>
                   ) : canManage ? (
-                    <span className="rounded-sm bg-accent-soft px-2.5 py-1 text-xs text-accent-strong theme-brutal:rounded-none btn-brutal-sm theme-brutal:bg-brutal-pink theme-brutal:text-black">{formatMessage({ id: "settings.connectedApps.install" })}</span>
+                    <span className="inline-flex h-7 items-center rounded-control border-[1.5px] border-line-strong px-2.5 text-footnote font-bold text-foreground">{formatMessage({ id: "settings.connectedApps.install" })}</span>
                   ) : (
-                    <Badge appearance="outline" uppercase>{formatMessage({ id: "settings.connectedApps.available" })}</Badge>
+                    <Badge appearance="soft" variant="muted">{formatMessage({ id: "settings.connectedApps.available" })}</Badge>
                   )}
                 </div>
-              </button>
+              </Card>
             ))}
           </div>
           {marketplaceApps.length === 0 && (
-            <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-6 text-center text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+            <div className="px-4 py-8 text-center text-callout text-foreground-hint">
               {formatMessage({ id: "settings.connectedApps.noMarketplaceMatch" })}
             </div>
           )}
-          <div className="text-center text-xs text-foreground-muted theme-brutal:text-black/55">
+          <div className="text-center text-footnote text-foreground-muted">
             {formatMessage({ id: "settings.connectedApps.reviewNote" })}
           </div>
         </div>
@@ -5623,7 +5715,7 @@ export function IntegrationsSection() {
           ))}
           </div>
           {filteredInstalledApps.length === 0 && (
-            <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-6 text-center text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+            <div className="px-4 py-8 text-center text-callout text-foreground-hint">
               {formatMessage({ id: "settings.connectedApps.noInstalledAppsMatch" })}
             </div>
           )}
@@ -5632,13 +5724,13 @@ export function IntegrationsSection() {
 
       {activeTab === "myapps" && (
         <div className="space-y-3" data-testid="connected-apps-my-apps-tab">
-          <div className="text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
+          <div className="text-footnote text-foreground-muted">
             {canManage
               ? formatMessage({ id: "settings.connectedApps.myAppsIntro" })
               : formatMessage({ id: "settings.connectedApps.myAppsReadOnlyIntro" })}
           </div>
           {filteredRegisteredApps.length === 0 ? (
-            <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-6 text-center text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+            <div className="px-4 py-8 text-center text-callout text-foreground-hint">
               {registeredApps.length === 0
                 ? formatMessage({ id: "settings.connectedApps.noRegisteredApps" })
                 : formatMessage({ id: "settings.connectedApps.noRegisteredAppsMatch" })}
@@ -5665,14 +5757,14 @@ export function IntegrationsSection() {
 
       {selectedInstalledApp && (
         <Modal onClose={handleCloseInstalledApp}>
-          <Card className="w-full max-w-2xl space-y-4 p-5">
+          <DialogSurface className="w-full max-w-2xl gap-4 p-5">
             <div className="flex items-start justify-between gap-3">
               <div className="flex min-w-0 items-start gap-3">
                 <ConnectedAppLogo name={selectedInstalledApp.name} logoUrl={selectedInstalledApp.logoUrl} seed={selectedInstalledApp.defaultLogoSeed} size="lg" />
                 <div className="min-w-0">
                   <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.installedAppEyebrow" })}</SectionEyebrow>
-                  <div className="mt-1 break-words text-xl font-bold text-foreground-strong theme-brutal:text-black">{selectedInstalledApp.name}</div>
-                  <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{selectedInstalledApp.developer}</div>
+                  <div className="mt-1 break-words text-headline text-foreground">{selectedInstalledApp.name}</div>
+                  <div className="mt-0.5 text-footnote text-foreground-muted">{selectedInstalledApp.developer}</div>
                 </div>
               </div>
               <CloseButton
@@ -5680,40 +5772,43 @@ export function IntegrationsSection() {
                 <X size={14} />
               </CloseButton>
             </div>
-            {error ? <Banner intent="warning" density="sm" className="font-bold">{error}</Banner> : null}
+            {error ? <Banner intent="warning" density="sm">{error}</Banner> : null}
+            {selectedInstalledApp.setupUrl && serverId ? <AppSetupPanel clientId={selectedInstalledApp.id} serverId={serverId} /> : null}
             <OAuthScopeSummaryPanel
               title={formatMessage({ id: "settings.connectedApps.loginAccessTitle" })}
               description={formatMessage({ id: "settings.connectedApps.loginAccessDescription" })}
               scopes={selectedInstalledApp.grantedScopes}
               defaultToDeclared={false}
             />
-            <AgentJwtSettings serverId={serverId ?? null} clientId={selectedInstalledApp.id} canManage={canManage} />
             <InstalledAppNotifications
               clientId={selectedInstalledApp.id}
               canManage={canManage}
               onError={setError}
             />
-            <div className="flex justify-end border-t-2 border-line-muted theme-brutal:border-black pt-4">
-              <Button
-                type="button" onClick={handleCloseInstalledApp} size="md">{formatMessage({ id: "settings.common.close" })}</Button>
+            <div>
+              <Separator className="mb-4" />
+              <div className="flex justify-end">
+                <Button
+                  type="button" variant="outline" onClick={handleCloseInstalledApp} size="lg">{formatMessage({ id: "settings.common.close" })}</Button>
+              </div>
             </div>
-          </Card>
+          </DialogSurface>
         </Modal>
       )}
 
       {selectedListing && (
         <Modal onClose={handleCloseListing}>
-          <Card className="w-full max-w-2xl space-y-4 p-5" aria-labelledby="connected-app-detail-title">
+          <DialogSurface className="w-full max-w-2xl gap-4 p-5" aria-labelledby="connected-app-detail-title">
             <div className="flex items-start justify-between gap-3">
               <div className="flex items-start gap-3">
                 <ConnectedAppLogo name={selectedListing.name} logoUrl={selectedListing.logoUrl} seed={selectedListing.defaultLogoSeed} size="lg" />
                 <div>
                   <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.appDetail" })}</SectionEyebrow>
                   <div className="mt-1 flex flex-wrap items-center gap-2">
-                    <h2 id="connected-app-detail-title" className="text-xl font-bold text-foreground-strong theme-brutal:text-black">{selectedListing.name}</h2>
+                    <h2 id="connected-app-detail-title" className="text-headline text-foreground">{selectedListing.name}</h2>
                     <ConnectedAppMarketplaceInstallBadge badge={selectedListing.marketplaceInstallBadge} />
                   </div>
-                  <div className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[selectedListing.category] ?? "settings.connectedApps.categoryOther" }), developer: selectedListing.developer })}</div>
+                  <div className="mt-0.5 text-footnote text-foreground-muted">{formatMessage({ id: "settings.connectedApps.byLine" }, { category: formatMessage({ id: CONNECTED_APP_CATEGORY_LABEL_ID[selectedListing.category] ?? "settings.connectedApps.categoryOther" }), developer: selectedListing.developer })}</div>
                 </div>
               </div>
               <CloseButton
@@ -5723,20 +5818,22 @@ export function IntegrationsSection() {
             </div>
             <ConnectedAppsErrorBanner surface={connectedAppsErrorSurface} target={CONNECTED_APPS_ERROR_LISTING} error={error} />
             <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.profile" })}>
-              <p className="mb-2 text-sm leading-relaxed text-foreground-muted theme-brutal:text-black/70">{selectedListing.description}</p>
-              <div className="divide-y-2 divide-black/10 text-sm">
+              <p className="mb-2 text-callout text-foreground-muted">{selectedListing.description}</p>
+              <div className="text-callout">
                 <ConnectedAppDetailRow label={formatMessage({ id: "settings.connectedApps.publisher" })}>
                   {selectedListing.developer}
                 </ConnectedAppDetailRow>
+                <Separator />
                 <ConnectedAppDetailRow label={formatMessage({ id: "settings.connectedApps.homepageUrlLabel" })}>
                   {selectedListing.homepageUrl ? (
                     <ConnectedAppUrlLink url={selectedListing.homepageUrl} />
                   ) : (
-                    <span className="break-all font-mono text-xs font-bold text-foreground-strong theme-brutal:text-black">{selectedListing.homepageDomain}</span>
+                    <span className="break-all font-mono text-mono-meta text-foreground">{selectedListing.homepageDomain}</span>
                   )}
                 </ConnectedAppDetailRow>
+                <Separator />
                 <ConnectedAppDetailRow label={formatMessage({ id: "settings.connectedApps.redirectCallback" })}>
-                  <span className="break-all font-mono text-xs font-bold text-foreground-strong theme-brutal:text-black">{selectedListing.callbackDomain}</span>
+                  <span className="break-all font-mono text-mono-meta text-foreground">{selectedListing.callbackDomain}</span>
                 </ConnectedAppDetailRow>
               </div>
             </ConnectedAppDetailSection>
@@ -5750,7 +5847,9 @@ export function IntegrationsSection() {
                 scopes={selectedListing.allowedScopes}
               />
             </ConnectedAppDetailSection>
-            {selectedListing.installed ? <AgentJwtSettings serverId={serverId ?? null} clientId={selectedListing.id} canManage={canManage} /> : null}
+            {selectedListing.setupUrl ? selectedListing.installed && serverId
+              ? <AppSetupPanel clientId={selectedListing.id} serverId={serverId} />
+              : <AppSetupRequirement url={selectedListing.setupUrl} description={selectedListing.setupDescription} /> : null}
             <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.appPermissions" })} tone="cream">
               <AppNotificationRequestSummary
                 groups={selectedListing.appNotificationGroups}
@@ -5765,14 +5864,14 @@ export function IntegrationsSection() {
               />
             </ConnectedAppDetailSection>
             <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.distribution" })} tone="cream">
-              <div className="text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/70">
+              <div className="text-footnote text-foreground-muted">
                 {formatMessage({ id: "settings.connectedApps.listingReviewNote" })}
               </div>
             </ConnectedAppDetailSection>
             {canManage && selectedListing.installed && (
               <ConnectedAppDetailSection title={formatMessage({ id: "settings.connectedApps.section.dangerZone" })}>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                  <div className="text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
+                  <div className="text-footnote text-foreground-muted">
                     {formatMessage({ id: "settings.connectedApps.detail.removeInstalledDescription" })}
                   </div>
                   <Button
@@ -5780,199 +5879,154 @@ export function IntegrationsSection() {
                     disabled={savingClientId === selectedListing.id}
                     onClick={handleRequestUninstallSelectedListing}
                     variant="danger"
-                    size="md"
+                    size="sm"
                   >
                     {savingClientId === selectedListing.id ? formatMessage({ id: "settings.connectedApps.uninstalling" }) : formatMessage({ id: "settings.connectedApps.uninstallFromServer" })}
                   </Button>
                 </div>
               </ConnectedAppDetailSection>
             )}
-            <div className="flex items-center justify-end gap-2 border-t-2 border-line-muted theme-brutal:border-black pt-4">
-              <Button
-                type="button" onClick={handleCloseListing} size="md">
-                {canManage ? formatMessage({ id: "settings.common.cancel" }) : formatMessage({ id: "settings.common.close" })}
-              </Button>
-              {canManage && !selectedListing.installed && (
+            <div>
+              <Separator className="mb-4" />
+              <div className="flex items-center justify-end gap-2">
                 <Button
-                  type="button"
-                  disabled={savingClientId === selectedListing.id}
-                  onClick={handleInstallSelectedListing}
-                  variant="accent"
-                  size="md"
-                >
-                  {savingClientId === selectedListing.id ? formatMessage({ id: "settings.connectedApps.installing" }) : formatMessage({ id: "settings.connectedApps.installToServer" })}
+                  type="button" variant={canManage && !selectedListing.installed ? "ghost" : "outline"} onClick={handleCloseListing} size="lg">
+                  {canManage ? formatMessage({ id: "settings.common.cancel" }) : formatMessage({ id: "settings.common.close" })}
                 </Button>
-              )}
+                {canManage && !selectedListing.installed && (
+                  <Button
+                    type="button"
+                    disabled={savingClientId === selectedListing.id}
+                    onClick={handleInstallSelectedListing}
+                    variant="accent"
+                    size="lg"
+                  >
+                    {savingClientId === selectedListing.id ? formatMessage({ id: "settings.connectedApps.installing" }) : formatMessage({ id: "settings.connectedApps.installToServer" })}
+                  </Button>
+                )}
+              </div>
             </div>
-          </Card>
+          </DialogSurface>
         </Modal>
       )}
 
       {canManage && showRegisterDrawer && (
-        <Modal onClose={closeRegisterDrawer}>
-          <Card
-            render={<form />}
-            onSubmit={handleSaveClient}
-            className="flex max-h-[min(52rem,calc(100dvh-2rem))] w-full max-w-5xl flex-col overflow-hidden bg-layer-panel theme-brutal:bg-white"
-            aria-labelledby="connected-app-form-title"
-            data-testid="connected-app-editor"
-          >
-            <div className="flex flex-col gap-3 border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex min-w-0 items-center gap-3">
-                <ConnectedAppLogo
-                  name={clientName || editingClient?.name || "App"}
-                  logoUrl={editingClient?.logoUrl}
-                  seed={clientId || editingClient?.clientId || "new-app"}
-                />
-                <div className="min-w-0">
-                  <SectionEyebrow as="div">{editingClient ? formatMessage({ id: "settings.connectedApps.editApp" }) : formatMessage({ id: "settings.connectedApps.registerApp" })}</SectionEyebrow>
-                  <h2 id="connected-app-form-title" className="mt-0.5 truncate text-xl font-black text-foreground-strong theme-brutal:text-black">
-                    {editingClient ? editingClient.name : formatMessage({ id: "settings.connectedApps.newConnectedApp" })}
-                  </h2>
-                  <p className="mt-0.5 text-xs text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.editor.headerDescription" })}</p>
-                </div>
-              </div>
-              <div className="flex shrink-0 items-center justify-end gap-2">
-                <CloseButton
-                  type="button"
-                  onClick={closeRegisterDrawer}
-
-
-                  aria-label={formatMessage({ id: "settings.connectedApps.closeAppForm" })}
-                >
-                  <X size={16} />
-                </CloseButton>
-                <Button
-                  type="submit" disabled={isAppWhenToUseTooLong(clientWhenToUse) || submitting || appNotificationLoading || savingClientId === editingClient?.id} variant="accent" size="sm">
-                  {submitting ? formatMessage({ id: "settings.common.saving" }) : editingClient ? formatMessage({ id: "settings.common.save" }) : formatMessage({ id: "settings.connectedApps.registerApp" })}
-                </Button>
-              </div>
-            </div>
-            {(error || createdSecret) && (
-              <div className="space-y-2 border-b-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-4 py-3">
-                <ConnectedAppsErrorBanner surface={connectedAppsErrorSurface} target={CONNECTED_APPS_ERROR_FORM} error={error} />
-                {renderClientSecretReveal()}
-              </div>
-            )}
-
-            <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] md:grid-cols-[220px_minmax(0,1fr)] md:grid-rows-1">
-              <nav
-                ref={appEditorRailRef}
-                className="flex gap-2 overflow-x-auto border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-3 md:block md:space-y-2 md:overflow-y-auto md:border-b-0 md:border-r-2"
-                aria-label={formatMessage({ id: "settings.connectedApps.appEditorSectionsAriaLabel" })}
-                data-testid="connected-app-editor-rail"
+        <FormDialog
+          testId="connected-app-editor"
+          bodyTestId="connected-app-editor-content"
+          navTestId="connected-app-editor-nav"
+          navLabel={formatMessage({ id: "settings.connectedApps.appEditorSectionsAriaLabel" })}
+          sections={appEditorSections}
+          title={editingClient ? formatMessage({ id: "settings.connectedApps.editTitle" }, { name: editingClient.name }) : formatMessage({ id: "settings.connectedApps.registerApp" })}
+          leading={(
+            <ConnectedAppLogo
+              name={clientName || editingClient?.name || "App"}
+              logoUrl={editingClient?.logoUrl}
+              seed={clientId || editingClient?.clientId || "new-app"}
+              size="sm"
+            />
+          )}
+          closeLabel={formatMessage({ id: "settings.connectedApps.closeAppForm" })}
+          onClose={closeRegisterDrawer}
+          onSubmit={handleSaveClient}
+          notice={error || createdSecret ? (
+            <>
+              <ConnectedAppsErrorBanner surface={connectedAppsErrorSurface} target={CONNECTED_APPS_ERROR_FORM} error={error} />
+              {renderClientSecretReveal()}
+            </>
+          ) : null}
+          footer={(
+            <>
+              <Button type="button" variant="ghost" size="lg" onClick={closeRegisterDrawer}>
+                {formatMessage({ id: "settings.common.cancel" })}
+              </Button>
+              <Button
+                type="submit"
+                variant="accent"
+                size="lg"
+                disabled={isAppWhenToUseTooLong(clientWhenToUse) || submitting || appNotificationLoading || savingClientId === editingClient?.id}
               >
-                {appEditorSections.map((section) => (
-                  <ConnectedAppEditorRailButton
-                    key={section.id}
-                    section={section}
-                    active={appEditorSection === section.id}
-                    onSelect={scrollToAppEditorSection}
-                  />
-                ))}
-              </nav>
-              <div
-                ref={appEditorContentRef}
-                onScroll={syncAppEditorSectionFromScroll}
-                className="min-h-0 space-y-4 overflow-y-auto bg-layer-panel theme-brutal:bg-white p-4"
-                data-testid="connected-app-editor-content"
-              >
-
+                {submitting ? formatMessage({ id: "settings.common.saving" }) : editingClient ? formatMessage({ id: "settings.common.save" }) : formatMessage({ id: "settings.connectedApps.registerApp" })}
+              </Button>
+            </>
+          )}
+        >
             <ConnectedAppEditorSection
               sectionId="profile"
               title={formatMessage({ id: "settings.connectedApps.section.profile" })}
               description={formatMessage({ id: "settings.connectedApps.editor.profileDescription" })}
               status={profileStatus}
             >
-            <div className="grid gap-4 sm:grid-cols-[140px_minmax(0,1fr)]">
-              <div>
-                <FormField
-                  label={formatMessage({ id: "settings.connectedApps.logoLabel" })}
-                  labelStyle="plain"
-                  size="compact"
-                  hint={editingClient ? formatMessage({ id: "settings.connectedApps.logoHintEdit" }) : formatMessage({ id: "settings.connectedApps.logoHintNew" })}
-                >
-                  <div className="space-y-2">
-                    <div className="flex h-[120px] w-[120px] items-center justify-center border-2 border-dashed border-line-strong theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream">
-                      <ConnectedAppLogo
-                        name={clientName || editingClient?.name || "App"}
-                        logoUrl={editingClient?.logoUrl}
-                        seed={clientId || editingClient?.clientId || "new-app"}
-                        size="lg"
-                      />
-                    </div>
-                    {editingClient && (
-                      <div className="flex flex-wrap gap-2">
-                        <input
-                          ref={logoInputRef}
-                          type="file"
-                          accept="image/png,image/jpeg,image/gif,image/webp"
-                          className="hidden"
-                          onChange={handleLogoFileChange}
-                        />
-                        <Button
-                          type="button"
-                          onClick={handlePickLogo}
-                          disabled={logoUploading}
-                          size="sm"
-                          
-                        >
-                          <Upload size={14} />
-                          {logoUploading ? formatMessage({ id: "settings.connectedApps.uploading" }) : editingClient.logoUrl ? formatMessage({ id: "settings.connectedApps.change" }) : formatMessage({ id: "settings.connectedApps.upload" })}
-                        </Button>
-                        {editingClient.logoUrl && (
-                          <Button
-                            type="button"
-                            onClick={handleClearLogo}
-                            disabled={logoUploading}
-                            size="sm"
-                          >
-                            {formatMessage({ id: "settings.connectedApps.reset" })}
-                          </Button>
-                        )}
-                      </div>
+            <FormField
+              label={formatMessage({ id: "settings.connectedApps.logoLabel" })}
+              hint={editingClient ? formatMessage({ id: "settings.connectedApps.logoHintEdit" }) : formatMessage({ id: "settings.connectedApps.logoHintNew" })}
+            >
+              <div className="flex items-center gap-4">
+                <ConnectedAppLogo
+                  name={clientName || editingClient?.name || "App"}
+                  logoUrl={editingClient?.logoUrl}
+                  seed={clientId || editingClient?.clientId || "new-app"}
+                  size="lg"
+                />
+                {editingClient && (
+                  <div className="flex flex-wrap gap-2">
+                    <input
+                      ref={logoInputRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/gif,image/webp"
+                      className="hidden"
+                      onChange={handleLogoFileChange}
+                    />
+                    <Button type="button" onClick={handlePickLogo} disabled={logoUploading} size="sm">
+                      <Upload size={16} />
+                      {logoUploading ? formatMessage({ id: "settings.connectedApps.uploading" }) : editingClient.logoUrl ? formatMessage({ id: "settings.connectedApps.change" }) : formatMessage({ id: "settings.connectedApps.upload" })}
+                    </Button>
+                    {editingClient.logoUrl && (
+                      <Button type="button" variant="ghost" onClick={handleClearLogo} disabled={logoUploading} size="sm">
+                        {formatMessage({ id: "settings.connectedApps.reset" })}
+                      </Button>
                     )}
                   </div>
-                </FormField>
+                )}
               </div>
-              <div className="space-y-3">
-                <FormField label={formatMessage({ id: "settings.connectedApps.appNameLabel" })} labelStyle="plain" size="compact">
-                  <Input
-                    type="text"
-                    value={clientName}
-                    onChange={handleClientNameChange}
-                    className="w-full text-sm"
-                    placeholder={formatMessage({ id: "settings.connectedApps.appNamePlaceholder" })}
-                    required
-                  />
-                </FormField>
-                <FormField label={formatMessage({ id: "settings.connectedApps.homepageUrlFieldLabel" })} labelStyle="plain" size="compact">
-                  <Input
-                    type="url"
-                    value={clientHomepageUrl}
-                    onChange={handleClientHomepageUrlChange}
-                    className="w-full text-sm"
-                    render={<input placeholder="https://example.com" />}
-                  />
-                </FormField>
-                <FormField label={formatMessage({ id: "settings.connectedApps.categoryLabel" })} labelStyle="plain" size="compact">
-                  <Select
-                    value={clientCategory}
-                    onValueChange={handleClientCategoryChange}
-                    items={publishCategoryItems}
-                  >
-                    <SelectTrigger className="w-full" aria-label={formatMessage({ id: "settings.connectedApps.appCategoryAriaLabel" })}>
-                      <SelectValue placeholder={formatMessage({ id: "settings.connectedApps.categoryLabel" })} />
-                      <SelectIcon />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectList>{renderSelectItems(publishCategoryItems)}</SelectList>
-                    </SelectContent>
-                  </Select>
-                </FormField>
-              </div>
+            </FormField>
+            <FormField label={formatMessage({ id: "settings.connectedApps.appNameLabel" })}>
+              <Input
+                type="text"
+                value={clientName}
+                onChange={handleClientNameChange}
+                className="w-full"
+                placeholder={formatMessage({ id: "settings.connectedApps.appNamePlaceholder" })}
+                required
+              />
+            </FormField>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField label={formatMessage({ id: "settings.connectedApps.homepageUrlFieldLabel" })}>
+                <Input
+                  type="url"
+                  value={clientHomepageUrl}
+                  onChange={handleClientHomepageUrlChange}
+                  className="w-full"
+                  render={<input placeholder="https://example.com" />}
+                />
+              </FormField>
+              <FormField label={formatMessage({ id: "settings.connectedApps.categoryLabel" })}>
+                <Select
+                  value={clientCategory}
+                  onValueChange={handleClientCategoryChange}
+                  items={publishCategoryItems}
+                >
+                  <SelectTrigger className="w-full" aria-label={formatMessage({ id: "settings.connectedApps.appCategoryAriaLabel" })}>
+                    <SelectValue placeholder={formatMessage({ id: "settings.connectedApps.categoryLabel" })} />
+                    <SelectIcon />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectList>{renderSelectItems(publishCategoryItems)}</SelectList>
+                  </SelectContent>
+                </Select>
+              </FormField>
             </div>
-            <FormField label={formatMessage({ id: "settings.connectedApps.descriptionLabel" })} labelStyle="plain" size="compact">
+            <FormField label={formatMessage({ id: "settings.connectedApps.descriptionLabel" })}>
               <Textarea
                 value={clientDescription}
                 onChange={handleClientDescriptionChange}
@@ -5981,12 +6035,12 @@ export function IntegrationsSection() {
                 className="resize-none"
               />
             </FormField>
-            <FormField label={formatMessage({ id: "settings.connectedApps.clientIdLabel" })} labelStyle="plain" size="compact" hint={formatMessage({ id: "settings.connectedApps.clientIdHint" })} optional>
+            <FormField label={formatMessage({ id: "settings.connectedApps.clientIdLabel" })} hint={formatMessage({ id: "settings.connectedApps.clientIdHint" })} optional>
               <Input
                 type="text"
                 value={clientId}
                 onChange={handleClientIdChange}
-                className="w-full font-mono text-sm disabled:bg-fill-muted disabled:text-foreground-muted theme-brutal:disabled:bg-black/5 theme-brutal:disabled:text-black/45"
+                className="w-full font-mono"
                 placeholder={formatMessage({ id: "settings.connectedApps.clientIdPlaceholder" })}
                 disabled={!!editingClient}
               />
@@ -6000,26 +6054,28 @@ export function IntegrationsSection() {
               description={formatMessage({ id: "settings.connectedApps.editor.loginDescription" })}
               status={loginStatus}
             >
-            <FormField label={formatMessage({ id: "settings.connectedApps.returnUrlLabel" })} labelStyle="plain" size="compact">
+            <FormField label={formatMessage({ id: "settings.connectedApps.returnUrlLabel" })}>
               <Input
                 type="url"
                 value={clientReturnUrl}
                 onChange={handleClientReturnUrlChange}
-                className="w-full text-sm"
+                className="w-full"
                 render={<input placeholder="https://example.com/login/callback" />}
               />
             </FormField>
-            <FormField label={formatMessage({ id: "settings.connectedApps.agentManifestLabel" })} labelStyle="plain" size="compact" optional>
+            <FormField label={formatMessage({ id: "settings.connectedApps.agentManifestLabel" })} optional>
               <Input
                 type="url"
                 value={clientAgentManifestUrl}
                 onChange={handleClientAgentManifestUrlChange}
-                className="w-full text-sm"
+                className="w-full"
                 render={<input placeholder="https://example.com/.well-known/raft-agent-manifest.json" />}
               />
             </FormField>
             <DeclaredScopesPicker value={clientAllowedScopes} onChange={setClientAllowedScopes} />
-            <AgentJwtSettings serverId={serverId ?? null} clientId={editingClient?.id ?? null} canManage={canManage} />
+            </ConnectedAppEditorSection>
+            <ConnectedAppEditorSection sectionId="setup" title={formatMessage({ id: "appSetup.title" })} description={formatMessage({ id: "appSetup.editorHint" })} status={formatMessage({ id: clientSetupRequired ? "appSetup.requiredAfterInstall" : "appSetup.notRequired" })}>
+              <AppSetupFields required={clientSetupRequired} url={clientSetupUrl} description={clientSetupDescription} onRequiredChange={setClientSetupRequired} onUrlChange={handleClientSetupUrlChange} onDescriptionChange={handleClientSetupDescriptionChange} />
             </ConnectedAppEditorSection>
             <ConnectedAppEditorSection
               sectionId="permissions"
@@ -6047,156 +6103,141 @@ export function IntegrationsSection() {
               onError={setError}
             />
             </ConnectedAppEditorSection>
+            {/* Sharing, publishing and the app's lifecycle act on a saved app;
+                a new app's form stops at what can be filled in now (the
+                Webhook section says that it waits for the save). */}
+            {editingClient && (
             <ConnectedAppEditorSection
               sectionId="distribution"
               title={formatMessage({ id: "settings.connectedApps.section.distribution" })}
               description={formatMessage({ id: "settings.connectedApps.editor.distributionDescription" })}
               status={distributionStatus}
             >
-            {!editingClient ? (
-              <div className="border-l-4 border-line-muted theme-brutal:border-black/30 bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/60">
-                {formatMessage({ id: "settings.connectedApps.saveBeforeShareOrReview" })}
-              </div>
-            ) : null}
-            {editingClient && sourceOwnedConnectedAppStatusHint(editingClient.publishStatus) ? (
-              <div className="border-l-4 border-warning bg-warning-soft px-3 py-2 text-xs leading-relaxed text-foreground-muted theme-brutal:border-soft-signal theme-brutal:bg-soft-signal/20 theme-brutal:text-black/70">
+            {sourceOwnedConnectedAppStatusHint(editingClient.publishStatus) ? (
+              <Banner live={false} intent="warning" density="sm">
                 {formatMessage({ id: sourceOwnedConnectedAppStatusHint(editingClient.publishStatus)! })}
-              </div>
+              </Banner>
             ) : null}
-            {editingClient && (editingClient.publishStatus === "private" || editingClient.publishStatus === "rejected") && (
-              <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm" data-testid="connected-app-private-share-card">
-                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
-                  <div>
-                    <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.privateShareTitle" })}</SectionEyebrow>
-                    <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
-                      {formatMessage({ id: "settings.connectedApps.privateShareDesc" })}
-                    </div>
+            {(editingClient.publishStatus === "private" || editingClient.publishStatus === "rejected") && (
+              <ConnectedAppEditorActionRow
+                testId="connected-app-private-share-card"
+                title={formatMessage({ id: "settings.connectedApps.privateShareTitle" })}
+                description={(
+                  <>
+                    {formatMessage({ id: "settings.connectedApps.privateShareDesc" })}
                     {shareLink && (
-                      <div className="mt-2 text-xs text-foreground-muted theme-brutal:text-black/55">
+                      <span className="mt-1 block">
                         {formatMessage({ id: "settings.connectedApps.activeLinkExpires" }, { when: shareLink.expiresAt ? formatDate(shareLink.expiresAt) : formatMessage({ id: "settings.connectedApps.never" }) })}
-                      </div>
+                      </span>
                     )}
-                  </div>
-                  <div className="flex flex-wrap justify-end gap-2">
-                    <Button
-                      type="button" size="sm" onClick={handleCreateShareLink} disabled={shareLoading}>
+                  </>
+                )}
+                action={(
+                  <>
+                    <Button type="button" size="sm" onClick={handleCreateShareLink} disabled={shareLoading}>
                       {shareLoading ? formatMessage({ id: "settings.connectedApps.working" }) : shareLink ? formatMessage({ id: "settings.connectedApps.regenerate" }) : formatMessage({ id: "settings.connectedApps.createLink" })}
                     </Button>
                     {shareLink && (
-                      <Button
-                        type="button" size="sm" onClick={handleRevokeShareLink} disabled={shareLoading}>
+                      <Button type="button" variant="ghost" size="sm" onClick={handleRevokeShareLink} disabled={shareLoading}>
                         {formatMessage({ id: "settings.connectedApps.revoke" })}
                       </Button>
                     )}
-                  </div>
-                </div>
+                  </>
+                )}
+              >
                 {shareUrl && (
-                  <div className="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+                  <div className="flex gap-2">
                     <Input
                       type="text"
                       readOnly
                       value={shareUrl}
-                      className="min-w-0 flex-1 font-mono text-xs"
+                      className="min-w-0 flex-1 font-mono"
                       aria-label={formatMessage({ id: "settings.connectedApps.privateShareUrlAria" })}
                     />
-                    <Button
-                      type="button" size="sm"  onClick={handleCopyShareUrl}>
-                      {shareCopied ? <Check size={14} /> : <Copy size={14} />}
+                    <Button type="button" size="lg" onClick={handleCopyShareUrl}>
+                      {shareCopied ? <Check size={18} /> : <Copy size={18} />}
                       {shareCopied ? formatMessage({ id: "settings.connectedApps.copied" }) : formatMessage({ id: "settings.connectedApps.copy" })}
                     </Button>
                   </div>
                 )}
-              </div>
+              </ConnectedAppEditorActionRow>
             )}
-            {editingClient && (editingClient.publishStatus === "private" || editingClient.publishStatus === "rejected") && (
-              <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-3 shadow-raft-sm theme-brutal:shadow-brutal-sm">
-                <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.publishRequestTitle" })}</SectionEyebrow>
-                <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
-                  {formatMessage({ id: "settings.connectedApps.distributionMetadataNote" })}
-                </div>
-                <div className="mt-3 flex justify-end">
+            {(editingClient.publishStatus === "private" || editingClient.publishStatus === "rejected") && (
+              <ConnectedAppEditorActionRow
+                title={formatMessage({ id: "settings.connectedApps.publishRequestTitle" })}
+                description={formatMessage({ id: "settings.connectedApps.distributionMetadataNote" })}
+                action={(
                   <Button
                     type="button"
                     onClick={handleRequestPublishEditingClient}
                     disabled={isAppWhenToUseTooLong(clientWhenToUse) || savingClientId === editingClient.id}
-                    variant="accent"
                     size="sm"
                   >
                     {savingClientId === editingClient.id ? formatMessage({ id: "settings.connectedApps.requesting" }) : formatMessage({ id: "settings.connectedApps.requestPublish" })}
                   </Button>
-                </div>
-              </div>
+                )}
+              />
             )}
-            {editingClient?.publishStatus === "published" ? (
-              <div className="border-l-4 border-brutal-lime bg-brutal-lime/15 px-3 py-2 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/70">
+            {editingClient.publishStatus === "published" ? (
+              <Banner live={false} intent="success" density="sm">
                 {formatMessage({ id: "settings.connectedApps.publishedMarketplaceNote" })}
-              </div>
+              </Banner>
             ) : null}
             </ConnectedAppEditorSection>
+            )}
 
+            {editingClient && (
             <ConnectedAppEditorSection
               sectionId="danger"
               title={formatMessage({ id: "settings.connectedApps.section.dangerZone" })}
               description={formatMessage({ id: "settings.connectedApps.editor.dangerDescription" })}
-              status={formatMessage({ id: editingClient
-                ? "settings.connectedApps.editor.dangerStatusRestricted"
-                : "settings.connectedApps.editor.dangerStatusAvailableAfterSave" })}
-              tone="warning"
+              status={formatMessage({ id: "settings.connectedApps.editor.dangerStatusRestricted" })}
             >
-              {!editingClient ? (
-                <div className="text-xs font-bold leading-relaxed text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "settings.connectedApps.editor.saveBeforeLifecycle" })}</div>
-              ) : (
-                <>
-                  <div className="flex flex-col gap-3 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white p-3 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.editor.clientSecretTitle" })}</SectionEyebrow>
-                      <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">
-                        {formatMessage({ id: "settings.connectedApps.editor.clientSecretDescription" })}
-                      </div>
-                    </div>
-                    <Button
-                      type="button"
-                      size="sm"
-                      variant="primary"
-                      onClick={handleRequestRegenerateSecret}
-                      disabled={submitting || regeneratingClientId === editingClient.id}
-                      data-testid="connected-app-regenerate-secret-button"
-                    >
-                      {formatMessage({ id: regeneratingClientId === editingClient.id
-                        ? "settings.connectedApps.editor.regeneratingClientSecret"
-                        : "settings.connectedApps.editor.regenerateClientSecret" })}
+              <ConnectedAppEditorActionRow
+                title={formatMessage({ id: "settings.connectedApps.editor.clientSecretTitle" })}
+                description={formatMessage({ id: "settings.connectedApps.editor.clientSecretDescription" })}
+                action={(
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="warning"
+                    onClick={handleRequestRegenerateSecret}
+                    disabled={submitting || regeneratingClientId === editingClient.id}
+                    data-testid="connected-app-regenerate-secret-button"
+                  >
+                    {formatMessage({ id: regeneratingClientId === editingClient.id
+                      ? "settings.connectedApps.editor.regeneratingClientSecret"
+                      : "settings.connectedApps.editor.regenerateClientSecret" })}
+                  </Button>
+                )}
+              />
+              {canRequestOfflineSourceOwnedConnectedApp(editingClient.publishStatus) ? (
+                <ConnectedAppEditorActionRow
+                  title={formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleTitle" })}
+                  description={formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleDescription" })}
+                  action={(
+                    <Button type="button" size="sm" onClick={handleRequestOfflineEditingClient}>
+                      {formatMessage({ id: "settings.connectedApps.editor.requestOffline" })}
                     </Button>
-                  </div>
-                  {canRequestOfflineSourceOwnedConnectedApp(editingClient.publishStatus) ? (
-                    <div className="flex flex-col gap-3 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 bg-layer-panel theme-brutal:bg-white p-3 sm:flex-row sm:items-start sm:justify-between">
-                      <div>
-                        <SectionEyebrow as="div">{formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleTitle" })}</SectionEyebrow>
-                        <div className="mt-1 text-xs leading-relaxed text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.connectedApps.editor.marketplaceLifecycleDescription" })}</div>
-                      </div>
-                      <Button
-                        type="button" size="sm" onClick={handleRequestOfflineEditingClient}>
-                        {formatMessage({ id: "settings.connectedApps.editor.requestOffline" })}
-                      </Button>
-                    </div>
-                  ) : null}
-                  {canDeleteSourceOwnedConnectedApp(editingClient.publishStatus) ? (
-                    <DangerActionCard
-                      testId="connected-app-delete-card"
-                      title={formatMessage({ id: "settings.connectedApps.deleteApp" })}
-                      description={formatMessage({ id: "settings.connectedApps.deleteAppDescription" })}
-                      actionLabel={formatMessage({ id: "settings.connectedApps.delete" })}
-                      actionIcon={<Trash2 size={14} />}
-                      actionSize="sm"
-                      onAction={handleRequestDeleteEditingClient}
-                    />
-                  ) : null}
-                </>
-              )}
+                  )}
+                />
+              ) : null}
+              {canDeleteSourceOwnedConnectedApp(editingClient.publishStatus) ? (
+                <ConnectedAppEditorActionRow
+                  testId="connected-app-delete-card"
+                  title={formatMessage({ id: "settings.connectedApps.deleteApp" })}
+                  description={formatMessage({ id: "settings.connectedApps.deleteAppDescription" })}
+                  action={(
+                    <Button type="button" size="sm" variant="danger" onClick={handleRequestDeleteEditingClient}>
+                      <Trash2 size={16} />
+                      {formatMessage({ id: "settings.connectedApps.delete" })}
+                    </Button>
+                  )}
+                />
+              ) : null}
             </ConnectedAppEditorSection>
-              </div>
-            </div>
-          </Card>
-        </Modal>
+            )}
+        </FormDialog>
       )}
 
       {canManage && deleteClientTarget && (
@@ -6206,7 +6247,7 @@ export function IntegrationsSection() {
           message={(
             <>
               {formatMessage({ id: "settings.connectedApps.deleteAppMessagePrefix" })}
-              <code className="font-mono font-bold">{deleteClientTarget.clientId}</code>
+              <code className="rounded-sticker bg-fill-muted px-1 font-mono text-mono-code text-foreground">{deleteClientTarget.clientId}</code>
               {formatMessage({ id: "settings.connectedApps.deleteAppMessageSuffix" })}
             </>
           )}
@@ -6230,13 +6271,13 @@ export function IntegrationsSection() {
             { id: "settings.connectedApps.editor.regenerateSecretConfirmMessage" },
             {
               clientId: regenerateSecretTarget.clientId,
-              code: (chunks) => <code key="client-id" className="font-mono font-bold">{chunks}</code>,
+              code: (chunks) => <code key="client-id" className="rounded-sticker bg-fill-muted px-1 font-mono text-mono-code text-foreground">{chunks}</code>,
             },
           )}
           confirmLabel={formatMessage({ id: "settings.connectedApps.editor.regenerateSecretConfirmLabel" })}
           loadingLabel={formatMessage({ id: "settings.connectedApps.editor.regeneratingClientSecret" })}
           confirmIcon={<AlertTriangle size={14} />}
-          confirmVariant="primary"
+          confirmVariant="warning"
           confirmTestId="connected-app-regenerate-secret-confirm-button"
           layer={1}
           onClose={handleCloseRegenerateSecret}
@@ -6254,12 +6295,13 @@ export function IntegrationsSection() {
             { id: "settings.connectedApps.editor.requestOfflineConfirmMessage" },
             {
               clientId: offlineRequestTarget.clientId,
-              code: (chunks) => <code key="client-id" className="font-mono font-bold">{chunks}</code>,
+              code: (chunks) => <code key="client-id" className="rounded-sticker bg-fill-muted px-1 font-mono text-mono-code text-foreground">{chunks}</code>,
             },
           )}
           confirmLabel={formatMessage({ id: "settings.connectedApps.editor.requestOffline" })}
           loadingLabel={formatMessage({ id: "settings.connectedApps.editor.requestOfflineConfirmLoading" })}
           confirmIcon={<Upload size={14} className="rotate-180" />}
+          confirmVariant="warning"
           layer={showRegisterDrawer ? 1 : undefined}
           onClose={handleCloseOfflineRequest}
           onConfirm={handleConfirmOfflineRequest}
@@ -6273,7 +6315,7 @@ export function IntegrationsSection() {
           message={(
             <>
               {formatMessage({ id: "settings.connectedApps.uninstallMessagePrefix" })}
-              <code className="font-mono font-bold">{marketplaceUninstallTarget.clientId}</code>
+              <code className="rounded-sticker bg-fill-muted px-1 font-mono text-mono-code text-foreground">{marketplaceUninstallTarget.clientId}</code>
               {formatMessage({ id: "settings.connectedApps.uninstallMessageSuffix" })}
               {marketplaceUninstallTarget.official && (
                 <> {formatMessage({ id: "settings.connectedApps.uninstallOfficialOptOut" })}</>
@@ -6418,18 +6460,17 @@ function PreJoinAgreementSection() {
         label={formatMessage({ id: "settings.preJoinAgreement.sectionLabel" })}
       />
 
-      <div className="border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm p-4 space-y-4">
-        <label className={`flex items-start gap-3 ${saving || loading ? "opacity-60" : ""}`}>
+      <Card className="space-y-4 p-4">
+        <label className={`flex items-start gap-3 ${saving || loading ? "cursor-not-allowed" : ""}`}>
           <Checkbox
-            size="md"
             checked={enabled}
             disabled={saving || loading}
             onCheckedChange={handleEnabledChange}
             className="mt-0.5"
           />
           <span className="min-w-0">
-            <span className="block text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "settings.preJoinAgreement.requireTitle" })}</span>
-            <span className="block text-xs text-foreground-muted theme-brutal:text-black/60 mt-0.5">
+            <span className={`block text-subhead font-semibold ${saving || loading ? "text-foreground-disabled" : "text-foreground"}`}>{formatMessage({ id: "settings.preJoinAgreement.requireTitle" })}</span>
+            <span className="block text-footnote text-foreground-muted mt-0.5">
               {formatMessage({ id: "settings.preJoinAgreement.requireDescription" })}
             </span>
           </span>
@@ -6437,16 +6478,16 @@ function PreJoinAgreementSection() {
 
         {enabled && (
           <>
-            <FormField label={formatMessage({ id: "settings.preJoinAgreement.titleLabel" })} labelStyle="plain" size="compact">
+            <FormField label={formatMessage({ id: "settings.preJoinAgreement.titleLabel" })} size="compact">
               <Input
                 value={title}
                 onChange={handleTitleChange}
                 maxLength={160}
                 disabled={saving || loading}
-                className="w-full text-sm disabled:opacity-60"
+                className="w-full"
               />
             </FormField>
-            <FormField label={formatMessage({ id: "settings.preJoinAgreement.bodyLabel" })} labelStyle="plain" size="compact">
+            <FormField label={formatMessage({ id: "settings.preJoinAgreement.bodyLabel" })} size="compact">
               <Textarea
                 value={bodyMarkdown}
                 onChange={handleBodyMarkdownChange}
@@ -6455,11 +6496,11 @@ function PreJoinAgreementSection() {
                 aria-invalid={bodyMarkdownError ? true : undefined}
                 aria-describedby={bodyMarkdownError ? "pre-join-agreement-error" : "pre-join-agreement-counter"}
                 disabled={saving || loading}
-                className="resize-y font-mono text-xs disabled:opacity-60"
+                className="resize-y font-mono"
               />
               <div className="mt-1 flex items-start justify-between gap-3">
                 {bodyMarkdownError ? (
-                  <p id="pre-join-agreement-error" role="alert" className="text-xs text-danger theme-brutal:text-brutal-red">
+                  <p id="pre-join-agreement-error" role="alert" className="text-caption text-danger-strong">
                     {bodyMarkdownError}
                   </p>
                 ) : (
@@ -6468,9 +6509,9 @@ function PreJoinAgreementSection() {
                 <TextareaCounter id="pre-join-agreement-counter" value={bodyMarkdown} limit={PRE_JOIN_AGREEMENT_BODY_MAX_LENGTH} />
               </div>
             </FormField>
-            <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 bg-layer-canvas-muted theme-brutal:bg-brutal-cream p-3">
-              <div className="mb-2 text-[11px] font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "settings.preJoinAgreement.preview" })}</div>
-              <div className="text-sm">
+            <div className="rounded-container border border-line-hairline bg-layer-canvas p-3">
+              <SectionEyebrow as="div" className="mb-2">{formatMessage({ id: "settings.preJoinAgreement.preview" })}</SectionEyebrow>
+              <div className="text-callout">
                 <AgreementBody source={bodyMarkdown} />
               </div>
             </div>
@@ -6478,13 +6519,13 @@ function PreJoinAgreementSection() {
         )}
 
         {error && (
-          <Banner intent="warning" density="sm" className="font-bold">
+          <Banner intent="warning" density="sm">
             {error}
           </Banner>
         )}
 
         <div className="flex flex-col items-start gap-2">
-          <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50">
+          <div className="text-caption text-foreground-hint">
             {formatMessage({ id: "settings.preJoinAgreement.versionNote" })}
           </div>
           <Button
@@ -6496,7 +6537,7 @@ function PreJoinAgreementSection() {
             {saving ? formatMessage({ id: "settings.common.saving" }) : saved ? formatMessage({ id: "settings.common.saved" }) : formatMessage({ id: "settings.common.save" })}
           </Button>
         </div>
-      </div>
+      </Card>
     </div>
   );
 }
@@ -6507,6 +6548,7 @@ function ServerTabContent() {
       <ProfileSection />
       <PublicVisibilitySection />
       <ArchivedChannelsSection />
+      <ArchivedAgentsSection />
       <DangerZoneSection />
     </>
   );
@@ -6535,9 +6577,9 @@ function BillingTabContent() {
           icon={<CreditCard size={16} />}
           label={formatMessage({ id: "billing.billing" })}
         />
-        <div className="border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 text-sm text-foreground-muted theme-brutal:text-black/60 shadow-raft-sm theme-brutal:shadow-brutal-sm">
+        <Card className="p-4 text-callout text-foreground-muted">
           {formatMessage({ id: "billing.onlyServerOwnersAndAdminsCanViewBilling" })}
-        </div>
+        </Card>
       </div>
     );
   }
@@ -6587,28 +6629,20 @@ export const ADMINISTRATION_VISUAL_SECTIONS = {
 export function AppearanceThemeSettingsControl() {
   const theme = useOptionalAppTheme();
   if (!theme) return null;
-  const {
-    preset,
-    preferences,
-    resolvedMode,
-    setPreset,
-    setMode,
-    setThemeForMode,
-  } = theme;
-
-  return (
-    <AppearanceThemePicker
-      preset={preset}
-      onChange={setPreset}
-      preferences={preferences}
-      resolvedMode={resolvedMode}
-      onModeChange={setMode}
-      onThemeForModeChange={setThemeForMode}
-    />
-  );
+  return <AppearanceThemePicker mode={theme.mode} onModeChange={theme.setMode} />;
 }
 
-function AppearanceSection() {
+/**
+ * `publicSurface`: the public server page (anonymous or nonmember reader). It has
+ * no live agent activity bar, carries no agent model on messages and has no
+ * Pinned / Joint / DM sidebar groups, so those three device toggles would do
+ * nothing visible there (cindyz, #wg-rbac:22e4889c). Anonymous visitors only
+ * need the browser-local theme picker on this surface (cindyz,
+ * #wg-rbac:a88cfff6), so every other appearance control stays member-only.
+ */
+// Exported for publicSettingsAppearance.behavior.test.tsx (rendered directly,
+// same precedent as AboutSection).
+export function AppearanceSection({ publicSurface = false }: { publicSurface?: boolean }) {
   const { formatMessage } = useIntl();
   const messageBodyFontSize = useAppearanceStore((s) => s.messageBodyFontSize);
   const setMessageBodyFontSize = useAppearanceStore((s) => s.setMessageBodyFontSize);
@@ -6633,24 +6667,25 @@ function AppearanceSection() {
 
   return (
     <div className="mb-6">
-      <Card className="mb-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
+      <Card className="mb-6 p-4">
         <div className="mb-3">
-          <div className="text-sm font-bold text-foreground-strong">{formatMessage({ id: "settings.appearance.themeTitle" })}</div>
-          <p className="mt-1 text-xs text-foreground-muted">{formatMessage({ id: "settings.appearance.themeDescription" })}</p>
+          <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.appearance.themeTitle" })}</div>
+          <p className="mt-1 text-footnote text-foreground-muted">{formatMessage({ id: "settings.appearance.themeDescription" })}</p>
         </div>
         <AppearanceThemeSettingsControl />
       </Card>
-      <div className="flex items-center gap-2 mb-3">
-        <Type size={16} className="text-foreground-muted" />
-        <span className="text-xs font-bold uppercase text-foreground-muted tracking-widest">
-          {formatMessage({ id: "settings.appearance.sectionLabel" })}
-        </span>
-      </div>
+      {!publicSurface && (
+        <>
+      <SectionHeader
+        className="mb-3"
+        icon={<Type size={16} />}
+        label={formatMessage({ id: "settings.appearance.sectionLabel" })}
+      />
 
-      <Card className="border-line-muted bg-layer-panel shadow-raft-sm p-4 space-y-4 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
+      <Card className="space-y-4 p-4">
         <div>
-          <div className="text-sm font-bold text-foreground-strong">{formatMessage({ id: "settings.appearance.messageFontSizeTitle" })}</div>
-          <p className="mt-1 text-xs text-foreground-muted">
+          <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "settings.appearance.messageFontSizeTitle" })}</div>
+          <p className="mt-1 text-footnote text-foreground-muted">
             {formatMessage({ id: "settings.appearance.messageFontSizeDescription" })}
           </p>
         </div>
@@ -6660,15 +6695,15 @@ function AppearanceSection() {
           onValueChange={setMessageBodyFontSize}
         />
 
-        <div className="text-[11px] font-bold text-foreground-muted">
+        <div className="text-caption text-foreground-hint">
           {formatMessage({ id: "settings.appearance.savedOnDevice" })}
         </div>
 
         <div className="space-y-2">
-          <div className="text-[10px] font-bold uppercase tracking-widest text-foreground-muted">
+          <SectionEyebrow as="div">
             {formatMessage({ id: "settings.appearance.preview" })}
-          </div>
-          <div className="pointer-events-none -mx-2" aria-label={formatMessage({ id: "settings.appearance.fontSizePreviewAria" })}>
+          </SectionEyebrow>
+          <div className="pointer-events-none -mx-2 rounded-control bg-layer-canvas" aria-label={formatMessage({ id: "settings.appearance.fontSizePreviewAria" })}>
             <MessageItem
               message={previewMessage}
               mentionMap={APPEARANCE_PREVIEW_MENTION_MAP}
@@ -6680,77 +6715,69 @@ function AppearanceSection() {
         </div>
       </Card>
 
-      <Card className="mt-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
-        <div className="flex items-start justify-between gap-4">
-          <span className="min-w-0">
-            <span id="live-agent-activity-setting-label" className="block text-sm font-bold text-foreground-strong">
-              {formatMessage({ id: "settings.appearance.liveAgentActivityTitle" })}
-            </span>
-            <span id="live-agent-activity-setting-description" className="mt-0.5 block text-xs leading-5 text-foreground-muted">
-              {formatMessage({ id: "settings.appearance.liveAgentActivityDescription" })}
-            </span>
-            <span className="mt-2 block text-[11px] font-bold text-foreground-muted">
-              {formatMessage({ id: "settings.appearance.savedOnDevice" })}
-            </span>
-          </span>
-          <Switch
-            size="md"
-            checked={showLiveAgentActivityBar}
-            onCheckedChange={setShowLiveAgentActivityBar}
-            aria-labelledby="live-agent-activity-setting-label"
-            aria-describedby="live-agent-activity-setting-description"
-            className="mt-0.5 shrink-0"
-          />
-        </div>
-      </Card>
-
-      <Card className="mt-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
-        <div className="flex items-start justify-between gap-4">
-          <span className="min-w-0">
-            <span id="agent-model-name-setting-label" className="block text-sm font-bold text-foreground-strong">
-              {formatMessage({ id: "settings.appearance.showAgentModelNameTitle" })}
-            </span>
-            <span id="agent-model-name-setting-description" className="mt-0.5 block text-xs leading-5 text-foreground-muted">
-              {formatMessage({ id: "settings.appearance.showAgentModelNameDescription" })}
-            </span>
-            <span className="mt-2 block text-[11px] font-bold text-foreground-muted">
-              {formatMessage({ id: "settings.appearance.savedOnDevice" })}
-            </span>
-          </span>
-          <Switch
-            size="md"
-            checked={showAgentModelName}
-            onCheckedChange={setShowAgentModelName}
-            aria-labelledby="agent-model-name-setting-label"
-            aria-describedby="agent-model-name-setting-description"
-            className="mt-0.5 shrink-0"
-          />
-        </div>
-      </Card>
-
-      <Card className="mt-4 border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm">
-        <div className="flex items-start justify-between gap-4">
-          <span className="min-w-0">
-            <span id="hide-empty-sidebar-sections-setting-label" className="block text-sm font-bold text-foreground-strong">
-              {formatMessage({ id: "settings.appearance.hideEmptySidebarSectionsTitle" })}
-            </span>
-            <span id="hide-empty-sidebar-sections-setting-description" className="mt-0.5 block text-xs leading-5 text-foreground-muted">
-              {formatMessage({ id: "settings.appearance.hideEmptySidebarSectionsDescription" })}
-            </span>
-            <span className="mt-2 block text-[11px] font-bold text-foreground-muted">
-              {formatMessage({ id: "settings.appearance.savedOnDevice" })}
-            </span>
-          </span>
-          <Switch
-            size="md"
-            checked={hideEmptySidebarSections}
-            onCheckedChange={setHideEmptySidebarSections}
-            aria-labelledby="hide-empty-sidebar-sections-setting-label"
-            aria-describedby="hide-empty-sidebar-sections-setting-description"
-            className="mt-0.5 shrink-0"
-          />
-        </div>
-      </Card>
+        {/* DS ListRow › setting rows (`plain`, display-only: the Switch is the
+            target) in an inset group, hairlines from the 16px edge. */}
+        <ListRowGroup className="mt-4">
+          <ListRow variant="plain" interactive={false}>
+            <ListRowBody>
+              <ListRowTitle id="live-agent-activity-setting-label">
+                {formatMessage({ id: "settings.appearance.liveAgentActivityTitle" })}
+              </ListRowTitle>
+              <ListRowDescription id="live-agent-activity-setting-description" wrap>
+                {formatMessage({ id: "settings.appearance.liveAgentActivityDescription" })}
+              </ListRowDescription>
+              <span className="text-caption text-foreground-hint">
+                {formatMessage({ id: "settings.appearance.savedOnDevice" })}
+              </span>
+            </ListRowBody>
+            <Switch
+              checked={showLiveAgentActivityBar}
+              onCheckedChange={setShowLiveAgentActivityBar}
+              aria-labelledby="live-agent-activity-setting-label"
+              aria-describedby="live-agent-activity-setting-description"
+            />
+          </ListRow>
+          <ListRow variant="plain" interactive={false}>
+            <ListRowBody>
+              <ListRowTitle id="agent-model-name-setting-label">
+                {formatMessage({ id: "settings.appearance.showAgentModelNameTitle" })}
+              </ListRowTitle>
+              <ListRowDescription id="agent-model-name-setting-description" wrap>
+                {formatMessage({ id: "settings.appearance.showAgentModelNameDescription" })}
+              </ListRowDescription>
+              <span className="text-caption text-foreground-hint">
+                {formatMessage({ id: "settings.appearance.savedOnDevice" })}
+              </span>
+            </ListRowBody>
+            <Switch
+              checked={showAgentModelName}
+              onCheckedChange={setShowAgentModelName}
+              aria-labelledby="agent-model-name-setting-label"
+              aria-describedby="agent-model-name-setting-description"
+            />
+          </ListRow>
+          <ListRow variant="plain" interactive={false}>
+            <ListRowBody>
+              <ListRowTitle id="hide-empty-sidebar-sections-setting-label">
+                {formatMessage({ id: "settings.appearance.hideEmptySidebarSectionsTitle" })}
+              </ListRowTitle>
+              <ListRowDescription id="hide-empty-sidebar-sections-setting-description" wrap>
+                {formatMessage({ id: "settings.appearance.hideEmptySidebarSectionsDescription" })}
+              </ListRowDescription>
+              <span className="text-caption text-foreground-hint">
+                {formatMessage({ id: "settings.appearance.savedOnDevice" })}
+              </span>
+            </ListRowBody>
+            <Switch
+              checked={hideEmptySidebarSections}
+              onCheckedChange={setHideEmptySidebarSections}
+              aria-labelledby="hide-empty-sidebar-sections-setting-label"
+              aria-describedby="hide-empty-sidebar-sections-setting-description"
+            />
+          </ListRow>
+        </ListRowGroup>
+        </>
+      )}
     </div>
   );
 }
@@ -6784,15 +6811,28 @@ export function AboutSection({
   const mobileDownloadQrUrl = `${typeof window === "undefined" ? "" : shareableWebOrigin()}${MOBILE_DOWNLOAD_CHOOSER_PATH}`;
 
   return (
-    <div className="space-y-4">
-      <section className="space-y-2">
+    <div className="space-y-6">
+      <section className="space-y-3">
         <SectionHeader label={formatMessage({ id: "settings.about.versionSectionLabel" })} icon={<Tag size={16} />} />
         <SurfaceListItem interactive={false} className="space-y-1">
           {/* Product wordmark — catalog brand id; locale values may match. */}
-          <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "brand.productName" })}</div>
-          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">{appVersion}</div>
+          <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "brand.productName" })}</div>
+          <div className="font-mono text-mono-meta text-foreground-muted">{appVersion}</div>
         </SurfaceListItem>
       </section>
+
+      {/*
+        Desktop app: offered on the web only. Inside Raft Desktop the reader
+        already has it, and updates arrive in-app.
+      */}
+      {isElectronDesktopShell() ? null : (
+        <section className="space-y-3">
+          <SectionHeader label={formatMessage({ id: "settings.desktopApp.sectionLabel" })} icon={<Monitor size={16} />} />
+          <SurfaceListItem interactive={false}>
+            <DesktopDownloadOptions />
+          </SurfaceListItem>
+        </section>
+      )}
 
       {/*
         Mobile app is a companion surface, not an entry point: someone who
@@ -6801,11 +6841,11 @@ export function AboutSection({
         menu carries only a signpost to it — this section is the single content
         host, so there is exactly one place to keep current.
       */}
-      <section className="space-y-2">
+      <section className="space-y-3">
         <SectionHeader label={formatMessage({ id: "settings.mobileApp.sectionLabel" })} icon={<Smartphone size={16} />} />
         <SurfaceListItem interactive={false}>
           <div className="min-w-0 space-y-3">
-            <div className="text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "settings.mobileApp.description" })}</div>
+            <div className="text-footnote text-foreground-muted">{formatMessage({ id: "settings.mobileApp.description" })}</div>
             {/* Both buttons are peers, deliberately. A primary/secondary pair
                 reads as a recommendation, and we have no basis for one: the
                 person's phone is not the device rendering this, so we cannot
@@ -6861,11 +6901,11 @@ export function AboutSection({
         </SurfaceListItem>
       </section>
 
-      {showWorkspace ? <section className="space-y-2" data-testid="settings-about-workspace">
+      {showWorkspace ? <section className="space-y-3" data-testid="settings-about-workspace">
         <SectionHeader label={formatMessage({ id: "settings.about.workspaceSectionLabel" })} icon={<Building2 size={16} />} />
         <SurfaceListItem interactive={false} className="space-y-1">
-          <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{currentServer?.name ?? formatMessage({ id: "settings.about.workspaceNameFallback" })}</div>
-          <div className="text-xs text-foreground-muted theme-brutal:text-black/60">{currentServer?.slug ? `/${currentServer.slug}` : formatMessage({ id: "settings.about.workspaceDetailsFallback" })}</div>
+          <div className="text-subhead font-semibold text-foreground">{currentServer?.name ?? formatMessage({ id: "settings.about.workspaceNameFallback" })}</div>
+          <div className={currentServer?.slug ? "font-mono text-mono-meta text-foreground-muted" : "text-footnote text-foreground-muted"}>{currentServer?.slug ? `/${currentServer.slug}` : formatMessage({ id: "settings.about.workspaceDetailsFallback" })}</div>
         </SurfaceListItem>
       </section> : null}
     </div>
@@ -6887,11 +6927,16 @@ export default function SettingsPanel({
   accountInitialError,
   accountPasswordChangeIntent = false,
   showAboutWorkspace = true,
+  publicTranslationContext,
+  publicSurface = false,
 }: {
   tab?: string;
   accountInitialError?: string;
   accountPasswordChangeIntent?: boolean;
   showAboutWorkspace?: boolean;
+  publicTranslationContext?: PublicTranslationSettingsContext;
+  /** Rendered inside the public server page (anonymous or nonmember). */
+  publicSurface?: boolean;
 }) {
   const { formatMessage } = useIntl();
   // A host-shell embed skips the chat startup loads, and the channel list is one
@@ -6918,7 +6963,6 @@ export default function SettingsPanel({
   // claim cannot go stale again. It had: `about` was absent, and this fallback
   // silently rendered the English `label`.
   const activeLabel = formatMessage({ id: SETTINGS_TAB_TITLE_ID[settingsTab] });
-  const ActiveIcon = SETTINGS_ICON_BY_ID[settingsTab] ?? Settings;
   const serverSlug = useServerStore((s) => s.current?.slug);
   // Mobile back: Settings sub-pages (account / browser / server) are
   // level-2 views inside the Settings tab. Per iOS NavigationView model
@@ -6940,12 +6984,13 @@ export default function SettingsPanel({
   );
 
   return (
-    <Panel edge="attached" className="flex min-h-0 flex-1 flex-col bg-layer-canvas-muted text-foreground-strong">
+    // One seam between two regions: the settings list beside this panel
+    // already draws it, so the frame is inset and draws none of its own.
+    // Settings content sits on paper.
+    <Panel edge="inset" className="flex min-h-0 flex-1 flex-col bg-layer-canvas text-foreground" data-testid="settings-panel-frame">
       {!embedded && settingsTab !== "feedback" && (
         <PanelHeader
           title={activeLabel}
-          icon={<ActiveIcon size={18} />}
-          iconBg="bg-primary-soft text-foreground-strong theme-brutal:bg-soft-signal theme-brutal:text-black"
           containerProps={headerContainerProps}
           onMobileBack={onMobileBack}
           mobileBackProps={mobileBackProps}
@@ -6954,8 +6999,8 @@ export default function SettingsPanel({
 
       {/* Content */}
       <div className={settingsTab === "feedback"
- ? "min-h-0 flex-1 bg-layer-panel dark:bg-layer-card theme-brutal:bg-white"
- : "flex-1 overflow-y-auto bg-layer-panel px-5 py-4 text-foreground-strong mobile-nav-clearance theme-brutal:bg-white theme-brutal:text-black"}
+ ? "min-h-0 flex-1 bg-layer-canvas"
+ : "flex-1 overflow-y-auto bg-layer-canvas px-4 py-4 text-foreground mobile-nav-clearance md:px-5"}
       >
         {settingsTab === "account" && (
           <AccountSection
@@ -6964,8 +7009,8 @@ export default function SettingsPanel({
           />
         )}
         {settingsTab === "account" && <UsageDataSettingsCard />}
-        {settingsTab === "language-region" && <LanguageRegionSection />}
-        {settingsTab === "appearance" && <AppearanceSection />}
+        {settingsTab === "language-region" && <LanguageRegionSection publicContext={publicTranslationContext} />}
+        {settingsTab === "appearance" && <AppearanceSection publicSurface={publicSurface} />}
         {settingsTab === "notifications" && <NotificationsTabContent />}
         {settingsTab === "server" && <ServerTabContent />}
         {settingsTab === "mcp" && <McpSettingsSection />}

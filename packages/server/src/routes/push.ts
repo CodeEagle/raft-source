@@ -7,6 +7,7 @@ import {
   getVapidPublicKey,
   ensureFamilyRevokeCapability,
   isPushEnabled,
+  mobilePushDeliveryStatus,
   removeSubscription,
   revokePushFamilyByCapability,
   saveSubscription,
@@ -19,6 +20,7 @@ import {
 } from "../services/pushService";
 import * as serverService from "../services/serverService";
 import { sendJsonServerError } from "./errorResponse";
+import { clientIpForRateLimit } from "../lib/clientIpForRateLimit";
 
 export const pushRouter: RouterType = Router();
 const PUSH_PROMPT_EVENTS = new Set([
@@ -34,6 +36,9 @@ const MAX_TOPIC_LENGTH = 255;
 const MAX_APP_VERSION_LENGTH = 64;
 const REGISTRATION_ID_PATTERN = /^[A-Za-z0-9._:-]+$/;
 const DEVICE_TOKEN_PATTERN = /^[A-Za-z0-9_-]+$/;
+// FCM registration tokens are longer and contain ':' (e.g. "<instance>:APA91b...").
+const MAX_FCM_DEVICE_TOKEN_LENGTH = 4096;
+const FCM_DEVICE_TOKEN_PATTERN = /^[A-Za-z0-9_:-]+$/;
 const TOPIC_PATTERN = /^[A-Za-z0-9.-]+$/;
 const APP_VERSION_PATTERN = /^[A-Za-z0-9._+()-]+$/;
 
@@ -56,7 +61,7 @@ function cleanBoundedRegistrationField(value: unknown, maxLength: number, patter
 }
 
 function parseProvider(value: unknown): PushRegistrationProvider | null {
-  return value === "apns" ? "apns" : null;
+  return value === "apns" || value === "fcm" ? value : null;
 }
 
 function parseEnv(value: unknown): PushRegistrationEnv | null {
@@ -183,7 +188,7 @@ const familyRevokeLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req) => {
     const capability = typeof req.body?.capability === "string" ? req.body.capability : "invalid";
-    return `${ipKeyGenerator(req.ip ?? "unknown")}:${capability.slice(0, 12)}`;
+    return `${ipKeyGenerator(clientIpForRateLimit(req))}:${capability.slice(0, 12)}`;
   },
   message: { error: "Too many family revoke attempts" },
 });
@@ -211,6 +216,32 @@ pushRouter.post("/family-revoke", familyRevokeLimiter, async (req, res) => {
   }
 });
 
+// Whether this installation gets server pushes through FCM, for every server the
+// user belongs to. The Android app keeps its own tray notifications where it doesn't.
+pushRouter.get("/delivery-status", requireAuth, requireVerified, async (req, res) => {
+  const userId = req.userId;
+  if (!userId) {
+    res.status(401).json({ error: "Unauthorized" });
+    return;
+  }
+  const installationId = cleanBoundedRegistrationField(req.query.installationId, MAX_INSTALLATION_ID_LENGTH, REGISTRATION_ID_PATTERN);
+  if (!installationId) {
+    res.status(400).json({ error: "Invalid installation id" });
+    return;
+  }
+
+  try {
+    const servers = await mobilePushDeliveryStatus({ userId, installationId });
+    res.json({ servers });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to read push delivery status",
+      logPrefix: "[Push] Failed to read push delivery status:",
+      err,
+    });
+  }
+});
+
 pushRouter.post("/registrations", requireAuth, requireVerified, requireServer, async (req, res) => {
   const userId = req.userId;
   const serverId = req.serverId;
@@ -223,7 +254,9 @@ pushRouter.post("/registrations", requireAuth, requireVerified, requireServer, a
   const provider = parseProvider(req.body?.provider);
   const env = parseEnv(req.body?.env);
   const installationId = cleanBoundedRegistrationField(req.body?.installationId, MAX_INSTALLATION_ID_LENGTH, REGISTRATION_ID_PATTERN);
-  const deviceToken = cleanBoundedRegistrationField(req.body?.deviceToken, MAX_DEVICE_TOKEN_LENGTH, DEVICE_TOKEN_PATTERN);
+  const deviceToken = provider === "fcm"
+    ? cleanBoundedRegistrationField(req.body?.deviceToken, MAX_FCM_DEVICE_TOKEN_LENGTH, FCM_DEVICE_TOKEN_PATTERN)
+    : cleanBoundedRegistrationField(req.body?.deviceToken, MAX_DEVICE_TOKEN_LENGTH, DEVICE_TOKEN_PATTERN);
   const topic = cleanBoundedRegistrationField(req.body?.topic, MAX_TOPIC_LENGTH, TOPIC_PATTERN);
   const appVersionInput = req.body?.appVersion;
   const appVersion = appVersionInput === undefined || appVersionInput === null
@@ -236,6 +269,11 @@ pushRouter.post("/registrations", requireAuth, requireVerified, requireServer, a
   }
   if (!env) {
     res.status(400).json({ error: "Invalid or missing push environment" });
+    return;
+  }
+  // FCM has no sandbox: one endpoint serves debug and release builds alike.
+  if (provider === "fcm" && env !== "production") {
+    res.status(400).json({ error: "FCM registrations use the production environment" });
     return;
   }
   if (!installationId || !deviceToken || !topic) {

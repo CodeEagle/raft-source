@@ -1,4 +1,4 @@
-import { Button, Spinner } from "raft-ui";
+import { Button, Spinner } from "@botiverse/raft-ui";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
@@ -27,6 +27,14 @@ import type { Machine } from "../../store/machineStore";
 import type { BulkChangeReceipt, BulkUnfinishedAgent } from "../../store/bulkChangeModelReceiptStore";
 import { BULK_SUCCESS_BANNER_MS } from "../../store/bulkChangeModelReceiptStore";
 import {
+  newBulkModelChangeOperation,
+  trackBulkModelChangeClosed,
+  trackBulkModelChangeFinished,
+  trackBulkModelChangeOpened,
+  trackBulkModelChangeSubmitted,
+} from "../../analytics/bulkModelChange";
+import type { BulkModelChangeAgentResult } from "../../analytics/bulkModelChange";
+import {
   buildBulkAgentUpdate,
   classifyUnfinished,
   formatBulkModelLabel,
@@ -40,6 +48,9 @@ type Step = "choose" | "review" | "applying";
 type ApplyState = "saving" | "saved" | "failed";
 
 const REASONING_DEFAULT_VALUE = "__default__";
+
+/** Raft DS field label: 13/18 600, ink. */
+const FIELD_LABEL_CLASS_NAME = "text-footnote font-semibold text-foreground";
 
 
 const SKIP_REASON_MESSAGE = {
@@ -103,7 +114,7 @@ function StepBody({ stepKey, children }: { stepKey: string; children: ReactNode 
   return (
     <div
       // Negative margin + matching padding: the clip box is 4px larger than the
-      // content, so brutal's 2px offset shadows and focus rings are not cut.
+      // content, so focus rings (2px paper gap + 2px ink) are not cut.
       className="-m-1 overflow-hidden transition-[height] duration-200 ease-out motion-reduce:transition-none"
       style={height === undefined ? undefined : { height }}
     >
@@ -125,18 +136,32 @@ function EditAgentLink({ agentId, onOpenAgent }: { agentId: string; onOpenAgent:
   );
 }
 
+// Raft DS Steps, drawn on the stepper's existing markup (raft-ui Steps would
+// turn it into an announced list): a 20px square mark per step — done is ink
+// with a paper check, the current step a yellow sticker, the next a seam box —
+// a 13/18 600 label, and a short seam between steps.
+const STEP_MARK_CLASS_NAME =
+  "inline-flex size-5 shrink-0 items-center justify-center rounded-sticker font-mono text-mono-meta font-bold";
+const STEP_MARK_DONE_CLASS_NAME = "border-[1.5px] border-foreground bg-foreground text-foreground-inverse";
+const STEP_MARK_CURRENT_CLASS_NAME = "border-[1.5px] border-sticker-ink bg-brand text-sticker-ink";
+const STEP_MARK_NEXT_CLASS_NAME = "border border-line-seam bg-layer-card text-foreground-hint";
+
 function Stepper({ step }: { step: Step }) {
   const { formatMessage } = useIntl();
   const reviewing = step !== "choose";
   return (
-    <div className="mb-4 flex items-center gap-2 text-xs font-medium text-foreground-placeholder theme-brutal:font-bold theme-brutal:uppercase theme-brutal:tracking-wide">
-      <span className={`flex items-center gap-1 ${reviewing ? "text-success-strong theme-brutal:text-black" : "text-foreground-strong"}`}>
-        {reviewing ? <Check size={12} aria-hidden /> : <span aria-hidden>{1}</span>}
+    <div className="mb-4 flex items-center gap-2 text-footnote font-semibold text-foreground-hint">
+      <span className={`flex items-center gap-2 ${reviewing ? "text-foreground-muted" : "text-foreground"}`}>
+        <span className={`${STEP_MARK_CLASS_NAME} ${reviewing ? STEP_MARK_DONE_CLASS_NAME : STEP_MARK_CURRENT_CLASS_NAME}`}>
+          {reviewing ? <Check size={14} aria-hidden /> : <span aria-hidden>{1}</span>}
+        </span>
         {formatMessage({ id: "machine.detail.bulkModel.stepChoose" })}
       </span>
-      <span className="h-px flex-1 bg-line-muted theme-brutal:h-0.5 theme-brutal:bg-black" aria-hidden />
-      <span className={`flex items-center gap-1 ${reviewing ? "text-foreground-strong" : ""}`}>
-        <span aria-hidden>{2}</span>
+      <span className="w-4 shrink-0 border-t border-line-seam" aria-hidden />
+      <span className={`flex items-center gap-2 ${reviewing ? "text-foreground" : ""}`}>
+        <span className={`${STEP_MARK_CLASS_NAME} ${reviewing ? STEP_MARK_CURRENT_CLASS_NAME : STEP_MARK_NEXT_CLASS_NAME}`}>
+          <span aria-hidden>{2}</span>
+        </span>
         {formatMessage({ id: "machine.detail.bulkModel.stepReview" })}
       </span>
     </div>
@@ -199,6 +224,17 @@ export default function BulkChangeModelDialog({
   const [runtimeAllowed, setRuntimeAllowed] = useState<Record<string, boolean> | null>(null);
   const [checkingRuntime, setCheckingRuntime] = useState(false);
   const [applyStates, setApplyStates] = useState<Record<string, ApplyState>>({});
+
+  // Usage events (RFC-067): one operation per dialog open, pinned to the
+  // server it was opened in. The ref keeps React's dev double-run of effects
+  // from counting an open twice.
+  const [operation] = useState(() => newBulkModelChangeOperation(serverId));
+  const openTracked = useRef(false);
+  useEffect(() => {
+    if (openTracked.current) return;
+    openTracked.current = true;
+    trackBulkModelChangeOpened(operation, retry ? "partial_receipt" : "machine_panel", agents.length);
+  }, [agents.length, operation, retry]);
 
   const runtimeModels = useRuntimeModels(machine.id, runtime, { reuseRecentMs: 60_000 });
   const models = runtimeModels.models;
@@ -279,6 +315,10 @@ export default function BulkChangeModelDialog({
     setReasoningChoice(next === REASONING_DEFAULT_VALUE ? null : next as ReasoningEffort);
   }, []);
   const ignoreClose = useCallback(() => {}, []);
+  const handleClose = useCallback(() => {
+    if (step !== "applying") trackBulkModelChangeClosed(operation, step);
+    onClose();
+  }, [onClose, operation, step]);
   const backToChoose = useCallback(() => setStep("choose"), []);
 
   const goToReview = useCallback(async () => {
@@ -306,6 +346,13 @@ export default function BulkChangeModelDialog({
   const apply = useCallback(async () => {
     const applying = plan.rows.filter((row): row is Exclude<BulkPlanRow, { kind: "skip" }> => row.kind !== "skip");
     if (applying.length === 0) return;
+    const startedAt = now();
+    const changeCount = applying.filter((row) => row.kind === "change").length;
+    trackBulkModelChangeSubmitted(operation, {
+      change: changeCount,
+      restartOnly: applying.length - changeCount,
+      skip: plan.rows.length - applying.length,
+    });
     setStep("applying");
     setApplyStates(Object.fromEntries(applying.map((row) => [row.agentId, "saving" as ApplyState])));
     const inputById = new Map(planInputs.map((input) => [input.id, input]));
@@ -322,9 +369,10 @@ export default function BulkChangeModelDialog({
           );
         }
         setApplyStates((current) => ({ ...current, [row.agentId]: "saved" }));
-        return { agentId: row.agentId, ok: true as const };
+        return { agentId: row.agentId, ok: true as const, result: "succeeded" as BulkModelChangeAgentResult };
       } catch {
         let phase: BulkUnfinishedPhase = "save_failed";
+        let result: BulkModelChangeAgentResult = "unconfirmed";
         try {
           const { data } = await api.get<Agent>(`/agents/${row.agentId}`);
           useAgentStore.setState((state) => ({
@@ -334,21 +382,23 @@ export default function BulkChangeModelDialog({
             { runtime: data.runtime, model: data.model, reasoningEffort: data.reasoningEffort ?? null },
             target,
           );
+          result = phase;
         } catch {
           phase = row.kind === "restartOnly" ? "restart_pending" : "save_failed";
         }
         setApplyStates((current) => ({ ...current, [row.agentId]: "failed" }));
-        return { agentId: row.agentId, ok: false as const, phase };
+        return { agentId: row.agentId, ok: false as const, phase, result };
       }
     }));
-    const failed = results.filter((r): r is { agentId: string; ok: false; phase: BulkUnfinishedPhase } => !r.ok);
+    trackBulkModelChangeFinished(operation, results.map((r) => r.result), now() - startedAt);
+    const failed = results.filter((r): r is Extract<typeof r, { ok: false }> => !r.ok);
     const changedAgentIds = results.filter((r) => r.ok).map((r) => r.agentId);
     const skippedAgentIds = plan.rows.filter((row) => row.kind === "skip").map((row) => row.agentId);
     const receipt: BulkChangeReceipt = failed.length === 0
       ? { kind: "success", target, changedAgentIds, skippedAgentIds, bannerUntil: now() + BULK_SUCCESS_BANNER_MS }
       : { kind: "partial", target, total: applying.length, unfinished: failed.map((r) => ({ agentId: r.agentId, phase: r.phase })) };
     onFinished(receipt, changedAgentIds);
-  }, [now, onFinished, plan.rows, planInputs, resetAgent, target, updateAgent]);
+  }, [now, onFinished, operation, plan.rows, planInputs, resetAgent, target, updateAgent]);
 
   const handleNext = useCallback(() => { void goToReview(); }, [goToReview]);
   const handleApply = useCallback(() => { void apply(); }, [apply]);
@@ -360,7 +410,7 @@ export default function BulkChangeModelDialog({
       title={step === "applying"
         ? formatMessage({ id: "machine.detail.bulkModel.applyingTitle" }, { count: plan.applyCount })
         : title}
-      onClose={step === "applying" ? ignoreClose : onClose}
+      onClose={step === "applying" ? ignoreClose : handleClose}
       maxWidthClass="max-w-2xl"
       testId="bulk-change-model-dialog"
     >
@@ -369,11 +419,11 @@ export default function BulkChangeModelDialog({
         {step === "choose" && (
           <div className="space-y-4">
             {runtimeIds.length === 0 ? (
-              <p className="text-sm text-foreground-muted">{formatMessage({ id: "machine.detail.bulkModel.noRuntimes" })}</p>
+              <p className="text-callout text-foreground-muted">{formatMessage({ id: "machine.detail.bulkModel.noRuntimes" })}</p>
             ) : (
               <>
                 <div className="space-y-1.5">
-                  <div className="text-xs font-bold text-foreground-strong">{formatMessage({ id: "machine.detail.bulkModel.runtime" })}</div>
+                  <div className={FIELD_LABEL_CLASS_NAME}>{formatMessage({ id: "machine.detail.bulkModel.runtime" })}</div>
                   <RuntimeSelectControl
                     value={runtime}
                     onValueChange={handleRuntimeChange}
@@ -381,12 +431,12 @@ export default function BulkChangeModelDialog({
                     placeholder={formatMessage({ id: "machine.detail.bulkModel.runtime" })}
                     testId="bulk-model-runtime"
                   />
-                  <p className="text-xs text-foreground-muted">
+                  <p className="text-caption text-foreground-muted">
                     {formatMessage({ id: "machine.detail.bulkModel.accountHint" }, { runtime: getRuntimeDisplayName(runtime) })}
                   </p>
                 </div>
                 <div className="space-y-1.5">
-                  <div className="text-xs font-bold text-foreground-strong">{formatMessage({ id: "machine.detail.bulkModel.model" })}</div>
+                  <div className={FIELD_LABEL_CLASS_NAME}>{formatMessage({ id: "machine.detail.bulkModel.model" })}</div>
                   <RuntimeSelectControl
                     value={model}
                     onValueChange={setModelChoice}
@@ -397,7 +447,7 @@ export default function BulkChangeModelDialog({
                 </div>
                 {reasoningOptions.length > 0 && (
                   <div className="space-y-1.5">
-                    <div className="text-xs font-bold text-foreground-strong">{formatMessage({ id: "machine.detail.bulkModel.reasoning" })}</div>
+                    <div className={FIELD_LABEL_CLASS_NAME}>{formatMessage({ id: "machine.detail.bulkModel.reasoning" })}</div>
                     <RuntimeSelectControl
                       value={reasoning ?? REASONING_DEFAULT_VALUE}
                       onValueChange={handleReasoningChange}
@@ -409,17 +459,16 @@ export default function BulkChangeModelDialog({
                 )}
               </>
             )}
-            <div className="flex justify-end gap-3 pt-1">
-              <Button size="sm" variant="outline" type="button" onClick={onClose} className="px-4 py-2 text-sm">
+            <div className="flex justify-end gap-2 pt-1">
+              <Button size="lg" variant="ghost" type="button" onClick={handleClose}>
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
               <Button
-                size="sm"
+                size="lg"
                 variant="accent"
                 type="button"
                 onClick={handleNext}
                 disabled={nextDisabled}
-                className="flex items-center gap-1.5 px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                 data-testid="bulk-model-next"
               >
                 {checkingRuntime && <Spinner size="xs" aria-label={formatMessage({ id: "common.loadingLabel" })} />}
@@ -431,7 +480,7 @@ export default function BulkChangeModelDialog({
 
         {step === "review" && (
           <div>
-            <ul className="divide-y divide-line-muted border-y border-line-muted theme-brutal:divide-black/15 theme-brutal:border-black/15" data-testid="bulk-model-review-list">
+            <ul className="divide-y divide-line-hairline border-y border-line-hairline" data-testid="bulk-model-review-list">
               {plan.rows.map((row) => {
                 const agent = agentById.get(row.agentId)!;
                 const sameRuntime = agent.runtime === runtime;
@@ -441,29 +490,29 @@ export default function BulkChangeModelDialog({
                 return (
                   <li
                     key={row.agentId}
-                    className={`flex min-w-0 items-center gap-2 py-2 text-sm ${skipped ? "text-foreground-placeholder" : ""}`}
+                    className={`flex min-w-0 items-center gap-2 py-2 text-callout ${skipped ? "text-foreground-hint" : ""}`}
                     data-testid={`bulk-model-row-${row.agentId}`}
                     data-row-kind={row.kind}
                   >
                     <AvatarSlot context="compact-list" type="agent" agentAvatarUrl={agent.avatarUrl} />
-                    <span className="w-24 shrink-0 truncate font-bold text-foreground-strong" title={agent.displayName ?? agent.name}>
+                    <span className="w-24 shrink-0 truncate font-semibold text-foreground" title={agent.displayName ?? agent.name}>
                       {agent.displayName ?? agent.name}
                     </span>
-                    <span className="flex min-w-0 flex-1 items-center gap-1.5 font-mono text-xs">
+                    <span className="flex min-w-0 flex-1 items-center gap-1.5 font-mono text-mono-meta">
                       {row.kind === "restartOnly" ? (
-                        <span className="truncate text-foreground-strong">{to}</span>
+                        <span className="truncate text-foreground">{to}</span>
                       ) : (
                         <>
-                          <span className="truncate text-foreground-muted">{from}</span>
-                          <ArrowRight size={12} className="shrink-0" aria-hidden />
+                          <span className="truncate text-foreground-hint">{from}</span>
+                          <ArrowRight size={12} className="shrink-0 text-foreground-muted" aria-hidden />
                           {skipped
                             ? <s className="truncate">{to}</s>
-                            : <span className="truncate text-foreground-strong">{to}</span>}
+                            : <span className="truncate text-foreground">{to}</span>}
                         </>
                       )}
                     </span>
                     {skipped && (
-                      <span className="flex shrink-0 items-center gap-1 text-xs text-warning-strong theme-brutal:text-black">
+                      <span className="flex shrink-0 items-center gap-1 text-caption text-warning-strong">
                         {formatMessage({ id: SKIP_REASON_MESSAGE[row.reason] })}
                         {row.reason !== "noChange" && (
                           <EditAgentLink agentId={row.agentId} onOpenAgent={onOpenAgent} />
@@ -475,25 +524,24 @@ export default function BulkChangeModelDialog({
               })}
             </ul>
             {plan.restartCount > 0 && (
-              <p className="mt-3 text-xs text-foreground-muted" data-testid="bulk-model-restart-line">
+              <p className="mt-3 text-footnote text-foreground-muted" data-testid="bulk-model-restart-line">
                 {formatMessage({ id: "machine.detail.bulkModel.restartLine" }, { count: plan.restartCount })}
               </p>
             )}
-            <div className="mt-4 flex items-center gap-3">
-              <Button size="sm" variant="outline" type="button" onClick={backToChoose} className="px-4 py-2 text-sm">
+            <div className="mt-4 flex items-center gap-2">
+              <Button size="lg" variant="outline" type="button" onClick={backToChoose}>
                 {formatMessage({ id: "machine.detail.bulkModel.back" })}
               </Button>
               <span className="flex-1" />
-              <Button size="sm" variant="outline" type="button" onClick={onClose} className="px-4 py-2 text-sm">
+              <Button size="lg" variant="ghost" type="button" onClick={handleClose}>
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
               <Button
-                size="sm"
+                size="lg"
                 variant="accent"
                 type="button"
                 onClick={handleApply}
                 disabled={plan.applyCount === 0}
-                className="px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-60"
                 data-testid="bulk-model-apply"
               >
                 {formatMessage({ id: "machine.detail.bulkModel.apply" }, { count: plan.applyCount })}
@@ -503,18 +551,18 @@ export default function BulkChangeModelDialog({
         )}
 
         {step === "applying" && (
-          <ul className="divide-y divide-line-muted theme-brutal:divide-black/15" data-testid="bulk-model-applying-list">
+          <ul className="divide-y divide-line-hairline" data-testid="bulk-model-applying-list">
             {plan.rows.filter((row) => row.kind !== "skip").map((row) => {
               const agent = agentById.get(row.agentId)!;
               const state = applyStates[row.agentId] ?? "saving";
               return (
-                <li key={row.agentId} className="flex items-center gap-2 py-2 text-sm">
+                <li key={row.agentId} className="flex items-center gap-2 py-2 text-callout">
                   <AvatarSlot context="compact-list" type="agent" agentAvatarUrl={agent.avatarUrl} />
-                  <span className="flex-1 truncate font-bold text-foreground-strong">{agent.displayName ?? agent.name}</span>
-                  <span className="flex items-center gap-1 text-xs text-foreground-muted" data-testid={`bulk-model-apply-${row.agentId}`} data-apply-state={state}>
+                  <span className="flex-1 truncate font-semibold text-foreground">{agent.displayName ?? agent.name}</span>
+                  <span className="flex items-center gap-1 text-caption text-foreground-muted" data-testid={`bulk-model-apply-${row.agentId}`} data-apply-state={state}>
                     {state === "saving" && <Spinner size="xs" aria-label={formatMessage({ id: "common.loadingLabel" })} />}
-                    {state === "saved" && <Check size={14} className="text-success-strong theme-brutal:text-black" aria-hidden />}
-                    {state === "failed" && <X size={14} className="text-warning-strong theme-brutal:text-black" aria-hidden />}
+                    {state === "saved" && <Check size={14} className="text-foreground" aria-hidden />}
+                    {state === "failed" && <X size={14} className="text-warning-strong" aria-hidden />}
                     {formatMessage({ id: APPLY_STATE_MESSAGE[state] })}
                   </span>
                 </li>

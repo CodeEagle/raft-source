@@ -205,7 +205,9 @@ test.describe("thread sparse-anchor", () => {
     await page.waitForTimeout(500);
     await context.setOffline(false);
     await expect.poll(() => resumeResponseObserved, { timeout: 20_000 }).toBe(true);
-    await expect(page.getByText("50 replies", { exact: true })).toBeVisible();
+    // The loaded reply count reads in the thread header's subtitle
+    // ("#channel · 50 replies", Raft DS › Panel), not in the scroller.
+    await expect(page.getByTestId("thread-header-subtitle")).toHaveText(/ · 50 replies$/);
     await expect(oldestReply).toHaveCount(0);
     await expect(page.getByRole("button", { name: /Load Older replies/i })).toHaveCount(0);
 

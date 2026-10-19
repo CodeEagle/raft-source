@@ -13,7 +13,7 @@ import { eq, inArray } from "drizzle-orm";
 import { openTestApp } from "../test/integration/app";
 import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
 import { getDb } from "../db/index";
-import { attachments, jointChannels, jointChannelServers, machines, servers, users } from "../db/schema";
+import { attachmentPreviewCache, attachments, jointChannels, jointChannelServers, machines, servers, users } from "../db/schema";
 import { signAccessToken } from "../middleware/auth";
 import { createSession, revokeAllUserSessions } from "../services/sessionService";
 import { assignMachine, createAgent } from "../services/agentService";
@@ -29,8 +29,12 @@ import {
   resetStorageForTests,
   type StorageBackend,
 } from "../services/storageService";
+import { WorkerPoolBusy } from "../services/workerPool/errors";
+import { setServerWorkerPoolForTests } from "../services/workerPool/serverWorkerPool";
+import type { WorkerPoolService } from "../services/workerPool/workerPoolService";
 import {
   ATTACHMENT_UPLOAD_DISABLED_MESSAGE,
+  ATTACHMENT_MEDIA_PREVIEW_PRESIGNED_URL_TTL_SECONDS,
   ATTACHMENT_PRESIGNED_URL_TTL_SECONDS,
   MAX_ATTACHMENT_FILE_SIZE_BYTES,
   MAX_ATTACHMENT_UPLOAD_FILES,
@@ -157,6 +161,69 @@ test("attachment URL route passes the bounded five-minute TTL to storage", async
       },
     ]);
     assert.equal(presignCalls[0]?.options?.expiresIn, 300);
+  } finally {
+    await app.close();
+    resetStorageForTests();
+  }
+});
+
+test("inline video/audio preview URLs get the one-hour TTL; downloads and other types keep five minutes", async ({ app }) => {
+  try {
+    const { userB, serverB, channelB } = await seedCrossServerFixture();
+    const tokenB = await tokenForHuman(userB.email);
+    const files = [
+      { id: "00000000-0000-4000-8000-0000000000a1", filename: "clip.mp4", mimeType: "video/mp4" },
+      { id: "00000000-0000-4000-8000-0000000000a2", filename: "voice.mp3", mimeType: "audio/mpeg" },
+      { id: "00000000-0000-4000-8000-0000000000a3", filename: "doc.pdf", mimeType: "application/pdf" },
+    ];
+    for (const file of files) {
+      await getDb().insert(attachments).values({
+        id: file.id,
+        channelId: channelB.id,
+        uploaderId: userB.id,
+        uploaderType: "user",
+        filename: file.filename,
+        mimeType: file.mimeType,
+        sizeBytes: 42,
+        storageKey: `${serverB.id}/${file.filename}`,
+        thumbnailKey: null,
+        contentHash: `hash-${file.filename}`,
+      });
+    }
+    const presigned: number[] = [];
+    __setStorageForTests({
+      async put() {},
+      async get() {
+        throw new Error("streaming is not expected");
+      },
+      async delete() {},
+      async getPresignedUrl(_key, options) {
+        presigned.push(options?.expiresIn ?? -1);
+        return "https://storage.example.test/presigned";
+      },
+    });
+
+    const ttlFor = async (id: string, query: string) => {
+      const before = presigned.length;
+      const res = await fetch(`${app.baseUrl}/api/attachments/${id}/url${query}`, {
+        headers: { Authorization: `Bearer ${tokenB}`, "X-Server-Id": serverB.id },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json() as { expiresAt: string };
+      assert.equal(presigned.length, before + 1);
+      const expiresIn = presigned[before];
+      const expiresAtDeltaSeconds = (Date.parse(body.expiresAt) - Date.now()) / 1000;
+      assert.ok(Math.abs(expiresAtDeltaSeconds - expiresIn) < 30, "expiresAt matches the signed TTL");
+      return expiresIn;
+    };
+
+    assert.equal(ATTACHMENT_MEDIA_PREVIEW_PRESIGNED_URL_TTL_SECONDS, 3600);
+    assert.equal(await ttlFor(files[0].id, "?disposition=inline"), 3600);
+    assert.equal(await ttlFor(files[1].id, "?disposition=inline"), 3600);
+    assert.equal(await ttlFor(files[0].id, "?disposition=attachment"), 300);
+    assert.equal(await ttlFor(files[0].id, "?disposition=inline&download=1"), 300);
+    assert.equal(await ttlFor(files[0].id, ""), 300);
+    assert.equal(await ttlFor(files[2].id, "?disposition=inline"), 300);
   } finally {
     await app.close();
     resetStorageForTests();
@@ -665,9 +732,11 @@ test("GET /api/attachments/:id/preview returns bounded XLSX data and typed failu
         contentHash: "xlsx-too-large",
       },
     ]);
+    let storageReads = 0;
     __setStorageForTests({
       async put() {},
       async get(key) {
+        storageReads += 1;
         return Readable.from([key.endsWith("corrupt.xlsx") ? Buffer.from("not a zip") : workbookBuffer]);
       },
       async delete() {},
@@ -694,6 +763,21 @@ test("GET /api/attachments/:id/preview returns bounded XLSX data and typed failu
       truncated: false,
     });
 
+    // XLSX previews are cached (task #19): a repeat is served without reading
+    // the original again, and the cache never bypasses the access check.
+    const readsAfterFirst = storageReads;
+    const cachedRes = await fetch(`${app.baseUrl}/api/attachments/${validId}/preview`, { headers });
+    assert.equal(cachedRes.status, 200);
+    assert.equal((await cachedRes.json() as { status: string }).status, "ok");
+    assert.equal(storageReads, readsAfterFirst);
+    const [cacheRow] = await db.select().from(attachmentPreviewCache).where(eq(attachmentPreviewCache.attachmentId, validId));
+    assert.ok(cacheRow);
+    const { userB, serverB } = await seedCrossServerFixture();
+    const outsiderRes = await fetch(`${app.baseUrl}/api/attachments/${validId}/preview`, {
+      headers: { Authorization: `Bearer ${await tokenForHuman(userB.email)}`, "X-Server-Id": serverB.id },
+    });
+    assert.equal(outsiderRes.status, 404);
+
     const corruptRes = await fetch(`${app.baseUrl}/api/attachments/${corruptId}/preview`, { headers });
     assert.equal(corruptRes.status, 200);
     assert.deepEqual(await corruptRes.json(), { status: "unsupported", reason: "unreadable" });
@@ -701,6 +785,40 @@ test("GET /api/attachments/:id/preview returns bounded XLSX data and typed failu
     const tooLargeRes = await fetch(`${app.baseUrl}/api/attachments/${tooLargeId}/preview`, { headers });
     assert.equal(tooLargeRes.status, 200);
     assert.deepEqual(await tooLargeRes.json(), { status: "unsupported", reason: "too_large" });
+
+    // Pool degradation is transient: the route answers the same degraded
+    // preview (never a 5xx for an interactive caller), and the outage is not
+    // pinned in the preview cache — the next request rebuilds.
+    const degradedId = "00000000-0000-4000-8000-000000000204";
+    await db.insert(attachments).values({
+      id: degradedId,
+      channelId: channel.id,
+      uploaderId: user.id,
+      uploaderType: "user",
+      filename: "degraded.xlsx",
+      mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      sizeBytes: workbookBuffer.length,
+      storageKey: `${server.id}/degraded.xlsx`,
+      thumbnailKey: null,
+      contentHash: "xlsx-degraded",
+    });
+    const queueFull = new WorkerPoolBusy("attachment_preview.xlsx", "queue_full", "queue full");
+    const failingPool: WorkerPoolService = {
+      submit: () => Promise.reject(queueFull),
+      submitDetailed: () => Promise.reject(queueFull),
+      warmup: () => {},
+      close: () => Promise.resolve(),
+    };
+    setServerWorkerPoolForTests(failingPool);
+    try {
+      const degradedRes = await fetch(`${app.baseUrl}/api/attachments/${degradedId}/preview`, { headers });
+      assert.equal(degradedRes.status, 200);
+      assert.deepEqual(await degradedRes.json(), { status: "unsupported", reason: "unavailable" });
+      const [degradedCacheRow] = await db.select().from(attachmentPreviewCache).where(eq(attachmentPreviewCache.attachmentId, degradedId));
+      assert.equal(degradedCacheRow, undefined);
+    } finally {
+      setServerWorkerPoolForTests(null);
+    }
   } finally {
     resetStorageForTests();
   }

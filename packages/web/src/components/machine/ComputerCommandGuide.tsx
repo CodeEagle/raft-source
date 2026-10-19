@@ -1,4 +1,4 @@
-import { Badge, SegmentedControl, SegmentedControlItem, SegmentedControlLabel } from "raft-ui";
+import { Badge, SegmentedControl, SegmentedControlItem, SegmentedControlLabel } from "@botiverse/raft-ui";
 import { useCallback, useMemo, useState } from "react";
 import { Terminal } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -17,6 +17,15 @@ interface ComputerCommandGuideProps {
   className?: string;
   onPlatformChange?: (platform: ComputerCommandPlatform) => void;
 }
+
+/** Where a command line would be when there is none yet: a dashed seam box,
+ *  like an empty board column (Raft DS), ink-3 text. */
+const COMMAND_PLACEHOLDER_CLASS_NAME =
+  "rounded-control border border-dashed border-line-seam px-3 py-2.5 text-footnote text-foreground-hint";
+
+/** A UI text button (Raft DS: ink, 1.5px underline, 600). */
+const COMMAND_GUIDE_TEXT_BUTTON_CLASS_NAME =
+  "rounded-sticker text-footnote font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none hover:bg-fill-pressed focus-visible:shadow-focus";
 
 // Raft Computer is the only connect path. The standalone daemon connect
 // command is retired: the daemon is no longer published on its own and this
@@ -105,6 +114,7 @@ export default function ComputerCommandGuide({
   const { formatMessage } = useIntl();
   const [platform, setPlatform] = useState<ComputerCommandPlatform>("mac-linux");
   const [copiedCommand, setCopiedCommand] = useState<CopyTarget | null>(null);
+  const [showConnectOnly, setShowConnectOnly] = useState(false);
 
   const isComputerGuide = Boolean(
     computerCommand || computerInstallCommand || windowsComputerCommand || windowsComputerInstallCommand,
@@ -141,6 +151,14 @@ export default function ComputerCommandGuide({
     windowsComputerInstallCommand,
   ]);
 
+  const connectOnlySteps = useMemo<CommandStep[]>(() => (computerCommand
+    ? [{
+      target: "mac-linux-setup",
+      command: computerCommand,
+      copyAriaLabel: formatMessage({ id: "machine.commandGuide.copySetupCommand" }),
+    }]
+    : []), [computerCommand, formatMessage]);
+
   const handleCopy = useCallback((target: CopyTarget) => {
     setCopiedCommand(target);
     setTimeout(() => {
@@ -157,7 +175,7 @@ export default function ComputerCommandGuide({
     <div className={className}>
       <div className="mb-2 flex flex-col items-start gap-2 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
         <div className="flex items-center gap-2">
-          <Terminal size={16} className="text-foreground-strong theme-brutal:text-black" />
+          <Terminal size={16} className="text-foreground-muted" aria-hidden="true" />
           <SectionEyebrow as="div">{formatMessage({ id: "machine.commandGuide.connectCommand" })}</SectionEyebrow>
         </div>
         <SegmentedControl<ComputerCommandPlatform>
@@ -179,7 +197,7 @@ export default function ComputerCommandGuide({
         </SegmentedControl>
       </div>
 
-      <p className="mb-2 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">
+      <p className="mb-3 text-footnote text-foreground-muted">
         {isComputerGuide && platform === "windows"
           ? formatMessage({ id: "machine.commandGuide.windowsComputerDescription" })
           : isComputerGuide && computerCommand
@@ -190,7 +208,7 @@ export default function ComputerCommandGuide({
       {isComputerGuide && platform === "windows" ? (
         <div className="space-y-3" data-testid="windows-computer-command-block">
             <div className="flex flex-wrap items-center gap-2">
-              <div className="text-xs font-bold uppercase tracking-wide text-foreground-muted theme-brutal:text-black/70">
+              <div className="text-footnote font-bold text-foreground">
                 {formatMessage({ id: "machine.commandGuide.raftComputerWindowsX64" })}
               </div>
               <Badge.Experimental />
@@ -202,19 +220,50 @@ export default function ComputerCommandGuide({
               onCopy={handleCopy}
             />
           ) : (
-            <div className="border-2 border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">
+            <div className={COMMAND_PLACEHOLDER_CLASS_NAME}>
               {formatMessage({ id: "machine.commandGuide.generateFreshComputerConnect" })}
             </div>
           )}
         </div>
       ) : isComputerGuide && displayedComputerSteps.length > 0 ? (
-        <CommandRows
-          steps={displayedComputerSteps}
-          copiedCommand={copiedCommand}
-          onCopy={handleCopy}
-        />
+        <>
+          <CommandRows
+            steps={displayedComputerSteps}
+            copiedCommand={copiedCommand}
+            onCopy={handleCopy}
+          />
+          {/* The one-line command installs first and only connects if that
+              succeeds, so a machine that already runs Raft Computer could
+              never get past "waiting" (bug-triage task #22, julie). Offer the
+              connect-only command behind an explicit choice. */}
+          {computerInstallAndSetupCommand && computerCommand && (
+            <div className="mt-2">
+              <button
+                type="button"
+                aria-expanded={showConnectOnly}
+                onClick={() => setShowConnectOnly((open) => !open)}
+                className={COMMAND_GUIDE_TEXT_BUTTON_CLASS_NAME}
+                data-testid="computer-command-already-installed"
+              >
+                {formatMessage({ id: "machine.commandGuide.alreadyInstalled" })}
+              </button>
+              {showConnectOnly && (
+                <div className="mt-2" data-testid="computer-command-connect-only">
+                  <p className="mb-2 text-footnote text-foreground-muted">
+                    {formatMessage({ id: "machine.commandGuide.connectOnlyDescription" })}
+                  </p>
+                  <CommandRows
+                    steps={connectOnlySteps}
+                    copiedCommand={copiedCommand}
+                    onCopy={handleCopy}
+                  />
+                </div>
+              )}
+            </div>
+          )}
+        </>
       ) : (
-        <div className="border-2 border-line-muted theme-brutal:border-black/30 bg-layer-panel theme-brutal:bg-white px-3 py-2 text-xs font-bold text-foreground-muted theme-brutal:text-black/50">
+        <div className={COMMAND_PLACEHOLDER_CLASS_NAME}>
           {formatMessage({ id: "machine.commandGuide.generateFreshConnect" })}
         </div>
       )}

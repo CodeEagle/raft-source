@@ -7,6 +7,7 @@ import { and, eq, inArray } from "drizzle-orm";
 
 import {
   agents,
+  appBotBindings,
   externalAppRegistrations,
   integrationAuditEvents,
   oauthAccessRequests,
@@ -1918,6 +1919,21 @@ test("marketplace publish review and install keeps third-party apps out of serve
       remember: true,
     }).returning();
 
+    const [sourceInstallBeforeOffline] = await getDb().select().from(oauthClientInstalls)
+      .where(and(eq(oauthClientInstalls.clientId, client.id), eq(oauthClientInstalls.serverId, publisherServer.id)));
+    assert.ok(sourceInstallBeforeOffline);
+    const [externalInstallBeforeOffline] = await getDb().select().from(oauthClientInstalls)
+      .where(and(eq(oauthClientInstalls.clientId, client.id), eq(oauthClientInstalls.serverId, installerServer.id)));
+    assert.ok(externalInstallBeforeOffline);
+    const sourceBot = await createAgent(publisherServer.id, "SourceOfflineBot", { runtime: "external", model: "external" });
+    const externalBot = await createAgent(installerServer.id, "ExternalOfflineBot", { runtime: "external", model: "external" });
+    const [sourceBinding] = await getDb().insert(appBotBindings).values({
+      installId: sourceInstallBeforeOffline.id, serverId: publisherServer.id, agentId: sourceBot.id, handle: sourceBot.name,
+    }).returning();
+    await getDb().insert(appBotBindings).values({
+      installId: externalInstallBeforeOffline.id, serverId: installerServer.id, agentId: externalBot.id, handle: externalBot.name,
+    });
+
     const approveOfflineRequestRes = await fetch(`${app.baseUrl}/api/integrations/clients/${client.id}/review-publish`, {
       method: "POST",
       headers: {
@@ -1938,22 +1954,29 @@ test("marketplace publish review and install keeps third-party apps out of serve
       .select({ id: oauthClientInstalls.id })
       .from(oauthClientInstalls)
       .where(eq(oauthClientInstalls.clientId, client.id));
-    assert.equal(installRowsAfterOfflineApproval.length, 0);
+    assert.deepEqual(installRowsAfterOfflineApproval, [{ id: sourceInstallBeforeOffline.id }]);
+    const [sourceInstallAfterOffline] = await getDb().select().from(oauthClientInstalls)
+      .where(eq(oauthClientInstalls.id, sourceInstallBeforeOffline.id));
+    assert.deepEqual(sourceInstallAfterOffline, sourceInstallBeforeOffline, "source install and its consent remain unchanged");
+    assert.deepEqual((await getDb().select().from(appBotBindings).where(eq(appBotBindings.id, sourceBinding.id)))[0], sourceBinding);
+    assert.equal((await getDb().select().from(agents).where(eq(agents.id, sourceBot.id)))[0]?.deletedAt, null);
+    assert.ok((await getDb().select().from(agents).where(eq(agents.id, externalBot.id)))[0]?.deletedAt);
+    assert.equal((await getDb().select().from(appBotBindings).where(eq(appBotBindings.installId, externalInstallBeforeOffline.id))).length, 0);
 
     const [revokedPublisherGrant] = await getDb().select().from(oauthGrants).where(eq(oauthGrants.id, publisherGrantBeforeOfflineApproval.id));
-    assert.equal(revokedPublisherGrant?.revokedByUserId, reviewer.id);
-    assert.ok(revokedPublisherGrant?.revokedAt);
+    assert.equal(revokedPublisherGrant?.revokedByUserId, null);
+    assert.equal(revokedPublisherGrant?.revokedAt, null);
     const [revokedInstallerGrant] = await getDb().select().from(oauthGrants).where(eq(oauthGrants.id, installerGrantBeforeOfflineApproval.id));
     assert.equal(revokedInstallerGrant?.revokedByUserId, reviewer.id);
     assert.ok(revokedInstallerGrant?.revokedAt);
     const [revokedPublisherToken] = await getDb().select().from(oauthAccessTokens).where(eq(oauthAccessTokens.id, publisherTokenBeforeOfflineApproval.id));
-    assert.ok(revokedPublisherToken?.revokedAt);
+    assert.equal(revokedPublisherToken?.revokedAt, null);
     const [revokedInstallerToken] = await getDb().select().from(oauthAccessTokens).where(eq(oauthAccessTokens.id, installerTokenBeforeOfflineApproval.id));
     assert.ok(revokedInstallerToken?.revokedAt);
     const [deniedPublisherRequest] = await getDb().select().from(oauthAccessRequests).where(eq(oauthAccessRequests.id, publisherPendingBeforeOfflineApproval.id));
-    assert.equal(deniedPublisherRequest?.status, "denied");
-    assert.equal(deniedPublisherRequest?.remember, false);
-    assert.equal(deniedPublisherRequest?.resolvedByUserId, reviewer.id);
+    assert.equal(deniedPublisherRequest?.status, "pending");
+    assert.equal(deniedPublisherRequest?.remember, true);
+    assert.equal(deniedPublisherRequest?.resolvedByUserId, null);
     const [deniedInstallerRequest] = await getDb().select().from(oauthAccessRequests).where(eq(oauthAccessRequests.id, installerPendingBeforeOfflineApproval.id));
     assert.equal(deniedInstallerRequest?.status, "denied");
     assert.equal(deniedInstallerRequest?.remember, false);
@@ -1989,7 +2012,25 @@ test("marketplace publish review and install keeps third-party apps out of serve
         scopes: ["openid", "profile", "identity"],
       }),
     });
-    assert.equal(publisherAgentRequestAfterOfflineApproval.status, 404);
+    assert.equal(publisherAgentRequestAfterOfflineApproval.status, 200);
+    // The actual human login lookup and authorization must agree with the
+    // source-owned row shown in Settings, while another Server remains denied.
+    const sourceLookup = await fetch(`${app.baseUrl}/api/oauth/clients/lookup?client_id=${client.clientId}&server_id=${publisherServer.id}`, {
+      headers: { Authorization: `Bearer ${publisherToken}` },
+    });
+    assert.equal(sourceLookup.status, 200);
+    const otherLookup = await fetch(`${app.baseUrl}/api/oauth/clients/lookup?client_id=${client.clientId}&server_id=${installerServer.id}`, {
+      headers: { Authorization: `Bearer ${installerToken}` },
+    });
+    assert.equal(otherLookup.status, 404);
+    const humanAuthorize = await fetch(`${app.baseUrl}/api/oauth/authorize/human`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${publisherToken}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId: client.clientId, serverId: publisherServer.id, scopes: ["openid", "profile"] }),
+    });
+    assert.equal(humanAuthorize.status, 200, await humanAuthorize.text());
+    assert.ok((await listAgentAvailableOAuthClients(publisherServer.id)).some((item) => item.id === client.id));
+    assert.equal((await listAgentAvailableOAuthClients(installerServer.id)).some((item) => item.id === client.id), false);
 
     const offlineDecisionAuditRows = await getDb()
       .select({ eventType: integrationAuditEvents.eventType, metadata: integrationAuditEvents.metadata })
@@ -2008,13 +2049,13 @@ test("marketplace publish review and install keeps third-party apps out of serve
       return metadata.clientKey === client.clientId
         && metadata.previousPublishStatus === "unpublish_requested"
         && metadata.nextPublishStatus === "private"
-        && metadata.removedInstallCount === 2
+        && metadata.removedInstallCount === 1
         && typeof metadata.revokedGrantCount === "number"
-        && metadata.revokedGrantCount >= 2
+        && metadata.revokedGrantCount >= 1
         && typeof metadata.revokedTokenCount === "number"
-        && metadata.revokedTokenCount >= 2
+        && metadata.revokedTokenCount >= 1
         && typeof metadata.deniedPendingRequestCount === "number"
-        && metadata.deniedPendingRequestCount >= 2;
+        && metadata.deniedPendingRequestCount >= 1;
     });
     assert.ok(offlineApprovalAuditFound, JSON.stringify(offlineDecisionAuditRows.map((row) => row.metadata)));
 
@@ -3365,4 +3406,181 @@ test("listInstalledAppPromptCatalog returns only enabled apps with a non-empty w
   assert.equal(entry.name, "Hinted user:alice App");
   assert.equal(entry.description, "Ask `@acme/metrics` first");
   assert.equal(entry.whenToUse, "ping user:alice when the queue backs up");
+  // The id agents pass to `raft integration invoke --service`.
+  assert.equal(entry.service, `hinted-${suffix.slice(0, 8)}`);
+});
+
+test("POST /api/integrations/clients/:clientId/install/bot creates and manages app-owned bot", async ({ app }) => {
+  const suffix = randomUUID();
+  const owner = await seedUser(`bot-owner-${suffix}@slock.test`, `bot-owner-${suffix}`);
+  const member = await seedUser(`bot-member-${suffix}@slock.test`, `bot-member-${suffix}`);
+  const server = await createServer("App Bot Server", `app-bot-${suffix.slice(0, 8)}`, owner.id);
+  await addMember(server.id, member.id, "member");
+
+  const { client } = await createOAuthClient({
+    serverId: server.id,
+    createdByUserId: owner.id,
+    clientId: `bot-app-${suffix.slice(0, 8)}`,
+    name: "Bot App",
+    enableBot: true,
+  });
+
+  const [install] = await getDb().insert(oauthClientInstalls).values({
+    serverId: server.id,
+    clientId: client.id,
+    installedByUserId: owner.id,
+    status: "active",
+    botGrant: "pending",
+  }).returning();
+
+  const ownerToken = await tokenForHuman(owner.email);
+  const memberToken = await tokenForHuman(member.email);
+
+  const call = (token: string, body: unknown) => fetch(`${app.baseUrl}/api/integrations/clients/${client.id}/install/bot`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "X-Server-Id": server.id,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  // No capability → 403
+  const memberRes = await call(memberToken, { action: "grant" });
+  assert.equal(memberRes.status, 403);
+
+  // Grant → creates managed bot
+  const grantRes = await call(ownerToken, { action: "grant" });
+  assert.equal(grantRes.status, 200);
+  const grantBody = await grantRes.json() as { botGrant: string; bot: { agentId: string; state: string; handle: string } };
+  assert.equal(grantBody.botGrant, "granted");
+  assert.equal(grantBody.bot.state, "active");
+  assert.ok(grantBody.bot.agentId);
+
+  const [botAgent] = await getDb().select().from(agents).where(eq(agents.id, grantBody.bot.agentId));
+  assert.ok(botAgent);
+  assert.equal(botAgent.managedByAppInstallId, install.id);
+  assert.equal(botAgent.status, "active");
+
+  const [binding] = await getDb().select().from(appBotBindings).where(eq(appBotBindings.installId, install.id));
+  assert.ok(binding);
+  assert.equal(binding.state, "active");
+  assert.equal(binding.generation, 1);
+  assert.equal(binding.handle, grantBody.bot.handle);
+
+  // Billing exclusion
+  const { getServerBillingUsage } = await import("../services/planService");
+  const usage = await getServerBillingUsage(getDb(), server.id);
+  assert.equal(usage.agents, 0, "managed bot excluded from seat count");
+
+  // Revoke → disabled
+  const revokeRes = await call(ownerToken, { action: "revoke" });
+  assert.equal(revokeRes.status, 200);
+  const [disabled] = await getDb().select().from(appBotBindings).where(eq(appBotBindings.installId, install.id));
+  assert.equal(disabled?.state, "disabled");
+  assert.ok(disabled?.disabledAt);
+});
+
+test("POST /api/app-bot/token exchanges OAuth access token for bot sk_agent_* + revocation 401", async ({ app }) => {
+  const suffix = randomUUID();
+  const owner = await seedUser(`bot-token-owner-${suffix}@slock.test`, `bot-token-owner-${suffix}`);
+  const server = await createServer("App Bot Token Server", `app-bot-token-${suffix.slice(0, 8)}`, owner.id);
+
+  const { client } = await createOAuthClient({
+    serverId: server.id,
+    createdByUserId: owner.id,
+    clientId: `bot-app-${suffix.slice(0, 8)}`,
+    name: "Bot App",
+    enableBot: true,
+  });
+
+  const [install] = await getDb().insert(oauthClientInstalls).values({
+    serverId: server.id,
+    clientId: client.id,
+    installedByUserId: owner.id,
+    status: "active",
+    botGrant: "granted",
+  }).returning();
+
+  // Create the managed bot.
+  const { createManagedAppBot } = await import("../services/appBotIdentityService");
+  const bot = await getDb().transaction((tx) =>
+    createManagedAppBot(tx, { installId: install.id, serverId: server.id }),
+  );
+
+  // Issue a valid OAuth access token for this client+server.
+  const rawToken = `oauth-token-${suffix}`;
+  const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+  await getDb().insert(oauthAccessTokens).values({
+    serverId: server.id,
+    principalType: "agent",
+    clientId: client.id,
+    tokenHash,
+    scopes: ["app"],
+    expiresAt: new Date(Date.now() + 3_600_000),
+  });
+
+  // 1. Exchange → sk_agent_*
+  const tokenRes = await fetch(`${app.baseUrl}/api/app-bot/token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${rawToken}` },
+  });
+  assert.equal(tokenRes.status, 200);
+  const tokenBody = await tokenRes.json() as { apiKey: string; agentId: string; scopes: string[] };
+  assert.ok(tokenBody.apiKey.startsWith("sk_agent_"));
+  assert.equal(tokenBody.agentId, bot.agentId);
+  for (const scope of ["send", "read", "mentions", "channels"]) {
+    assert.ok(tokenBody.scopes.includes(scope), `missing scope ${scope}`);
+  }
+  // Withheld capabilities must not leak.
+  for (const withheld of ["tasks", "reactions", "server", "knowledge", "mcp"]) {
+    assert.ok(!tokenBody.scopes.includes(withheld), `leaked scope ${withheld}`);
+  }
+
+  // 2. The key authenticates as the bot agent on the standard agent surface.
+  const whoamiRes = await fetch(`${app.baseUrl}/internal/agent-api/`, {
+    headers: { Authorization: `Bearer ${tokenBody.apiKey}` },
+  });
+  assert.equal(whoamiRes.status, 200);
+
+  // 3. Rotation: second exchange revokes the first credential.
+  const tokenRes2 = await fetch(`${app.baseUrl}/api/app-bot/token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${rawToken}` },
+  });
+  assert.equal(tokenRes2.status, 200);
+  const tokenBody2 = await tokenRes2.json() as { apiKey: string };
+  assert.notEqual(tokenBody2.apiKey, tokenBody.apiKey);
+
+  // Old key → 401
+  const oldKeyRes = await fetch(`${app.baseUrl}/internal/agent-api/`, {
+    headers: { Authorization: `Bearer ${tokenBody.apiKey}` },
+  });
+  assert.equal(oldKeyRes.status, 401);
+
+  // New key still works
+  const newKeyRes = await fetch(`${app.baseUrl}/internal/agent-api/`, {
+    headers: { Authorization: `Bearer ${tokenBody2.apiKey}` },
+  });
+  assert.equal(newKeyRes.status, 200);
+
+  // 4. Revoked install → 401
+  const { disableManagedAppBot } = await import("../services/appBotIdentityService");
+  await getDb().update(oauthClientInstalls)
+    .set({ botGrant: "revoked", updatedAt: new Date() })
+    .where(eq(oauthClientInstalls.id, install.id));
+  await getDb().transaction((tx) => disableManagedAppBot(tx, { installId: install.id }));
+
+  const revokedRes = await fetch(`${app.baseUrl}/internal/agent-api/`, {
+    headers: { Authorization: `Bearer ${tokenBody2.apiKey}` },
+  });
+  assert.equal(revokedRes.status, 401);
+
+  // 5. Exchange also fails when grant is revoked.
+  const tokenRes3 = await fetch(`${app.baseUrl}/api/app-bot/token`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${rawToken}` },
+  });
+  assert.equal(tokenRes3.status, 403);
 });

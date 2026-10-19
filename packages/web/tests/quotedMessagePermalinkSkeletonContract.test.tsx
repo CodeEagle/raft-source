@@ -31,9 +31,7 @@ test("quoted message permalink loading skeleton keeps placeholder bars as horizo
     </TestIntlProvider>,
   );
 
-  const bars = [...container.querySelectorAll("div")].filter((el) =>
-    /(^|\s)bg-black\/10(\s|$)/.test(el.className),
-  );
+  const bars = [...container.querySelectorAll<HTMLElement>('[data-slot="skeleton"][data-variant="line"]')];
   assert.ok(bars.length >= 1, "loading preview must paint placeholder bars");
   const last = bars[bars.length - 1]!;
   assert.match(

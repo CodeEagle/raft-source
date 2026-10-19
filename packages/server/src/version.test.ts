@@ -35,6 +35,7 @@ test("readBuildIdentityStatus accepts complete build-time release identity", () 
       sha: "abcdef1234567890abcdef1234567890abcdef12",
       builtAt: "2026-07-13T04:52:55Z",
       branch: "staging",
+      version: SERVER_VERSION,
     },
   });
 });

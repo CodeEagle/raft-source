@@ -28,6 +28,7 @@ import {
   scopeDbTraceSinkRowsDroppedTotal,
   scopeDbTraceSinkRowsExportedTotal,
 } from "../metrics";
+import { trackActiveSpans } from "./eventLoopStall";
 
 export interface ServerTracerRuntime {
   tracer: Tracer;
@@ -76,7 +77,8 @@ export function createServerTracerFromEnv(
   const sink = sinks.length === 1 ? sinks[0]! : new FanoutTraceSink(sinks);
 
   return {
-    tracer: new BasicTracer({ sink: new TraceUserIdTraceSink(sink) }),
+    // Wrapped so a stalled event loop can name the background spans still open (./eventLoopStall).
+    tracer: trackActiveSpans(new BasicTracer({ sink: new TraceUserIdTraceSink(sink) })),
     shutdown: async () => {
       for (const shutdownSink of sinks) {
         await shutdownSink.shutdown();

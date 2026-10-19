@@ -1,14 +1,12 @@
 // Theme-contract regression for the channel-settings Joint sections.
 //
-// Both sections shipped with hardcoded brutal-only classes (`text-black`,
-// `text-black/55`, `border-black/10`, `border-black/20`). On the elegant
-// themes they render black-on-dark and nearly disappear (Artea flagged the
-// elegant-dark screenshot on 2026-09-28). The fix follows the channel-dialog
-// convention set by PR #8365: semantic tokens (`text-foreground-strong`,
-// `text-foreground-muted`, `border-line-muted`) plus `theme-brutal:`
-// overrides that restore the exact brutal look. These assertions pin the
-// class strings on the rendered DOM so a revert cannot silently reintroduce
-// black text on the dark themes.
+// Both sections once shipped hardcoded black text (`text-black`,
+// `text-black/55`) that nearly disappeared on dark surfaces (Artea flagged the
+// dark screenshot on 2026-09-28). They are now raft-ui FormSections (the Raft
+// Design System's sheet section): a 13/18 700 ink-2 heading
+// (`text-foreground-muted`) and an ink-3 (`text-foreground-hint`) line under
+// it, with no theme-scoped overrides. These assertions pin the class strings on
+// the rendered DOM so a revert cannot silently reintroduce fixed black text.
 
 import assert from "node:assert/strict";
 import "./helpers/domSetup";
@@ -23,6 +21,15 @@ afterEach(cleanup);
 
 const noop = () => {};
 
+/** A raft-ui FormSection's own title and description elements. */
+function formSectionParts(section: HTMLElement) {
+  assert.equal(section.getAttribute("data-slot"), "form-section");
+  return {
+    title: section.querySelector('[data-slot="form-section-title"]'),
+    description: section.querySelector('[data-slot="form-section-description"]'),
+  };
+}
+
 function assertHasClasses(element: Element | null, expected: string[]): void {
   assert.ok(element, `expected element for classes ${expected.join(" ")}`);
   const tokens = (element.getAttribute("class") ?? "").split(/\s+/);
@@ -34,7 +41,7 @@ function assertHasClasses(element: Element | null, expected: string[]): void {
   }
 }
 
-test("JointConversionSection renders theme tokens with brutal overrides", () => {
+test("JointConversionSection renders the DS section tokens", () => {
   const { container } = renderWithIntl(
     <JointConversionSection
       busy={false}
@@ -44,27 +51,26 @@ test("JointConversionSection renders theme tokens with brutal overrides", () => 
     />,
   );
 
-  assertHasClasses(screen.getByTestId("channel-settings-joint-conversion-section"), [
-    "border-line-muted",
-    "theme-brutal:border-black/10",
-  ]);
-  assertHasClasses(screen.getByTestId("channel-settings-joint-conversion-title"), [
-    "text-foreground-strong",
-    "theme-brutal:text-black",
-  ]);
-  assertHasClasses(
-    container.querySelector("#channel-settings-joint-conversion-description"),
-    ["text-foreground-muted", "theme-brutal:text-black/55"],
-  );
-  // "In progress" hint on the current conversion stage (the descriptive span
-  // inside the stage list that carried `text-black/55`).
-  assertHasClasses(screen.getByText("In progress"), [
+  // Task #741: the section's divider is raft-ui's (FormSection draws the rule
+  // between consecutive sections), not a web border class.
+  const section = screen.getByTestId("channel-settings-joint-conversion-section");
+  assert.doesNotMatch(section.className, /(?:^|\s)border-(?:t|b)(?:\s|$)/);
+  const { title, description } = formSectionParts(section);
+  assertHasClasses(title, [
+    "text-footnote",
+    "font-bold",
     "text-foreground-muted",
-    "theme-brutal:text-black/55",
   ]);
+  assert.equal(title?.textContent, "Chat with members from other servers");
+  assertHasClasses(description, ["text-foreground-hint"]);
+  // The CTA is described by that line.
+  assert.ok(description?.contains(container.querySelector("#channel-settings-joint-conversion-description")));
+  // "In progress" hint on the current conversion stage (the descriptive span
+  // inside the stage list that once carried `text-black/55`).
+  assertHasClasses(screen.getByText("In progress"), ["text-foreground-hint"]);
 });
 
-test("JointAttachmentUploadSection renders theme tokens with brutal overrides", () => {
+test("JointAttachmentUploadSection renders the DS section tokens", () => {
   const uploads: RecoveryView[] = [
     {
       uploadId: "u1",
@@ -79,18 +85,13 @@ test("JointAttachmentUploadSection renders theme tokens with brutal overrides", 
     <JointAttachmentUploadSection uploads={uploads} onOpenChannel={noop} onCancel={noop} />,
   );
 
-  assertHasClasses(screen.getByTestId("channel-settings-joint-uploads-section"), [
-    "border-line-muted",
-    "theme-brutal:border-black/10",
-  ]);
-  const title = screen.getByTestId("channel-settings-joint-uploads-title");
-  assertHasClasses(title, ["text-foreground-strong", "theme-brutal:text-black"]);
-  assertHasClasses(title.nextElementSibling, [
-    "text-foreground-muted",
-    "theme-brutal:text-black/55",
-  ]);
-  assertHasClasses(screen.getByTestId("channel-settings-joint-upload-u1"), [
-    "border-line-muted",
-    "theme-brutal:border-black/20",
-  ]);
+  // Task #741: the section's divider is raft-ui's (FormSection draws the rule
+  // between consecutive sections), not a web border class.
+  const section = screen.getByTestId("channel-settings-joint-uploads-section");
+  assert.doesNotMatch(section.className, /(?:^|\s)border-(?:t|b)(?:\s|$)/);
+  const { title, description } = formSectionParts(section);
+  assertHasClasses(title, ["text-footnote", "font-bold", "text-foreground-muted"]);
+  assertHasClasses(description, ["text-foreground-hint"]);
+  // A single upload row has no divider above it (Separators go between rows).
+  assert.ok(screen.getByTestId("channel-settings-joint-upload-u1").querySelector('[data-slot="separator"]') === null);
 });

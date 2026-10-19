@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
-import { Navigate } from "react-router-dom";
-import { Button } from "raft-ui";
+import { Navigate, useLocation } from "react-router-dom";
+import { Button, Card } from "@botiverse/raft-ui";
 import { useMachineStore } from "../../store/machineStore";
 import { useComputerConnectionWatch } from "../../hooks/useComputerConnectionWatch";
 import Modal from "../Modal";
@@ -11,9 +11,11 @@ import ConfirmDialog from "../ConfirmDialog";
 import CreateAgentDialog from "../agent/CreateAgentDialog";
 import ServerSetupComputerRuntimeStep from "./ServerSetupComputerRuntimeStep";
 import type { ServerSetupComputer } from "./ServerSetupComputerRuntimeStep";
+import ServerSetupDisplayStyleStep from "./ServerSetupDisplayStyleStep";
 import ServerSetupHandoffStep from "./ServerSetupHandoffStep";
 import ServerSetupSurveyStep from "./ServerSetupSurveyStep";
 import { getComputerCommands } from "../../utils/computerSetupCommand";
+import { completeOnboardingDisplayStyle, useOnboardingDisplayStylePending } from "../../utils/onboardingDisplayStyle";
 import { getServerUrl } from "../../utils/server";
 import { emitHostEvent, hasRaftHostEventBridge, readRaftHostOnboardingContext } from "../../embed/hostBridge";
 import { NATIVE_ONBOARDING_CONTRACT_VERSION } from "../../embed/nativeOnboarding";
@@ -56,6 +58,11 @@ function StepContainer({ children }: { children: ReactNode }) {
       </div>
     </div>
   );
+}
+
+export function isServerSettingsPath(pathname: string, serverSlug: string): boolean {
+  const base = `/s/${serverSlug}/settings`;
+  return pathname === base || pathname.startsWith(`${base}/`);
 }
 
 type ServerSetupProjectionGateProps = {
@@ -101,6 +108,8 @@ export default function ServerSetupProjectionGate({
   dedicatedSurface = false,
 }: ServerSetupProjectionGateProps) {
   const { formatMessage } = useIntl();
+  const displayStylePending = useOnboardingDisplayStylePending();
+  const { pathname } = useLocation();
   const machines = useMachineStore((state) => state.machines);
   const loadMachines = useMachineStore((state) => state.loadMachines);
   // Every platform connects through Raft Computer's device authorization; the
@@ -342,11 +351,16 @@ export default function ServerSetupProjectionGate({
     void refreshProjection();
   }, [pendingCreateAgentProjection, refreshProjection]);
 
+  // Settings is the setup flow's escape hatch (the footer links here; Delete lives
+  // here), so the blocking modal stays down on it. Every other route still gets
+  // the gate, so this does not reopen a way to skip setup (task #246).
+  if (!dedicatedSurface && isServerSettingsPath(pathname, serverSlug)) return null;
+
   if (!projectionResolved) {
     if (!dedicatedSurface) return null;
     return (
       <div className="flex min-h-full w-full items-center justify-center p-6" data-testid="native-onboarding-loading">
-        <p className="text-sm font-bold text-foreground-muted">{formatMessage({ id: "onboarding.native.loading" })}</p>
+        <p className="text-callout text-foreground-muted">{formatMessage({ id: "onboarding.native.loading" })}</p>
       </div>
     );
   }
@@ -356,23 +370,37 @@ export default function ServerSetupProjectionGate({
   // still-live "enable-notifications" step was how a "Turn on notifications"
   // modal could pop up on any gate-mounting page. The wizard is gone; the
   // honest state when we don't know is to show nothing (task #164).
+  // Task #247: a new account that is not in a setup of its own (an invited
+  // member, or an owner whose setup is already behind them) picks its display
+  // style here, in the slot where this gate would otherwise render nothing, so
+  // it can never stack on a setup step.
+  // A post-setup step is a blocking Modal in the browser and page content on the
+  // dedicated (native) surface.
+  const presentStep = (step: ReactNode) => (dedicatedSurface
+    ? <StepContainer>{step}</StepContainer>
+    : <Modal onClose={ignoreModalClose} layer={1} closeOnEscape={false}>{step}</Modal>);
+  const memberDisplayStyle = displayStylePending && !dedicatedSurface
+    ? presentStep(<ServerSetupDisplayStyleStep variant="member" onDone={completeOnboardingDisplayStyle} />)
+    : null;
   if (!projection || projection.phase === null) {
-    if (!dedicatedSurface) return null;
+    if (!dedicatedSurface) return memberDisplayStyle;
     const messageId = projectionLoadFailed
       ? "onboarding.native.loadFailed"
       : "onboarding.native.unavailable";
     return (
       <div className="flex min-h-full w-full items-center justify-center p-6" data-testid="native-onboarding-unavailable">
-        <div className="w-full max-w-md rounded-lg border border-line-muted bg-layer-panel p-5 text-center shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal">
-          <p className="text-sm font-bold text-foreground-strong">{formatMessage({ id: messageId })}</p>
-          <button
+        <Card className="block w-full max-w-md p-5 text-center">
+          <p className="text-subhead font-bold text-foreground">{formatMessage({ id: messageId })}</p>
+          <Button
             type="button"
-            className="mt-4 rounded-md border border-line-muted bg-primary-soft px-4 py-2 text-sm font-bold text-foreground-strong shadow-raft-sm active:translate-x-0.5 active:translate-y-0.5 active:shadow-none theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal-sm"
+            size="lg"
+            variant="outline"
+            className="mt-4"
             onClick={retryProjection}
           >
             {formatMessage({ id: "onboarding.native.retry" })}
-          </button>
-        </div>
+          </Button>
+        </Card>
       </div>
     );
   }
@@ -382,10 +410,13 @@ export default function ServerSetupProjectionGate({
   const setupComplete = projection.surface === "complete";
   if (setupComplete && surveyPending) {
     const step = <ServerSetupSurveyStep onDone={refreshProjectionInBackground} />;
-    if (!dedicatedSurface) {
-      return <Modal onClose={ignoreModalClose} layer={1} closeOnEscape={false}>{step}</Modal>;
-    }
-    return <StepContainer>{step}</StepContainer>;
+    return presentStep(step);
+  }
+  // Task #247: after the survey, before the handoff, so Cindy's first message
+  // arrives in the style the owner picked. Browser-local, like the theme.
+  if (setupComplete && handoffPending && displayStylePending) {
+    const step = <ServerSetupDisplayStyleStep onDone={completeOnboardingDisplayStyle} />;
+    return presentStep(step);
   }
   if (setupComplete && handoffPending) {
     const step = (
@@ -394,10 +425,7 @@ export default function ServerSetupProjectionGate({
         onDone={refreshProjectionInBackground}
       />
     );
-    if (!dedicatedSurface) {
-      return <Modal onClose={ignoreModalClose} layer={1} closeOnEscape={false}>{step}</Modal>;
-    }
-    return <StepContainer>{step}</StepContainer>;
+    return presentStep(step);
   }
   if (!projection.blocksChat) {
     if (dedicatedSurface && !effectiveWakeGeneration) {
@@ -414,26 +442,26 @@ export default function ServerSetupProjectionGate({
         // app shell inside the onboarding page.
         return (
           <div className="flex min-h-full w-full items-center justify-center p-6" data-testid="native-onboarding-complete">
-            <p className="text-sm font-bold text-foreground-muted">{formatMessage({ id: "onboarding.native.complete" })}</p>
+            <p className="text-callout text-foreground-muted">{formatMessage({ id: "onboarding.native.complete" })}</p>
           </div>
         );
       }
-      return null;
+      return memberDisplayStyle;
     }
     return (
       <div
         className="pointer-events-none fixed inset-x-0 bottom-0 z-40 flex justify-center px-4 pb-4"
         data-testid="server-setup-resume-bar"
       >
-        <div className="pointer-events-auto flex w-full max-w-[560px] flex-wrap items-center justify-between gap-3 rounded-lg border border-line-muted bg-primary-soft text-foreground-strong px-4 py-3 shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black theme-brutal:shadow-brutal">
-          <p className="min-w-0 text-sm font-bold">
+        <div className="pointer-events-auto flex w-full max-w-[560px] flex-wrap items-center justify-between gap-3 rounded-container bg-layer-popover px-4 py-3 text-foreground shadow-float ring-1 ring-line-seam">
+          <p className="min-w-0 text-callout font-bold">
             {formatMessage({ id: "layout.onboarding.notSetUpYet" })}
           </p>
           <Button
             type="button"
             onClick={handleResumeClick}
             disabled={loading}
-            size="md"
+            size="sm"
             variant="outline"
             className="shrink-0"
             data-testid="server-setup-resume"

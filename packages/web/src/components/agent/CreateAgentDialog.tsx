@@ -1,9 +1,9 @@
-import { Card,
-  Banner,
+import { Banner,
   BannerAction,
   BannerDescription,
   BannerTitle,
   Button,
+  DialogSurface,
   Input,
   Select,
   SelectContent,
@@ -13,12 +13,13 @@ import { Card,
   SelectItemText,
   SelectList,
   SelectValue,
-  Checkbox,
-  Textarea } from "raft-ui";
+  Textarea } from "@botiverse/raft-ui";
 import CloseButton from "../ui/CloseButton";
+import SectionEyebrow from "../ui/SectionEyebrow";
+import Tooltip from "../ui/Tooltip";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
-import { X } from "lucide-react";
+import { Dices, X } from "lucide-react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import { useAgentStore } from "../../store/agentStore";
@@ -28,7 +29,7 @@ import type { Machine } from "../../store/machineStore";
 import { useServerStore } from "../../store/serverStore";
 import { catalogModelLabel } from "../../store/modelLabelCatalogStore";
 import api from "../../api/client";
-import { bothComputerVersionsKnown, isDaemonOutdated, validateAgentNameReason, getCreatableRuntimeOptions, runtimeAvailabilitySuffix, getDefaultModel, REASONING_EFFORT_RUNTIMES, PLAN_CONFIG, getBillingCapacityLimitLabel, getBillingCapacityLimitState, getBillingUsage, getEffectiveLimits } from "@botiverse/raft-shared";
+import { bothComputerVersionsKnown, isDaemonOutdated, suggestAgentName, validateAgentNameReason, getCreatableRuntimeOptions, runtimeAvailabilitySuffix, getDefaultModel, REASONING_EFFORT_RUNTIMES, PLAN_CONFIG, getBillingCapacityLimitLabel, getBillingCapacityLimitState, getBillingUsage, getEffectiveLimits } from "@botiverse/raft-shared";
 import { formatAgentNameValidationError } from "../../i18n/nameValidation";
 import { formatRuntimeConfigBuildError } from "../../utils/runtimeConfigBuildErrorPresentation";
 import type { ProviderConnectionSummary, ResolvedAgentCreateFormDefinition, RuntimeConfig, RuntimeReasoningEffort, RuntimeFormDefinitionRef, RuntimeModelInfo, RuntimeSelectionOption, ServerPlan } from "@botiverse/raft-shared";
@@ -49,6 +50,7 @@ import {
 import type { RuntimeFormV2Value, RuntimeFormV2Values } from "@botiverse/raft-runtime-form";
 import { useProviderConnections } from "../../hooks/useProviderConnections";
 import { useAgentRuntimeProvider } from "../../hooks/useAgentRuntimeProvider";
+import { HostedModelChoice, hostedModelPickerShown, initialHostedModel, useHostedRuntimeModels } from "./HostedModelChoice";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import Modal from "../Modal";
@@ -90,7 +92,15 @@ import type {
 } from "../../utils/createAgentLastConfig";
 import { buildConnectionDrivenBuiltInConfig, buildSchemaDrivenBuiltInConfig, buildSchemaDrivenKimiConfig } from "../../utils/schemaRuntimeConfigForm";
 
+/** Names already used on this server, so a suggested name avoids them. */
+function takenAgentNames(): string[] {
+  return useAgentStore.getState().agents.filter((agent) => !agent.deletedAt).map((agent) => agent.name);
+}
+
+
 const MAX_AGENT_DESCRIPTION_LENGTH = 3000;
+/** The computer picker's value for "hosted by Raft": no computer, the agent runs on the provider. */
+const HOSTED_COMPUTER_CHOICE = "__hosted_runtime__";
 
 const ONBOARDING_RUNTIME_PRIORITY = ["claude", "codex", "grok", "builtin"];
 
@@ -162,6 +172,20 @@ function machineMeetsDaemonRequirement(
         && !isDaemonOutdated(machine.daemonVersion, minimumDaemonVersion)
       )
     );
+}
+
+/**
+ * Fallback computer when nothing more specific (a prefill, the caller's
+ * default, the remembered last choice) applies: the person creating the agent
+ * usually means their own computer, so an online Computer they attached comes
+ * before any other online machine (bug-triage task #23, julie).
+ */
+export function pickFallbackMachine(
+  machines: readonly Machine[],
+  minimumDaemonVersion: string | undefined,
+): Machine | undefined {
+  const usable = machines.filter((m) => m.status === "online" && machineMeetsDaemonRequirement(m, minimumDaemonVersion));
+  return usable.find((m) => m.computerAttachedByCurrentUser === true) ?? usable[0];
 }
 
 function renderSelectItems(options: readonly SelectOption[]) {
@@ -364,6 +388,8 @@ export default function CreateAgentDialog({
   prefilledDescription,
   prefilledMachineId,
   prefilledMachineMode,
+  prefilledHosting,
+  prefilledHostedModel,
   minimumDaemonVersion,
   onCreated,
   onOnboardingComplete,
@@ -403,6 +429,13 @@ export default function CreateAgentDialog({
    */
   prefilledMachineId?: string;
   prefilledMachineMode?: "preferred" | "required";
+  /**
+   * Where an action card suggests the agent runs. `antiproton` preselects
+   * "Hosted by Raft (Antiproton)" when it is available; the human can change it.
+   */
+  prefilledHosting?: "computer" | "antiproton";
+  /** The card's hosted model, preselected only while the provider still offers it. */
+  prefilledHostedModel?: string;
   /** Optional feature-specific hard gate for the Computer daemon. */
   minimumDaemonVersion?: string;
   /**
@@ -491,8 +524,12 @@ export default function CreateAgentDialog({
   // surrounding modal layer and its options cannot be selected.
   const createAgentSelectPortalRef = useRef<HTMLFormElement>(null);
 
+  // A fresh create starts with a suggested name (`adjective-noun`) instead of
+  // an empty field; the dice button next to the label rolls another. The name
+  // is the agent's @handle, so a usable default beats an "untitled" one the
+  // user has to rename later.
   const [name, setName] = useState(
-    prefilledName ?? (onboarding ? "Cindy" : ""),
+    () => prefilledName ?? (onboarding ? "Cindy" : suggestAgentName(takenAgentNames())),
   );
   const [description, setDescription] = useState(
     prefilledDescription ?? (onboarding ? "Onboarding Assistant" : ""),
@@ -531,7 +568,7 @@ export default function CreateAgentDialog({
         ? ""
         : defaultOnline
           || rememberedMachineOnline
-          || machines.find((m) => m.status === "online" && machineMeetsDaemonRequirement(m, minimumDaemonVersion))?.id
+          || pickFallbackMachine(machines, minimumDaemonVersion)?.id
           || ""
   );
   const selectedMachine = machines.find((m) => m.id === selectedMachineId);
@@ -559,6 +596,30 @@ export default function CreateAgentDialog({
       disabled: isOffline || blockedByRequired || daemonTooOld,
     };
   }), [machines, prefilledMachineMode, prefilledMachineId, minimumDaemonVersion, formatMessage]);
+  // Hosted runtime (antiproton): a "computer" choice of its own in the normal form, when the
+  // server's flag is on and the deployment is configured. A card that requires a computer
+  // never offers it: confirming the card checks the agent landed on that computer.
+  const hostedRuntimeProvider = useAgentRuntimeProvider(
+    "antiproton",
+    !external && !onboarding && !previewOnly && prefilledMachineMode !== "required",
+  );
+  const [hostedSelected, setHostedSelected] = useState(prefilledHosting === "antiproton");
+  // With no computer connected, hosting is the only place the agent can run.
+  const isHostedMode = hostedRuntimeProvider.available && (hostedSelected || machines.length === 0);
+  const hostedModels = useHostedRuntimeModels("antiproton", isHostedMode);
+  /** `undefined` until the creator picks; then an offered id, or `null` for the provider's default. */
+  const [hostedModelPick, setHostedModelPick] = useState<string | null | undefined>(undefined);
+  const hostedModelsView = hostedModels.state.kind === "ready" ? hostedModels.state.view : null;
+  // Where the server may not pick (`antiproton_model_picker` off), Raft decides: no pick is sent.
+  const hostedModel = hostedModelsView === null || hostedModelsView.locked || !hostedModelPickerShown(hostedModelsView)
+    ? null
+    : hostedModelPick !== undefined ? hostedModelPick
+      : prefilledHostedModel !== undefined && hostedModelsView.models.some((option) => option.id === prefilledHostedModel)
+        ? prefilledHostedModel
+        : initialHostedModel(hostedModelsView);
+  const computerOptions: SelectOption[] = useMemo(() => hostedRuntimeProvider.available
+    ? [...machineOptions, { value: HOSTED_COMPUTER_CHOICE, label: formatMessage({ id: "agent.create.hostedRuntime.option" }) }]
+    : machineOptions, [hostedRuntimeProvider.available, machineOptions, formatMessage]);
   const machineRuntimeIds = selectedMachine?.runtimes ?? [];
   const runtimeSelectionCatalog = useNewAgentRuntimeOptions(
     previewOnly ? null : selectedMachineId,
@@ -665,9 +726,6 @@ export default function CreateAgentDialog({
   const agents = allAgents.filter((a) => !a.deletedAt);
   const nav = useAppNavigate();
   const providerConnectionCatalog = useProviderConnections(!previewOnly && runtime === "builtin");
-  // Hosted runtime (antiproton): offered only for external agents when the server's flag is on and the deployment is configured.
-  const hostedRuntimeProvider = useAgentRuntimeProvider("antiproton", external && !previewOnly);
-  const [runOnHostedRuntime, setRunOnHostedRuntime] = useState(false);
   const availableProviderConnections = providerConnectionCatalog.connections.filter(
     (connection) => connection.enabled && connection.hasCredential,
   );
@@ -949,6 +1007,8 @@ export default function CreateAgentDialog({
 
   const handleMachineChange = useCallback((val: unknown) => {
     if (typeof val !== "string") return;
+    setHostedSelected(val === HOSTED_COMPUTER_CHOICE);
+    if (val === HOSTED_COMPUTER_CHOICE) return;
     setSelectedMachineId(val);
     setRuntime("");
     setModel(getDefaultModel("claude"));
@@ -968,17 +1028,21 @@ export default function CreateAgentDialog({
     setReasoningEffort(reconcileReasoningEffort("claude", getDefaultModel("claude"), null));
   }, [setSelectedMachineId]);
 
+  const reloadHostedModels = hostedModels.reload;
+  const handleHostedModelsReload = useCallback(() => { void reloadHostedModels(); }, [reloadHostedModels]);
+
   const handleNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     setName(e.target.value);
     if (error) setError("");
   }, [error]);
 
+  const handleRandomName = useCallback(() => {
+    setName((current) => suggestAgentName([current, ...takenAgentNames()]));
+    if (error) setError("");
+  }, [error]);
+
   const handleDescriptionChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setDescription(e.target.value);
-  }, []);
-
-  const handleHostedRuntimeChange = useCallback((checked: boolean | "indeterminate") => {
-    setRunOnHostedRuntime(checked === true);
   }, []);
 
   const handleCloseEditProviderConnection = useCallback(() => {
@@ -1061,10 +1125,7 @@ export default function CreateAgentDialog({
             && machineMeetsDaemonRequirement(m, minimumDaemonVersion)
           )
           : undefined)
-        ?? machines.find((m) =>
-          m.status === "online"
-          && machineMeetsDaemonRequirement(m, minimumDaemonVersion)
-        );
+        ?? pickFallbackMachine(machines, minimumDaemonVersion);
     if (!machine || machine.status !== "online") return;
     // oxlint-disable-next-line react-doctor/no-derived-state, react-doctor/no-chain-state-updates -- YMNNE-family: pre-existing non-bug site grandfathered; rule now gates new code (see docs/frontend/render-cost-contract.md)
     setSelectedMachineId(machine.id);
@@ -1164,6 +1225,8 @@ export default function CreateAgentDialog({
   }, [runtimeModels.models, runtimeModels.default, model, customModelMode, builtInGatewayModelRequired, schemaBacked]);
 
   const isExternalMode = external;
+  // Neither an external nor a hosted agent runs on a computer: no computer, runtime or model fields.
+  const skipsComputer = isExternalMode || isHostedMode;
   const plan = (currentServer?.plan || "free") as ServerPlan;
   const billing = useServerStore((s) => s.billing);
   const loadBilling = useServerStore((s) => s.loadBilling);
@@ -1183,7 +1246,7 @@ export default function CreateAgentDialog({
   // "Create Agent 那个也可以编辑了").
   const nameLocked = onboarding;
   const descriptionLocked = onboarding;
-  const lockedFieldClass = "bg-fill-muted text-foreground-muted cursor-not-allowed";
+  const lockedFieldClass = "border-line-hairline bg-fill-muted text-foreground-muted cursor-not-allowed";
   /**
    * One validator, two questions: "is this name usable?" and "should we say so
    * yet?" — previously conflated, which is why the empty case was unreachable.
@@ -1221,7 +1284,7 @@ export default function CreateAgentDialog({
    * that field's own error slot. Nothing invalid reaches the API: `handleSubmit`
    * returns on this flag before any create call.
    */
-  const fieldValidationBlocked = Boolean(nameValidationError) || (!isExternalMode && (
+  const fieldValidationBlocked = Boolean(nameValidationError) || (!skipsComputer && (
     v2Active
       ? v2Malformed
       : providerApiUrlInvalid || builtInBaseUrlInvalid || schemaReasoningInvalid
@@ -1229,7 +1292,9 @@ export default function CreateAgentDialog({
 
   const createDisabled =
     atLimit ||
-    (!isExternalMode && (
+    // An unavailable list still allows the default (no model is sent, nothing to check).
+    (isHostedMode && (hostedModels.state.kind === "loading" || !name.trim())) ||
+    (!skipsComputer && (
       !selectedMachineId ||
       (prefilledMachineMode === "required" && selectedMachineId !== prefilledMachineId) ||
       machines.length === 0 ||
@@ -1271,27 +1336,27 @@ export default function CreateAgentDialog({
       setSubmitting(false);
       return;
     }
-    if (!isExternalMode && !selectedMachineId) {
+    if (!skipsComputer && !selectedMachineId) {
       setError(formatMessage({ id: "agent.create.selectComputerError" }));
       setSubmitting(false);
       return;
     }
-    if (!isExternalMode && prefilledMachineMode === "required" && selectedMachineId !== prefilledMachineId) {
+    if (!skipsComputer && prefilledMachineMode === "required" && selectedMachineId !== prefilledMachineId) {
       setError(formatMessage({ id: "agent.create.actionCardRequiresComputer" }));
       setSubmitting(false);
       return;
     }
-    if (!isExternalMode && minimumDaemonVersion && !selectedMachineMeetsDaemonRequirement) {
+    if (!skipsComputer && minimumDaemonVersion && !selectedMachineMeetsDaemonRequirement) {
       setError(formatMessage({ id: "agent.create.minimumDaemonVersion" }, { version: minimumDaemonVersion }));
       setSubmitting(false);
       return;
     }
-    if (!isExternalMode && !availableRuntimes.includes(runtime)) {
+    if (!skipsComputer && !availableRuntimes.includes(runtime)) {
       setError(formatMessage({ id: "agent.create.runtimeNotInstalled" }));
       setSubmitting(false);
       return;
     }
-    if (!isExternalMode && !v2Active && !modelSourceAllowsSubmit) {
+    if (!skipsComputer && !v2Active && !modelSourceAllowsSubmit) {
       setError(formatMessage({ id: "agent.create.modelSourceInvalid" }));
       setSubmitting(false);
       return;
@@ -1314,12 +1379,21 @@ export default function CreateAgentDialog({
     try {
       const avatarKey = onboarding ? "mug" : AVATAR_KEYS[Math.floor(Math.random() * AVATAR_KEYS.length)];
       const reusedCreatedOnboardingAgent = Boolean(createdOnboardingAgent);
-      const agent = createdOnboardingAgent ?? (isExternalMode
+      const agent = createdOnboardingAgent ?? (isHostedMode
         ? await createAgent(name.trim(), {
             description: description.trim() || undefined,
             avatarUrl: `pixel:${avatarKey}`,
             external: true,
-            ...(runOnHostedRuntime && hostedRuntimeProvider.available ? { provider: "antiproton" as const } : {}),
+            provider: "antiproton",
+            hostedModel,
+            actionCardMessageId,
+            actionCardConfirmationVersion,
+          })
+        : isExternalMode
+        ? await createAgent(name.trim(), {
+            description: description.trim() || undefined,
+            avatarUrl: `pixel:${avatarKey}`,
+            external: true,
             actionCardMessageId,
             actionCardConfirmationVersion,
           })
@@ -1416,7 +1490,7 @@ export default function CreateAgentDialog({
               actionCardConfirmationVersion,
             });
           })());
-      if (remembersLastConfig && currentServer) {
+      if (remembersLastConfig && currentServer && !isHostedMode) {
         writeCreateAgentLastConfig(currentServer.id, {
           machineId: selectedMachineId,
           runtime,
@@ -1519,14 +1593,14 @@ export default function CreateAgentDialog({
   if (onboarding) {
     const formId = "create-cindy-onboarding-form";
     const content = (
-      <section ref={cindyRuntimeSelectPortalRef} className="flex w-full max-w-[calc(100vw-1rem)] flex-col border border-line-muted bg-layer-panel text-foreground-strong shadow-raft-md theme-brutal:border-2 theme-brutal:border-line-strong theme-brutal:rounded-none theme-brutal:shadow-brutal md:max-w-[960px] md:h-[min(720px,calc(100dvh-2rem))] md:min-h-0 md:overflow-hidden" data-testid="create-cindy-screen-c">
-        <header className="flex shrink-0 items-start justify-between gap-3 border-b-2 border-line-muted theme-brutal:border-black px-6 pb-4 pt-6 sm:px-9">
+      <DialogSurface render={<section ref={cindyRuntimeSelectPortalRef} />} className="w-full max-w-[calc(100vw-1rem)] md:max-w-[960px] md:h-[min(720px,calc(100dvh-2rem))] md:min-h-0" data-testid="create-cindy-screen-c">
+        <header className="flex shrink-0 items-start justify-between gap-3 border-b border-line-seam px-6 pb-4 pt-6 sm:px-9">
           <div className="min-w-0">
-            <div className="font-mono text-[10px] font-bold uppercase tracking-wide text-foreground-muted">
+            <SectionEyebrow as="div">
               {formatMessage({ id: "agent.create.setupServer" })}
-            </div>
-            <h1 className="mt-2 text-xl font-bold">{formatMessage({ id: "agent.create.meetCindy" })}</h1>
-            <p className="mt-1 text-xs leading-5 text-foreground-muted">
+            </SectionEyebrow>
+            <h1 className="mt-1 text-title">{formatMessage({ id: "agent.create.meetCindy" })}</h1>
+            <p className="mt-1 text-callout text-foreground-muted">
               {formatMessage({ id: "agent.create.cindyDescription" })}
             </p>
           </div>
@@ -1535,13 +1609,9 @@ export default function CreateAgentDialog({
               the step is mandatory and carries its own Later, so no X there.
 
               Left on `variant="default"` deliberately, unlike the dialog shell's X.
-              This branch is UNREACHABLE in production: it needs `onboarding` with a
-              shell other than "step", and the only caller that could supply that
-              feeds `onboarding` from a store flag nothing sets true —
-              `setShowCreateAgent(show, onboarding = false)` has two call sites and
-              both pass one argument. Restyling a dead path is noise in a diff, and
-              worse, it implies the path is live. Whether this branch should exist
-              at all is a separate question (@cindyz, 2026-08-29). */}
+              Reached from a hosted Cindy's DM banner (HostedCindyFailedBanner): when
+              she could not start, this dialog connects a computer and converts her
+              into a computer Cindy in place. */}
           {onboardingShell !== "modal" ? null : (
             <CloseButton
               type="button"
@@ -1558,21 +1628,20 @@ export default function CreateAgentDialog({
 
         <form id={formId} noValidate onSubmit={handleSubmit} className="flex flex-col md:min-h-0 md:flex-1 md:overflow-hidden">
           <div className="flex flex-col gap-0 md:grid md:grid-cols-[0.95fr_1.05fr] md:min-h-0 md:flex-1 md:overflow-hidden">
-            <div className="flex flex-col border-b-2 border-line-muted theme-brutal:border-black bg-soft-pink px-8 py-5 md:min-h-0 md:justify-center md:border-b-0 md:border-r-2 md:py-8">
+            <div className="flex flex-col border-b border-line-seam bg-layer-frame px-8 py-5 text-foreground-on-frame md:min-h-0 md:justify-center md:border-b-0 md:border-r md:py-8">
               <div className="mx-auto flex max-w-[360px] flex-col items-center text-center">
                 <div className="relative mb-3 md:mb-5" data-testid="cindy-avatar-entrance">
-                  <span className="onboarding-cindy-pop-mark absolute -right-5 top-1 size-3 rotate-12 border-2 border-line-muted theme-brutal:border-black bg-brutal-lime" aria-hidden="true" />
-                  <span className="onboarding-cindy-pop-mark absolute -left-5 top-8 size-2.5 -rotate-12 border-2 border-line-muted theme-brutal:border-black bg-primary-soft theme-brutal:bg-soft-signal [animation-delay:70ms]" aria-hidden="true" />
-                  {/* Every avatar frame in the app carries the black border (see
-                      AvatarSlot); this hero was the one that did not. */}
-                  <AvatarSlot context="profile-tile" type="agent" agentAvatarUrl="pixel:mug" className="onboarding-cindy-entrance relative z-10 !size-[88px] theme-brutal:shadow-brutal-lg md:!size-[132px]" />
+                  <span className="onboarding-cindy-pop-mark absolute -right-5 top-1 size-3 rotate-12 rounded-[2px] border-[1.5px] border-sticker-ink bg-success" aria-hidden="true" />
+                  <span className="onboarding-cindy-pop-mark absolute -left-5 top-8 size-2.5 -rotate-12 rounded-[2px] border-[1.5px] border-sticker-ink bg-sticker-paper [animation-delay:70ms]" aria-hidden="true" />
+                  {/* Cindy is the onboarding hero: the DS xl sticker (99, hard
+                      brand-art shadow) at every width. */}
+                  <AvatarSlot context="profile-hero" type="agent" agentAvatarUrl="pixel:mug" className="onboarding-cindy-entrance z-10" />
                 </div>
-                <h2 className="text-2xl font-black tracking-normal md:text-4xl">
+                <h2 className="text-title md:text-display">
                   {formatMessage({ id: "agent.create.cindyName" })}
                 </h2>
-                {/* The old "Onboarding assistant" badge spent a line restating
-                    what the name and blurb already say. Say what she does for you. */}
-                <p className="mt-2 text-sm font-medium leading-relaxed text-foreground-muted md:mt-3 md:text-base">
+                {/* No role badge under the name: the blurb says what she does for you. */}
+                <p className="mt-2 text-callout font-medium text-foreground-on-frame-muted md:mt-3 md:text-body">
                   {formatMessage({ id: "agent.create.cindyHeroDescription" })}
                 </p>
               </div>
@@ -1580,8 +1649,8 @@ export default function CreateAgentDialog({
 
             <div className="max-h-[min(70dvh,calc(100dvh-12rem))] overflow-y-auto px-6 py-6 md:max-h-none md:min-h-0 md:px-8">
               {atLimit && (
-                <Banner status="warning" className="mb-4 dark:bg-warning-soft dark:text-warning-strong">
-                  <BannerDescription className="dark:!text-warning-strong">
+                <Banner status="warning" className="mb-4">
+                  <BannerDescription>
                     {formatMessage(
                       { id: "agent.create.capacityReached" },
                       {
@@ -1596,7 +1665,6 @@ export default function CreateAgentDialog({
                             onClick={handleUpgradeToBilling}
                             variant="link"
                             size="inline"
-                            className="dark:!text-warning-strong"
                           >
                             {chunks}
                           </Button>
@@ -1607,8 +1675,8 @@ export default function CreateAgentDialog({
                 </Banner>
               )}
               {error && !atLimit && (
-                <Banner status="warning" className="mb-4 dark:bg-warning-soft dark:text-warning-strong">
-                  <BannerDescription className="dark:!text-warning-strong">
+                <Banner status="warning" className="mb-4">
+                  <BannerDescription>
                     {error}
                   </BannerDescription>
                 </Banner>
@@ -1634,7 +1702,7 @@ export default function CreateAgentDialog({
                       type="button"
                       onClick={handleConnectComputerClick}
                       variant="default"
-                      size="lg"
+                      size="sm"
                     >
                       {formatMessage({ id: "agent.create.connectComputer" })}
                     </Button>
@@ -1709,13 +1777,12 @@ export default function CreateAgentDialog({
                 // computer they won't actually keep running agents on (a borrowed laptop, the
                 // machine without Claude Code, the wrong one of two). Only "Start over" is the
                 // clickable part; the sentence around it is plain guidance, not a button.
-                <div className="mt-6 flex flex-wrap items-baseline gap-x-1 text-sm">
+                <div className="mt-6 flex flex-wrap items-baseline gap-x-1 text-callout text-foreground-muted">
                   <span data-testid="create-agent-start-over-description">
                     {formatMessage({ id: "agent.create.notYourComputer" })}
                   </span>
                   <TextLink
                     variant="muted"
-                    inline
                     onClick={handleOnboardingStartOverClick}
                     disabled={submitting}
                     data-testid="create-agent-start-over"
@@ -1727,16 +1794,15 @@ export default function CreateAgentDialog({
               ) : null}
             </div>
           </div>
-          <footer className="flex shrink-0 flex-col-reverse gap-3 border-t-2 border-line-muted theme-brutal:border-black px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-9">
+          <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-line-seam px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-9">
             {onboarding ? (
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                <SetupSessionFooter disabled={submitting} />
+                <SetupSessionFooter disabled={submitting} showServerSettings />
                 {onOnboardingLater ? (
                   <TextLink
                     variant="muted"
                     onClick={handleOnboardingLaterClick}
                     disabled={submitting}
-                    className="text-sm"
                   >
                     {formatMessage({ id: "agent.create.setupMyself" })}
                   </TextLink>
@@ -1761,7 +1827,7 @@ export default function CreateAgentDialog({
             </Button>
           </footer>
         </form>
-      </section>
+      </DialogSurface>
     );
     return onboardingShell === "modal" ? <Modal onClose={onClose}>{content}</Modal> : content;
   }
@@ -1769,39 +1835,30 @@ export default function CreateAgentDialog({
   // An agent runs on a computer. With none connected there is nothing to configure and
   // nothing to create: every field below would be dead, and the one action that unblocks
   // them is not on this screen. Ask for the computer instead (stdrc, 2026-07-13).
-  if (!isExternalMode && machines.length === 0) {
+  if (!isExternalMode && machines.length === 0 && !hostedRuntimeProvider.available) {
     return (
-      <Modal onClose={onClose}>
-        <Card className="w-full max-w-md p-6" data-testid="create-agent-needs-computer">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-lg font-bold uppercase">{dialogTitle}</h2>
-            <CloseButton   onClick={onClose} aria-label={formatMessage({ id: "common.close" })}>
-              <X size={20} />
-            </CloseButton>
-          </div>
+      <DialogCard title={dialogTitle} onClose={onClose} testId="create-agent-needs-computer">
+        <Banner status="info">
+          <BannerTitle>{formatMessage({ id: "agent.create.connectComputerFirst" })}</BannerTitle>
+          <BannerDescription>
+            {formatMessage({ id: "agent.create.needsComputerDescription" })}
+          </BannerDescription>
+        </Banner>
 
-          <Banner status="info">
-            <BannerTitle>{formatMessage({ id: "agent.create.connectComputerFirst" })}</BannerTitle>
-            <BannerDescription>
-              {formatMessage({ id: "agent.create.needsComputerDescription" })}
-            </BannerDescription>
-          </Banner>
-
-          <div className="mt-4 flex justify-end gap-3">
-            <Button type="button" variant="outline" size="lg" onClick={onClose}>
-              {formatMessage({ id: "common.confirm.cancel" })}
-            </Button>
-            <Button
-              type="button"
-              onClick={handleConnectComputerClick}
-              variant="accent"
-                    size="lg"
-            >
-              {formatMessage({ id: "agent.create.connectComputer" })}
-            </Button>
-          </div>
-        </Card>
-      </Modal>
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <Button type="button" variant="ghost" size="lg" onClick={onClose}>
+            {formatMessage({ id: "common.confirm.cancel" })}
+          </Button>
+          <Button
+            type="button"
+            onClick={handleConnectComputerClick}
+            variant="accent"
+            size="lg"
+          >
+            {formatMessage({ id: "agent.create.connectComputer" })}
+          </Button>
+        </div>
+      </DialogCard>
     );
   }
 
@@ -1813,7 +1870,7 @@ export default function CreateAgentDialog({
             is paying for space the row has already bought. The reasoning for
             never using 16px still stands verbatim: with every field now holding
             a 16px message row open whether or not it has anything to say, a 16px gap
-            on top of it read as too airy — measured 36px (brutal) / 38px (elegant)
+            on top of it read as too airy — measured 36–38px
             from one control to the next label. This is the safe lever: the reserved
             row itself cannot shrink below the 16px a line of help text occupies
             without bringing back the layout jump it exists to prevent. 8px between fields
@@ -1830,7 +1887,7 @@ export default function CreateAgentDialog({
               not a warning, and it stays until submit. */}
           {autoJoinChannelName && (
             <p
-              className="border-2 border-line-muted theme-brutal:border-black bg-info-soft theme-brutal:bg-brutal-cyan/60 px-3 py-2 text-xs font-bold text-foreground-strong theme-brutal:text-black"
+              className="rounded-container bg-info-soft px-3 py-2 text-footnote font-semibold text-foreground"
               data-testid="create-agent-channel-context"
             >
               {formatMessage(
@@ -1860,8 +1917,8 @@ export default function CreateAgentDialog({
             * anything else about Banner is fixed in raft-ui, not at callsites.
             */}
           {atLimit && (
-            <Banner status="warning" className="dark:bg-warning-soft dark:text-warning-strong">
-              <BannerDescription className="dark:!text-warning-strong">
+            <Banner status="warning">
+              <BannerDescription>
                 {formatMessage(
                   { id: "agent.create.capacityReached" },
                   {
@@ -1875,8 +1932,7 @@ export default function CreateAgentDialog({
                         type="button"
                         onClick={handleUpgradeToBilling}
                         variant="link"
-                            size="inline"
-                            className="dark:!text-warning-strong"
+                        size="inline"
                       >
                         {chunks}
                       </Button>
@@ -1897,7 +1953,7 @@ export default function CreateAgentDialog({
                       type="button"
                       onClick={handleUpgradeToBilling}
                       variant="link"
-                            size="inline"
+                      size="inline"
                     >
                       {formatMessage({ id: "agent.create.viewPlans" })}
                     </Button>
@@ -1913,9 +1969,9 @@ export default function CreateAgentDialog({
               {(
                 <Select
                   chrome="field"
-                  value={selectedMachineId}
+                  value={isHostedMode ? HOSTED_COMPUTER_CHOICE : selectedMachineId}
                   onValueChange={handleMachineChange}
-                  items={machineOptions}
+                  items={computerOptions}
                 >
                   <FieldSelectTrigger className="w-full">
                     <SelectValue placeholder={formatMessage({ id: "agent.create.selectPlaceholder" })} />
@@ -1923,13 +1979,18 @@ export default function CreateAgentDialog({
                   </FieldSelectTrigger>
                   <SelectContent portalProps={createAgentSelectPortalProps}>
                     <SelectList>
-                      {renderSelectItems(machineOptions)}
+                      {renderSelectItems(computerOptions)}
                     </SelectList>
                   </SelectContent>
                 </Select>
               )}
-              {minimumDaemonVersion && (
-                <p className="mt-1 text-xs font-medium text-foreground-muted">
+              {isHostedMode && (
+                <p className="mt-1 text-caption text-foreground-hint" data-testid="create-agent-hosted-runtime">
+                  {formatMessage({ id: "agent.create.hostedRuntime.hint" })}
+                </p>
+              )}
+              {minimumDaemonVersion && !isHostedMode && (
+                <p className="mt-1 text-caption text-foreground-hint">
                   {formatMessage(
                     { id: "agent.create.requiresDaemon" },
                     { version: minimumDaemonVersion },
@@ -1937,7 +1998,7 @@ export default function CreateAgentDialog({
                 </p>
               )}
               {prefilledMachineMode === "required" ? (
-                <p className="mt-1 text-xs text-foreground-muted">
+                <p className="mt-1 text-caption text-foreground-hint">
                   {prefilledMachine?.name
                     ? formatMessage(
                         { id: "agent.create.requiredByActionCardNamed" },
@@ -1946,7 +2007,7 @@ export default function CreateAgentDialog({
                     : formatMessage({ id: "agent.create.requiredByActionCard" })}
                 </p>
               ) : prefilledMachineId ? (
-                <p className="mt-1 text-xs text-foreground-muted">
+                <p className="mt-1 text-caption text-foreground-hint">
                   {prefilledMachineOnline
                     ? formatMessage({ id: "agent.create.suggestedByActionCard" })
                     : formatMessage({ id: "agent.create.suggestedComputerUnavailable" })}
@@ -1967,6 +2028,21 @@ export default function CreateAgentDialog({
             }
             error={inlineNameError}
             htmlFor="create-agent-name"
+            labelAccessory={nameLocked ? undefined : (
+              <Tooltip content={formatMessage({ id: "agent.create.randomName" })}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="ml-auto"
+                  onClick={handleRandomName}
+                  aria-label={formatMessage({ id: "agent.create.randomName" })}
+                  data-testid="create-agent-random-name"
+                >
+                  <Dices size={12} aria-hidden="true" />
+                </Button>
+              </Tooltip>
+            )}
           >
             <Input
               id="create-agent-name"
@@ -1984,7 +2060,7 @@ export default function CreateAgentDialog({
               say so. The caller composes the note because only it saw the
               original search text. */}
           {prefilledNameNote && (
-            <p className="text-xs text-foreground-muted theme-brutal:text-black/60" data-testid="create-agent-prefill-note">
+            <p className="text-caption text-foreground-hint" data-testid="create-agent-prefill-note">
               {prefilledNameNote}
             </p>
           )}
@@ -2008,27 +2084,25 @@ export default function CreateAgentDialog({
               readOnly={descriptionLocked}
             />
             {descriptionLocked ? (
-              <div className="mt-1 text-xs text-foreground-muted">
+              <div className="mt-1 text-caption text-foreground-hint">
                 {onboarding
                   ? formatMessage({ id: "agent.create.fixedForOnboarding" })
                   : formatMessage({ id: "agent.create.prefilledByActionCard" })}
               </div>
             ) : null}
           </StableField>
-          {isExternalMode && hostedRuntimeProvider.available && (
-            <label className="flex items-start gap-3 border border-line-muted px-3 py-2 theme-brutal:border-2 theme-brutal:border-black" data-testid="create-agent-hosted-runtime">
-              <Checkbox
-                checked={runOnHostedRuntime}
-                onCheckedChange={handleHostedRuntimeChange}
-                aria-label={formatMessage({ id: "agent.create.hostedRuntime.label" })}
+          {isHostedMode && hostedModelPickerShown(hostedModelsView) && (
+            <StableField label={formatMessage({ id: "agent.detail.hostedModel.title" })}>
+              <HostedModelChoice
+                state={hostedModels.state}
+                value={hostedModel}
+                onChange={setHostedModelPick}
+                onReload={handleHostedModelsReload}
+                testId="create-agent-hosted-model"
               />
-              <span className="min-w-0">
-                <span className="block text-sm font-bold">{formatMessage({ id: "agent.create.hostedRuntime.label" })}</span>
-                <span className="mt-0.5 block text-xs leading-5 text-foreground-muted">{formatMessage({ id: "agent.create.hostedRuntime.hint" })}</span>
-              </span>
-            </label>
+            </StableField>
           )}
-          {!isExternalMode && selectedMachineId && (
+          {!skipsComputer && selectedMachineId && (
             <>
             <RuntimeConfigFields
               showValidationErrors={validationAttempted}
@@ -2091,11 +2165,11 @@ export default function CreateAgentDialog({
             </>
           )}
 
-          <div className="flex justify-end gap-3">
+          <div className="flex justify-end gap-2">
             <Button
               type="button"
               onClick={onClose}
-              variant="outline"
+              variant="ghost"
               size="lg"
             >
               {formatMessage({ id: "common.confirm.cancel" })}

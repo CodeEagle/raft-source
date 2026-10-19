@@ -1,11 +1,11 @@
 import { createHash } from "crypto";
 import { isDeepStrictEqual } from "node:util";
 import { eq, and, inArray, isNull, isNotNull, sql, asc, ne } from "drizzle-orm";
-import { getDb, withDbTraceAttributes, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
+import { getDb, registerDatabaseCloseHookForTests, withDbTraceAttributes, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
 import { actorRoleHasServerCapability } from "../lib/actorPermissions";
 import { FencedAuthorizationDeniedError, ServerMembershipRevokedError } from "../lib/actorMembershipFence";
-import { agents, machines, channels, channelAgents, servers, serverMembers, serverAgentMembers, users, agentRuntimeProfiles, messages, tasks, taskEvents, agentProviderConnections, providerConnections, providerConnectionCredentials } from "../db/schema";
-import { ALL_CHANNEL_TEAM_THRESHOLD, EXTERNAL_AGENT_RUNTIME_ID, PLAN_CONFIG, currentDate, getEffectiveLimits, type AgentRuntimeErrorState, type AgentStatus, type ServerPlan, type ReasoningEffort, type RuntimeConfig, getDefaultModel, isExternalAgentRuntime, validateAgentName, type ServerRole } from "@botiverse/raft-shared";
+import { raftbenchConfigs, raftbenchFindings, raftbenchLatestRuns, raftbenchServiceAgents, thirdPartyAgentEvents, agents, machines, channels, channelAgents, servers, serverMembers, serverAgentMembers, users, agentRuntimeProfiles, messages, tasks, taskEvents, agentProviderConnections, providerConnections, providerConnectionCredentials } from "../db/schema";
+import { ALL_CHANNEL_TEAM_THRESHOLD, EXTERNAL_AGENT_RUNTIME_ID, PLAN_CONFIG, currentDate, currentTimeMs, getEffectiveLimits, type AgentRuntimeErrorState, type AgentStatus, type ServerPlan, type ReasoningEffort, type RuntimeConfig, getDefaultModel, isExternalAgentRuntime, validateAgentName, type ServerRole } from "@botiverse/raft-shared";
 import { assertAgentCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage, withAgentCreateLock } from "./planService";
 import { untracedDbQuery, type DbQueryTracer } from "../tracing/dbQueryTrace";
 import { assertAgentHandleAvailableInServer, lockServerPrincipalHandles, PrincipalHandleConflictError } from "./principalHandleService";
@@ -953,6 +953,10 @@ export async function updateAgent(
       .limit(1)
       .for("update");
     if (!existing) return null;
+    if (fields.runtime !== undefined && fields.runtime !== EXTERNAL_AGENT_RUNTIME_ID) {
+      const [binding] = await tx.select({ serverId: raftbenchServiceAgents.serverId }).from(raftbenchServiceAgents).where(eq(raftbenchServiceAgents.agentId, agentId)).limit(1);
+      if (binding) throw new FencedAuthorizationDeniedError("forbidden");
+    }
 
     const { reasoningEffort, envVars, runtimeConfig, sessionId, providerConnection, ...rest } = fields;
     const now = currentDate();
@@ -1141,6 +1145,19 @@ export async function deleteAgent(agentId: string, options: { executor?: Databas
   const deletedAt = new Date();
 
   await db.transaction(async (tx) => {
+    const [dedicated] = await tx.select({ serverId: raftbenchServiceAgents.serverId })
+      .from(raftbenchServiceAgents).where(eq(raftbenchServiceAgents.agentId, agentId));
+    if (dedicated) {
+      const [config] = await tx.select().from(raftbenchConfigs)
+        .where(eq(raftbenchConfigs.serverId, dedicated.serverId)).for("update");
+      if (config?.agentId === agentId) {
+        await tx.delete(raftbenchLatestRuns).where(eq(raftbenchLatestRuns.serverId, dedicated.serverId));
+        await tx.delete(raftbenchFindings).where(eq(raftbenchFindings.serverId, dedicated.serverId));
+        await tx.delete(thirdPartyAgentEvents).where(and(eq(thirdPartyAgentEvents.serverId, dedicated.serverId), eq(thirdPartyAgentEvents.systemApp, "system.raftbench")));
+        await tx.update(raftbenchConfigs).set({ agentId: null, enabled: false, revision: config.revision + 1, readMessages: 0, readThroughSeq: 0, completedBatches: 0, scannedThroughAt: null, updatedAt: deletedAt })
+          .where(eq(raftbenchConfigs.serverId, dedicated.serverId));
+      }
+    }
     await tx.update(agents)
       .set({
         deletedAt,
@@ -1363,9 +1380,14 @@ export async function assignMachine(
   options: { executor?: DatabaseExecutor } = {},
 ) {
   const db = options.executor ?? getDb();
-  await db.update(agents)
-    .set({ machineId, updatedAt: new Date() })
-    .where(and(eq(agents.id, agentId), isNull(agents.deletedAt)));
+  await db.transaction(async tx => {
+    await tx.select({ id: agents.id }).from(agents).where(eq(agents.id, agentId)).for("update");
+    if (machineId !== null) {
+      const [binding] = await tx.select({ serverId: raftbenchServiceAgents.serverId }).from(raftbenchServiceAgents).where(eq(raftbenchServiceAgents.agentId, agentId)).limit(1);
+      if (binding) throw new FencedAuthorizationDeniedError("forbidden");
+    }
+    await tx.update(agents).set({ machineId, updatedAt: new Date() }).where(and(eq(agents.id, agentId), isNull(agents.deletedAt)));
+  });
 }
 
 /**
@@ -1468,4 +1490,47 @@ export async function markAgentStatusProtocolAdopted(agentId: string, adoptedAt:
     .returning({ adoptedAt: agents.statusProtocolAdoptedAt });
   if (updated?.adoptedAt) return updated.adoptedAt;
   return (await getAgentStatusProtocolAdoptedAt(agentId)) ?? adoptedAt;
+}
+
+const RAFTBENCH_BINDINGS_TTL_MS = 30_000;
+let raftbenchBindings: { ids: Set<string>; expiresAt: number } | null = null;
+let raftbenchBindingsEpoch = 0;
+let raftbenchBindingsRefresh: Promise<Set<string>> | null = null;
+
+/** Invalidate after the binding transaction commits, before provider work starts. */
+export function invalidateRaftBenchServiceAgentBindings(): void {
+  raftbenchBindings = null;
+  raftbenchBindingsEpoch += 1;
+  raftbenchBindingsRefresh = null;
+}
+registerDatabaseCloseHookForTests(async () => { invalidateRaftBenchServiceAgentBindings(); });
+
+/** Dedicated identity survives Disable and unassignment; cache the complete tiny set. */
+export async function raftBenchServiceAgentIds(agentIds: readonly string[]): Promise<Set<string>> {
+  if (agentIds.length === 0) return new Set();
+  const cached = raftbenchBindings;
+  if (cached && cached.expiresAt > currentTimeMs()) {
+    return new Set(agentIds.filter(id => cached.ids.has(id)));
+  }
+  const epoch = raftbenchBindingsEpoch;
+  if (!raftbenchBindingsRefresh) {
+    const refresh = getDb().select({ agentId: raftbenchServiceAgents.agentId }).from(raftbenchServiceAgents)
+      .then(bindings => {
+        const ids = new Set(bindings.map(row => row.agentId));
+        if (epoch === raftbenchBindingsEpoch) raftbenchBindings = { ids, expiresAt: currentTimeMs() + RAFTBENCH_BINDINGS_TTL_MS };
+        return ids;
+      });
+    raftbenchBindingsRefresh = refresh;
+    void refresh.finally(() => {
+      if (raftbenchBindingsRefresh === refresh) raftbenchBindingsRefresh = null;
+    }).catch(() => {}); // The awaiting callers receive refresh failures; never cache them.
+  }
+  const ids = await raftbenchBindingsRefresh;
+  // A binding changed while the read was in flight: do not publish its old answer.
+  if (epoch !== raftbenchBindingsEpoch) return raftBenchServiceAgentIds(agentIds);
+  return new Set(agentIds.filter(id => ids.has(id)));
+}
+
+export async function isRaftBenchServiceAgent(agentId: string): Promise<boolean> {
+  return (await raftBenchServiceAgentIds([agentId])).has(agentId);
 }

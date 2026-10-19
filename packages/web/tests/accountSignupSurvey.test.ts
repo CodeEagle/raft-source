@@ -85,8 +85,10 @@ test("the survey is asked after Cindy is created and before the handoff", async 
   assert.equal(submit.disabled, true);
   const role = screen.getByRole("radio", { name: SIGNUP_ROLES[0].label });
   fireEvent.click(role);
-  assert.match(role.className, /bg-soft-signal/);
-  assert.doesNotMatch(role.className, /bg-brutal-pink/);
+  // Selected answer = yellow sticker (DS: yellow is what you selected), never
+  // the pink of the one primary action below it.
+  assert.match(role.className, /(?:^|\s)bg-brand(?:\s|$)/);
+  assert.doesNotMatch(role.className, /bg-attention|bg-palette-pink/);
   assert.equal(submit.disabled, true, "one answer cannot submit the survey");
 
   fireEvent.click(screen.getByTestId("signup-source-other"));
@@ -101,7 +103,8 @@ test("the survey is asked after Cindy is created and before the handoff", async 
     referralSource: "other",
     referralSourceOther: "Local meetup",
   }]);
-  assert.ok(screen.getByTestId("server-setup-survey").classList.contains("shadow-raft-md"));
+  // The step frame is raft-ui's dialog frame (DialogSurface), not a restated copy.
+  assert.equal(screen.getByTestId("server-setup-survey").getAttribute("data-slot"), "dialog-surface");
 });
 
 test("the handoff screen is answered by the server alone, with no session-local memory", async () => {

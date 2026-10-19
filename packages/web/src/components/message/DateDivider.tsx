@@ -1,4 +1,4 @@
-import { MessageListDateDivider } from "raft-ui";
+import { MessageListDateDivider } from "@botiverse/raft-ui";
 import { useIntl } from "react-intl";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 
@@ -8,10 +8,8 @@ import { useTimeFormatter } from "../../hooks/useTimeFormatter";
  * current-day header (task #44), where `sticky` swaps the flat rule for a
  * self-contained pill so it reads over scrolling messages.
  *
- * Composes existing design-system pieces (no new primitive): the brutal
- * `border-t-2 border-black` rule (cf. `ui/ContextMenuDivider`) + the section
- * label treatment (`text-[10px] font-bold uppercase tracking-widest`, cf.
- * `ui/SectionHeader`).
+ * The flat form is the RUI event row (Space Mono 12, ink-3, between hairlines);
+ * the sticky pill keeps the same machine-text treatment on a paper chip.
  */
 export function DateDivider({
   createdAt,
@@ -35,7 +33,7 @@ export function DateDivider({
   if (sticky) {
     return (
       <div className="pointer-events-none flex justify-center pt-1" data-testid={testId}>
-        <span className="rounded-sm bg-layer-panel px-2 py-0.5 text-[10px] font-medium text-foreground-muted shadow-raft-xs theme-brutal:rounded-none theme-brutal:bg-white theme-brutal:font-bold theme-brutal:uppercase theme-brutal:tracking-widest theme-brutal:text-black/50">
+        <span className="rounded-chip border border-line-hairline bg-layer-canvas px-2 py-0.5 font-mono text-mono-meta text-foreground-hint">
           {label}
         </span>
       </div>

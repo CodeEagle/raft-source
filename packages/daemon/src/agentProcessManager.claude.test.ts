@@ -405,6 +405,89 @@ test("Claude APM baseline: tool_output decrements outstandingToolUses", async ()
   });
 });
 
+test("task #17: a finished tool call records its id, outcome, exit code and daemon-measured duration on the Tool finished row", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    driver.parsedLines.set("tool-start", [{ kind: "tool_call", name: "Bash", input: { command: "pnpm test" }, callId: "toolu_1" }]);
+    driver.parsedLines.set("tool-end", [{ kind: "tool_output", name: "toolu_1", callId: "toolu_1", ok: true, exitCode: 1 }]);
+    const realNow = Date.now;
+    let now = 1_000_000;
+    Date.now = () => now;
+    try {
+      driver.processes[0].stdout.emit("data", Buffer.from("tool-start\n"));
+      await flush();
+      now += 2_500;
+      driver.processes[0].stdout.emit("data", Buffer.from("tool-end\n"));
+      await flush();
+    } finally {
+      Date.now = realNow;
+    }
+    const entries = sent.flatMap((msg) => msg.type === "agent:activity" ? msg.entries ?? [] : []);
+    const start = entries.find((e) => e.kind === "tool_start");
+    assert.equal(start?.kind === "tool_start" ? start.callId : undefined, "toolu_1");
+    const finished = entries.find((e) => e.kind === "status" && e.detailKind === "tool_end");
+    assert.ok(finished?.kind === "status");
+    assert.deepEqual(finished.tool, { callId: "toolu_1", ok: true, durationMs: 2_500, exitCode: 1 });
+  });
+});
+
+test("task #17: a tool end the runtime reports nothing about keeps the bare Tool finished row", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    driver.parsedLines.set("tool-start", [{ kind: "tool_call", name: "shell", input: { command: "ls" } }]);
+    driver.parsedLines.set("tool-end", [{ kind: "tool_output", name: "shell" }]);
+    driver.processes[0].stdout.emit("data", Buffer.from("tool-start\n"));
+    await flush();
+    driver.processes[0].stdout.emit("data", Buffer.from("tool-end\n"));
+    await flush();
+    const entries = sent.flatMap((msg) => msg.type === "agent:activity" ? msg.entries ?? [] : []);
+    const finished = entries.find((e) => e.kind === "status" && e.detailKind === "tool_end");
+    assert.ok(finished?.kind === "status");
+    assert.equal("tool" in finished, false, "no outcome is claimed when the runtime said nothing");
+  });
+});
+
+test("task #17: a turn ends with one turn_summary entry folding its trigger, actions and problems", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    const ap = getProcess(manager, "agent-1");
+    (manager as any).commitApmIdleState("agent-1", ap, true);
+    const accepted = await manager.deliverMessage(
+      "agent-1",
+      makeMessage("please fix the tests", { channel_name: "proj-runtime", message_id: "msg-wake", seq: 7, sender_name: "Tenny" }),
+      { deliveryId: "delivery-wake" },
+    );
+    assert.equal(accepted, true);
+    await waitFor(() => driver.encodedCalls.length === 1, "idle delivery written");
+    driver.parsedLines.set("grep", [{ kind: "tool_call", name: "Bash", input: { command: "grep -rn listRecentActivityLog src" }, callId: "t1" }]);
+    driver.parsedLines.set("grep-end", [{ kind: "tool_output", name: "t1", callId: "t1", ok: true }]);
+    driver.parsedLines.set("test", [{ kind: "tool_call", name: "Bash", input: { command: "npx vitest run src/a.test.ts" }, callId: "t2" }]);
+    driver.parsedLines.set("test-end", [{ kind: "tool_output", name: "t2", callId: "t2", ok: true, exitCode: 1 }]);
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    for (const line of ["grep", "grep-end", "test", "test-end", "turn-end"]) {
+      driver.processes[0].stdout.emit("data", Buffer.from(`${line}\n`));
+      await flush();
+    }
+    // The proxy reports the reply the agent sent; it lands in the open turn
+    // only before the turn ends, so this one belongs to no turn.
+    (manager as any).turnSummaries.noteSendOutcome("agent-1", { state: "sent", messageId: "late" }, Date.now());
+
+    const summaries = sent.flatMap((msg) => msg.type === "agent:activity" ? msg.entries ?? [] : [])
+      .filter((entry) => entry.kind === "turn_summary");
+    assert.equal(summaries.length, 1, "exactly one summary per turn");
+    const summary = summaries[0]!.kind === "turn_summary" ? summaries[0]!.summary : undefined;
+    assert.ok(summary);
+    assert.equal(summary.outcome, "completed");
+    assert.deepEqual(summary.trigger, { target: "#proj-runtime", channelId: "channel-1", sender: "Tenny", messageId: "msg-wake" });
+    assert.deepEqual(summary.actions, [{ kind: "search", count: 1 }, { kind: "run_checks", count: 1 }]);
+    assert.deepEqual(summary.problems.map(({ kind, reason, exitCode }) => ({ kind, reason, exitCode })), [
+      { kind: "run_checks", reason: "exit_nonzero", exitCode: 1 },
+    ]);
+    assert.equal(summary.messagesSent, 0);
+    assert.ok(summary.endedAt >= summary.startedAt);
+  });
+});
+
 test("Claude APM baseline: compaction_started sets compacting=true; compaction_finished clears it", async () => {
   await withManager(async ({ driver, manager }) => {
     await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
@@ -5110,5 +5193,295 @@ test("Claude live delivery: a ledger write lock held by the CLI never delays del
       cli.exec("ROLLBACK");
       cli.close();
     }
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// task #1260 — background tasks keep a quiet main turn out of "Idle"
+// Real sequence captured from Claude Code (stream-json): Agent tool returns at
+// once → system task_started → main turn `result` (turn_end) → subagent rows
+// → system task_notification {status} → Claude opens a new turn by itself.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function subagentLine(phase: "started" | "progress" | "notification", taskId: string, extra: Record<string, unknown> = {}) {
+  return [{
+    kind: "subagent_progress",
+    source: "claude_task_lifecycle",
+    phase,
+    taskId,
+    parentToolUseId: `toolu_${taskId}`,
+    subagentType: "general-purpose",
+    payloadBytes: 64,
+    ...extra,
+  } as ParsedEvent];
+}
+
+function lastActivity(sent: MachineToServerMessage[]) {
+  const msg = activityMessages(sent).at(-1)!;
+  return { detail: msg.detail, detailKind: msg.detailKind };
+}
+
+test("task #1260: a turn ending with a background task outstanding shows waiting, not Idle, and stays protocol-idle for delivery", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    driver.parsedLines.set("task-a-start", subagentLine("started", "task_a"));
+    driver.parsedLines.set("task-a-start-dup", subagentLine("started", "task_a"));
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.parsedLines.set("task-a-done", subagentLine("notification", "task_a", { taskStatus: "completed" }));
+
+    const proc = driver.processes[0];
+    proc.stdout.emit("data", Buffer.from("task-a-start\n"));
+    proc.stdout.emit("data", Buffer.from("task-a-start-dup\n"));
+    proc.stdout.emit("data", Buffer.from("turn-end\n"));
+    await flush();
+
+    const ap = (manager as any).agents.get("agent-1");
+    assert.equal(ap.backgroundTasks.size, 1, "the same task_id counts once");
+    assert.deepEqual(lastActivity(sent), { detail: "Waiting for 1 background task", detailKind: "subagent_activity" });
+    assert.equal(ap.gatedSteering.isIdle, true, "delivery semantics: the main turn is over, the agent is idle for stdin delivery");
+
+    proc.stdout.emit("data", Buffer.from("task-a-done\n"));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 0);
+    assert.deepEqual(lastActivity(sent), { detail: "Idle", detailKind: "idle" });
+    const details = activityMessages(sent).map((m) => m.detail);
+    assert.ok(details.includes("Subagent completed (general-purpose)"), details.join(" | "));
+  });
+});
+
+test("task #1260: failed and stopped notifications end a task; an unknown or repeated notification changes nothing; the count follows nested tasks", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    driver.parsedLines.set("a-start", subagentLine("started", "task_a"));
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.parsedLines.set("b-start", subagentLine("started", "task_b"));
+    driver.parsedLines.set("c-start", subagentLine("started", "task_c"));
+    driver.parsedLines.set("b-failed", subagentLine("notification", "task_b", { taskStatus: "failed" }));
+    driver.parsedLines.set("c-stopped", subagentLine("notification", "task_c", { taskStatus: "stopped" }));
+    driver.parsedLines.set("zz-done", subagentLine("notification", "task_zz", { taskStatus: "completed" }));
+    driver.parsedLines.set("a-done", subagentLine("notification", "task_a", { taskStatus: "completed" }));
+    const proc = driver.processes[0];
+    const ap = (manager as any).agents.get("agent-1");
+
+    for (const line of ["a-start", "turn-end", "b-start", "c-start"]) proc.stdout.emit("data", Buffer.from(`${line}\n`));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 3);
+
+    proc.stdout.emit("data", Buffer.from("b-failed\n"));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 2);
+    assert.equal(lastActivity(sent).detail, "Waiting for 2 background tasks", "a quiet turn re-states what is still outstanding");
+
+    proc.stdout.emit("data", Buffer.from("zz-done\n"));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 2, "a notification for a task this process never started is ignored");
+    assert.equal(lastActivity(sent).detail, "Waiting for 2 background tasks", "the count is re-stated unchanged");
+
+    proc.stdout.emit("data", Buffer.from("c-stopped\n"));
+    proc.stdout.emit("data", Buffer.from("c-stopped\n"));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 1, "a repeated notification is not double-counted");
+    assert.equal(lastActivity(sent).detail, "Waiting for 1 background task");
+
+    proc.stdout.emit("data", Buffer.from("a-done\n"));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 0);
+    assert.equal(lastActivity(sent).detail, "Idle");
+  });
+});
+
+test("task #1260: a notification without a confirmed terminal status keeps the task outstanding (reviewer counterexample)", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    driver.parsedLines.set("a-start", subagentLine("started", "task_a"));
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.parsedLines.set("a-unknown", subagentLine("notification", "task_a"));
+    driver.parsedLines.set("a-done", subagentLine("notification", "task_a", { taskStatus: "completed" }));
+    const proc = driver.processes[0];
+    const ap = (manager as any).agents.get("agent-1");
+
+    for (const line of ["a-start", "turn-end", "a-unknown"]) proc.stdout.emit("data", Buffer.from(`${line}\n`));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 1, "the envelope's name is not completion evidence");
+    assert.equal(lastActivity(sent).detail, "Waiting for 1 background task");
+    assert.equal(activityMessages(sent).filter((m) => m.detail === "Idle").length, 0);
+
+    proc.stdout.emit("data", Buffer.from("a-done\n"));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 0);
+    assert.equal(lastActivity(sent).detail, "Idle");
+  });
+});
+
+test("task #1260: the last notification does not overwrite a turn the main agent has already started", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    driver.parsedLines.set("a-start", subagentLine("started", "task_a"));
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.parsedLines.set("new-turn-text", [{ kind: "text", text: "picking the results up" }]);
+    driver.parsedLines.set("a-done", subagentLine("notification", "task_a", { taskStatus: "completed" }));
+    const proc = driver.processes[0];
+    const ap = (manager as any).agents.get("agent-1");
+
+    for (const line of ["a-start", "turn-end", "new-turn-text", "a-done"]) proc.stdout.emit("data", Buffer.from(`${line}\n`));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 0);
+    assert.notEqual(ap.runtimeTraceSpan, null, "the new turn is open");
+    assert.notEqual(lastActivity(sent).detail, "Idle", "no Idle while a turn is open");
+    assert.equal(activityMessages(sent).filter((m) => m.detail === "Idle").length, 0);
+
+    // The open turn ends normally with nothing outstanding: Idle, as always.
+    proc.stdout.emit("data", Buffer.from("turn-end\n"));
+    await flush();
+    assert.equal(lastActivity(sent).detail, "Idle");
+  });
+});
+
+test("task #1260: a restart forgets the old process's background tasks; its late notification cannot reach the new one", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    driver.parsedLines.set("a-start", subagentLine("started", "task_a"));
+    driver.parsedLines.set("turn-end", [{ kind: "turn_end", sessionId: "session-1" }]);
+    driver.parsedLines.set("a-done", subagentLine("notification", "task_a", { taskStatus: "completed" }));
+    const first = driver.processes[0];
+    first.stdout.emit("data", Buffer.from("a-start\n"));
+    first.stdout.emit("data", Buffer.from("turn-end\n"));
+    await flush();
+    assert.equal(lastActivity(sent).detail, "Waiting for 1 background task");
+
+    await manager.stopAgent("agent-1");
+    await flush();
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    const ap = (manager as any).agents.get("agent-1");
+    assert.equal(ap.backgroundTasks.size, 0, "a fresh process record starts with no background tasks");
+    const second = driver.processes[1];
+    second.stdout.emit("data", Buffer.from("turn-end\n"));
+    await flush();
+    assert.equal(lastActivity(sent).detail, "Idle", "no residue from the previous process");
+
+    // A notification the old process emits late (e.g. during teardown) is addressed to the old record.
+    first.stdout.emit("data", Buffer.from("a-done\n"));
+    await flush();
+    assert.equal(ap.backgroundTasks.size, 0);
+    assert.equal(lastActivity(sent).detail, "Idle");
+  });
+});
+
+// task #379 — Claude Code's usage-limit reply is a structured provider limit
+// (see claudeEventNormalizer). Field sample (KopiC, #proj-runtime:f0eadc47):
+// each turn was one synthetic quota error plus turn_end, and the generic
+// `runtime_error` backoff cleared at every turn_end, so each delivery and
+// reminder immediately started another empty turn for 15 hours.
+const QUOTA_TEXT_379 = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai.";
+
+async function emitTurn(
+  driver: { parsedLines: Map<string, unknown[]>; processes: Array<{ stdout: { emit: (event: string, data: Buffer) => void } }> },
+  line: string,
+  events: unknown[],
+) {
+  driver.parsedLines.set(line, events);
+  driver.processes[0]!.stdout.emit("data", Buffer.from(`${line}\n`));
+  await flush();
+}
+
+test("task #379: a used-up quota takes the rate-limit backoff, which survives turn_end and holds deliveries", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    await emitTurn(driver as never, "quota-turn", [
+      { kind: "error", message: QUOTA_TEXT_379, providerLimit: { kind: "quota_exhausted" } },
+      { kind: "turn_end", sessionId: "session-1" },
+    ]);
+
+    const ap = getProcess(manager, "agent-1");
+    assert.ok(ap, "a used-up quota keeps the runtime process (recoverable, not terminal)");
+    assert.equal(ap.runtimeErrorDeliveryBackoff.kind, "backing_off", "turn_end must not clear the quota backoff");
+    assert.equal(ap.runtimeErrorDeliveryBackoff.reason, "rate_limited");
+
+    const writesBefore = driver.encodedCalls.length;
+    const accepted = await manager.deliverMessage(
+      "agent-1",
+      makeMessage("delivery during quota backoff", { message_id: "msg-quota", seq: 379 }),
+      { deliveryId: "delivery-quota" },
+    );
+    assert.equal(accepted, true);
+    assert.equal(driver.encodedCalls.length, writesBefore, "a delivery during the backoff waits instead of starting another empty turn");
+    assert.equal(getProcess(manager, "agent-1").inbox.length, 1);
+
+    assert.equal(sent.some((m) => m.type === "agent:status" && (m as { status?: string }).status === "inactive"), false);
+    const errorActivity = sent
+      .filter((msg): msg is Extract<MachineToServerMessage, { type: "agent:activity" }> => msg.type === "agent:activity")
+      .filter((msg) => projectTestActivity(msg) === "error")
+      .at(-1);
+    assert.match(errorActivity?.detail ?? "", /reached your Fable limit/);
+    assert.doesNotMatch(errorActivity?.detail ?? "", /resets at/, "no reset time is invented when the runtime did not report one");
+    // The typed carrier names the limit the runtime reported, not an unclassified error.
+    const carrier = sent
+      .filter((msg): msg is Extract<MachineToServerMessage, { type: "agent:activity" }> => msg.type === "agent:activity")
+      .find((msg) => msg.runtimeError)?.runtimeError;
+    assert.equal(carrier?.errorClass, "RateLimitError");
+    assert.equal(carrier?.errorReason, "rate_limited");
+  });
+});
+
+test("task #379: a runtime-reported reset time reaches the visible error", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    await emitTurn(driver as never, "quota-reset", [
+      { kind: "error", message: QUOTA_TEXT_379, providerLimit: { kind: "quota_exhausted", resetsAt: "2026-10-14T00:00:00.000Z" } },
+    ]);
+    const errorActivity = sent
+      .filter((msg): msg is Extract<MachineToServerMessage, { type: "agent:activity" }> => msg.type === "agent:activity")
+      .filter((msg) => projectTestActivity(msg) === "error")
+      .at(-1);
+    assert.match(errorActivity?.detail ?? "", /limit resets at 2026-10-14T00:00:00\.000Z/);
+  });
+});
+
+test("task #379: a transient throttle takes the same recoverable backoff and never goes terminal", async () => {
+  await withManager(async ({ driver, manager, sent }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    // Wording the text classifier does not know: only the structured
+    // classification can route it to the rate-limit backoff.
+    const throttle = { kind: "error", message: "Slow down a little, then send again.", providerLimit: { kind: "transient_rate_limit" } };
+    for (let i = 0; i < 4; i += 1) {
+      await emitTurn(driver as never, `throttle-${i}`, [throttle, { kind: "turn_end", sessionId: "session-1" }]);
+    }
+    assert.equal(getProcess(manager, "agent-1").runtimeErrorDeliveryBackoff.reason, "rate_limited");
+    assert.equal(sent.some((m) => m.type === "agent:status" && (m as { status?: string }).status === "inactive"), false);
+  });
+});
+
+test("task #379: real progress after the quota resets clears the backoff", async () => {
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    await emitTurn(driver as never, "quota-before-recovery", [
+      { kind: "error", message: QUOTA_TEXT_379, providerLimit: { kind: "quota_exhausted" } },
+      { kind: "turn_end", sessionId: "session-1" },
+    ]);
+    assert.equal(getProcess(manager, "agent-1").runtimeErrorDeliveryBackoff.kind, "backing_off");
+    await emitTurn(driver as never, "recovered", [{ kind: "text", text: "Back to work." }]);
+    assert.equal(getProcess(manager, "agent-1").runtimeErrorDeliveryBackoff.kind, "idle");
+  });
+});
+
+test("task #379: an unclassified runtime error keeps today's backoff that turn_end clears (control)", async () => {
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-1", makeConfig({ sessionId: "session-1" }));
+    await flush();
+    await emitTurn(driver as never, "generic", [
+      { kind: "error", message: QUOTA_TEXT_379 },
+      { kind: "turn_end", sessionId: "session-1" },
+    ]);
+    assert.equal(getProcess(manager, "agent-1").runtimeErrorDeliveryBackoff.kind, "idle", "without the structured limit the same text keeps the old runtime_error behaviour");
   });
 });

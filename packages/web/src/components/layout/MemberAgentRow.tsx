@@ -1,8 +1,9 @@
 import { memo, useCallback } from "react";
-import { SidebarItem } from "raft-ui";
+import { SidebarItem, SidebarItemContent, SidebarItemSubtitle, SidebarItemTitle } from "@botiverse/raft-ui";
+import { isExternalAgentRuntime } from "@botiverse/raft-shared";
 import type { Agent } from "../../store/agentStore";
 import AvatarSlot from "../ui/AvatarSlot";
-import { SidebarAgentActivityBadge, sidebarItemClass } from "./Sidebar";
+import { SIDEBAR_ROW_TRAILING_CLASS, SidebarAgentActivityBadge, SidebarAgentMeta, sidebarItemClass } from "./Sidebar";
 import type { SidebarCtxKind, SidebarLongPress } from "./Sidebar";
 
 // Members-tab agent entity row. Builds its own handlers from stable parent
@@ -41,7 +42,7 @@ export const MemberAgentRow = memo(function MemberAgentRow({
     [agent.id, onContextMenu],
   );
   return (
-    <SidebarItem variant="accent"
+    <SidebarItem
       data-agent-id={agent.id}
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
@@ -57,12 +58,21 @@ export const MemberAgentRow = memo(function MemberAgentRow({
         agentAvatarUrl={agent.avatarUrl}
         badge={<SidebarAgentActivityBadge agentId={agent.id} />}
       />
-      <div className="flex min-w-0 flex-1 items-baseline gap-1 text-left">
-        <span className="min-w-0 truncate text-sm">{agent.displayName || agent.name}</span>
+      {/* raft-ui's row content, as every sidebar row: one line, an ellipsis. */}
+      <SidebarItemContent>
+        <SidebarItemTitle>{agent.displayName || agent.name}</SidebarItemTitle>
         {agent.description && (
-          <span className="min-w-0 flex-1 truncate text-xs text-foreground-muted theme-brutal:text-black/40">{agent.description}</span>
+          <SidebarItemSubtitle data-sidebar-row-description="">{agent.description}</SidebarItemSubtitle>
         )}
-      </div>
+      </SidebarItemContent>
+      {/* Runtime in mono, or what it is doing while it works (DS `rf-srow__meta`). */}
+      <span className={SIDEBAR_ROW_TRAILING_CLASS}>
+        <SidebarAgentMeta
+          agentId={agent.id}
+          runtime={agent.runtime}
+          external={agent.external === true || isExternalAgentRuntime(agent.runtime)}
+        />
+      </span>
     </SidebarItem>
   );
 });

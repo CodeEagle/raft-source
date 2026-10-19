@@ -185,6 +185,8 @@ test("integration app prepare register posts sanitized action-card request", asy
               category: "Developer Tools",
               homepageUrl: "https://demo.example",
               returnUrl: "https://demo.example/auth/raft/callback",
+              setupUrl: "https://demo.example/setup",
+              setupDescription: "Choose a repository",
               scopes: ["email", "openid", "profile"],
             },
           },
@@ -201,6 +203,8 @@ test("integration app prepare register posts sanitized action-card request", asy
     redirectUrl: "https://demo.example/auth/raft/callback",
     scope: ["openid profile", "email"],
     target: "#proj-auth",
+    setupUrl: "https://demo.example/setup",
+    setupDescription: "Choose a repository",
   });
 
   assert.deepEqual(requests, [
@@ -217,6 +221,8 @@ test("integration app prepare register posts sanitized action-card request", asy
         homepageUrl: "https://demo.example",
         returnUrl: "https://demo.example/auth/raft/callback",
         agentManifestUrl: undefined,
+        setupUrl: "https://demo.example/setup",
+        setupDescription: "Choose a repository",
         scopes: ["email", "openid profile"],
         unsafeDemoUrlOverride: false,
       },

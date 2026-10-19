@@ -34,7 +34,7 @@ export function AgentDMConversationCard({ item }: { item: AgentDMConversation })
         { name: item.peerDisplayName || item.peerName },
       )}
       title={formatMessage({ id: "agent.dmConversation.activityTitle" })}
-      footer={<span className="text-[11px] font-mono uppercase tracking-wide text-black/45">{formatMessage({ id: "agent.dmConversation.activityOnly" })}</span>}
+      footer={<span className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "agent.dmConversation.activityOnly" })}</span>}
     />
   );
 }

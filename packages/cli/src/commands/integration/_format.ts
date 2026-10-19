@@ -1,8 +1,11 @@
 import { axSurface } from "../../core/renderer";
+import type {
+  AgentLoginIntegrationInventoryProjection,
+  AppSetupState,
+} from "@botiverse/raft-shared";
 import {
   AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION,
-  type AgentLoginIntegrationInventoryProjection,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 export interface RegisteredIntegrationService {
   id: string;
@@ -15,6 +18,9 @@ export interface RegisteredIntegrationService {
   agentManifestUrl: string | null;
   agentManifestUrlSource?: "explicit" | "well_known" | null;
   allowedScopes?: string[];
+  setupUrl?: string | null;
+  setupDescription?: string | null;
+  setup?: AppSetupState | null;
   createdAt: string;
   updatedAt: string;
   /** Set by the platform's official-app judgment (contract rev3.1), never by the app. Absent/false = ordinary service. */
@@ -116,6 +122,10 @@ function pushServiceBlock(
     lines.push(`  local CLI env: raft integration env --service ${JSON.stringify(service.clientId)}`);
     lines.push(`  for login_with_raft HTTP API action manifests: raft integration invoke --service ${JSON.stringify(service.clientId)} --list-actions`);
   }
+  if (service.setup) {
+    lines.push(`  installation setup: ${service.setup.status}`);
+    if (service.setup.url) lines.push(`  setup link for a Server administrator: ${service.setup.url}`);
+  } else if (service.setupUrl) lines.push("  post-install setup: required");
   if (service.homepageUrl) lines.push(`  homepage: ${service.homepageUrl}`);
   if (service.description) lines.push(`  description: ${service.description}`);
   // Contract rev3.1 §4b: the `official` mark is platform-set, never app-supplied, and
@@ -196,6 +206,7 @@ export const formatIntegrationLogin = axSurface(
       `next action: ${data.nextAction ?? "install_from_marketplace"}`,
       `marketplace: ${data.installation?.marketplaceUrl ?? "-"}`,
     ];
+    if (data.service.setupUrl) lines.push("post-install configuration is required; an administrator can continue from the installed App details");
     if (data.installation?.actionCardMessageId) {
       lines.push(`install card: ${data.installation.actionCardMessageId}`);
       lines.push(`target: ${data.installation.target ?? "-"}`);
@@ -240,6 +251,10 @@ export const formatIntegrationLogin = axSurface(
     lines.push(`for login_with_raft HTTP API action manifests: raft integration invoke --service ${JSON.stringify(data.service.clientId)} --list-actions`);
   }
   lines.push("grant: this agent is authorized in Raft; application authentication has not been verified");
+  if (data.service.setup) {
+    lines.push(`installation setup: ${data.service.setup.status}`);
+    if (data.service.setup.url) lines.push(`setup link for a Server administrator: ${data.service.setup.url}`);
+  }
   lines.push("identity: run `raft profile show` if the service or human asks for your Raft Agent identity card");
   if (data.session) {
     lines.push("session: callback cookies stored for this agent; application authentication unverified");

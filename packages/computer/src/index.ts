@@ -180,6 +180,10 @@ export async function bootstrapThenRun(
     const { runBundledRaftCli } = await import("@botiverse/raft-daemon/bundled-cli");
     await runBundledRaftCli(cliArgv);
   },
+  runRuntimeDetectionChild: () => Promise<number> = async () => {
+    const { runRuntimeDetectionChildMain } = await import("@botiverse/raft-daemon/runtime-detection-child");
+    return runRuntimeDetectionChildMain();
+  },
 ): Promise<void> {
   const legacyInvocation = parseLegacyOsSupervisorInvocation(argv);
   if (legacyInvocation) {
@@ -200,6 +204,12 @@ export async function bootstrapThenRun(
   // daemon core first cost ~0.3 GiB and seconds per call.
   if (argv[2] === "__cli") {
     await runBundledCli(argv.slice(3));
+    return;
+  }
+  // task #1268: `<exe> __detect-runtimes` is the runtime detection child the
+  // hosted daemon spawns for one detection round (streams JSON lines, exits).
+  if (argv[2] === "__detect-runtimes") {
+    process.exitCode = await runRuntimeDetectionChild();
     return;
   }
   await bootstrapSupervisedServiceEnv(argv, env, capture);
