@@ -823,6 +823,11 @@ function unsupportedInitializeResultMessage(): string {
 export class CodexDriver implements RuntimeDriver {
   readonly id = "codex";
   readonly workspaceExecutionSandboxModes = ["read-only", "workspace-write"] as const;
+  delegationCapabilities() {
+    // Describes this adapter's enforced workspace profile, not Git/Docker/ports or a coordinator tool gate.
+    return { adapter: this.id, observedAt: new Date().toISOString(), enforcement: "advisory" as const,
+      capabilities: { "workspace.write": "supported" as const } };
+  }
   readonly lifecycle = {
     kind: "persistent",
     stdin: "direct",

@@ -13,6 +13,7 @@ import { asAxSurfaceText, type AxSurfaceText,
   AGENT_MIGRATION_RESUMABLE_PROTOCOL,
   COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS,
   DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
+  DAEMON_CAPABILITY_DELEGATION_V1,
   SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1,
   SERVER_CAPABILITY_START_SPAWN_ERROR_V1,
   createTraceScopeTracer,
@@ -4892,6 +4893,7 @@ test("RFC 071: DaemonCore advertises runtime outcomes, acks processInstanceId on
     await waitFor(() => sentOfType(socket, "ready").length > 0, "ready");
     const ready = sentOfType(socket, "ready")[0]!;
     assert.equal(ready.capabilities?.includes(DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1), true);
+    assert.equal(ready.capabilities?.includes(DAEMON_CAPABILITY_DELEGATION_V1), true);
     assert.ok(ready.daemonInstanceId);
 
     socket.emitServerMessage({

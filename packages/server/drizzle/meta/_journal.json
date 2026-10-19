@@ -2381,6 +2381,13 @@
       "when": 1792343294410,
       "tag": "0339_channel_workspace_task_path_snapshot",
       "breakpoints": true
+    },
+    {
+      "idx": 340,
+      "version": "7",
+      "when": 1792395629764,
+      "tag": "0340_delegation_records",
+      "breakpoints": true
     }
   ]
 }

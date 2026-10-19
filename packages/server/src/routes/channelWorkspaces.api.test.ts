@@ -1,3 +1,4 @@
+import { DAEMON_CAPABILITY_DELEGATION_V1, type DelegationRecord, type DelegationOutcome } from "@botiverse/raft-shared";
 import { randomUUID } from "node:crypto";
 import assert from "node:assert/strict";
 import { and, asc, eq } from "drizzle-orm";
@@ -253,7 +254,7 @@ test("worker lifecycle updates advance the canonical task to review and persist 
     }),
   });
   assert.equal(response.status, 200);
-  const created = await response.json() as { run: { id: string }; task: { id: string } };
+  const created = await response.json() as { run: { id: string; delegation?: DelegationRecord }; task: { id: string } };
 
   const orchestrator = new AgentOrchestrator();
   (orchestrator as any).validateMachineAgentMessage = async () => f.agent;
@@ -264,6 +265,8 @@ test("worker lifecycle updates advance the canonical task to review and persist 
     taskId: created.task.id,
     status,
     leaseId: "worker-lease-1",
+    ...(created.run.delegation ? { delegationAttemptId: created.run.delegation.contract.attemptId } : {}),
+    ...(status === "succeeded" ? { workerOutcome: { version: 1, kind: "completed", summary: detail! } } : {}),
     ...(status === "running" ? { workerPid: 4567 } : {}),
     ...(detail ? { detail } : {}),
   });
@@ -313,7 +316,7 @@ test("terminal cancellation callbacks reconcile the server run and ignore late n
     }),
   });
   assert.equal(response.status, 200);
-  const created = await response.json() as { run: { id: string }; task: { id: string } };
+  const created = await response.json() as { run: { id: string; delegation?: DelegationRecord }; task: { id: string } };
 
   const orchestrator = new AgentOrchestrator();
   (orchestrator as any).validateMachineAgentMessage = async () => f.agent;
@@ -335,6 +338,7 @@ test("terminal cancellation callbacks reconcile the server run and ignore late n
     taskId: created.task.id,
     status,
     leaseId: "cancel-reconcile-lease",
+    ...(created.run.delegation ? { delegationAttemptId: created.run.delegation.contract.attemptId } : {}),
     ...(status === "running" ? { workerPid: 9876 } : {}),
     ...(detail ? { detail } : {}),
   });
@@ -465,4 +469,77 @@ test("workspace alias and parent-child overlaps are refused after target Compute
   });
   assert.equal(response.status, 409);
   assert.equal((await response.json() as { code: string }).code, "workspace_path_overlap");
+});
+
+test("blocked delegation persists typed checkpoint, rejects replay and continues only its authenticated owner", async ({ app }) => {
+  const f = await fixture("DelegationContinuation");
+  app.app.set("io", undefined);
+  let dispatchCount = 0;
+  app.app.set("agentOrchestrator", {
+    validateMachineWorkspacePath: async (_id: string, requestedPath: string) => ({ requestedPath, canonicalPath: requestedPath, status: "available" }),
+    hasMachineLocally: () => true,
+    dispatchChannelWorkspaceTask: async () => { dispatchCount++; return true; },
+    cancelChannelWorkspaceTask: async () => true,
+  });
+  const url = `${app.baseUrl}/api/channels/${f.channel.id}/workspaces/${f.agent.id}`;
+  const configResponse = await fetch(url, { method: "PUT", headers: headers(f.owner.id, f.server.id), body: JSON.stringify({ expectedRevision: 0, bindings: [{ machineId: f.machine.id, path: "/workspace/continuation", mode: "writer" }] }) });
+  assert.equal(configResponse.status, 200);
+  const config = await configResponse.json() as { bindings: Array<{ workspaceId: string }> };
+  const request = { workspaceId: config.bindings[0].workspaceId, instruction: "Implement, commit and verify", idempotencyKey: randomUUID(), delegation: { mode: "delegated" } };
+  const hard = await fetch(`${url}/tasks`, { method: "POST", headers: headers(f.owner.id, f.server.id), body: JSON.stringify({ ...request, delegation: { mode: "delegate_required" } }) });
+  assert.equal(hard.status, 409);
+  assert.equal((await hard.json() as { code: string }).code, "delegation_enforcement_unsupported");
+  const response = await fetch(`${url}/tasks`, { method: "POST", headers: headers(f.owner.id, f.server.id), body: JSON.stringify(request) });
+  assert.equal(response.status, 200);
+  const created = await response.json() as { run: { id: string; delegation: DelegationRecord }; task: { id: string } };
+  const orchestrator = new AgentOrchestrator();
+  (orchestrator as any).validateMachineAgentMessage = async () => f.agent;
+  const frames: Array<{ run: { delegation?: DelegationRecord } }> = [];
+  const conn = { serverId: f.server.id, lastPong: Date.now(), lastIngressAt: Date.now(), capabilities: new Set<string>(), ws: { readyState: 1, send: (raw: string) => frames.push(JSON.parse(raw)) } };
+  (orchestrator as any).machineConnections.set(f.machine.id, conn);
+  assert.equal(await orchestrator.dispatchChannelWorkspaceTask(created.run.id), false, "an older daemon cannot ignore the contract");
+  assert.equal(frames.length, 0);
+  conn.capabilities.add(DAEMON_CAPABILITY_DELEGATION_V1);
+  assert.equal(await orchestrator.dispatchChannelWorkspaceTask(created.run.id), true);
+  assert.equal(frames[0].run.delegation?.contract.attemptId, created.run.delegation.contract.attemptId);
+  const outcome: DelegationOutcome = { version: 1, kind: "needs_operation", summary: "Commit needs capability", operation: { capability: "git.commit", description: "Commit prepared changes", reason: "policy_denied" }, checkpoint: { id: "checkpoint-1", stateFingerprint: "tree-abc", completed: ["implemented"], remaining: ["verify commit"] } };
+  const update = { type: "agent:workspace:task:update", agentId: f.agent.id, runId: created.run.id, taskId: created.task.id, leaseId: "lease-one", delegationAttemptId: created.run.delegation.contract.attemptId };
+  await orchestrator.handleMachineMessage(f.machine.id, { ...update, status: "running", workerPid: 123 } as never);
+  await orchestrator.handleMachineMessage(f.machine.id, { ...update, status: "succeeded", detail: "Done without structured outcome" } as never);
+  let [stored] = await getDb().select().from(channelWorkspaceTaskRuns).where(eq(channelWorkspaceTaskRuns.id, created.run.id));
+  assert.equal(stored.status, "running", "prose alone cannot become success");
+  await orchestrator.handleMachineMessage(f.machine.id, { ...update, status: "blocked", workerOutcome: outcome, detail: outcome.summary } as never);
+  [stored] = await getDb().select().from(channelWorkspaceTaskRuns).where(eq(channelWorkspaceTaskRuns.id, created.run.id));
+  assert.equal(stored.status, "blocked");
+  assert.deepEqual(stored.delegation?.outcome, outcome);
+  const [task] = await getDb().select().from(tasks).where(eq(tasks.id, created.task.id));
+  assert.equal(task.status, "in_progress");
+  assert.equal(await orchestrator.dispatchChannelWorkspaceTask(stored.id), false, "reconnect must not replay blocked effects");
+  const retryUrl = `${url}/tasks/${stored.id}/retry`;
+  const post = (body: unknown) => fetch(retryUrl, { method: "POST", headers: headers(f.owner.id, f.server.id), body: JSON.stringify(body) });
+  assert.equal((await post({})).status, 409);
+  const continuation = { previousAttemptId: created.run.delegation.contract.attemptId, checkpointId: "checkpoint-1", workerId: f.agent.id, receipt: "Authorized exact operation completed; tree verified" };
+  assert.equal((await post({ continuation: { ...continuation, workerId: "other-worker" } })).status, 409);
+  assert.equal((await fetch(retryUrl, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ continuation }) })).status, 401);
+  for (const status of ["todo", "in_review", "done"] as const) {
+    await getDb().update(tasks).set({ status }).where(eq(tasks.id, created.task.id));
+    assert.equal((await post({ continuation })).status, 409, `cannot continue a ${status} task`);
+  }
+  await getDb().update(tasks).set({ status: "in_progress", claimedById: null, claimedByType: null }).where(eq(tasks.id, created.task.id));
+  assert.equal((await post({ continuation })).status, 409, "unclaimed work cannot continue under old ownership");
+  await getDb().update(tasks).set({ claimedById: f.agent.id, claimedByType: "agent" }).where(eq(tasks.id, created.task.id));
+  const resumed = await post({ continuation });
+  assert.equal(resumed.status, 200);
+  [stored] = await getDb().select().from(channelWorkspaceTaskRuns).where(eq(channelWorkspaceTaskRuns.id, created.run.id));
+  assert.equal(stored.status, "queued");
+  assert.notEqual(stored.delegation?.contract.attemptId, update.delegationAttemptId);
+  assert.equal(stored.delegation?.contract.workerId, f.agent.id);
+  assert.deepEqual(stored.delegation?.continuation?.checkpoint, outcome.checkpoint);
+  assert.equal(dispatchCount, 2);
+  assert.equal((await post({ continuation })).status, 409, "checkpoint receipt cannot be consumed twice");
+  await orchestrator.handleMachineMessage(f.machine.id, { ...update, status: "succeeded", workerOutcome: { version: 1, kind: "completed", summary: "late old attempt" } } as never);
+  [stored] = await getDb().select().from(channelWorkspaceTaskRuns).where(eq(channelWorkspaceTaskRuns.id, created.run.id));
+  assert.equal(stored.status, "queued", "old attempt cannot finish a continuation");
+  const conflict = await fetch(`${url}/tasks`, { method: "POST", headers: headers(f.owner.id, f.server.id), body: JSON.stringify({ ...request, delegation: { requiredCapabilities: ["docker.run"] } }) });
+  assert.equal(conflict.status, 409);
 });

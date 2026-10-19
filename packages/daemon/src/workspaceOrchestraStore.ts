@@ -1,3 +1,4 @@
+import { delegationRecordSchema, assertDelegationContinuation, type DelegationRecord, type DelegationOutcome } from "@botiverse/raft-shared";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -10,9 +11,11 @@ export type WorkspaceOrchestraJobStatus =
   | "uncertain"
   | "succeeded"
   | "failed"
-  | "cancelled";
+  | "cancelled"
+  | "blocked";
 
 export interface EnqueueWorkspaceOrchestraJob {
+  delegation?: DelegationRecord;
   /** Stable server-side run id; omitted only by compatibility callers. */
   id?: string;
   serverId: string;
@@ -105,7 +108,7 @@ function dedupeKey(input: Pick<EnqueueWorkspaceOrchestraJob, "serverId" | "messa
 }
 
 function cloneJob(job: WorkspaceOrchestraJob): WorkspaceOrchestraJob {
-  return { ...job };
+  return structuredClone(job);
 }
 
 function validateEnqueueInput(input: EnqueueWorkspaceOrchestraJob): void {
@@ -168,11 +171,31 @@ export class WorkspaceOrchestraStore {
 
   enqueue(input: EnqueueWorkspaceOrchestraJob): { job: WorkspaceOrchestraJob; duplicate: boolean } {
     validateEnqueueInput(input);
+    if (input.delegation) {
+      delegationRecordSchema.parse(input.delegation);
+      const c = input.delegation.contract;
+      if (c.taskId !== input.taskId || c.runId !== input.id || c.workerId !== input.agentId
+        || c.resource.id !== input.workspaceId || c.resource.revision !== input.workspaceRevision || c.resource.root !== input.canonicalWorkspacePath) {
+        throw new Error("delegation_dispatch_identity_mismatch");
+      }
+    }
     const key = dedupeKey(input);
     const existing = this.state.jobs.find((job) => job.dedupeKey === key);
     if (existing) {
+      if (Boolean(input.delegation) !== Boolean(existing.delegation)) throw new Error("delegation_contract_presence_mismatch");
+      if (input.delegation && existing.delegation && input.delegation.contract.attemptId === existing.delegation.contract.attemptId
+        && JSON.stringify(input.delegation.contract) !== JSON.stringify(existing.delegation.contract)) throw new Error("delegation_contract_conflict");
+      if (input.delegation && existing.delegation && input.delegation.contract.attemptId !== existing.delegation.contract.attemptId) {
+        if (existing.status !== "blocked" || existing.cancelRequested) throw new Error("delegation_run_not_continuable");
+        assertDelegationContinuation(existing.delegation, input.delegation);
+        if (existing.machineId !== input.machineId || existing.channelId !== input.channelId || existing.canonicalWorkspacePath !== input.canonicalWorkspacePath || existing.workspaceRevision !== input.workspaceRevision) throw new Error("delegation_resource_changed");
+        Object.assign(existing, { delegation: structuredClone(input.delegation), instruction: input.instruction, status: "queued", leaseId: null, pid: null, processInstanceId: null, outcome: null, updatedAt: this.now().toISOString() });
+        this.persist();
+        return { job: cloneJob(existing), duplicate: false };
+      }
       if (
         existing.taskId !== input.taskId
+        || existing.instruction !== input.instruction
         || existing.workspaceId !== input.workspaceId
         || existing.requestedPath !== input.requestedPath
         || existing.canonicalWorkspacePath !== input.canonicalWorkspacePath
@@ -180,12 +203,16 @@ export class WorkspaceOrchestraStore {
       ) {
         throw new Error("Duplicate Channel workspace request conflicts with its persisted task or binding revision");
       }
+      if (existing.status === "blocked" && !existing.cancelRequested && !existing.delegation?.outcome) {
+        Object.assign(existing, { status: "queued", leaseId: null, pid: null, processInstanceId: null });
+        this.persist();
+      }
       return { job: cloneJob(existing), duplicate: true };
     }
 
     const now = this.now().toISOString();
     const job: WorkspaceOrchestraJob = {
-      ...input,
+      ...structuredClone(input),
       id: input.id ?? randomUUID(),
       dedupeKey: key,
       status: "queued",
@@ -238,7 +265,7 @@ export class WorkspaceOrchestraStore {
   requestCancel(jobId: string): WorkspaceOrchestraJob {
     const job = this.state.jobs.find((candidate) => candidate.id === jobId);
     if (!job) throw new Error("Channel workspace task was not found");
-    if (job.status === "queued") {
+    if (job.status === "queued" || job.status === "blocked") {
       job.status = "cancelled";
       job.cancelRequested = true;
       job.outcome = "cancelled_before_start";
@@ -257,12 +284,19 @@ export class WorkspaceOrchestraStore {
   finish(
     jobId: string,
     leaseId: string,
-    outcome: "succeeded" | "failed" | "cancelled",
+    outcome: "succeeded" | "failed" | "cancelled" | "blocked",
     detail: string,
     processStoppedConfirmed: boolean,
+    workerOutcome?: DelegationOutcome,
   ): WorkspaceOrchestraJob {
     const job = this.requireLease(jobId, leaseId);
+    if (job.delegation && ((outcome === "succeeded" && workerOutcome?.kind !== "completed")
+      || (outcome === "blocked" && job.pid !== null && workerOutcome?.kind !== "needs_operation"))) {
+      outcome = "failed";
+      detail = "invalid_delegation_worker_result";
+    }
     job.updatedAt = this.now().toISOString();
+    if (workerOutcome && job.delegation) job.delegation = delegationRecordSchema.parse({ ...job.delegation, outcome: workerOutcome });
     job.outcome = detail.slice(0, 4000);
     if (!processStoppedConfirmed) {
       job.status = "uncertain";
@@ -270,7 +304,7 @@ export class WorkspaceOrchestraStore {
       this.persist();
       return cloneJob(job);
     }
-    job.status = outcome;
+    job.status = job.cancelRequested ? "cancelled" : outcome;
     this.persist();
     return cloneJob(job);
   }
@@ -325,6 +359,9 @@ export class WorkspaceOrchestraStore {
       const parsed = JSON.parse(readFileSync(this.statePath, "utf8")) as Partial<WorkspaceOrchestraState>;
       if (parsed.schemaVersion !== 1 || !Array.isArray(parsed.jobs)) {
         throw new Error("Channel workspace orchestra state has an unsupported schema");
+      }
+      for (const job of parsed.jobs) {
+        if (job.delegation !== undefined) delegationRecordSchema.parse(job.delegation);
       }
       return parsed as WorkspaceOrchestraState;
     } catch (error) {

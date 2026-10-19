@@ -1,3 +1,4 @@
+import type { DelegationCapabilities } from "@botiverse/raft-shared";
 import type { ChildProcess } from "node:child_process";
 import path from "node:path";
 import type { RuntimeCompactionInterruption } from "@botiverse/raft-shared";
@@ -466,6 +467,7 @@ export interface RuntimeDriver {
   readonly id: string;
 
   /** Sandbox modes the driver actually applies at its execution boundary. */
+  delegationCapabilities?(workingDirectory: string): DelegationCapabilities;
   readonly workspaceExecutionSandboxModes?: readonly WorkspaceExecutionProfile["sandbox"][];
 
   /** Structured lifecycle policy. */

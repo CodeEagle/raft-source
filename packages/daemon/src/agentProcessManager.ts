@@ -1,3 +1,4 @@
+import { delegationCapabilityBlocker, resolveDelegationWorkerResult, type DelegationOutcome } from "@botiverse/raft-shared";
 import type { AgentApiHistoryConsumptionScope } from "@botiverse/raft-shared";
 import { readFileSync, rmSync } from "node:fs";
 import { lstat, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
@@ -1825,6 +1826,7 @@ export class AgentProcessManager {
             ...(job.leaseId ? { leaseId: job.leaseId } : {}),
             ...(job.pid ? { workerPid: job.pid } : {}),
             ...(job.outcome ? { detail: job.outcome.slice(0, 4000) } : {}),
+            ...(job.delegation ? { delegationAttemptId: job.delegation.contract.attemptId, workerOutcome: job.delegation.outcome } : {}),
           });
         },
       );
@@ -1846,6 +1848,7 @@ export class AgentProcessManager {
         taskId: input.taskId,
         status,
         detail: detail.slice(0, 1000),
+        ...(input.delegation ? { delegationAttemptId: input.delegation.contract.attemptId } : {}),
       });
     };
     const executor = this.workspaceOrchestraExecutor;
@@ -1890,6 +1893,7 @@ export class AgentProcessManager {
         canonicalWorkspacePath: input.canonicalWorkspacePath,
         workspaceRevision: input.workspaceRevision,
         instruction: input.instruction,
+        delegation: input.delegation,
       }, conversation);
       return { job, duplicate };
     } catch (error) {
@@ -1939,6 +1943,7 @@ export class AgentProcessManager {
         ...(job.leaseId ? { leaseId: job.leaseId } : {}),
         ...(job.pid ? { workerPid: job.pid } : {}),
         ...(job.outcome ? { detail: job.outcome.slice(0, 4000) } : {}),
+        ...(job.delegation ? { delegationAttemptId: job.delegation.contract.attemptId, workerOutcome: job.delegation.outcome } : {}),
       });
     }
   }
@@ -1964,8 +1969,20 @@ export class AgentProcessManager {
     if (!policy || policy.revision < job.workspaceRevision) {
       return { outcome: "failed", detail: "conversation_restart_required_for_read_only_policy", processStoppedConfirmed: true };
     }
+    const currentPath = await validateWritableWorkspacePath(job.requestedPath ?? job.canonicalWorkspacePath, job.canonicalWorkspacePath);
+    if (currentPath.status !== "available" || currentPath.canonicalPath !== job.canonicalWorkspacePath) {
+      return { outcome: "blocked", detail: `workspace_revalidation_${currentPath.status}`, processStoppedConfirmed: true };
+    }
+    if (control.signal.aborted) return { outcome: "cancelled", detail: "cancel_requested", processStoppedConfirmed: true };
     const driver = this.driverResolver("codex");
     const processInstanceId = randomUUID();
+    if (job.delegation) {
+      const evidence = driver.delegationCapabilities?.(job.canonicalWorkspacePath) ?? {
+        adapter: driver.id, observedAt: new Date().toISOString(), enforcement: "unsupported" as const, capabilities: {},
+      };
+      const blocker = delegationCapabilityBlocker(job.delegation.contract, evidence);
+      if (blocker) return { outcome: "blocked", detail: blocker, processStoppedConfirmed: true };
+    }
     const config: AgentConfig = {
       ...conversation.config,
       sessionId: null,
@@ -1987,6 +2004,12 @@ export class AgentProcessManager {
         `You are a single-task workspace worker for ${config.displayName || config.name}.`,
         "Work only in the assigned project directory and report a concise outcome.",
         "Do not use Raft communication tools, change task status, or access other workspaces.",
+        ...(job.delegation ? [
+          "Return the final result on a single final line prefixed RAFT_DELEGATION_RESULT= followed by one JSON object without markdown. Use {version:1,kind:'completed'|'failed'|'cancelled',summary:string}.",
+          "When one operation is blocked, return {version:1,kind:'needs_operation',summary:string,operation:{capability:string,description:string,reason:'policy_denied'|'unavailable'|'authentication'|'path'|'unknown'},checkpoint:{id:string,stateFingerprint:string,completed:string[],remaining:string[]}}. Do not take over or bypass denied operations. Each string is at most 800 chars; each list at most 8 entries. A needs_operation checkpoint must have remaining work.",
+          "A continuation receipt describes a prior operation; it does not grant extra permissions. Compare actual project state with the checkpoint before continuing. If it diverges, return needs_operation and describe the mismatch. Keep the remaining work with this worker. On continuation, perform only remaining work; do not repeat completed steps or the prior operation.",
+          `Task contract (advisory delegation, no coordinator tool gateway): ${JSON.stringify(job.delegation)}`,
+        ] : []),
       ].join("\n"),
       prompt: "",
       workingDirectory: job.canonicalWorkspacePath,
@@ -2006,7 +2029,8 @@ export class AgentProcessManager {
         const current = this.agents.get(job.agentId);
         const currentPolicy = current?.config.runtimeContext?.channelWorkspaceConversationPolicy;
         if (
-          current !== conversation
+          control.signal.aborted
+          || current !== conversation
           || current?.exit.kind !== "live"
           || !currentPolicy
           || currentPolicy.revision < job.workspaceRevision
@@ -2029,7 +2053,7 @@ export class AgentProcessManager {
       resolveTerminal(next);
     };
     const appendOutput = (text: string) => {
-      if (output.length < 16_000) output += text.slice(0, 16_000 - output.length);
+      output = (output + text).slice(-64_000);
     };
     let timeout: ReturnType<typeof setTimeout> | null = null;
     const onAbort = () => settle({ outcome: "cancelled", detail: "cancel_requested" });
@@ -2074,9 +2098,19 @@ export class AgentProcessManager {
         try { process.kill(-pid, "SIGKILL"); } catch { /* the group may have exited between probes */ }
         stopped = await waitForWorkspaceWorkerGroupStop(pid, WORKSPACE_WORKER_KILL_WAIT_MS);
       }
-      const detail = output.trim().slice(0, 4000) || result.detail;
+      let workerOutcome: DelegationOutcome | undefined;
+      let outcome: WorkspaceOrchestraCompletion["outcome"] = result.outcome;
+      if (job.delegation && result.outcome === "succeeded") {
+        const resolved = resolveDelegationWorkerResult(output.trim());
+        workerOutcome = resolved.outcome;
+        outcome = resolved.status;
+        result.detail = resolved.detail;
+        output = "";
+      }
+      const detail = workerOutcome?.summary ?? (output.trim().slice(0, 4000) || result.detail);
       return {
-        outcome: result.outcome,
+        outcome,
+        workerOutcome,
         detail: stopped ? detail : `process_stop_unconfirmed: ${detail}`,
         processStoppedConfirmed: stopped,
       };

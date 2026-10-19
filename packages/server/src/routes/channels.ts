@@ -1,3 +1,4 @@
+import { delegationRequirementsSchema, delegationRecordSchema, delegationContinuationSchema, assertDelegationContinuation } from "@botiverse/raft-shared";
 import { projectConversionState } from "@botiverse/raft-shared";
 import { randomUUID } from "node:crypto";
 import { emitChannelConversionCardUpdates } from "../services/channelConversionRealtimeService";
@@ -3877,6 +3878,7 @@ channelRouter.get("/:id/workspaces/:agentId/tasks", async (req, res) => {
       id: channelWorkspaceTaskRuns.id,
       status: channelWorkspaceTaskRuns.status,
       result: channelWorkspaceTaskRuns.result,
+      delegation: channelWorkspaceTaskRuns.delegation,
       createdAt: channelWorkspaceTaskRuns.createdAt,
       updatedAt: channelWorkspaceTaskRuns.updatedAt,
       taskId: tasks.id,
@@ -3903,6 +3905,11 @@ channelRouter.get("/:id/workspaces/:agentId/tasks", async (req, res) => {
 });
 
 channelRouter.post("/:id/workspaces/:agentId/tasks", async (req, res) => {
+  const requirements = delegationRequirementsSchema.safeParse(req.body?.delegation ?? {});
+  if (!requirements.success) { res.status(400).json({ error: "Invalid delegation requirements", code: "invalid_delegation_requirements" }); return; }
+  if (requirements.data.mode === "delegate_required") {
+    res.status(409).json({ error: "Strong delegation tool enforcement is not available in this phase", code: "delegation_enforcement_unsupported" }); return;
+  }
   const workspaceId = req.body?.workspaceId;
   const idempotencyKey = req.body?.idempotencyKey;
   const instruction = typeof req.body?.instruction === "string" ? req.body.instruction.trim() : "";
@@ -3977,17 +3984,20 @@ channelRouter.post("/:id/workspaces/:agentId/tasks", async (req, res) => {
         return;
       }
       const task = await taskService.getTask(existing.taskId);
-      if (!task || task.title !== title || task.description !== instruction) {
+      if (!task || task.title !== title || task.description !== instruction
+        || (existing.delegation && (existing.delegation.contract.mode !== requirements.data.mode
+          || JSON.stringify(existing.delegation.contract.requiredCapabilities) !== JSON.stringify(requirements.data.requiredCapabilities)))
+        || (Boolean(existing.delegation) !== Boolean(req.body?.delegation))) {
         res.status(409).json({ error: "Idempotency key was already used for a different workspace task", code: "workspace_task_idempotency_conflict" });
         return;
       }
       const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
-      if (existing.status === "queued" || existing.status === "blocked") {
+      if ((existing.status === "queued" || existing.status === "blocked") && !existing.delegation?.outcome) {
         void agentOrchestrator.dispatchChannelWorkspaceTask(existing.id).catch((dispatchError) => {
           console.error("channel.workspace.task duplicate dispatch failed:", serializeErrorForLog(dispatchError));
         });
       }
-      res.json({ run: existing, task, dispatchRequested: existing.status === "queued" || existing.status === "blocked", duplicate: true });
+      res.json({ run: existing, task, dispatchRequested: (existing.status === "queued" || existing.status === "blocked") && !existing.delegation?.outcome, duplicate: true });
       return;
     }
 
@@ -4051,6 +4061,12 @@ channelRouter.post("/:id/workspaces/:agentId/tasks", async (req, res) => {
               canonicalWorkspacePath,
               idempotencyKey,
               status: "queued",
+              delegation: req.body?.delegation ? {
+                version: 1,
+                contract: { version: 1, taskId: task.id, runId, attemptId: randomUUID(), workerId: agent.id,
+                  mode: requirements.data.mode, resource: { id: binding.workspaceId, revision: binding.revision, root: canonicalWorkspacePath },
+                  requiredCapabilities: requirements.data.requiredCapabilities },
+              } : null,
               requestedByUserId: req.userId!,
               createdAt: new Date(),
               updatedAt: new Date(),
@@ -4075,6 +4091,9 @@ channelRouter.post("/:id/workspaces/:agentId/tasks", async (req, res) => {
             raced.channelId !== channel.id || raced.agentId !== agent.id
             || raced.workspaceId !== binding.workspaceId || raced.workspaceRevision !== binding.revision
             || racedTask?.title !== title || racedTask?.description !== instruction
+            || (Boolean(raced.delegation) !== Boolean(req.body?.delegation))
+            || (raced.delegation && (raced.delegation.contract.mode !== requirements.data.mode
+              || JSON.stringify(raced.delegation.contract.requiredCapabilities) !== JSON.stringify(requirements.data.requiredCapabilities)))
           ) {
             res.status(409).json({ error: "Idempotency key was already used for a different workspace task", code: "workspace_task_idempotency_conflict" });
             return;
@@ -4164,13 +4183,13 @@ channelRouter.post("/:id/workspaces/:agentId/tasks/:runId/cancel", async (req, r
       res.status(404).json({ error: "Workspace task run not found" });
       return;
     }
-    const updated = ["queued", "starting", "running", "uncertain", "cancel_requested"].includes(run.status)
+    const updated = ["queued", "starting", "running", "uncertain", "cancel_requested", "blocked"].includes(run.status)
       ? (await getDb().update(channelWorkspaceTaskRuns).set({
           status: "cancel_requested",
           updatedAt: new Date(),
         }).where(and(
           eq(channelWorkspaceTaskRuns.id, run.id),
-          inArray(channelWorkspaceTaskRuns.status, ["queued", "starting", "running", "uncertain", "cancel_requested"]),
+          inArray(channelWorkspaceTaskRuns.status, ["queued", "starting", "running", "uncertain", "cancel_requested", "blocked"]),
         )).returning())[0] ?? run
       : run;
     const orchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
@@ -4209,11 +4228,40 @@ channelRouter.post("/:id/workspaces/:agentId/tasks/:runId/retry", async (req, re
       res.status(409).json({ error: "Only queued or blocked workspace tasks can be retried", code: "workspace_task_not_retryable" });
       return;
     }
+    let delegation = run.delegation;
+    if (delegation?.outcome) {
+      const previous = delegationRecordSchema.safeParse(delegation);
+      const continuation = delegationContinuationSchema.safeParse(previous.success && previous.data.outcome?.kind === "needs_operation"
+        ? { ...req.body?.continuation, checkpoint: previous.data.outcome.checkpoint } : req.body?.continuation);
+      if (!previous.success || previous.data.outcome?.kind !== "needs_operation" || !continuation.success) {
+        res.status(409).json({ error: "A blocked worker checkpoint requires its explicit continuation receipt", code: "delegation_continuation_required" });
+        return;
+      }
+      const next = { version: 1 as const, contract: { ...previous.data.contract, attemptId: randomUUID() }, continuation: continuation.data };
+      try { assertDelegationContinuation(previous.data, next); }
+      catch { res.status(409).json({ error: "Continuation must retain the task, resource and worker owner", code: "delegation_continuation_ownership_mismatch" }); return; }
+      const [binding] = await getDb().select({ revision: channelWorkspaceConfigs.revision, mode: channelWorkspaceBindings.mode, canonicalPath: workspaces.canonicalPath, validationStatus: workspaces.validationStatus })
+        .from(channelWorkspaceBindings).innerJoin(workspaces, eq(workspaces.id, channelWorkspaceBindings.workspaceId))
+        .innerJoin(channelWorkspaceConfigs, and(eq(channelWorkspaceConfigs.channelId, channelWorkspaceBindings.channelId), eq(channelWorkspaceConfigs.agentId, channelWorkspaceBindings.agentId)))
+        .where(and(eq(channelWorkspaceBindings.channelId, channel.id), eq(channelWorkspaceBindings.agentId, run.agentId), eq(channelWorkspaceBindings.workspaceId, run.workspaceId))).limit(1);
+      const agent = await agentService.getAgent(run.agentId);
+      const task = await taskService.getTask(run.taskId);
+      if (!binding || binding.mode !== "writer" || binding.validationStatus !== "available" || binding.revision !== run.workspaceRevision
+        || binding.canonicalPath !== run.canonicalWorkspacePath || agent?.machineId !== run.machineId
+        || !await channelService.isChannelAgent(channel.id, run.agentId) || channel.archivedAt
+        || !task || task.status !== "in_progress" || task.claimedByType !== "agent" || task.claimedById !== run.agentId) {
+        res.status(409).json({ error: "Task ownership or workspace binding changed", code: "delegation_continuation_stale" }); return;
+      }
+      delegation = next;
+    } else if (req.body?.continuation) {
+      res.status(409).json({ error: "This run has no blocked worker checkpoint", code: "delegation_checkpoint_missing" }); return;
+    }
     const queued = run.status === "blocked"
-      ? (await getDb().update(channelWorkspaceTaskRuns).set({ status: "queued", result: null, updatedAt: new Date() })
-          .where(and(eq(channelWorkspaceTaskRuns.id, run.id), eq(channelWorkspaceTaskRuns.status, "blocked")))
-          .returning())[0] ?? run
+      ? (await getDb().update(channelWorkspaceTaskRuns).set({ status: "queued", result: null, delegation, leaseId: null, workerPid: null, updatedAt: new Date() })
+          .where(and(eq(channelWorkspaceTaskRuns.id, run.id), eq(channelWorkspaceTaskRuns.status, "blocked"), eq(channelWorkspaceTaskRuns.updatedAt, run.updatedAt)))
+          .returning())[0]
       : run;
+    if (!queued) { res.status(409).json({ error: "Workspace run changed; reload before continuing", code: "delegation_continuation_stale" }); return; }
     const orchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
     const dispatched = await orchestrator.dispatchChannelWorkspaceTask(run.id);
     res.json({ run: queued, dispatched });
