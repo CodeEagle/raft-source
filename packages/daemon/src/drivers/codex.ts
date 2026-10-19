@@ -852,6 +852,12 @@ export class CodexDriver implements RuntimeDriver {
 
   buildThreadRequest(ctx: SpawnContext): { method: "thread/start" | "thread/resume"; params: Record<string, any> } {
     assertWorkspaceExecutionProfileSupported(this, ctx.workspaceExecution, ctx.workingDirectory);
+    // Read-only defaults to no network, which also blocks the daemon-local
+    // Raft CLI proxy. Keep filesystem writes denied while allowing the
+    // conversation's authenticated communication on every new turn.
+    this.conversationSandboxPolicy = ctx.workspaceExecution?.lane === "conversation"
+      ? { type: "readOnly", networkAccess: true }
+      : undefined;
     // We pass the standing prompt as `developerInstructions` (additive, injected
     // as a developer-role message per turn) rather than `baseInstructions`
     // (replaces Codex's default base). Resume works because we always re-send
@@ -907,6 +913,7 @@ export class CodexDriver implements RuntimeDriver {
   }
 
   private process: ChildProcess | null = null;
+  private conversationSandboxPolicy: { type: "readOnly"; networkAccess: true } | undefined;
   private requestId = 0;
   private pendingInitialPrompt: string | null = null;
   private initializeRequestId: JsonRpcId | null = null;
@@ -1277,6 +1284,7 @@ export class CodexDriver implements RuntimeDriver {
       params: {
         threadId: this.normalizer.threadId,
         input,
+        ...(this.conversationSandboxPolicy ? { sandboxPolicy: this.conversationSandboxPolicy } : {}),
       },
     });
     this.observePostCompactionFirstRequest("turn/start");
@@ -1303,6 +1311,7 @@ export class CodexDriver implements RuntimeDriver {
     this.pendingInitialTurnRequestId = this.sendRequest("turn/start", {
       threadId: this.normalizer.threadId,
       input,
+      ...(this.conversationSandboxPolicy ? { sandboxPolicy: this.conversationSandboxPolicy } : {}),
     });
   }
 
