@@ -22,8 +22,10 @@ export type {
   RuntimeSendResult,
   RuntimeSessionDescriptor,
   RuntimeTurnAttribution,
+  WorkspaceExecutionProfile,
 } from "./types";
-export { createChildProcessRuntimeSession, ChildProcessRuntimeSession } from "./runtimeSession";
+export { assertWorkspaceExecutionProfileSupported } from "./types";
+export { createChildProcessRuntimeSession, createWorkspaceExecutionRuntimeSession, ChildProcessRuntimeSession } from "./runtimeSession";
 export {
   allowedTranscriptRootsForRuntime,
   ensureRuntimeHomeDir,

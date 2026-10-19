@@ -3666,6 +3666,22 @@ export const messageReactions = pgTable("message_reactions", {
   index("idx_message_reactions_reactor").on(t.reactorType, t.reactorId),
 ]);
 
+/** Durable receipt that an on-device Agent accepted a human message for its
+ * local processing queue. The triple key is the idempotency boundary for
+ * retries and reconnects; it is separate from read state and task ownership. */
+export const agentRequestAcknowledgements = pgTable("agent_request_acknowledgements", {
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  messageId: uuid("message_id").notNull().references(() => messages.id, { onDelete: "cascade" }),
+  agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  status: text("status", { enum: ["received", "queued"] }).notNull().default("received"),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.serverId, t.messageId, t.agentId] }),
+  index("idx_agent_request_acknowledgements_agent_created").on(t.agentId, t.createdAt),
+  check("agent_request_acknowledgements_status_check", sql`${t.status} IN ('received', 'queued')`),
+]);
+
 // ReadCache pages are version-bound per typed reaction discussion. The row is
 // created lazily on the first route-owned mutation; pre-existing reaction rows
 // therefore remain readable at version zero during rollout.
@@ -3784,6 +3800,69 @@ export const machines = pgTable("daemons", {
   index("idx_daemons_server").on(t.serverId),
   index("idx_daemons_api_key_prefix").on(t.apiKeyPrefix),
   index("idx_daemons_api_key_fingerprint").on(t.apiKeyFingerprint),
+]);
+
+/** A user-managed project directory on one Computer. Paths are stored exactly
+ * as entered until that Computer resolves them; the Server never treats a
+ * path string as proof that a directory exists or is safe to use. */
+export const workspaces = pgTable("workspaces", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  machineId: uuid("daemon_id").notNull().references(() => machines.id, { onDelete: "cascade" }),
+  requestedPath: text("requested_path").notNull(),
+  canonicalPath: text("canonical_path"),
+  validationStatus: text("validation_status", {
+    enum: ["unverified", "available", "missing", "not_directory", "permission_denied", "invalid_path", "offline", "alias_conflict"],
+  }).notNull().default("unverified"),
+  validationMessage: text("validation_message"),
+  validatedAt: timestamp("validated_at", { withTimezone: true }),
+  createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_workspaces_machine_requested_path").on(t.serverId, t.machineId, t.requestedPath),
+  uniqueIndex("idx_workspaces_machine_canonical_path").on(t.serverId, t.machineId, t.canonicalPath)
+    .where(sql`${t.canonicalPath} IS NOT NULL`),
+  index("idx_workspaces_machine").on(t.serverId, t.machineId),
+  check("workspaces_validation_status_check", sql`${t.validationStatus} IN ('unverified', 'available', 'missing', 'not_directory', 'permission_denied', 'invalid_path', 'offline', 'alias_conflict')`),
+]);
+
+/** The revision survives an empty binding set so stale clients cannot silently
+ * restore a configuration after it was cleared. */
+export const channelWorkspaceConfigs = pgTable("channel_workspace_configs", {
+  channelId: uuid("channel_id").notNull(),
+  agentId: uuid("agent_id").notNull(),
+  revision: integer("revision").notNull().default(0),
+  updatedByUserId: uuid("updated_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.channelId, t.agentId] }),
+  foreignKey({
+    name: "channel_workspace_configs_membership_fk",
+    columns: [t.channelId, t.agentId],
+    foreignColumns: [channelAgents.channelId, channelAgents.agentId],
+  }).onDelete("cascade"),
+  check("channel_workspace_configs_revision_check", sql`${t.revision} >= 0`),
+]);
+
+export const channelWorkspaceBindings = pgTable("channel_workspace_bindings", {
+  channelId: uuid("channel_id").notNull(),
+  agentId: uuid("agent_id").notNull(),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  mode: text("mode", { enum: ["reader", "writer"] }).notNull().default("reader"),
+  position: integer("position").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  primaryKey({ columns: [t.channelId, t.agentId, t.workspaceId] }),
+  foreignKey({
+    name: "channel_workspace_bindings_config_fk",
+    columns: [t.channelId, t.agentId],
+    foreignColumns: [channelWorkspaceConfigs.channelId, channelWorkspaceConfigs.agentId],
+  }).onDelete("cascade"),
+  index("idx_channel_workspace_bindings_order").on(t.channelId, t.agentId, t.position),
+  index("idx_channel_workspace_bindings_workspace").on(t.workspaceId),
+  check("channel_workspace_bindings_mode_check", sql`${t.mode} IN ('reader', 'writer')`),
+  check("channel_workspace_bindings_position_check", sql`${t.position} BETWEEN 0 AND 7`),
 ]);
 
 // Tasks — THE CANONICAL TASK TABLE (v1.4).
@@ -4103,6 +4182,40 @@ export const readCursorWidenPhaseAudit = pgTable("read_cursor_widen_phase_audit"
   note: text("note"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
+
+/** Execution lease/status for a canonical Raft task dispatched to a bound
+ * on-device workspace. The task remains the user-facing source of truth; this
+ * row only records the workspace runner's delivery and recovery state. */
+export const channelWorkspaceTaskRuns = pgTable("channel_workspace_task_runs", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  channelId: uuid("channel_id").notNull().references(() => channels.id, { onDelete: "cascade" }),
+  agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  machineId: uuid("machine_id").notNull().references(() => machines.id, { onDelete: "cascade" }),
+  taskId: uuid("task_id").notNull().references(() => tasks.id, { onDelete: "cascade" }),
+  messageId: uuid("message_id").notNull().references(() => messages.id, { onDelete: "cascade" }),
+  workspaceId: uuid("workspace_id").notNull().references(() => workspaces.id, { onDelete: "cascade" }),
+  workspaceRevision: integer("workspace_revision").notNull(),
+  requestedPath: text("requested_path").notNull(),
+  canonicalWorkspacePath: text("canonical_workspace_path").notNull(),
+  idempotencyKey: text("idempotency_key").notNull(),
+  status: text("status", { enum: ["queued", "starting", "running", "cancel_requested", "uncertain", "succeeded", "failed", "cancelled", "blocked"] }).notNull().default("queued"),
+  leaseId: text("lease_id"),
+  workerPid: integer("worker_pid"),
+  result: text("result"),
+  requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("channel_workspace_task_runs_task_unique").on(t.taskId),
+  uniqueIndex("channel_workspace_task_runs_request_unique").on(t.serverId, t.idempotencyKey),
+  index("channel_workspace_task_runs_pending_idx").on(t.machineId, t.status, t.createdAt)
+    .where(sql`${t.status} IN ('queued', 'starting', 'running', 'cancel_requested', 'uncertain')`),
+  check("channel_workspace_task_runs_revision_positive", sql`${t.workspaceRevision} > 0`),
+  check("channel_workspace_task_runs_status_check", sql`${t.status} IN ('queued', 'starting', 'running', 'cancel_requested', 'uncertain', 'succeeded', 'failed', 'cancelled', 'blocked')`),
+  check("channel_workspace_task_runs_paths_nonempty", sql`length(${t.requestedPath}) > 0 AND length(${t.canonicalWorkspacePath}) > 0`),
+  check("channel_workspace_task_runs_pid_positive", sql`${t.workerPid} IS NULL OR ${t.workerPid} > 0`),
+]);
 
 export const userRetirementReceipts = pgTable("user_retirement_receipts", {
   userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),

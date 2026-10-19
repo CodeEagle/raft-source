@@ -1,4 +1,5 @@
 import type { ChildProcess } from "node:child_process";
+import path from "node:path";
 import type { RuntimeCompactionInterruption } from "@botiverse/raft-shared";
 import type { ActiveSpan, AgentConfig, AgentMessage, RuntimeModelSourceOutcome, SubagentLineage, Tracer, AxSurfaceText } from "@botiverse/raft-shared";
 import type { AgentProxyInboxCoordinator } from "../agentCredentialProxy";
@@ -240,6 +241,14 @@ export interface SpawnContext {
   prompt: string;
   workingDirectory: string;
   /**
+   * Explicit sandbox profile for a Channel workspace lane. This is intentionally
+   * absent from ordinary launches: existing agents keep their configured
+   * runtime behavior until a separately managed conversation/worker lifecycle
+   * opts them in. Drivers without a native, enforced sandbox must reject a
+   * context that supplies this field.
+   */
+  workspaceExecution?: WorkspaceExecutionProfile;
+  /**
    * Absolute path to the bundled `slock` cli entry script. Drivers that have
    * been ported to CLI-first communication inject this into the spawned process
    * so the agent can invoke the cli for chat/task/attachment operations without
@@ -268,6 +277,20 @@ export interface SpawnContext {
    */
   assertLaunchCurrent?: () => void;
 }
+
+export type WorkspaceExecutionProfile =
+  | {
+      lane: "conversation";
+      sandbox: "read-only";
+    }
+  | {
+      lane: "worker";
+      sandbox: "workspace-write";
+      workspaceRevision: number;
+      taskId: string;
+      leaseId: string;
+      canonicalWorkspacePath: string;
+    };
 
 // ── Spawn Result ──
 // Returned by driver.spawn() — the process plus an optional initial stdin write.
@@ -442,6 +465,9 @@ export interface RuntimeDriver {
   /** Short ID matching RUNTIMES[].id (e.g. "claude", "codex") */
   readonly id: string;
 
+  /** Sandbox modes the driver actually applies at its execution boundary. */
+  readonly workspaceExecutionSandboxModes?: readonly WorkspaceExecutionProfile["sandbox"][];
+
   /** Structured lifecycle policy. */
   readonly lifecycle: RuntimeLifecycleContract;
 
@@ -606,6 +632,40 @@ export interface RuntimeDriver {
    * models. Runs on explicit model reads — not per-turn.
    */
   detectModels?(ctx?: RuntimeModelDetectionContext): Promise<RuntimeModelSourceOutcome>;
+}
+
+/** Fail closed when a workspace lane is requested from a driver that does not
+ * apply the requested mode at its execution boundary. */
+export function assertWorkspaceExecutionProfileSupported(
+  driver: RuntimeDriver,
+  profile: WorkspaceExecutionProfile | undefined,
+  workingDirectory?: string,
+): void {
+  if (!profile) return;
+  if (profile.lane !== "conversation" && profile.lane !== "worker") {
+    throw new Error("Channel workspace execution lane is invalid");
+  }
+  const requiredSandbox = profile.lane === "conversation" ? "read-only" : "workspace-write";
+  if (profile.sandbox !== requiredSandbox) {
+    throw new Error(`Channel workspace ${profile.lane} lane requires the ${requiredSandbox} sandbox`);
+  }
+  if (!driver.workspaceExecutionSandboxModes?.includes(profile.sandbox)) {
+    throw new Error(`Runtime ${driver.id} does not enforce the ${profile.sandbox} Channel workspace sandbox`);
+  }
+  if (profile.lane === "worker" && (
+    !Number.isSafeInteger(profile.workspaceRevision)
+    || profile.workspaceRevision < 1
+    || typeof profile.taskId !== "string"
+    || profile.taskId.trim().length === 0
+    || typeof profile.leaseId !== "string"
+    || profile.leaseId.trim().length === 0
+    || typeof profile.canonicalWorkspacePath !== "string"
+    || !path.isAbsolute(profile.canonicalWorkspacePath)
+    || path.resolve(profile.canonicalWorkspacePath) !== profile.canonicalWorkspacePath
+    || (workingDirectory !== undefined && path.resolve(workingDirectory) !== profile.canonicalWorkspacePath)
+  )) {
+    throw new Error("Channel workspace worker execution requires a matching canonical path, revision, task id, and active writer lease id");
+  }
 }
 
 export interface RuntimeModelDetectionContext {

@@ -20,6 +20,7 @@ import { Archive, ArchiveRestore, Check, Eye, EyeOff, Hash, Info, Lock, LogOut, 
 import { useChannelStore } from "../../store/channelStore";
 import { useServerStore } from "../../store/serverStore";
 import { ChannelPreferencesSection } from "./ChannelPreferencesSection";
+import ChannelWorkspaceSettings from "./ChannelWorkspaceSettings";
 import {
   CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
   MAX_JOINT_CHANNEL_SERVERS,
@@ -1580,6 +1581,19 @@ export default function EditChannelDialog({
           editor={bridgeEditor}
           visibility={currentVisibility}
           disabled={saving}
+        />
+      )}
+      {Boolean(
+        effectiveCapabilities.editChannelMetadata
+        && !isArchived
+        && channel?.serverId
+        && channel.name !== "all"
+        && (channel.type === "channel" || channel.type === "private"),
+      ) && channel?.serverId && (
+        <ChannelWorkspaceSettings
+          channelId={channelId}
+          serverId={channel.serverId}
+          canManage={Boolean(effectiveCapabilities.editChannelMetadata)}
         />
       )}
       {guestAccessSection}

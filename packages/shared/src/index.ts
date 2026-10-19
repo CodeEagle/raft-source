@@ -750,6 +750,33 @@ export type AgentWakeRefusedReason =
   | "machine_mismatch"
   | "server_error";
 
+export type ChannelWorkspaceTaskRunStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "cancel_requested"
+  | "uncertain"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "blocked";
+
+/** Explicit task dispatch into one server-authorized, machine-local workspace. */
+export interface ChannelWorkspaceTaskRunDispatch {
+  id: string;
+  serverId: string;
+  machineId: string;
+  channelId: string;
+  agentId: string;
+  taskId: string;
+  messageId: string;
+  workspaceId: string;
+  workspaceRevision: number;
+  requestedPath: string;
+  canonicalWorkspacePath: string;
+  instruction: string;
+}
+
 export type ServerToMachineMessage =
   /**
    * Authenticated websocket ownership context. The Server sends this as the
@@ -786,6 +813,8 @@ export type ServerToMachineMessage =
    */
   | { type: "agent:start:wiki"; agentId: string; config: AgentConfig; wikiWorkspacePack: WikiWorkspacePack; wakeMessage?: AgentMessage; wakeMessageTransient?: boolean; resumeMessages?: AgentMessage[]; unreadSummary?: Record<string, number>; resumePrompt?: string; launchId?: string; startDispatchId?: string; traceparent?: string; catchupBatchId?: string; breakerGeneration?: number; takeoverEpoch?: number; humanStart?: boolean }
   | { type: "agent:stop"; agentId: string }
+  | { type: "agent:workspace:task"; agentId: string; run: ChannelWorkspaceTaskRunDispatch }
+  | { type: "agent:workspace:task:cancel"; agentId: string; run: ChannelWorkspaceTaskRunDispatch }
   /**
    * Answer to a daemon `agent:wake:request` (task #1103). `dispatched` means
    * the Server issued its ordinary `agent:start` for this agent; `refused` is
@@ -833,6 +862,7 @@ export type ServerToMachineMessage =
    */
   | { type: "agent:activity_probe"; agentId: string; probeId: string; purpose: "sweep" | "manual" }
   | { type: "machine:workspace:scan" }
+  | { type: "machine:workspace:validate_path"; requestId: string; path: string }
   | { type: "machine:workspace:delete"; directoryName: string }
   | { type: "machine:runtime_models:detect"; requestId: string; runtime: string }
   /**
@@ -1444,7 +1474,26 @@ export type MachineToServerMessage =
    * the terminal-failure breaker uses.
    */
   | { type: "agent:process_exited"; agentId: string; daemonInstanceId: string; processInstanceId: string; spawnLaunchId: string | null; launchId: string; clientSeq: number; code: number | null; signal: string | null; /** RFC 071 outbox: `breakerGeneration` of `launchId`'s agent:start, when it had one. */ generation?: number }
-  | { type: "agent:deliver:ack"; agentId: string; seq: number; traceparent?: string; deliveryId?: string; mentionDelivery?: MentionDeliveryIdentitySnapshot }
+  | {
+      type: "agent:workspace:task:update";
+      agentId: string;
+      runId: string;
+      taskId: string;
+      status: ChannelWorkspaceTaskRunStatus;
+      leaseId?: string;
+      workerPid?: number;
+      detail?: string;
+    }
+  | {
+      type: "agent:deliver:ack";
+      agentId: string;
+      seq: number;
+      traceparent?: string;
+      deliveryId?: string;
+      mentionDelivery?: MentionDeliveryIdentitySnapshot;
+      /** Durable quick-receipt fact, emitted only for an accepted human message. */
+      requestAck?: { messageId: string; status: "received" | "queued" };
+    }
   /**
    * Message bodies the daemon itself put in front of the model (startup
    * catch-up, wake with thread context, full-body stdin delivery), reported
@@ -1478,6 +1527,13 @@ export type MachineToServerMessage =
       outcomeObject?: FeedbackTranscriptOutcomeObjectPlan;
     }
   | { type: "machine:workspace:scan_result"; directories: WorkspaceDirectoryInfo[] }
+  | {
+      type: "machine:workspace:validate_path_result";
+      requestId: string;
+      requestedPath: string;
+      status: WorkspacePathValidationStatus;
+      canonicalPath?: string;
+    }
   | { type: "machine:workspace:delete_result"; directoryName: string; success: boolean }
   | {
       type: "machine:migration:source_workspace_archive_result";
@@ -1602,6 +1658,15 @@ export interface AgentRuntimeContext {
   daemonVersion?: string | null;
   /** Local workspace path for this agent process, filled by the daemon. */
   workspacePath?: string | null;
+  /**
+   * Spawn-time policy for isolating the Codex conversation process from every
+   * channel-bound project directory. The daemon applies it only to new
+   * launches; saving workspace settings never restarts an existing process.
+   */
+  channelWorkspaceConversationPolicy?: {
+    kind: "shared_workspaces_read_only";
+    revision: number;
+  } | null;
 }
 
 export const RUNTIME_CONFIG_VERSION = 1 as const;
@@ -2029,6 +2094,20 @@ export interface WorkspaceDirectoryInfo {
    * which only ever used `~/.slock/agents/`.
    */
   displayPath?: string;
+}
+
+export type WorkspacePathValidationStatus =
+  | "available"
+  | "missing"
+  | "not_directory"
+  | "permission_denied"
+  | "invalid_path";
+
+export interface WorkspacePathValidationResult {
+  requestedPath: string;
+  status: WorkspacePathValidationStatus;
+  /** Resolved on the target Computer. Omitted unless status is `available`. */
+  canonicalPath?: string;
 }
 
 /** A Claude Code skill (slash command) from SKILL.md */

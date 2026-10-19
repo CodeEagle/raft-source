@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { hydrateRuntimeConfig, runtimeConfigToLaunchFields, runtimeModelSourceOutcomeFromSet, type AgentConfig, type RuntimeModelInfo, type RuntimeModelSet, type RuntimeModelSourceOutcome, type Tracer , type AxSurfaceText } from "@botiverse/raft-shared";
-import type { RuntimeDriver, SpawnContext, SpawnResult, ParsedEvent, RuntimeProbeResult, RuntimeProbeUnavailableReason } from "./types";
+import { assertWorkspaceExecutionProfileSupported, type RuntimeDriver, type SpawnContext, type SpawnResult, type ParsedEvent, type RuntimeProbeResult, type RuntimeProbeUnavailableReason } from "./types";
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import { codexStateRootCandidates, resolveCodexHomeRootFromEnv } from "./codexHome";
 import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch";
@@ -822,6 +822,7 @@ function unsupportedInitializeResultMessage(): string {
 
 export class CodexDriver implements RuntimeDriver {
   readonly id = "codex";
+  readonly workspaceExecutionSandboxModes = ["read-only", "workspace-write"] as const;
   readonly lifecycle = {
     kind: "persistent",
     stdin: "direct",
@@ -850,6 +851,7 @@ export class CodexDriver implements RuntimeDriver {
   }
 
   buildThreadRequest(ctx: SpawnContext): { method: "thread/start" | "thread/resume"; params: Record<string, any> } {
+    assertWorkspaceExecutionProfileSupported(this, ctx.workspaceExecution, ctx.workingDirectory);
     // We pass the standing prompt as `developerInstructions` (additive, injected
     // as a developer-role message per turn) rather than `baseInstructions`
     // (replaces Codex's default base). Resume works because we always re-send
@@ -858,8 +860,8 @@ export class CodexDriver implements RuntimeDriver {
     const threadParams: Record<string, any> = {
       cwd: ctx.workingDirectory,
       approvalPolicy: "never",
-      sandbox: "danger-full-access",
-      sandbox_mode: "danger-full-access",
+      sandbox: ctx.workspaceExecution?.sandbox ?? "danger-full-access",
+      sandbox_mode: ctx.workspaceExecution?.sandbox ?? "danger-full-access",
       developerInstructions: ctx.standingPrompt,
       // Raw response items are used only as payload-free liveness signals in
       // the daemon. They replace the previous transcript-mtime heuristic.
@@ -871,6 +873,16 @@ export class CodexDriver implements RuntimeDriver {
     }
     if (launchRuntimeFields.reasoningEffort) {
       threadParams.config = { model_reasoning_effort: launchRuntimeFields.reasoningEffort };
+    }
+    if (ctx.workspaceExecution?.lane === "worker") {
+      threadParams.config = {
+        ...(threadParams.config ?? {}),
+        sandbox_workspace_write: {
+          writable_roots: [],
+          exclude_slash_tmp: true,
+          exclude_tmpdir_env_var: true,
+        },
+      };
     }
     if (launchRuntimeFields.mode.kind === "fast") {
       threadParams.serviceTier = "fast";
@@ -929,6 +941,7 @@ export class CodexDriver implements RuntimeDriver {
   }
 
   async spawn(ctx: SpawnContext): Promise<SpawnResult> {
+    assertWorkspaceExecutionProfileSupported(this, ctx.workspaceExecution, ctx.workingDirectory);
     const { spawnEnv } = await prepareCliTransport(ctx, { NO_COLOR: "1" });
     const managedMcp = await prepareManagedMcpRuntimeProxy({
       agentId: ctx.agentId,
@@ -1010,6 +1023,11 @@ export class CodexDriver implements RuntimeDriver {
         stdio: ["pipe", "pipe", "pipe"],
         env: env ?? spawnEnv,
         shell,
+        // A workspace writer lease covers Codex and any tool process it
+        // launches. Give each worker a process group so cancellation/recovery
+        // can confirm the whole execution tree has stopped before releasing
+        // the directory lock.
+        ...(ctx.workspaceExecution?.lane === "worker" ? { detached: true } : {}),
       });
       launchSpan?.end("ok");
     } catch (error) {

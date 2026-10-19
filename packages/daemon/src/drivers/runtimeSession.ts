@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 import { StringDecoder } from "node:string_decoder";
 import { logger } from "../logger";
 import { takeEarlyChildEvents } from "./runtimeChild";
+import { assertWorkspaceExecutionProfileSupported } from "./types";
 import type {
   ParsedEvent,
   RuntimeDriver,
@@ -103,7 +104,7 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
     const pid = this.process?.pid;
     if (typeof pid !== "number") return undefined;
     try {
-      process.kill(pid, 0);
+      process.kill(this.ctx.workspaceExecution?.lane === "worker" ? -pid : pid, 0);
       return true;
     } catch (err) {
       const code = typeof err === "object" && err !== null && "code" in err ? (err as { code?: unknown }).code : undefined;
@@ -122,6 +123,7 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
     if (this.started) {
       return { ok: false, reason: "runtime_error", error: "runtime session already started" };
     }
+    assertWorkspaceExecutionProfileSupported(this.driver, this.ctx.workspaceExecution, this.ctx.workingDirectory);
     this.started = true;
     const launchCtx: SpawnContext = {
       ...this.ctx,
@@ -161,14 +163,31 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
     reason?: string;
   }): Promise<void> {
     const proc = this.process;
-    if (!proc || this.closed) return;
+    if (!proc || (this.closed && this.ctx.workspaceExecution?.lane !== "worker")) return;
     this.requestedStopReason = opts?.reason;
-    proc.kill(opts?.signal ?? "SIGTERM");
+    const signal = opts?.signal ?? "SIGTERM";
+    const pid = proc.pid;
+    if (this.ctx.workspaceExecution?.lane === "worker" && typeof pid === "number") {
+      try {
+        process.kill(-pid, signal);
+      } catch (error) {
+        const code = typeof error === "object" && error !== null && "code" in error
+          ? (error as { code?: unknown }).code
+          : undefined;
+        if (code !== "ESRCH") throw error;
+      }
+    } else {
+      proc.kill(signal);
+    }
     if (!opts?.forceAfterMs) return;
     setTimeout(() => {
       if (!this.closed) {
         try {
-          proc.kill("SIGKILL");
+          if (this.ctx.workspaceExecution?.lane === "worker" && typeof pid === "number") {
+            process.kill(-pid, "SIGKILL");
+          } else {
+            proc.kill("SIGKILL");
+          }
         } catch {
           // Already exited.
         }
@@ -267,4 +286,13 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
 
 export function createChildProcessRuntimeSession(driver: RuntimeDriver, ctx: SpawnContext): RuntimeSession {
   return new ChildProcessRuntimeSession(driver, ctx);
+}
+
+/** Create a lane only after its runtime proves it can enforce the requested
+ * sandbox profile. Kept separate from ordinary session creation so existing
+ * launches retain their runtime-specific defaults. */
+export function createWorkspaceExecutionRuntimeSession(driver: RuntimeDriver, ctx: SpawnContext): RuntimeSession {
+  if (!ctx.workspaceExecution) throw new Error("Channel workspace execution profile is required");
+  assertWorkspaceExecutionProfileSupported(driver, ctx.workspaceExecution, ctx.workingDirectory);
+  return driver.createSession?.(ctx) ?? createChildProcessRuntimeSession(driver, ctx);
 }

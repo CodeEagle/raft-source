@@ -806,7 +806,11 @@ export async function prepareCliTransport(
   //    an absolute path, so agent behavior does not depend on a host-global
   //    `slock` install or PATH ordering.
   // 3. Prepend that wrapper directory to PATH for the spawned runtime.
-  cleanupWorkspaceCliTransportFiles(ctx.workingDirectory);
+  // A worker's cwd is a user project. Never remove legacy-looking transport
+  // files there; worker CLI transport is kept in the daemon-owned home below.
+  if (ctx.workspaceExecution?.lane !== "worker") {
+    cleanupWorkspaceCliTransportFiles(ctx.workingDirectory);
+  }
   const slockDir = buildCliTransportDir(slockHome, ctx.agentId, ctx.launchId);
   mkdirSync(slockDir, { recursive: true });
   // RFC 072 §7.2: this spawn's context id (new, or the resumed session's),

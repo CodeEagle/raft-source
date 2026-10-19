@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
@@ -6,6 +6,8 @@ import {
   deleteWorkspaceDirectory,
   resolveWorkspaceDirectoryPath,
   scanWorkspaceDirectories,
+  validateWorkspacePath,
+  workspacePathsOverlap,
   workspaceDisplayPath,
 } from "./workspaces";
 
@@ -116,4 +118,48 @@ test("workspace display paths are ~-relative under the user's home, absolute els
   assert.equal(workspaceDisplayPath("/srv/raft/agents/a1", "/home/alice"), "/srv/raft/agents/a1/");
   // A sibling that merely shares the prefix is not under the home.
   assert.equal(workspaceDisplayPath("/home/alice2/agents/a1", "/home/alice"), "/home/alice2/agents/a1/");
+});
+
+test("validateWorkspacePath resolves directory aliases without writing into the project", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daemon-workspace-validation-"));
+  try {
+    const project = path.join(root, "project");
+    const alias = path.join(root, "project-alias");
+    await mkdir(project);
+    await writeFile(path.join(project, "README.md"), "keep me");
+    await symlink(project, alias, "dir");
+    const before = await readdir(project);
+
+    const direct = await validateWorkspacePath(project);
+    const throughAlias = await validateWorkspacePath(alias);
+
+    assert.equal(direct.status, "available");
+    assert.equal(throughAlias.status, "available");
+    assert.equal(throughAlias.canonicalPath, direct.canonicalPath);
+    assert.deepEqual(await readdir(project), before, "validation must not create project metadata");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("validateWorkspacePath reports missing, non-directory, traversal and filesystem root paths", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "daemon-workspace-validation-errors-"));
+  try {
+    const file = path.join(root, "README.md");
+    await writeFile(file, "x");
+    assert.equal((await validateWorkspacePath(path.join(root, "missing"))).status, "missing");
+    assert.equal((await validateWorkspacePath(file)).status, "not_directory");
+    assert.equal((await validateWorkspacePath(`${root}${path.sep}..${path.sep}escape`)).status, "invalid_path");
+    assert.equal((await validateWorkspacePath(path.parse(root).root)).status, "invalid_path");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspacePathsOverlap catches equal, parent and child paths without matching siblings", () => {
+  assert.equal(workspacePathsOverlap("/Users/alice/.raft/agents", "/Users/alice/.raft/agents"), true);
+  assert.equal(workspacePathsOverlap("/Users/alice/.raft/agents", "/Users/alice/.raft/agents/a1"), true);
+  assert.equal(workspacePathsOverlap("/Users/alice/.raft/agents/a1", "/Users/alice/.raft/agents"), true);
+  assert.equal(workspacePathsOverlap("/Users/alice/.raft/agents", "/Users/alice/Developer/project"), false);
+  assert.equal(workspacePathsOverlap("/Users/alice/project", "/Users/alice/project-two"), false);
 });

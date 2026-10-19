@@ -104,6 +104,15 @@ export const messageSocketPayloadKeys = [
 
 export const MESSAGE_REALTIME_PRODUCER_REGISTRY: ProducerRegistryEntry[] = [
   {
+    id: "services/agentOrchestrator.ts#agent-orchestrator.request-ack.eyes.updated#message:updated",
+    event: "message:updated",
+    audience: "channel room for the acknowledged human message",
+    authority: "durable request acknowledgement after machine/agent, message, server, sender, sequence, and channel access checks",
+    applyTarget: "hydrated message context update carrying the server-side receipt reaction; viewer-scoped attachment comment metadata stripped",
+    presence: "channel room only",
+    payloadKeys: hydratedMessageUpdatePayloadKeys,
+  },
+  {
     id: "routes/internal.ts#route-internal.reaction-remove.updated#message:updated",
     event: "message:updated",
     audience: "agent-visible message channel room",
