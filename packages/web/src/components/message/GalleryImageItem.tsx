@@ -23,6 +23,7 @@ export function GalleryImageItem({
   lightboxImages,
   layout,
   onDownload,
+  onImageError,
 }: {
   att: NonNullable<Message["attachments"]>[number];
   previewSrc: string;
@@ -31,8 +32,12 @@ export function GalleryImageItem({
   lightboxImages: NonNullable<Message["attachments"]>[number][];
   layout: MessageImageGalleryItemLayout;
   onDownload: (attachment: NonNullable<Message["attachments"]>[number]) => void | Promise<void>;
+  onImageError?: (attachmentId: string) => void;
 }) {
   const { formatMessage } = useIntl();
+  const handleImageError = useCallback(() => {
+    onImageError?.(att.id);
+  }, [onImageError, att.id]);
   const handleOpenImage = useCallback(() => {
     if (!isOptimistic && imageIndex >= 0) {
       // Image comments are descoped for now (cindyz 6/11): no comment
@@ -60,6 +65,7 @@ export function GalleryImageItem({
         width={att.width ?? undefined}
         height={att.height ?? undefined}
         loading="lazy"
+        onError={onImageError ? handleImageError : undefined}
       />
       {isOptimistic && (
         <MessageImageGalleryOverlay>

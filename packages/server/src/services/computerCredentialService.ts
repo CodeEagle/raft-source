@@ -289,11 +289,10 @@ export async function generateComputerApiKeyMaterial(): Promise<{
  * Stable, zero-enumeration failure: non-member / missing / deleted server
  * all collapse to `not_authorized` (no signal whether the server exists).
  *
- * Role gate: attaching a Computer mints a machine principal, so it requires
- * the `manageMachines` capability (owner / admin only — member is denied).
- * A member who lacks the capability gets the distinct `requires_admin` code:
- * this is not an enumeration leak (the caller already knows they are a
- * member) and lets the CLI tell them to ask an admin instead of a blank 403.
+ * Role gate: owners/admins may attach Computers server-wide. A plain member
+ * may attach one Computer for their own use; the attachment transaction keeps
+ * the member row locked while creating both the Computer and its backing
+ * machine, so this self-service path cannot be widened into machine admin.
  */
 export type AttachComputerResult =
   | { ok: true; apiKey: string; serverMachineId: string; machineId: string; serverId: string; serverSlug: string; resumed: boolean }
@@ -317,12 +316,11 @@ export async function attachComputer(input: {
 }): Promise<AttachComputerResult> {
   const db = getDb();
 
-  // Server must exist + not be soft-deleted, and the user must be a member
-  // WITH the manageMachines capability (owner / admin). getMemberRole returns
-  // null for nonexistent/deleted servers and non-members, so the liveness +
-  // membership check collapses to `not_authorized` (no existence signal). A
-  // member who lacks the capability is told `requires_admin` — they already
-  // know they are a member, so this is not an enumeration leak.
+  // Server must exist + not be soft-deleted, and the user must be a member.
+  // getMemberRole returns null for nonexistent/deleted servers and
+  // non-members, so the liveness + membership check collapses to
+  // `not_authorized` (no existence signal). Owner/admin roles still require
+  // the server-wide registerMachines capability; members use self-attach.
   const [server] = await db
     .select({ id: servers.id, slug: servers.slug })
     .from(servers)
@@ -330,7 +328,8 @@ export async function attachComputer(input: {
   if (!server) return { ok: false, error: "not_authorized" };
   const role = await getActorServerRoleInServer(server.id, "user", input.userId);
   if (!role) return { ok: false, error: "not_authorized" };
-  if (!await actorHasServerCapabilityInServer(server.id, "user", input.userId, "registerMachines")) {
+  const canSelfAttach = role === "member";
+  if (!canSelfAttach && !await actorHasServerCapabilityInServer(server.id, "user", input.userId, "registerMachines")) {
     return { ok: false, error: "requires_admin" };
   }
 
@@ -345,7 +344,8 @@ export async function attachComputer(input: {
     return await db.transaction(async (tx): Promise<AttachComputerResult> => {
       const machineCreateLock = await acquireMachineCreateLock(tx, server.id);
       const lockedRole = await lockActorMembershipRow(tx, server.id, input.userId, "share");
-      if (!actorRoleHasServerCapability(lockedRole, "registerMachines")) {
+      const lockedSelfAttach = lockedRole === "member";
+      if (!lockedSelfAttach && !actorRoleHasServerCapability(lockedRole, "registerMachines")) {
         return { ok: false, error: "requires_admin" };
       }
 
@@ -380,6 +380,10 @@ export async function attachComputer(input: {
       const { machine } = await registerMachine(server.id, input.userId, input.name, {
         machineCreateLock,
         material: machineMaterial,
+        // The enclosing transaction already holds and re-checks the member's
+        // own membership row. Do not require the server-wide capability for a
+        // member self-attach, while preserving the existing owner/admin fence.
+        ...(!lockedSelfAttach ? { capability: "registerMachines" as const } : {}),
       });
       await tx.update(computers).set({ machineId: machine.id }).where(eq(computers.id, row.id));
 

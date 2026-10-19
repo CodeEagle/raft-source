@@ -67,6 +67,7 @@ import {
 } from "./utils/changePasswordNavigation";
 import { NavigationDepthTracker, useAppNavigate } from "./hooks/useAppNavigate";
 import { useJoinCommunityFlow } from "./hooks/useJoinCommunityFlow";
+import { useServerPermissions } from "./hooks/useServerPermissions";
 import {
   CHINESE_COMMUNITY_SERVER_SLUG,
   CHINESE_COMMUNITY_PAGE_PATH,
@@ -88,7 +89,10 @@ import { emitAuthTraceAndFlush } from "./utils/webAuthTrace";
 import { jointInviteAcceptErrorMessage } from "./utils/jointChannelLimit";
 import { showToast } from "./components/toastBridge";
 import DraggableDevOverlay from "./components/dev/DraggableDevOverlay";
-import { HIDE_LOCAL_DEV_TOOLS_EVENT } from "./components/dev/devOverlayEvents";
+import {
+  HIDE_LOCAL_DEV_TOOLS_EVENT,
+  SHOW_LOCAL_DEV_TOOLS_EVENT,
+} from "./components/dev/devOverlayEvents";
 import Tooltip from "./components/ui/Tooltip";
 import { Settings2, X } from "lucide-react";
 import { isHostShell } from "./embed";
@@ -103,6 +107,7 @@ import {
   serverRouteMachineId,
   useBrowserDocumentTitle,
 } from "./utils/browserDocumentTitle";
+import { canRenderEnvironmentDevTools } from "./utils/environmentDevToolsAccess";
 
 /** Parse URL search params once */
 function getUrlParams() {
@@ -151,8 +156,9 @@ function openServerPicker() {
 
 function EnvironmentDevOverlay() {
   const previewApiTarget = usePreviewApiTarget(deploymentEnv === "web-preview");
+  const { role } = useServerPermissions();
   const [open, setOpen] = useState(false);
-  const [hidden, setHidden] = useState(false);
+  const [hidden, setHidden] = useState(() => document.documentElement.dataset.raftDevToolsHidden === "true");
   const { formatMessage } = useIntl();
   const closePanel = useCallback(() => setOpen(false), []);
   const togglePanel = useCallback(() => setOpen((value) => !value), []);
@@ -162,6 +168,13 @@ function EnvironmentDevOverlay() {
     setOpen(false);
     setHidden(true);
   }, []);
+  useEffect(() => {
+    const eventName = canRenderEnvironmentDevTools(role)
+      ? SHOW_LOCAL_DEV_TOOLS_EVENT
+      : HIDE_LOCAL_DEV_TOOLS_EVENT;
+    window.dispatchEvent(new CustomEvent(eventName, { detail: { reason: "permission" } }));
+  }, [role]);
+  if (!canRenderEnvironmentDevTools(role)) return null;
   if (!environmentLabelMessageId) return null;
   if (isSlockdev && import.meta.env?.VITE_SLOCKDEV_HIDE_PANEL === "1") return null;
   if (hidden) return null;
@@ -245,6 +258,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
   const { onClose, onHideAll } = props;
   const [copied, setCopied] = useState(false);
   const { formatMessage } = useIntl();
+  const { role } = useServerPermissions();
   const login = useAuthStore((s) => s.login);
   const logout = useAuthStore((s) => s.logout);
   const user = useAuthStore((s) => s.user);
@@ -269,6 +283,7 @@ function SlockdevDebugPanel(props: SlockdevDebugPanelProps) {
     }
   }, [seedCommand]);
 
+  if (!canRenderEnvironmentDevTools(role)) return null;
   if (!isSlockdev) return null;
   if (import.meta.env?.VITE_SLOCKDEV_HIDE_PANEL === "1") return null;
 

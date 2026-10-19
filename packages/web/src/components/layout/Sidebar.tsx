@@ -63,6 +63,7 @@ import AgentActivityDot from "../agent/AgentActivityDot";
 import { useLongPress } from "../../hooks/useLongPress";
 import { useComputerUpgradeReconnect } from "../../hooks/useComputerUpgradeReconnect";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
+import { canCreateAgentForRole, canRegisterMachineForRole } from "../../utils/memberAgentAccess";
 import CreateChannelDialog from "../channel/CreateChannelDialog";
 import CreateJointChannelDialog from "../channel/CreateJointChannelDialog";
 import ChannelPinMenuItem from "../channel/ChannelPinMenuItem";
@@ -1371,8 +1372,9 @@ export default function Sidebar({ mobileInline, bottomSlot }: SidebarProps) {
   const canManageServer = capabilities.editServerSettings;
   const canCreateChannel = capabilities.createChannels;
   const canCreateJointChannel = capabilities.federateChannels;
-  const canCreateAgent = capabilities.createAgents;
-  const canRegisterMachines = capabilities.registerMachines;
+  const canCreateAgent = canCreateAgentForRole(currentRole, capabilities);
+  const canCreateExternalAgent = currentRole !== "member" && capabilities.createAgents;
+  const canRegisterMachines = canRegisterMachineForRole(currentRole, capabilities);
   const canInviteMembers = capabilities.inviteMembers;
   const canManageExternalAuth = capabilities.manageExternalAuth;
   const canViewBillingSettings = canOpenSettingsTab("billing", capabilities);
@@ -2291,13 +2293,15 @@ export default function Sidebar({ mobileInline, bottomSlot }: SidebarProps) {
             >
               {formatMessage({ id: "layout.sidebar.createAgent" })}
             </MenuItem>
-            <MenuItem
-              icon={<Link2 size={14} className="shrink-0" />}
-              onClick={openCreateExternalAgentDialog}
-            >
-              {formatMessage({ id: "layout.sidebar.createExternalAgent" })}
-            </MenuItem>
-            {isHandoffAvailable() && (
+            {canCreateExternalAgent && (
+              <MenuItem
+                icon={<Link2 size={14} className="shrink-0" />}
+                onClick={openCreateExternalAgentDialog}
+              >
+                {formatMessage({ id: "layout.sidebar.createExternalAgent" })}
+              </MenuItem>
+            )}
+            {canCreateExternalAgent && isHandoffAvailable() && (
               <MenuItem
                 icon={<ArrowRightLeft size={14} className="shrink-0" />}
                 data-testid="sidebar-menu-handoff-session"
@@ -3832,6 +3836,7 @@ export default function Sidebar({ mobileInline, bottomSlot }: SidebarProps) {
                 {canRegisterMachines && (
                   <Tooltip content={formatMessage({ id: "layout.sidebar.addComputer" })}>
                   <button
+                    aria-label={formatMessage({ id: "layout.sidebar.addComputer" })}
                     onClick={() => setShowAddMachine(true)}
                     className={SIDEBAR_SECTION_ICON_BUTTON_CLASS}
                   >

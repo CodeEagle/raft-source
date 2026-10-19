@@ -16,4 +16,5 @@ interface ImportMetaEnv {
   readonly VITE_SLOCKDEV_ENV_NAME?: string;
   readonly VITE_SLOCKDEV_EMAIL?: string;
   readonly VITE_SLOCKDEV_PREVIEW_DESCRIPTION?: string;
+  readonly VITE_COMPUTER_INSTALL_BASE_URL?: string;
 }

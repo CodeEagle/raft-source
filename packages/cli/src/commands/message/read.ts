@@ -13,6 +13,7 @@ import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";
 import { CliError } from "../../core/errors";
 import { writeText, adoptCliReplyText } from "../../core/renderer";
+import { loadChannelWorkspaceContextsForMessages } from "../../channelWorkspaceContext";
 import { apiFailureError } from "../_apiFailure";
 import { PEER_KIND_OPTION, requireTargetAlias, type TargetAliasOpts } from "../_target";
 import { formatHistory } from "./_format";
@@ -161,11 +162,17 @@ export const messageReadCommand = defineCommand(
       : undefined;
     // Sender descriptions already shown in this context print as `@name`
     // only. Folded messages are not printed, so they claim nothing.
-    const allMessages = res.data.messages ?? [];
+    const resolvedChannelId = typeof res.data.channel_id === "string" ? res.data.channel_id : undefined;
+    const allMessages = (res.data.messages ?? []).map((message) => (
+      resolvedChannelId && typeof message.channel_id !== "string"
+        ? { ...message, channel_id: resolvedChannelId }
+        : message
+    ));
     const printed = allMessages.filter((m) => !(typeof m.seq === "number" && alreadyShownSeqs?.has(m.seq)));
     const senders = elideSeenSenders(printed, agentContext.agentId);
     const elidedByMessage = new Map(printed.map((m, index) => [m, senders.messages[index]]));
     const displayData = { ...res.data, messages: allMessages.map((m) => elidedByMessage.get(m) ?? m) };
+    const channelContexts = loadChannelWorkspaceContextsForMessages(agentContext, ctx.env, displayData.messages);
     writeText(
       ctx.io, adoptCliReplyText(
       `${formatHistory(readOpts.channel, displayData, {
@@ -174,7 +181,7 @@ export const messageReadCommand = defineCommand(
         before: readOpts.before,
         unread: readOpts.unread === true,
         ...(alreadyShownSeqs ? { alreadyShownSeqs } : {}),
-      })}\n`,
+      }, channelContexts)}\n`,
     ));
     await senders.settle(ctx.io);
     // What the window consumed (the FH-001 full-body advance contract: target

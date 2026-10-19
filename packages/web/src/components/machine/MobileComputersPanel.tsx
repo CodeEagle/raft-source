@@ -6,6 +6,7 @@ import { useLocation } from "react-router-dom";
 import { useMachineStore } from "../../store/machineStore";
 import { useServerStore } from "../../store/serverStore";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
+import { canRegisterMachineForRole } from "../../utils/memberAgentAccess";
 import { useAppNavigate, useMobileBack } from "../../hooks/useAppNavigate";
 import EmptyState from "../ui/EmptyState";
 import PanelHeader from "../ui/PanelHeader";
@@ -47,8 +48,8 @@ export default function MobileComputersPanel() {
   const loadMachines = useMachineStore((s) => s.loadMachines);
   const setShowAddMachine = useMachineStore((s) => s.setShowAddMachine);
   const serverSlug = useServerStore((s) => s.current?.slug);
-  const { capabilities } = useServerPermissions();
-  const canRegisterMachines = capabilities.registerMachines;
+  const { role: currentRole, capabilities } = useServerPermissions();
+  const canRegisterMachines = canRegisterMachineForRole(currentRole, capabilities);
   const nav = useAppNavigate();
   const location = useLocation();
   const attentionOnly = new URLSearchParams(location.search).get("filter") === "attention";

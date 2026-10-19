@@ -51,8 +51,8 @@
  *     prevents cross-server enumeration: a logged-in user can't probe
  *     which other servers an agent exists on by hitting this endpoint.
  *   - 403 `insufficient_role` is only returned when the user IS a
- *     member of the agent's server but is neither the creator nor a holder of
- *     `issueAgentCredentials`. This is
+ *     member of the agent's server but is neither an owner/admin holder of
+ *     `issueAgentCredentials` nor otherwise authorized. This is
  *     the standard "you're authenticated but not authorized" signal.
  *   - 400 `scopes_invalid` / `scopes_empty` / `name_invalid` /
  *     `replaces_credential_invalid` for body validation failures.
@@ -116,7 +116,7 @@ async function authorizedAgent(req: Request<{ id: string }>, res: Response) {
   if (actor.serverRole === null) { respondAgentMissing(res); return null; }
   if (!userCanActOnAgentResource(actor.serverRole, req.userId!, agent, "issueAgentCredentials")) {
     res.status(403).json({
-      error: "The `issueAgentCredentials` capability or human creator authority is required to manage agent credentials",
+      error: "The `issueAgentCredentials` capability is required to manage agent credentials",
       code: "insufficient_role",
     });
     return null;
@@ -159,7 +159,7 @@ function respondFencedCredentialError(error: unknown, res: Response): boolean {
   }
   if (error instanceof FencedAuthorizationDeniedError) {
     res.status(403).json({
-      error: "The `issueAgentCredentials` capability or human creator authority is required to manage agent credentials",
+      error: "The `issueAgentCredentials` capability is required to manage agent credentials",
       code: "insufficient_role",
     });
     return true;

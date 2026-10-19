@@ -99,6 +99,7 @@ import { resolvePassiveAx } from "./passiveAxGate";
 import { buildCliTransportDir } from "./drivers/cliTransport";
 import { reapOrphanProcesses } from "./daemonOrphanReaper";
 import { deleteWorkspaceDirectory, initializeAgentWorkspace, scanWorkspaceDirectories } from "./workspaces";
+import { loadChannelWorkspaceContextsSync, type ChannelWorkspaceContext } from "./channelWorkspaceContext";
 import { buildCindyMemoryMd, buildCindySeedFiles } from "./cindy";
 import { AgentStartCoordinator, type AgentStartQueueItem, type PendingStartRebind } from "./agentStartCoordinator";
 import type { CapabilityWait, RecoveryGrant, StartRefusalDecision } from "./runtimeOutcomeOutbox";
@@ -4417,6 +4418,8 @@ export class AgentProcessManager {
       const projectedWakeMessage = wakeMessageProjection.messages[0];
       const runtimeProfileControlPrompt = transientWakeMessage ? null : formatRuntimeProfileControlPrompt([projectedWakeMessage]);
       if (transientWakeMessage) {
+        // A transient/system notice is not a concrete channel delivery; do
+        // not load editable channel-local configuration for it.
         prompt = formatSystemNoticeRuntimeInput(projectedWakeMessage, driver);
       } else if (runtimeProfileControlPrompt) {
         prompt = runtimeProfileControlPrompt;
@@ -4426,7 +4429,12 @@ export class AgentProcessManager {
         const pendingInboxNotice = startingInboxMessages.length > 0
           ? formatInboxUpdateRuntimeInput(startingInboxMessages, driver, startingInboxMessages.length)
           : undefined;
-        prompt = formatConcreteMessagesRuntimeInput([projectedWakeMessage], driver, pendingInboxNotice);
+        prompt = formatConcreteMessagesRuntimeInput(
+          [projectedWakeMessage],
+          driver,
+          pendingInboxNotice,
+          this.loadChannelWorkspaceContexts(agentId, agentDataDir, [projectedWakeMessage]),
+        );
       } else {
         wakeMessageDeliveredAsInboxUpdate = true;
         prompt = formatInboxUpdateRuntimeInput([wakeMessage, ...startingInboxMessages], driver);
@@ -4445,7 +4453,12 @@ export class AgentProcessManager {
     } else if (resumeCatchupInputMessages.length > 0) {
       resumeCatchupDeliveredAsInput = true;
       renderedStartupThreadContextMessages = resumeCatchupProjection.renderedContextMessages;
-      prompt = formatConcreteMessagesRuntimeInput(resumeCatchupProjection.messages, driver);
+      prompt = formatConcreteMessagesRuntimeInput(
+        resumeCatchupProjection.messages,
+        driver,
+        undefined,
+        this.loadChannelWorkspaceContexts(agentId, agentDataDir, resumeCatchupProjection.messages),
+      );
       promptSource = "resume_catchup_inbox";
 
       prompt = composeAxSurfaces(prompt, formatBoundedStartupUnreadSuffix(unreadSummary));
@@ -4462,6 +4475,7 @@ export class AgentProcessManager {
           renderedStartupThreadContextMessages,
           driver,
           pendingInboxNotice,
+          this.loadChannelWorkspaceContexts(agentId, agentDataDir, renderedStartupThreadContextMessages),
         );
         promptSource = "starting_thread_context";
       } else {
@@ -6785,6 +6799,25 @@ export class AgentProcessManager {
         reason: "workspace_reset_threw",
         error_class: errorClassOf(err),
       }, "error");
+    }
+  }
+
+  private loadChannelWorkspaceContexts(
+    agentId: string,
+    agentWorkspacePath: string,
+    messages: readonly AgentMessage[],
+  ): ReadonlyMap<string, ChannelWorkspaceContext> {
+    try {
+      // Keep filtering and distinct-channel handling in the shared loader so
+      // every delivery seam agrees about system and third-party messages.
+      return loadChannelWorkspaceContextsSync(agentWorkspacePath, messages, (channelId, error) => {
+        logger.warn(`[Agent ${agentId}] Channel workspace context unavailable for ${channelId}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    } catch (error) {
+      // Channel-local files are optional user-owned context. Unexpected
+      // loader failures must not make the daemon drop the actual message.
+      logger.warn(`[Agent ${agentId}] Channel workspace context unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      return new Map<string, ChannelWorkspaceContext>();
     }
   }
 
@@ -10676,6 +10709,13 @@ export class AgentProcessManager {
     const runtimeProjection = this.projectThreadJoinContextsForRuntimeInput(agentId, messages);
     const renderedContextMessageSet = new Set(runtimeProjection.renderedContextMessages);
     const pendingNoticeMessages = messages.filter((message) => !renderedContextMessageSet.has(message));
+    const channelWorkspaceContexts = runtimeProjection.renderedContextMessages.length > 0
+      ? this.loadChannelWorkspaceContexts(
+        agentId,
+        path.join(this.dataDir, agentId),
+        runtimeProjection.renderedContextMessages,
+      )
+      : new Map<string, ChannelWorkspaceContext>();
     const rows = projectAgentInboxSnapshot(messages);
     const senderElision = this.elideSeenSenders(agentId, ap, runtimeProjection.renderedContextMessages);
     const prompt = runtimeProjection.renderedContextMessages.length > 0
@@ -10685,6 +10725,7 @@ export class AgentProcessManager {
         pendingNoticeMessages.length > 0
           ? formatInboxUpdateRuntimeInput(pendingNoticeMessages, ap.driver, ap.inbox.length)
           : undefined,
+        channelWorkspaceContexts,
       )
       : formatInboxUpdateRuntimeInput(messages, ap.driver, ap.inbox.length);
     const projectionAttrs = this.recordInboxUpdateProjection(agentId, ap, messages, source, mode, prompt, ap.inbox.length);
@@ -10868,7 +10909,14 @@ export class AgentProcessManager {
     const controlPrompt = formatRuntimeProfileControlPrompt(runtimeProjection.messages);
     // A control prompt renders no message lines, so it claims no senders.
     const senderElision = controlPrompt ? NO_SENDER_ELISION(runtimeProjection.messages) : this.elideSeenSenders(agentId, ap, runtimeProjection.messages);
-    const prompt = controlPrompt ?? formatConcreteMessagesRuntimeInput(senderElision.messages, ap.driver);
+    const prompt = controlPrompt ?? formatConcreteMessagesRuntimeInput(
+      senderElision.messages,
+      ap.driver,
+      undefined,
+      options.transient
+        ? new Map<string, ChannelWorkspaceContext>()
+        : this.loadChannelWorkspaceContexts(agentId, path.join(this.dataDir, agentId), runtimeProjection.messages),
+    );
     const inputTraceAttrs = buildRuntimeInputTraceAttrs({
       source: traceSource,
       prompt,

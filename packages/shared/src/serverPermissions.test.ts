@@ -8,6 +8,7 @@ import {
   getServerCapabilities,
   getServerSurfaceCapabilities,
   hasServerCapability,
+  isMemberOwnedComputer,
   type ServerCapability,
   type ServerRole,
 } from "./serverPermissions";
@@ -42,7 +43,7 @@ const MEMBER_CAPABILITIES = new Set<ServerCapability>([
   "viewMembers",
   "viewServerProfile",
   "viewAgents",
-  "controlAgentRuntime",
+  "createAgents",
   "viewMachines",
   "assignTasks",
 ]);
@@ -76,6 +77,20 @@ test("guest has an explicit all-false server capability bundle", () => {
 test("member has exactly the eleven explicitly approved capabilities", () => {
   const granted = SERVER_CAPABILITY_KEYS.filter((capability) => hasServerCapability("member", capability));
   assert.deepEqual(granted, [...MEMBER_CAPABILITIES]);
+});
+
+test("members may create agents but do not receive server-wide runtime control", () => {
+  assert.equal(hasServerCapability("member", "createAgents"), true);
+  assert.equal(hasServerCapability("member", "controlAgentRuntime"), false);
+  assert.equal(hasServerCapability("member", "registerMachines"), false);
+});
+
+test("member computer ownership requires a live machine attached by that same user", () => {
+  const member = "11111111-1111-4111-8111-111111111111";
+  assert.equal(isMemberOwnedComputer({ userId: member, attachedByUserId: member, machineId: "machine-1" }), true);
+  assert.equal(isMemberOwnedComputer({ userId: member, attachedByUserId: "22222222-2222-4222-8222-222222222222", machineId: "machine-1" }), false);
+  assert.equal(isMemberOwnedComputer({ userId: member, attachedByUserId: member, machineId: null }), false);
+  assert.equal(isMemberOwnedComputer({ userId: member, attachedByUserId: null, machineId: "machine-1" }), false);
 });
 
 test("unknown membership fails closed for every capability", () => {

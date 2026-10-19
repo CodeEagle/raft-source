@@ -31,6 +31,7 @@ import { getComputerCommands } from "../../utils/computerSetupCommand";
 import { getComputerVersionFact } from "../../utils/computerVersionFact";
 import { useComputerUpgradeReconnect } from "../../hooks/useComputerUpgradeReconnect";
 import { canViewMachineRuntimeAccountUsage } from "../../utils/machineRuntimeUsageVisibility";
+import { canManageMachineForRole } from "../../utils/memberAgentAccess";
 import ConfirmDialog from "../ConfirmDialog";
 import { trackAgentCreateOpened } from "../../analytics/journey";
 import CreateAgentDialog from "../agent/CreateAgentDialog";
@@ -806,7 +807,7 @@ export default function MachineDetailPanel({
   const openProfile = useProfileStore((s) => s.openProfile);
   const currentUserId = useAuthStore((s) => s.user?.id ?? null);
   const allAgents = useAgentStore((s) => s.agents);
-  const { capabilities } = useServerPermissions();
+  const { role: currentRole, capabilities } = useServerPermissions();
   const machineAgents = allAgents.filter((a) => !a.deletedAt && a.machineId === machine.id);
   const serverId = useServerStore((s) => s.current?.id ?? null);
   const serverSlug = useServerStore((s) => s.current?.slug);
@@ -899,16 +900,7 @@ export default function MachineDetailPanel({
   // When either changes, fall back to the product default immediately: healthy
   // Computers stay collapsed, while an offline Computer exposes recovery.
   const showRecoveryGuide = recoveryGuideDisclosure ?? machine.status !== "online";
-  const canManageMachines = machine.computerAttachedByCurrentUser === true
-    || (currentUserId !== null && machine.creator?.id === currentUserId)
-    || [
-    capabilities.editMachines,
-    capabilities.controlComputers,
-    capabilities.removeMachines,
-    capabilities.rotateMachineKeys,
-    capabilities.createAgents,
-    capabilities.migrateAgents,
-    ].some(Boolean);
+  const canManageMachines = canManageMachineForRole(machine, currentUserId, currentRole, capabilities);
   const canViewRuntimeAccountUsage = canViewMachineRuntimeAccountUsage(machine, currentUserId, capabilities);
   const handleDelete = useCallback(async () => {
     await deleteMachine(machine.id);

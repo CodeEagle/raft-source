@@ -13,16 +13,45 @@ import api from "../../api/client";
  * Signed URLs carry an expiry, so they are cacheable by construction — this
  * just stops us re-asking for a URL we already hold.
  */
-const cache = new Map<string, string>();
+interface CachedInlineAttachmentUrl {
+  url: string;
+  expiresAt: string | null;
+}
+
+type InlineAttachmentUrlResponse = {
+  urls?: Array<{ id: string; url: string; expiresAt?: string | null }>;
+};
+
+const cache = new Map<string, CachedInlineAttachmentUrl>();
 const inFlight = new Map<string, Promise<string | null>>();
+const batchInFlight = new Map<string, Promise<string | null>>();
+const requestGenerations = new Map<string, number>();
+
+function nextRequestGeneration(attachmentId: string): number {
+  const generation = (requestGenerations.get(attachmentId) ?? 0) + 1;
+  requestGenerations.set(attachmentId, generation);
+  return generation;
+}
 
 function readFresh(attachmentId: string): string | null {
-  return cache.get(attachmentId) ?? null;
+  const cached = cache.get(attachmentId);
+  if (!cached) return null;
+  if (cached.expiresAt) {
+    const expiresAt = Date.parse(cached.expiresAt);
+    if (!Number.isFinite(expiresAt) || Date.now() >= expiresAt) {
+      cache.delete(attachmentId);
+      return null;
+    }
+  }
+  return cached.url;
 }
 
 /** Drop a cached URL that failed to load, so the next render refetches it. */
 export function invalidateInlineAttachmentUrl(attachmentId: string): void {
   cache.delete(attachmentId);
+  nextRequestGeneration(attachmentId);
+  inFlight.delete(attachmentId);
+  batchInFlight.delete(attachmentId);
 }
 
 export function getCachedInlineAttachmentUrl(attachmentId: string): string | null {
@@ -49,25 +78,53 @@ export function getCachedInlineAttachmentUrl(attachmentId: string): string | nul
 export async function fetchInlineAttachmentUrls(attachmentIds: string[]): Promise<Map<string, string>> {
   const resolved = new Map<string, string>();
   const missing: string[] = [];
+  const pending: Array<[string, Promise<string | null>]> = [];
+  const generations = new Map<string, number>();
+  const considered = new Set<string>();
   for (const id of attachmentIds) {
+    if (considered.has(id)) continue;
+    considered.add(id);
     const hit = readFresh(id);
     if (hit) resolved.set(id, hit);
-    else missing.push(id);
+    else {
+      const currentPending = batchInFlight.get(id) ?? inFlight.get(id);
+      if (currentPending) pending.push([id, currentPending]);
+      else {
+        missing.push(id);
+        generations.set(id, nextRequestGeneration(id));
+      }
+    }
   }
-  if (missing.length === 0) return resolved;
 
-  try {
-    const { data } = await api.post<{ urls?: Array<{ id: string; url: string; expiresAt?: string | null }> }>(
+  if (missing.length > 0) {
+    const response = Promise.resolve().then(() => api.post<InlineAttachmentUrlResponse>(
       "/attachments/urls",
       { attachmentIds: missing },
-    );
-    for (const entry of data.urls ?? []) {
-      cache.set(entry.id, entry.url);
-      resolved.set(entry.id, entry.url);
+    ));
+    for (const attachmentId of missing) {
+      const generation = generations.get(attachmentId)!;
+      let attachmentRequest: Promise<string | null>;
+      attachmentRequest = response
+        .then(({ data }) => {
+          const entry = data.urls?.find((candidate) => candidate.id === attachmentId);
+          if (!entry || requestGenerations.get(attachmentId) !== generation) return null;
+          cache.set(attachmentId, { url: entry.url, expiresAt: entry.expiresAt ?? null });
+          return entry.url;
+        })
+        .catch(() => null)
+        .finally(() => {
+          if (batchInFlight.get(attachmentId) === attachmentRequest) {
+            batchInFlight.delete(attachmentId);
+          }
+        });
+      batchInFlight.set(attachmentId, attachmentRequest);
+      pending.push([attachmentId, attachmentRequest]);
     }
-  } catch {
-    // Fall through: callers still render what resolved, and a later open can
-    // retry the single form.
+  }
+
+  for (const [attachmentId, attachmentRequest] of pending) {
+    const url = await attachmentRequest;
+    if (url) resolved.set(attachmentId, url);
   }
   return resolved;
 }
@@ -76,19 +133,26 @@ export async function fetchInlineAttachmentUrl(attachmentId: string): Promise<st
   const cached = readFresh(attachmentId);
   if (cached) return cached;
 
+  const pendingBatch = batchInFlight.get(attachmentId);
+  if (pendingBatch) return pendingBatch;
+
   const pending = inFlight.get(attachmentId);
   if (pending) return pending;
 
+  const requestGeneration = nextRequestGeneration(attachmentId);
   const request = api
     .get<{ url: string; expiresAt?: string | null }>(
       `/attachments/${attachmentId}/url?disposition=inline`,
     )
     .then(({ data }) => {
-      cache.set(attachmentId, data.url);
+      if (requestGenerations.get(attachmentId) !== requestGeneration) return null;
+      cache.set(attachmentId, { url: data.url, expiresAt: data.expiresAt ?? null });
       return data.url;
     })
     .finally(() => {
-      inFlight.delete(attachmentId);
+      if (requestGenerations.get(attachmentId) === requestGeneration) {
+        inFlight.delete(attachmentId);
+      }
     });
 
   inFlight.set(attachmentId, request.catch(() => null));
@@ -103,4 +167,6 @@ export async function fetchInlineAttachmentUrl(attachmentId: string): Promise<st
 export function resetInlineAttachmentUrlCache(): void {
   cache.clear();
   inFlight.clear();
+  batchInFlight.clear();
+  requestGenerations.clear();
 }

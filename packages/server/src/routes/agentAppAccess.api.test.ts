@@ -97,7 +97,7 @@ function api(baseUrl: string, token: string, serverId: string) {
   };
 }
 
-test("automatic agent grants need authority over the agent, and a person's revoke sticks", async ({ app }) => {
+test("automatic agent grants require integration authority, and a person's revoke sticks", async ({ app }) => {
   const s = await seedServer();
   // A plain member's app may not grant itself access to someone else's agent.
   const memberApp = await createApp(s.server.id, s.member.id, `aaa-m-${s.suffix.slice(0, 6)}`);
@@ -110,7 +110,7 @@ test("automatic agent grants need authority over the agent, and a person's revok
   assert.equal(foreign.status, "pending");
   assert.equal((await activeGrants(s.creatorAgent.id, memberApp.client.id)).length, 0);
 
-  // The agent's own creator's app is granted automatically.
+  // Agent creator identity alone is not integration authority.
   const creatorApp = await createApp(s.server.id, s.creator.id, `aaa-c-${s.suffix.slice(0, 6)}`);
   const own = await requestAgent(app.baseUrl, {
     clientKey: creatorApp.client.clientId,
@@ -118,10 +118,8 @@ test("automatic agent grants need authority over the agent, and a person's revok
     serverSlug: s.server.slug,
     agentName: s.creatorAgent.name,
   });
-  assert.equal(own.status, "approved");
-  const [grant] = await activeGrants(s.creatorAgent.id, creatorApp.client.id);
-  assert.ok(grant);
-  assert.equal(grant.grantSource, "app_request");
+  assert.equal(own.status, "pending");
+  assert.equal((await activeGrants(s.creatorAgent.id, creatorApp.client.id)).length, 0);
 
   // An owner/admin's app is granted automatically for any agent.
   const ownerApp = await createApp(s.server.id, s.owner.id, `aaa-o-${s.suffix.slice(0, 6)}`);
@@ -132,41 +130,44 @@ test("automatic agent grants need authority over the agent, and a person's revok
     agentName: s.creatorAgent.name,
   });
   assert.equal(byOwner.status, "approved");
+  const [grant] = await activeGrants(s.creatorAgent.id, ownerApp.client.id);
+  assert.ok(grant);
+  assert.equal(grant.grantSource, "app_request");
 
-  // The agent's creator revokes; the app's next request waits for a person.
-  const creatorApi = api(app.baseUrl, await tokenForHuman(s.creator.email), s.server.id);
-  const revoke = await creatorApi.post(`/integrations/grants/${grant.id}/revoke`);
+  // The owner revokes; the app's next request waits for a person.
+  const ownerApi = api(app.baseUrl, await tokenForHuman(s.owner.email), s.server.id);
+  const revoke = await ownerApi.post(`/integrations/grants/${grant.id}/revoke`);
   assert.equal(revoke.status, 200);
   const afterRevoke = await requestAgent(app.baseUrl, {
-    clientKey: creatorApp.client.clientId,
-    clientSecret: creatorApp.clientSecret,
+    clientKey: ownerApp.client.clientId,
+    clientSecret: ownerApp.clientSecret,
     serverSlug: s.server.slug,
     agentName: s.creatorAgent.name,
   });
   assert.equal(afterRevoke.status, "pending");
-  assert.equal((await activeGrants(s.creatorAgent.id, creatorApp.client.id)).length, 0);
+  assert.equal((await activeGrants(s.creatorAgent.id, ownerApp.client.id)).length, 0);
 
   // Granting again on the agent's behalf clears the block; the next request reuses that grant.
-  const regrant = await creatorApi.post(`/integrations/agents/${s.creatorAgent.id}/grants`, {
-    clientId: creatorApp.client.id,
+  const regrant = await ownerApi.post(`/integrations/agents/${s.creatorAgent.id}/grants`, {
+    clientId: ownerApp.client.id,
     scopes: SCOPES,
   });
   assert.equal(regrant.status, 201);
-  assert.equal((await activeGrants(s.creatorAgent.id, creatorApp.client.id))[0]?.grantSource, "person");
+  assert.equal((await activeGrants(s.creatorAgent.id, ownerApp.client.id))[0]?.grantSource, "person");
   const blocks = await getDb().select().from(oauthAgentAutoGrantBlocks).where(eq(oauthAgentAutoGrantBlocks.agentId, s.creatorAgent.id));
   assert.equal(blocks.length, 0);
   const reused = await requestAgent(app.baseUrl, {
-    clientKey: creatorApp.client.clientId,
-    clientSecret: creatorApp.clientSecret,
+    clientKey: ownerApp.client.clientId,
+    clientSecret: ownerApp.clientSecret,
     serverSlug: s.server.slug,
     agentName: s.creatorAgent.name,
   });
   assert.equal(reused.status, "approved");
   // Reused the person's grant rather than creating another one.
-  assert.equal((await activeGrants(s.creatorAgent.id, creatorApp.client.id)).length, 1);
+  assert.equal((await activeGrants(s.creatorAgent.id, ownerApp.client.id)).length, 1);
 });
 
-test("the agent's creator and owners/admins manage its app access; other members cannot", async ({ app }) => {
+test("only owners/admins manage Agent app access; creators and other members cannot", async ({ app }) => {
   const s = await seedServer();
   const memberApp = await createApp(s.server.id, s.member.id, `aab-m-${s.suffix.slice(0, 6)}`);
   const ownerApp = await createApp(s.server.id, s.owner.id, `aab-o-${s.suffix.slice(0, 6)}`);
@@ -174,7 +175,7 @@ test("the agent's creator and owners/admins manage its app access; other members
   const memberApi = api(app.baseUrl, await tokenForHuman(s.member.email), s.server.id);
   const ownerApi = api(app.baseUrl, await tokenForHuman(s.owner.email), s.server.id);
 
-  // Pending request for the creator's agent: another member may not approve it, the creator may.
+  // Pending request for the creator's Agent: neither member may approve it; the owner may.
   const pending = await requestAgent(app.baseUrl, {
     clientKey: memberApp.client.clientId,
     clientSecret: memberApp.clientSecret,
@@ -183,7 +184,8 @@ test("the agent's creator and owners/admins manage its app access; other members
   });
   assert.equal(pending.status, "pending");
   assert.equal((await memberApi.post(`/integrations/requests/${pending.requestId}/approve`, { remember: true })).status, 403);
-  assert.equal((await creatorApi.post(`/integrations/requests/${pending.requestId}/approve`, { remember: true })).status, 200);
+  assert.equal((await creatorApi.post(`/integrations/requests/${pending.requestId}/approve`, { remember: true })).status, 403);
+  assert.equal((await ownerApi.post(`/integrations/requests/${pending.requestId}/approve`, { remember: true })).status, 200);
   const [approvedRequest] = await getDb().select().from(oauthAccessRequests).where(eq(oauthAccessRequests.id, pending.requestId));
   assert.equal(approvedRequest?.status, "approved");
   assert.equal((await activeGrants(s.creatorAgent.id, memberApp.client.id)).length, 1);
@@ -213,10 +215,12 @@ test("the agent's creator and owners/admins manage its app access; other members
   const foreign = await ownerApi.post(`/integrations/agents/${s.creatorAgent.id}/grants`, { clientId: foreignApp.client.id, scopes: SCOPES });
   assert.equal(foreign.status, 404);
 
-  // The picker lists apps usable on this server, for the same people who may grant.
+  // The picker lists apps usable on this server only for owner/admin callers.
   const picker = await creatorApi.get(`/integrations/agents/${s.creatorAgent.id}/grantable-apps`);
-  assert.equal(picker.status, 200);
-  const apps = (await picker.json() as { apps: Array<{ clientId: string; scopes: string[] }> }).apps;
+  assert.equal(picker.status, 403);
+  const ownerPicker = await ownerApi.get(`/integrations/agents/${s.creatorAgent.id}/grantable-apps`);
+  assert.equal(ownerPicker.status, 200);
+  const apps = (await ownerPicker.json() as { apps: Array<{ clientId: string; scopes: string[] }> }).apps;
   const ids = apps.map((a) => a.clientId);
   assert.ok(ids.includes(ownerApp.client.id));
   assert.ok(ids.includes(memberApp.client.id));

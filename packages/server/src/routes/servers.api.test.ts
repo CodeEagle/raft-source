@@ -5596,6 +5596,292 @@ test("machine workspace scan and runtime model detect require admin machine priv
     });
 });
 
+test("member cannot mutate a Computer when legacy machine ownership names that member", async ({ app }) => {
+    const { owner, member, server } = await seedRoleFixture("computer-owner-overrides-machine-user");
+    const [machine] = await getDb().insert(machines).values({
+      serverId: server.id,
+      // This legacy field is intentionally the wrong owner for a Computer.
+      userId: member.id,
+      name: "owner-computer",
+      apiKeyHash: "unused-computer-owner-override-hash",
+    }).returning();
+    await getDb().insert(computers).values({
+      serverId: server.id,
+      machineId: machine.id,
+      name: "owner-computer",
+      apiKeyHash: "unused-computer-owner-override-computer-hash",
+      apiKeyPrefix: "sk_computer_owner_override",
+      attachedByUserId: owner.id,
+    });
+
+    const response = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}`, {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${await tokenForHuman(member.email)}`,
+        "X-Server-Id": server.id,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ name: "member-must-not-rename" }),
+    });
+
+    assert.equal(response.status, 403);
+    assert.match((await response.json() as { error: string }).error, /permission|creator authority/i);
+});
+
+test("guest cannot use legacy machine ownership as Computer authority", async ({ app }) => {
+  const { server } = await seedRoleFixture("computer-guest-legacy-owner");
+  const guest = await seedPasswordUser("computer-guest-legacy-owner");
+  await getDb().insert(serverMembers).values({ serverId: server.id, userId: guest.id, role: "guest" });
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id,
+    userId: guest.id,
+    name: "legacy-guest-machine",
+    apiKeyHash: "unused-computer-guest-legacy-hash",
+  }).returning();
+
+  const response = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${await tokenForHuman(guest.email)}`,
+      "X-Server-Id": server.id,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: "guest-must-not-rename" }),
+  });
+
+  assert.equal(response.status, 403);
+});
+
+test("member cannot use a legacy machine after its Computer history was revoked", async ({ app }) => {
+  const { owner, member, server } = await seedRoleFixture("computer-revoked-history");
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id,
+    userId: member.id,
+    name: "revoked-computer",
+    apiKeyHash: "unused-computer-revoked-history-machine-hash",
+  }).returning();
+  await getDb().insert(computers).values({
+    serverId: server.id,
+    machineId: machine.id,
+    name: "revoked-computer",
+    apiKeyHash: "unused-computer-revoked-history-computer-hash",
+    apiKeyPrefix: "sk_computer_revoked_history",
+    attachedByUserId: member.id,
+    revokedAt: new Date(),
+    revokedByUserId: owner.id,
+    revokedReason: "test revoke",
+  });
+
+  const response = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${await tokenForHuman(member.email)}`,
+      "X-Server-Id": server.id,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: "member-must-not-reclaim-revoked-computer" }),
+  });
+
+  assert.equal(response.status, 403);
+});
+
+test("member may use the single active Computer after a revoked attachment was replaced", async ({ app }) => {
+  const { owner, member, server } = await seedRoleFixture("computer-revoked-replaced");
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id,
+    userId: owner.id,
+    name: "replaced-computer",
+    apiKeyHash: "unused-computer-replaced-machine-hash",
+  }).returning();
+  await getDb().insert(computers).values([
+    {
+      serverId: server.id,
+      machineId: machine.id,
+      name: "old-computer-attachment",
+      apiKeyHash: "unused-computer-replaced-old-hash",
+      apiKeyPrefix: "sk_computer_replaced_old",
+      attachedByUserId: owner.id,
+      revokedAt: new Date(Date.now() - 1000),
+      revokedByUserId: owner.id,
+      revokedReason: "replaced",
+    },
+    {
+      serverId: server.id,
+      machineId: machine.id,
+      name: "new-computer-attachment",
+      apiKeyHash: "unused-computer-replaced-new-hash",
+      apiKeyPrefix: "sk_computer_replaced_new",
+      attachedByUserId: member.id,
+    },
+  ]);
+
+  const response = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${await tokenForHuman(member.email)}`,
+      "X-Server-Id": server.id,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: "member-may-use-current-computer" }),
+  });
+
+  assert.equal(response.status, 200);
+});
+
+test("member access fails closed when a machine has multiple active Computer rows", async ({ app }) => {
+  const { member, server } = await seedRoleFixture("computer-duplicate-active");
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id,
+    userId: member.id,
+    name: "duplicate-computer",
+    apiKeyHash: "unused-computer-duplicate-machine-hash",
+  }).returning();
+  await getDb().insert(computers).values([
+    {
+      serverId: server.id,
+      machineId: machine.id,
+      name: "duplicate-computer-1",
+      apiKeyHash: "unused-computer-duplicate-computer-hash-1",
+      apiKeyPrefix: "sk_computer_duplicate_1",
+      attachedByUserId: member.id,
+    },
+    {
+      serverId: server.id,
+      machineId: machine.id,
+      name: "duplicate-computer-2",
+      apiKeyHash: "unused-computer-duplicate-computer-hash-2",
+      apiKeyPrefix: "sk_computer_duplicate_2",
+      attachedByUserId: member.id,
+    },
+  ]);
+
+  const response = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${await tokenForHuman(member.email)}`,
+      "X-Server-Id": server.id,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ name: "member-must-not-use-ambiguous-computer" }),
+  });
+
+  assert.equal(response.status, 403);
+});
+
+test("member Computer workspace scan and delete require own user agent on the current machine", async ({ app }) => {
+  const { owner, member, server } = await seedRoleFixture("member-computer-workspace-owner");
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id,
+    userId: owner.id,
+    name: "member-owned-computer",
+    apiKeyHash: "unused-member-workspace-machine-hash",
+  }).returning();
+  await getDb().insert(computers).values({
+    serverId: server.id,
+    machineId: machine.id,
+    name: "member-owned-computer",
+    apiKeyHash: "unused-member-workspace-computer-hash",
+    apiKeyPrefix: "sk_computer_member_workspace",
+    attachedByUserId: member.id,
+  });
+  const [ownAgent] = await getDb().insert(agents).values({
+    serverId: server.id,
+    name: "member-own-agent",
+    runtime: "codex",
+    machineId: machine.id,
+    creatorType: "user",
+    creatorId: member.id,
+    status: "active",
+  }).returning();
+  const [otherCreatorAgent] = await getDb().insert(agents).values({
+    serverId: server.id,
+    name: "owner-agent-on-member-computer",
+    runtime: "codex",
+    machineId: machine.id,
+    creatorType: "user",
+    creatorId: owner.id,
+    status: "active",
+  }).returning();
+  const [otherMachineAgent] = await getDb().insert(agents).values({
+    serverId: server.id,
+    name: "member-agent-on-other-machine",
+    runtime: "codex",
+    machineId: null,
+    creatorType: "user",
+    creatorId: member.id,
+    status: "active",
+  }).returning();
+  const memberToken = await tokenForHuman(member.email);
+  const entries = (directoryName: string) => ({
+    directoryName,
+    totalSizeBytes: 42,
+    lastModified: new Date(0).toISOString(),
+    fileCount: 1,
+  });
+  const deleteCalls: string[] = [];
+  app.app.set("agentOrchestrator", {
+    hasMachineLocally: () => true,
+    scanMachineWorkspaces: async () => [
+      entries(ownAgent.id),
+      entries(otherCreatorAgent.id),
+      entries(otherMachineAgent.id),
+    ],
+    deleteMachineWorkspaceDir: async (_machineId: string, directoryName: string) => {
+      deleteCalls.push(directoryName);
+      return true;
+    },
+  });
+  const headers = { Authorization: `Bearer ${memberToken}`, "X-Server-Id": server.id };
+
+  const scan = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/workspaces`, { headers });
+  assert.equal(scan.status, 200);
+  assert.deepEqual((await scan.json() as Array<{ directoryName: string }>).map((entry) => entry.directoryName), [ownAgent.id]);
+
+  const deleteOtherCreator = await fetch(
+    `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/workspaces/${otherCreatorAgent.id}`,
+    { method: "DELETE", headers },
+  );
+  assert.equal(deleteOtherCreator.status, 404);
+  const deleteOtherMachine = await fetch(
+    `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/workspaces/${otherMachineAgent.id}`,
+    { method: "DELETE", headers },
+  );
+  assert.equal(deleteOtherMachine.status, 404);
+  assert.deepEqual(deleteCalls, []);
+
+  const deleteOwn = await fetch(
+    `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/workspaces/${ownAgent.id}`,
+    { method: "DELETE", headers },
+  );
+  assert.equal(deleteOwn.status, 200);
+  assert.deepEqual(deleteCalls, [ownAgent.id]);
+});
+
+test("member runtime-account usage cannot use legacy machine ownership without a Computer", async ({ app }) => {
+  __clearRuntimeAccountUsageLocalCacheForTests();
+  try {
+    const { member, server } = await seedRoleFixture("runtime-usage-legacy-machine");
+    const [machine] = await getDb().insert(machines).values({
+      serverId: server.id,
+      userId: member.id,
+      name: "legacy-runtime-machine",
+      apiKeyHash: "unused-runtime-legacy-machine-hash",
+    }).returning();
+    const response = await fetch(
+      `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-account-usage/codex`,
+      {
+        headers: {
+          Authorization: `Bearer ${await tokenForHuman(member.email)}`,
+          "X-Server-Id": server.id,
+        },
+      },
+    );
+    assert.equal(response.status, 403);
+  } finally {
+    __clearRuntimeAccountUsageLocalCacheForTests();
+  }
+});
+
 test("machine workspace scan and delete are scoped to the requesting server's agents on a shared Computer", async ({ app }) => {
   // One Computer attached to two servers keeps every agent workspace under one data
   // root, and each server sees the host through its own machine row. Server A's
@@ -5909,6 +6195,71 @@ test("POST /computer/:action — a removal that commits after the request-level 
     assert.equal((await res.json() as { error: string }).error, "Not a member of this server");
     assert.deepEqual(await computerLifecycleRowCounts(machine.id), { operations: 0, dispatches: 0, targets: 0 });
     assert.equal(relayCalls, 0, "a removed admin must not trigger a Computer control relay");
+});
+
+test("POST /computer/upgrade — Computer revocation after request auth creates no upgrade request or relay", async ({ app }) => {
+  const { owner, member, server } = await seedRoleFixture("computer-upgrade-revocation-wins");
+  const [machine] = await getDb().insert(machines).values({
+    serverId: server.id,
+    userId: owner.id,
+    name: "upgrade-revocation-computer",
+    apiKeyHash: "unused-computer-upgrade-revocation-machine-hash",
+    os: "darwin arm64",
+  }).returning();
+  const [computer] = await getDb().insert(computers).values({
+    serverId: server.id,
+    machineId: machine.id,
+    name: "upgrade-revocation-computer",
+    apiKeyHash: "unused-computer-upgrade-revocation-hash",
+    apiKeyPrefix: "sk_computer_upgrade_revocation",
+    attachedByUserId: member.id,
+  }).returning();
+  await enableRemoteUpgradeV2Flag(server.id);
+  const memberToken = await tokenForHuman(member.email);
+  let relayCalls = 0;
+  app.app.set("agentOrchestrator", {
+    getCurrentTimeMs: () => Date.parse("2026-09-01T01:00:00.000Z"),
+    hasMachineLocally: () => true,
+    getMachineComputerVersionFact: async () => ({
+      version: "1.0.40",
+      observedAt: "2026-09-01T00:59:59.000Z",
+      provenance: "owner_connection",
+    }),
+    sendComputerUpgrade: async () => {
+      relayCalls += 1;
+      return { sent: true };
+    },
+  });
+  app.app.set("computerBroadcastPolicyEvaluator", async (input: EvaluateComputerBroadcastPolicyInput) => {
+    await getDb().update(computers).set({
+      revokedAt: new Date("2026-09-01T00:59:59.500Z"),
+      revokedByUserId: owner.id,
+      revokedReason: "removed",
+    }).where(eq(computers.id, computer.id));
+    return testBroadcastPolicyDecision(input, {
+      eligibility: "eligible",
+      reasonCode: "eligible",
+      targetVersion: "1.0.41",
+    });
+  });
+
+  const response = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/computer/upgrade`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${memberToken}`,
+      "X-Server-Id": server.id,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ targetVersion: "1.0.41" }),
+  });
+
+  assert.equal(response.status, 403, await response.clone().text());
+  assert.equal(
+    (await getDb().select({ id: computerUpgradeRequests.id }).from(computerUpgradeRequests)
+      .where(eq(computerUpgradeRequests.machineId, machine.id))).length,
+    0,
+  );
+  assert.equal(relayCalls, 0, "a member whose Computer was revoked must not trigger an upgrade relay");
 });
 
 test("POST /computer-lifecycle-operations — a removal that commits after the request-level check leaves zero lifecycle rows (task #91)", async ({ app }) => {

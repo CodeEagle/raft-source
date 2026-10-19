@@ -20,6 +20,10 @@ import { formatAttachmentSuffix, type AttachmentDownloadHintStyle } from "./atta
 import type { AgentProxyVisibleMessage } from "./agentCredentialProxy";
 import { formatAgentMessageVisibleTarget } from "./agentVisibleDeliveryLedger";
 import type { RuntimeDriver } from "./drivers/types";
+import {
+  formatChannelWorkspaceContextBlock,
+  type ChannelWorkspaceContext,
+} from "./channelWorkspaceContext";
 
 const RESPONSE_TARGET_HINT =
   "Reply in the channel or create/reply in a thread as appropriate; use each message's `target` and `msg` fields to choose the exact target.";
@@ -96,6 +100,29 @@ export const adoptAxSurfaceText = (text: string): AxSurfaceText => asAxSurfaceTe
 type IncomingMessageFormatOptions = {
   attachmentHint?: AttachmentDownloadHintStyle;
 };
+
+type ChannelWorkspaceContextMap = ReadonlyMap<string, ChannelWorkspaceContext>;
+
+function formatChannelWorkspaceContext(
+  message: Pick<AgentMessage, "channel_id" | "third_party_event">,
+  contexts: ChannelWorkspaceContextMap | undefined,
+): string {
+  const channelId = message.channel_id;
+  if (!channelId || channelId === "system" || message.third_party_event || !contexts) return "";
+  const context = contexts.get(channelId);
+  if (!context) return "";
+  return formatChannelWorkspaceContextBlock(channelId, { context });
+}
+
+function formatMessageWithChannelContext(
+  message: AgentMessage,
+  options: IncomingMessageFormatOptions,
+  contexts: ChannelWorkspaceContextMap | undefined,
+): string {
+  const channelContext = formatChannelWorkspaceContext(message, contexts);
+  const body = formatIncomingMessage(message, options);
+  return channelContext ? `${channelContext}\n\n${body}` : body;
+}
 
 function getMessageShortId(messageId: string): string {
   return messageId.startsWith("thread-") ? messageId.slice(7) : messageId.slice(0, 8);
@@ -175,8 +202,8 @@ function incomingMessageFormatOptionsForDriver(driver: RuntimeDriver): IncomingM
 
 export const formatSystemNoticeRuntimeInput = axSurface(
   "System notice envelope around a single system message.",
-  (message: AgentMessage, driver: RuntimeDriver): string => {
-  return (`System notice received:\n\n${formatIncomingMessage(message, incomingMessageFormatOptionsForDriver(driver))}\n\nRespond as appropriate. Complete all your work before stopping.\n${RESPONSE_TARGET_HINT}`);
+  (message: AgentMessage, driver: RuntimeDriver, contexts?: ChannelWorkspaceContextMap): string => {
+  return (`System notice received:\n\n${formatMessageWithChannelContext(message, incomingMessageFormatOptionsForDriver(driver), contexts)}\n\nRespond as appropriate. Complete all your work before stopping.\n${RESPONSE_TARGET_HINT}`);
 },
   {
     examples: [{ args: [{ ...exampleMessage, sender_name: "System", sender_type: "system", content: "\ud83d\udccc Assigned @alice-agent to task #42 \"do the thing\"" }, exampleStdinDriver] }],
@@ -189,10 +216,24 @@ export const formatConcreteMessagesRuntimeInput = axSurface(
   messages: readonly AgentMessage[],
   driver: RuntimeDriver,
   pendingInboxNotice?: string,
+  contexts?: ChannelWorkspaceContextMap,
 ): string => {
   const header = messages.length === 1 ? "New message received:" : "New messages received:";
+  const contextChannelsRendered = new Set<string>();
   const concreteMessages = messages
-    .map((message) => formatIncomingMessage(message, incomingMessageFormatOptionsForDriver(driver)))
+    .map((message) => {
+      const channelId = message.channel_id;
+      const canUseChannelContext = Boolean(
+        channelId
+        && channelId !== "system"
+        && !message.third_party_event
+        && contexts?.has(channelId)
+        && !contextChannelsRendered.has(channelId),
+      );
+      const messageContexts = canUseChannelContext ? contexts : undefined;
+      if (canUseChannelContext && channelId) contextChannelsRendered.add(channelId);
+      return formatMessageWithChannelContext(message, incomingMessageFormatOptionsForDriver(driver), messageContexts);
+    })
     .join("\n");
   return (`${header}\n\n${concreteMessages}${pendingInboxNotice ? `\n\n${pendingInboxNotice}` : ""}\n\nRespond as appropriate. Complete all your work before stopping.\n${RESPONSE_TARGET_HINT}`);
 },

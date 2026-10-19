@@ -255,21 +255,18 @@ test("attach: non-member and nonexistent server collapse to uniform 403 not_auth
     assert.equal(ghost.status, 403);
     assert.equal((await ghost.json() as { code?: string }).code, "not_authorized");
 
-    // Added as a plain member, the SAME request is still rejected — but now
-    // with the distinct `requires_admin` code, NOT `not_authorized`. A member
-    // already knows the server exists, so disclosing the role requirement is
-    // not an enumeration leak.
+    // A plain member may attach their own Computer. The attachment is
+    // self-scoped; it does not grant server-wide machine administration.
     await addMember(server.id, stranger.id, "member");
     const plainMember = await fetch(`${app.baseUrl}/api/computer/attach`, {
       method: "POST",
       headers: jsonHeaders({ Authorization: `Bearer ${stranger.bearer}` }),
       body: JSON.stringify({ serverSlug: server.slug, name: "raft-computer" }),
     });
-    assert.equal(plainMember.status, 403);
-    assert.equal((await plainMember.json() as { code?: string }).code, "requires_admin");
+    assert.equal(plainMember.status, 201);
 
-    // Elevated to admin (manageMachines = true), the SAME request succeeds —
-    // proves the 403s were authorization, not a malformed request.
+    // Elevated to admin (manageMachines = true), an otherwise identical
+    // request succeeds with a fresh display name.
     await transitionMemberRole({
       serverId: server.id,
       actorUserId: owner.id,
@@ -280,18 +277,15 @@ test("attach: non-member and nonexistent server collapse to uniform 403 not_auth
     const nowAdmin = await fetch(`${app.baseUrl}/api/computer/attach`, {
       method: "POST",
       headers: jsonHeaders({ Authorization: `Bearer ${stranger.bearer}` }),
-      body: JSON.stringify({ serverSlug: server.slug, name: "raft-computer" }),
+      body: JSON.stringify({ serverSlug: server.slug, name: "raft-computer-admin" }),
     });
     assert.equal(nowAdmin.status, 201);
   });
 });
 
-// Role gate regression (tygg 2026-06-05 #wg-raft-computer): attaching a
-// Computer mints a machine principal, so it requires the manageMachines
-// capability — owner / admin allowed, member denied with requires_admin.
-// Before this gate a plain member could attach via CLI/API even though the
-// UI hid the action; the gate makes the rule a real authorization boundary.
-test("attach: role gate — owner & admin allowed, plain member denied with requires_admin", async () => {
+// Role gate regression: owner/admin retain server-wide attachment authority;
+// members may attach only their own Computer.
+test("attach: owner, admin, and member can attach an independently-owned Computer", async () => {
   await withEnv(true, async (app) => {
     // Owner (server creator) — manageMachines = true → 201.
     const owner = await seedUser();
@@ -313,8 +307,7 @@ test("attach: role gate — owner & admin allowed, plain member denied with requ
     });
     assert.equal(adminRes.status, 201);
 
-    // Plain member — manageMachines = false → 403 requires_admin, and no
-    // computer row is created for them.
+    // Plain member — self-attach is allowed and creates exactly one row.
     const member = await seedUser();
     await addMember(server.id, member.id, "member");
     const memberRes = await fetch(`${app.baseUrl}/api/computer/attach`, {
@@ -322,15 +315,14 @@ test("attach: role gate — owner & admin allowed, plain member denied with requ
       headers: jsonHeaders({ Authorization: `Bearer ${member.bearer}` }),
       body: JSON.stringify({ serverSlug: server.slug, name: "member-box" }),
     });
-    assert.equal(memberRes.status, 403);
-    assert.equal((await memberRes.json() as { code?: string }).code, "requires_admin");
+    assert.equal(memberRes.status, 201);
 
     const db = getDb();
     const memberComputers = await db
       .select({ id: computers.id })
       .from(computers)
       .where(eq(computers.attachedByUserId, member.id));
-    assert.equal(memberComputers.length, 0);
+    assert.equal(memberComputers.length, 1);
   });
 });
 

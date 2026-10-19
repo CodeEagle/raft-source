@@ -239,8 +239,9 @@ test("real PG route: POST /api/agents/:id/migration/cancel refuses a canceller r
 
 test("real PG route: POST /api/agents/:id/start refuses to complete a migration for a starter removed after the request-level checks", REAL_PG_TEST, async () => {
   await withRealPgApp(async (app, observer) => {
-    // Members hold controlAgentRuntime.
-    const seeded = await seedServer("member");
+    // The request must pass its runtime-control check before the membership
+    // removal races the fenced completion write.
+    const seeded = await seedServer("admin");
     const now = new Date();
     const arriving = await beginArrivingTestAgentMigration({
       agentId: seeded.agent.id,

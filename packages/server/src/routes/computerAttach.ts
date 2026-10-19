@@ -59,9 +59,9 @@ computerAttachRouter.post("/attach", requireAuth, async (req, res) => {
         return;
       }
       // Uniform 403. `not_authorized` collapses non-member / missing / deleted
-      // server (no existence enumeration). `requires_admin` is the distinct
-      // member-without-manageMachines case — safe to disclose since the caller
-      // already knows they are a member; lets the CLI say "ask an admin".
+      // server (no existence enumeration). `requires_admin` is reserved for a
+      // role that lacks server-wide machine administration; plain members use
+      // the self-attach branch in the service.
       const error =
         result.error === "requires_admin"
           ? "Attaching a Computer requires the admin or owner role on this server"

@@ -91,7 +91,7 @@ const MEMBER_SERVER_CAPABILITIES = capabilitiesFrom([
   "addChannelMembers",
   "viewMembers",
   "viewAgents",
-  "controlAgentRuntime",
+  "createAgents",
   "viewMachines",
   "assignTasks",
 ]);
@@ -161,6 +161,23 @@ export function getServerSurfaceCapabilities(
 
 export function hasServerCapability(role: ServerRole | null | undefined, capability: ServerCapability): boolean {
   return getServerCapabilities(role)[capability];
+}
+
+/**
+ * A member may target only a live Computer whose attachment was established
+ * by that same human. The database-backed callers additionally verify the
+ * server, active row, and transaction locks; this pure predicate keeps the
+ * ownership rule shared and fail-closed at every boundary.
+ */
+export function isMemberOwnedComputer(input: {
+  userId: string;
+  attachedByUserId: string | null | undefined;
+  machineId: string | null | undefined;
+}): boolean {
+  return Boolean(input.machineId)
+    && input.attachedByUserId !== null
+    && input.attachedByUserId !== undefined
+    && input.attachedByUserId === input.userId;
 }
 
 export function canReadBillingSummary(role: ServerRole | null | undefined): boolean {

@@ -53,6 +53,7 @@ import {
 } from "@botiverse/raft-shared";
 import { parseBrandedUuidFromBody } from "../lib/brandedParse";
 import { actorCanChangeServerMemberRole, actorHasServerCapabilityInServer, decideAgentConnectorAuthority, actorRoleHasServerCapability, getActorServerRoleInServer, roleCanInspectAgentPrivateSurfaces, userCanActOnAgentResource } from "../lib/actorPermissions";
+import { assertMemberAgentMachineAccess, MemberAgentMachineAuthorizationError } from "../lib/memberAgentAuthorization";
 import { getCdnStorage } from "../services/storageService";
 import { streamStorageResponse } from "../services/storageResponseStream";
 import { decodePixelAvatarKey, renderPixelAvatarSvg } from "../services/pixelAvatarService";
@@ -1438,10 +1439,12 @@ agentRouter.get("/", async (req, res) => {
 // Create agent — accepts machineId and program, auto-starts after creation
 agentRouter.post("/", async (req, res) => {
   try {
-    if (!await actorHasServerCapabilityInServer(req.serverId!, "user", req.userId!, "createAgents")) {
+    const callerRole = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+    if (!callerRole || !actorRoleHasServerCapability(callerRole, "createAgents")) {
       res.status(403).json({ error: "The `createAgents` capability is required to create agents" });
       return;
     }
+    const memberScopedCreate = callerRole === "member";
     // Optimistic setup-state token for the create-vs-reset race. Both operations serialize
     // on the agent lock in the service; this request-start snapshot tells the winner whether
     // the caller was queued behind a reset and must retry from the now-current screen.
@@ -1458,6 +1461,13 @@ agentRouter.post("/", async (req, res) => {
     const { name, description, model, runtime, reasoningEffort, machineId, envVars, avatarUrl, actionCardMessageId, actionCardConfirmationVersion } = req.body;
     let { runtimeConfig, formDefinitionRef } = req.body;
     const external = req.body?.external === true;
+    if (memberScopedCreate && external) {
+      res.status(403).json({
+        error: "Members may create only managed agents on their own Computer",
+        code: "member_external_agent_forbidden",
+      });
+      return;
+    }
     let v2Submitted = false;
     let v2SubmittedReasoningEffort: unknown = null;
     if (!external) {
@@ -1471,6 +1481,13 @@ agentRouter.post("/", async (req, res) => {
       v2SubmittedReasoningEffort = v2 ? v2.runtimeConfig.reasoningEffort : null;
     }
     const onboarding = req.body?.onboarding === true;
+    if (memberScopedCreate && onboarding) {
+      res.status(403).json({
+        error: "Members may not create the server onboarding agent",
+        code: "member_onboarding_agent_forbidden",
+      });
+      return;
+    }
     if (external && onboarding) {
       res.status(400).json({ error: "Onboarding agent cannot be external" });
       return;
@@ -1546,6 +1563,13 @@ agentRouter.post("/", async (req, res) => {
     }
     // Hosted runtime provider (raft-agent-provider.v1): only for external agents.
     const rawProvider = req.body?.provider;
+    if (memberScopedCreate && rawProvider !== undefined && rawProvider !== null) {
+      res.status(403).json({
+        error: "Members may not create hosted agents",
+        code: "member_hosted_agent_forbidden",
+      });
+      return;
+    }
     if (rawProvider !== undefined && rawProvider !== null) {
       if (!external) {
         res.status(400).json({ error: "provider is only valid for external agents", code: "agent_runtime_provider_invalid" });
@@ -1636,6 +1660,23 @@ agentRouter.post("/", async (req, res) => {
         res.status(400).json({ error: "Machine not found in this server" });
         return;
       }
+    }
+    try {
+      // This is an early, non-locking rejection for the common invalid target.
+      // createAgent repeats the relation check under the creator/member and
+      // machine/Computer locks immediately before inserting the Agent.
+      await assertMemberAgentMachineAccess(getDb(), {
+        serverId: req.serverId!,
+        userId: req.userId!,
+        role: callerRole,
+        machineId: assignedMachine?.id ?? null,
+      }, { lockRows: false });
+    } catch (err) {
+      if (err instanceof MemberAgentMachineAuthorizationError) {
+        res.status(403).json({ error: err.message, code: err.code });
+        return;
+      }
+      throw err;
     }
     const isCindyOnboardingAgent = onboarding;
     if (isCindyOnboardingAgent) {
@@ -1857,6 +1898,7 @@ agentRouter.post("/", async (req, res) => {
         creatorId: req.userId!,
         // Task #93 line G: re-check `createAgents` under a share lock on the creator's member row inside the create lock.
         actorCapabilityFence: { userId: req.userId!, capability: "createAgents" },
+        memberAgentMachineFence: { userId: req.userId! },
         expectedSetupStatus,
         actionCardMessageId: typeof actionCardMessageId === "string" ? actionCardMessageId : undefined,
         actionCardConfirmationVersion: typeof actionCardConfirmationVersion === "number" ? actionCardConfirmationVersion : undefined,
@@ -1935,6 +1977,8 @@ agentRouter.post("/", async (req, res) => {
     if (err instanceof ServerMembershipRevokedError) {
       // Task #93 line G: the creator's removal committed after the request-level check; nothing was created.
       res.status(403).json({ error: err.message });
+    } else if (err instanceof MemberAgentMachineAuthorizationError) {
+      res.status(403).json({ error: err.message, code: err.code });
     } else if (err instanceof FencedAuthorizationDeniedError) {
       // Task #93 line G: the creator lost `createAgents` (demotion) before the create committed; nothing was created.
       res.status(403).json({ error: "The `createAgents` capability is required to create agents" });
@@ -4850,7 +4894,7 @@ agentRouter.post("/:id/bootstrap-tokens", async (req, res) => {
     );
     if (!canManage) {
       res.status(403).json({
-        error: "The `issueAgentCredentials` capability or human creator authority is required to issue agent bootstrap tokens",
+        error: "The `issueAgentCredentials` capability is required to issue agent bootstrap tokens",
         code: "insufficient_role",
       });
       return;
@@ -4929,7 +4973,7 @@ agentRouter.post("/:id/bootstrap-tokens", async (req, res) => {
         res.status(404).json({ error: "Agent not found", code: "agent_missing" });
       } else {
         res.status(403).json({
-          error: "The `issueAgentCredentials` capability or human creator authority is required to issue agent bootstrap tokens",
+          error: "The `issueAgentCredentials` capability is required to issue agent bootstrap tokens",
           code: "insufficient_role",
         });
       }

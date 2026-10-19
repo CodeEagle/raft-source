@@ -4,6 +4,7 @@ import { eq, and, inArray, isNull, isNotNull, sql, asc, ne } from "drizzle-orm";
 import { getDb, withDbTraceAttributes, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
 import { actorRoleHasServerCapability } from "../lib/actorPermissions";
 import { FencedAuthorizationDeniedError, ServerMembershipRevokedError } from "../lib/actorMembershipFence";
+import { assertMemberAgentMachineAccess } from "../lib/memberAgentAuthorization";
 import { agents, machines, channels, channelAgents, servers, serverMembers, serverAgentMembers, users, agentRuntimeProfiles, messages, tasks, taskEvents, agentProviderConnections, providerConnections, providerConnectionCredentials } from "../db/schema";
 import { ALL_CHANNEL_TEAM_THRESHOLD, EXTERNAL_AGENT_RUNTIME_ID, PLAN_CONFIG, currentDate, getEffectiveLimits, type AgentRuntimeErrorState, type AgentStatus, type ServerPlan, type ReasoningEffort, type RuntimeConfig, getDefaultModel, isExternalAgentRuntime, validateAgentName, type ServerRole } from "@botiverse/raft-shared";
 import { assertAgentCapacityAvailable, getServerBillingEntitlement, getServerBillingUsage, withAgentCreateLock } from "./planService";
@@ -85,6 +86,12 @@ export async function createAgent(
      */
     actorCapabilityFence?: { userId: string; capability: "createAgents" };
     /**
+     * Additional fence for member-created managed Agents. The request-level
+     * route check is only an early rejection; this relation is re-read under
+     * the creator/member + machine/Computer locks before the Agent insert.
+     */
+    memberAgentMachineFence?: { userId: string };
+    /**
      * Runs inside the create transaction right after the agent row exists
      * (e.g. hosted-runtime provisioning mints the credential and records the
      * provisioning intent atomically with the agent).
@@ -115,6 +122,14 @@ export async function createAgent(
         throw new FencedAuthorizationDeniedError("forbidden");
       }
       ownerSetupStamp = locked.ownerMemberLocked ? { kind: "owner_row_locked" } : { kind: "owner_row_missing" };
+      if (opts.memberAgentMachineFence) {
+        await assertMemberAgentMachineAccess(tx, {
+          serverId,
+          userId: opts.memberAgentMachineFence.userId,
+          role: locked.creatorRole,
+          machineId: opts.machineId,
+        });
+      }
     }
     if (opts.actionCardMessageId) {
       await assertActionCardWritableInTransaction(tx, opts.actionCardMessageId, opts.actionCardConfirmationVersion);
@@ -1417,6 +1432,18 @@ export async function autoAssignMachine(serverId: string, machineId: string) {
         ne(agents.runtime, EXTERNAL_AGENT_RUNTIME_ID),
         isNull(agents.machineId),
         isNull(agents.deletedAt),
+        // A member-created Agent is permanently scoped to the Computer the
+        // member attached. If that Computer is revoked/deleted, leave the
+        // Agent unassigned instead of silently moving it onto the first
+        // online machine owned by another user.
+        sql`NOT EXISTS (
+          SELECT 1
+          FROM server_members AS member_creator
+          WHERE member_creator.server_id = ${serverId}
+            AND member_creator.user_id = ${agents.creatorId}
+            AND member_creator.role = 'member'
+            AND ${agents.creatorType} = 'user'
+        )`,
       )
     );
 }

@@ -1545,6 +1545,8 @@ export const agentApiHistoryResponseSchema = lazySchema("agentApiHistoryResponse
   // CLI falls back to the requested target and stays fail-closed rather than
   // trying to reconstruct identity from message-rendering fields.
   target: z.string().min(1).optional(),
+  /** Stable visible channel identity used by local channel-workspace loaders. */
+  channel_id: z.string().trim().min(1).optional(),
   consumption_scope: agentApiHistoryConsumptionScopeSchema.optional(),
   messages: z.array(agentApiMessageEnvelopeSchema),
   has_more: z.boolean(),
@@ -3297,6 +3299,8 @@ export interface AgentApiEventsResponse {
 }
 
 export interface AgentApiHistoryResponse {
+  target?: string;
+  channel_id?: string;
   consumption_scope?: AgentApiHistoryConsumptionScope;
   messages: AgentApiMessageEnvelope[];
   has_more: boolean;

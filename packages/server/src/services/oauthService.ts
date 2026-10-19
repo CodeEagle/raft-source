@@ -759,9 +759,10 @@ function canAutoGrantAgentClient(appType: OAuthClientAppType, installed: boolean
  * Whether an app gets a grant for this agent with no person involved. Only
  * when whoever stands behind the app already has authority over the agent:
  * an installed published app (installing needs an owner/admin), or a
- * server-local app created by a server owner/admin or by the agent's own
- * creator, or when the agent itself asked. Never after a person revoked this
- * app's grant for this agent.
+ * server-local app created by a server owner/admin, or when the agent itself
+ * asked. Agent creator identity alone is deliberately insufficient: member
+ * Agent ownership does not confer workspace integration authority. Never
+ * auto-grant after a person revoked this app's grant for this agent.
  */
 async function mayAutoGrantAgentClient(
   executor: DatabaseExecutor,
@@ -779,7 +780,6 @@ async function mayAutoGrantAgentClient(
     .limit(1);
   if (blocked) return false;
   if (initiatedByAgent || client.appType === "third_party_global") return true;
-  if (agent.creatorType === "user" && agent.creatorId === client.createdByUserId) return true;
   return actorHasServerCapabilityInServer(agent.serverId, "user", client.createdByUserId, "manageExternalAuth", executor);
 }
 

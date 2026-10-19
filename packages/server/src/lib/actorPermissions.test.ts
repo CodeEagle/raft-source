@@ -8,7 +8,7 @@ import { serverAgentMembers, serverMembers, users } from "../db/schema";
 import { getDb } from "../db/index";
 import { createAgent } from "../services/agentService";
 import { createServer } from "../services/serverService";
-import { actorHasServerCapabilityInServer, decideAgentConnectorAuthority, resolveActorContext } from "./actorPermissions";
+import { actorHasServerCapabilityInServer, decideAgentConnectorAuthority, resolveActorContext, userCanActOnAgentResource } from "./actorPermissions";
 import { assertActorServerCapabilityMatrix } from "../test/actorCapabilityMatrix";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
@@ -55,8 +55,8 @@ test("actor permissions resolve human and agent server roles through the shared 
     cases: [
       { label: "human owner", actorType: "user", actorId: owner.id, expected: true },
       { label: "human admin", actorType: "user", actorId: admin.id, expected: true },
-      { label: "human member", actorType: "user", actorId: member.id, expected: true },
-      { label: "agent member", actorType: "agent", actorId: agent.id, expected: true },
+      { label: "human member", actorType: "user", actorId: member.id, expected: false },
+      { label: "agent member", actorType: "agent", actorId: agent.id, expected: false },
     ],
   });
   for (const capability of ["manageIntegrations", "editAgents"] as const) {
@@ -97,4 +97,19 @@ test("connector authority: creator first, then owner/admin; members and guests o
   assert.equal(decideAgentConnectorAuthority("member", me, null), null);
   assert.equal(decideAgentConnectorAuthority("guest", me, me), null);
   assert.equal(decideAgentConnectorAuthority(null, me, me), null);
+});
+
+test("a member creator retains only own agent edit/runtime/delete authority", () => {
+  const userId = "11111111-1111-4111-8111-111111111111";
+  const agent = { creatorType: "user", creatorId: userId };
+  assert.equal(userCanActOnAgentResource("member", userId, agent, "editAgents"), true);
+  assert.equal(userCanActOnAgentResource("member", userId, agent, "controlAgentRuntime"), true);
+  assert.equal(userCanActOnAgentResource("member", userId, agent, "deleteAgents"), true);
+  assert.equal(userCanActOnAgentResource("member", userId, agent, "manageExternalAuth"), false);
+  assert.equal(userCanActOnAgentResource("member", userId, agent, "issueAgentCredentials"), false);
+  assert.equal(userCanActOnAgentResource("member", userId, agent, "migrateAgents"), false);
+  assert.equal(userCanActOnAgentResource("member", userId, agent, "resetAgentWorkspace"), false);
+  assert.equal(userCanActOnAgentResource("member", "22222222-2222-4222-8222-222222222222", agent, "editAgents"), false);
+  assert.equal(userCanActOnAgentResource("guest", userId, agent, "editAgents"), false);
+  assert.equal(userCanActOnAgentResource(null, userId, agent, "deleteAgents"), false);
 });

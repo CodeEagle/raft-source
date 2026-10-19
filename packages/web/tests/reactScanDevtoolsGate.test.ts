@@ -32,9 +32,12 @@ test("React Scan devtools are switch-off by default for shared dev preview", () 
   );
 
   assert.match(devtoolsSource, /import\("react-scan"\)/);
-  assert.match(devtoolsSource, /initiallyEnabled\s*=\s*import\.meta\.env\.VITE_ENABLE_REACT_SCAN\s*===\s*"true"/);
-  assert.match(devtoolsSource, /enabled:\s*initiallyEnabled/);
-  assert.match(devtoolsSource, /showToolbar:\s*true/);
+  assert.match(devtoolsSource, /scan\(\{[\s\S]*enabled:\s*false[\s\S]*showToolbar:\s*false/);
+  assert.match(devtoolsSource, /SHOW_LOCAL_DEV_TOOLS_EVENT/);
+  assert.match(devtoolsSource, /HIDE_LOCAL_DEV_TOOLS_EVENT/);
+  assert.match(devtoolsSource, /showLocalReactDevTools/);
+  assert.match(devtoolsSource, /hideLocalReactDevTools/);
+  assert.match(devtoolsSource, /reason\s*===\s*"permission"/);
   assert.match(envExample, /VITE_ENABLE_REACT_SCAN=true/);
   assert.match(envExample, /screenshots, and screen recordings/);
 });

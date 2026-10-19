@@ -163,7 +163,11 @@ import type { MessageReadReceiptScope } from "./messageReadReceiptScope";
 import { projectReadReceipt } from "../../store/readReceiptDomain";
 import { useReadReceiptStore } from "../../store/readReceiptStore";
 import { fetchAttachmentPreviewSummary } from "./attachmentPreviewSummaryCache";
-import { fetchInlineAttachmentUrls } from "./inlineAttachmentUrlCache";
+import {
+  fetchInlineAttachmentUrl,
+  fetchInlineAttachmentUrls,
+  invalidateInlineAttachmentUrl,
+} from "./inlineAttachmentUrlCache";
 import { openDocumentPreview } from "./openDocumentPreview";
 import { openMediaPreview } from "./openMediaPreview";
 import { useMediaPreviewStore } from "../../store/mediaPreviewStore";
@@ -1446,12 +1450,42 @@ function ImageInlineFallbackLoader({
   children,
 }: {
   fallbackKey: string;
-  children: (fallbackUrls: Record<string, string>) => ReactNode;
+  children: (fallbackUrls: Record<string, string>, onImageError?: (attachmentId: string) => void) => ReactNode;
 }) {
   // The parent seam must keep empty keys off this state/effect-bearing path.
   // Stryker disable next-line all: this invariant is the oracle for mutations of that parent seam.
   if (!fallbackKey) throw new Error("ImageInlineFallbackLoader requires a non-empty fallback key");
   const [fallbackUrls, setFallbackUrls] = useState<Record<string, string>>({});
+  const retryStates = useRef(new Map<string, "retrying" | "retried">());
+  const lifecycle = useRef(0);
+
+  const handleImageError = useCallback((attachmentId: string) => {
+    const retryState = retryStates.current.get(attachmentId);
+    if (retryState === "retrying") return;
+    if (retryState === "retried") {
+      setFallbackUrls((current) => removeImageInlineFallbackUrl(current, attachmentId));
+      return;
+    }
+
+    retryStates.current.set(attachmentId, "retrying");
+    setFallbackUrls((current) => removeImageInlineFallbackUrl(current, attachmentId));
+    invalidateInlineAttachmentUrl(attachmentId);
+    const requestLifecycle = lifecycle.current;
+    void fetchInlineAttachmentUrl(attachmentId)
+      .then((url) => {
+        if (lifecycle.current !== requestLifecycle) return;
+        retryStates.current.set(attachmentId, "retried");
+        setFallbackUrls((current) => url
+          ? setImageInlineFallbackUrl(current, attachmentId, url)
+          : removeImageInlineFallbackUrl(current, attachmentId));
+      })
+      .catch(() => {
+        if (lifecycle.current === requestLifecycle) {
+          retryStates.current.set(attachmentId, "retried");
+          setFallbackUrls((current) => removeImageInlineFallbackUrl(current, attachmentId));
+        }
+      });
+  }, []);
 
   // Stryker disable all: this fetch lifecycle moved unchanged from MessageItem;
   // its URL/error semantics remain covered by the existing fallback contracts.
@@ -1462,15 +1496,16 @@ function ImageInlineFallbackLoader({
   // oxlint-disable-next-line react-doctor/no-cascading-set-state
   useEffect(() => {
     const attachmentIds = splitImageInlineFallbackKey(fallbackKey);
-    let cancelled = false;
-    const controller = new AbortController();
+    const currentLifecycle = lifecycle.current + 1;
+    lifecycle.current = currentLifecycle;
+    retryStates.current.clear();
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
     setFallbackUrls((current) => retainImageInlineFallbackUrls(current, attachmentIds));
 
     // One request for the whole gallery instead of one per image.
     void fetchInlineAttachmentUrls(attachmentIds)
       .then((urls) => {
-        if (cancelled) return;
+        if (lifecycle.current !== currentLifecycle) return;
         for (const attachmentId of attachmentIds) {
           const url = urls.get(attachmentId);
           setFallbackUrls((current) => url
@@ -1480,18 +1515,17 @@ function ImageInlineFallbackLoader({
       });
 
     return () => {
-      cancelled = true;
-      controller.abort();
+      lifecycle.current += 1;
     };
   }, [fallbackKey]);
   // Stryker restore all
 
-  return children(fallbackUrls);
+  return children(fallbackUrls, handleImageError);
 }
 
 function renderWithImageInlineFallback(
   fallbackKey: string,
-  children: (fallbackUrls: Record<string, string>) => ReactNode,
+  children: (fallbackUrls: Record<string, string>, onImageError?: (attachmentId: string) => void) => ReactNode,
 ) {
   if (!fallbackKey) return children(EMPTY_IMAGE_INLINE_FALLBACK_URLS);
   return <ImageInlineFallbackLoader fallbackKey={fallbackKey}>{children}</ImageInlineFallbackLoader>;
@@ -4764,7 +4798,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
         </CollapsibleMessageContent>
         {/* Attached files */}
         {!forwardedBundleMetadata && message.attachments && message.attachments.length > 0 && (() => {
-          return renderWithImageInlineFallback(imageFallbackKey, (imageFallbackUrls) => {
+          return renderWithImageInlineFallback(imageFallbackKey, (imageFallbackUrls, onImageError) => {
             // Stryker disable all: pre-existing attachment classification moved under the fallback seam.
             if (!message.attachments) return null;
             const renderedImages = imagePreviewAttachments.filter((att) => !!getImageGalleryPreviewSrc(att, imageFallbackUrls));
@@ -4802,6 +4836,7 @@ const ConnectedMessageItem = memo(function ConnectedMessageItem({ message, menti
                             lightboxImages={lightboxImages}
                             layout={item}
                             onDownload={handleDownloadAttachment}
+                            onImageError={previewSrc === imageFallbackUrls[att.id] ? onImageError : undefined}
                           />
                         );
                       })}

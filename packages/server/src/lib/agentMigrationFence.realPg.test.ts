@@ -78,7 +78,7 @@ async function seedUser(label: string) {
 
 /**
  * Owner, one actor with `actorRole`, two Computers and an Agent on the source Computer. With `actorIsCreator` the Agent
- * is the actor's own, so the creator branch of the authority rule applies.
+ * is the actor's own, which is useful when exercising ownership-sensitive fences.
  */
 async function seed(actorRole: ServerRole, actorIsCreator = false) {
   const owner = await seedUser("owner");
@@ -324,8 +324,9 @@ for (const change of CHANGES) {
 
   test(`real PG: auto-start completion waits for an in-flight ${change} of the starter and, once it commits, changes nothing`, async () => {
     await withRealPg(async (observer) => {
-      // Members hold controlAgentRuntime; only guests lose it.
-      const seeded = await seed("member");
+      // Only owner/admin roles hold server-wide controlAgentRuntime; a
+      // member's creator override is intentionally narrower.
+      const seeded = await seed("admin");
       const migration = await seedStarting(seeded);
       const before = await migrationSnapshot(observer, migration.id, seeded.agent.id);
       const { waitsOn, prepare } = membershipChange(change, seeded, "guest");
@@ -341,10 +342,11 @@ for (const change of CHANGES) {
   }, TEST_TIMEOUT_MS);
 }
 
-test("real PG: a removed creator cannot migrate their own Agent through the creator rule", async () => {
+test("real PG: a removed actor cannot migrate their own Agent after the request-level check", async () => {
   await withRealPg(async (observer) => {
-    // A member holds no migrateAgents; the creator branch alone authorized the request-level check.
-    const seeded = await seed("member", true);
+    // Use an admin so the request reaches the fenced write. Member creator
+    // ownership no longer grants the migration capability.
+    const seeded = await seed("admin", true);
     const { waitsOn, prepare } = membershipChange("removal", seeded, "member");
     const outcome = await raceWriteAgainst(observer, waitsOn, prepare, () => beginTestAgentMigration({
       agentId: seeded.agent.id,
@@ -486,9 +488,9 @@ test("real PG: cancel first vs an owner-driven transitionMemberRole — no deadl
 
 test("real PG: completion first vs an owner-driven transitionMemberRole — no deadlock, migration completed, role change after", async () => {
   await withRealPg(async (observer) => {
-    const seeded = await seed("member");
+    const seeded = await seed("admin");
     const migration = await seedStarting(seeded);
-    // A promotion takes the same locks as a demotion (servers FOR UPDATE, then member rows) and keeps controlAgentRuntime.
+    // A promotion takes the same locks as a demotion (servers FOR UPDATE, then member rows).
     await writeFirstAgainstTransition(observer, seeded, "admin", "%update \"agent_migrations\"%", () => completeAgentMigrationAutoStart({
       migrationId: migration.id,
       agentId: seeded.agent.id,

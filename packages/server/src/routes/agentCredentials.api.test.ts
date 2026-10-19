@@ -155,7 +155,7 @@ test("owner of agent's server mints sk_agent_* without X-Server-Id header", asyn
   });
 });
 
-test("agent creator keeps issueAgentCredentials authority after demotion to member", async () => {
+test("agent creator who is a member cannot manage external-agent credentials", async () => {
   await withDeviceAuthGateOn(async () => {
     const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
     try {
@@ -175,11 +175,10 @@ test("agent creator keeps issueAgentCredentials authority after demotion to memb
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
         body: JSON.stringify({}),
       });
-      assert.equal(res.status, 201);
-      const minted = await res.json();
+      assert.equal(res.status, 403);
+      assert.equal((await res.json() as { code?: string }).code, "insufficient_role");
       const headers = { Authorization: `Bearer ${token}` };
-      assert.equal((await fetch(`${app.baseUrl}/api/agents/${agent.id}/credentials`, { headers })).status, 200);
-      assert.equal((await fetch(`${app.baseUrl}/api/agents/${agent.id}/credentials/${minted.credentialId}`, { method: "DELETE", headers })).status, 204);
+      assert.equal((await fetch(`${app.baseUrl}/api/agents/${agent.id}/credentials`, { headers })).status, 403);
     } finally {
       await app.close();
     }
@@ -251,8 +250,7 @@ test("server member without issueAgentCredentials or creator authority gets 403 
       const body = (await res.json()) as { code: string; error: string };
       assert.equal(body.code, "insufficient_role");
       assert.match(body.error, /issueAgentCredentials/);
-      assert.match(body.error, /human creator authority/);
-      assert.doesNotMatch(body.error, /owners and admins/);
+      assert.doesNotMatch(body.error, /human creator authority/);
       for (const method of ["GET", "DELETE"]) {
         const suffix = method === "DELETE" ? "/00000000-0000-0000-0000-000000000001" : "";
         const denied = await fetch(`${app.baseUrl}/api/agents/${agent.id}/credentials${suffix}`, { method, headers: { Authorization: `Bearer ${token}` } });

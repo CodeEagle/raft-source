@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import type { ApiResponse } from "../../client";
 import type { AgentContext } from "../../auth/env";
@@ -6,6 +9,7 @@ import { createCommandContext } from "../../core/context";
 import { CliError } from "../../core/errors";
 import type { CliIo } from "../../core/io";
 import { buildResolvePath, messageResolveCommand } from "./resolve";
+import { channelWorkspaceDirectoryPath } from "../../channelWorkspaceContext";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -79,6 +83,47 @@ test("message resolve command prints a canonical citation row", async () => {
   const output = stdout.join("");
   assert.match(output, /\[target=#proj-runtime msg=abcd1234 time=.* type=human\]/);
   assert.match(output, /@xxchan — 我是谁: review this/);
+});
+
+test("managed message resolve loads the resolved channel's local files", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "raft-cli-resolve-channel-context-"));
+  const channelPath = channelWorkspaceDirectoryPath(workspace, "channel-a");
+  fs.mkdirSync(channelPath, { recursive: true });
+  fs.writeFileSync(path.join(channelPath, "AGENTS.md"), "AGENTS_A", "utf8");
+  fs.writeFileSync(path.join(channelPath, "MEMORY.md"), "MEMORY_A", "utf8");
+  const { io, stdout, stderr } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    env: { SLOCK_CURRENT_WORKSPACE_PATH: workspace },
+    loadAgentContext: () => ({ ...agentContext, clientMode: "managed-runner", secretSource: "agent-proxy-token-env" }),
+    createApiClient: () => ({
+      request: async (): Promise<ApiResponse<unknown>> => ({
+        ok: true,
+        status: 200,
+        error: null,
+        data: {
+          message: {
+            message_id: "aaaaaaaa-0000-0000-0000-000000000000",
+            channel_id: "channel-a",
+            channel_type: "channel",
+            channel_name: "alpha",
+            timestamp: "2026-05-28T00:00:00.000Z",
+            sender_type: "human",
+            sender_name: "alice",
+            content: "resolved-a",
+          },
+        },
+      }),
+    }) as any,
+  });
+
+  await messageResolveCommand.handler(ctx, "aaaaaaaa");
+
+  assert.deepEqual(stderr, []);
+  const output = stdout.join("");
+  assert.ok(output.indexOf('channel_id="channel-a"') < output.indexOf("resolved-a"));
+  assert.match(output, /AGENTS_A/);
+  assert.match(output, /MEMORY_A/);
 });
 
 test("message resolve prints the server-projected forwarded snapshot verbatim", async () => {

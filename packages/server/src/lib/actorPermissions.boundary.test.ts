@@ -83,8 +83,8 @@ test("agent authorization responses describe the executable action capabilities"
   ].map((file) => readFile(path.join(srcRoot, "routes", file), "utf8")));
   const agentActionSource = agentActionRoutes.join("\n");
 
-  assert.match(credentialsRoute, /`issueAgentCredentials` capability or human creator authority is required to manage agent credentials/);
-  assert.match(agentsRoute, /`issueAgentCredentials` capability or human creator authority is required to issue agent bootstrap tokens/);
+  assert.match(credentialsRoute, /`issueAgentCredentials` capability is required to manage agent credentials/);
+  assert.match(agentsRoute, /`issueAgentCredentials` capability is required to issue agent bootstrap tokens/);
   assert.match(agentsRoute, /`viewAgents` capability is required to inspect runtime options/);
   assert.match(channelsRoute, /`controlAgentRuntime` capability is required to stop all agents in a channel/);
   assert.match(channelsRoute, /`controlAgentRuntime` capability is required to resume all agents in a channel/);

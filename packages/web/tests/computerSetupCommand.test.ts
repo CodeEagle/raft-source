@@ -65,6 +65,17 @@ test("Computer setup command omits production server-url for the default hosted 
   );
 });
 
+test("Computer install command supports a self-hosted release base", () => {
+  assert.equal(
+    computerInstallCommand(
+      "slockdev",
+      null,
+      "https://downloads.example.test/raft-computer/1.0.47/",
+    ),
+    "curl -fsSL https://downloads.example.test/raft-computer/1.0.47/install.sh | sh",
+  );
+});
+
 test("Computer setup command includes custom production server-url when provided", () => {
   assert.equal(
     getComputerSetupCommand("botiverse", "production", "https://api.custom.example.test"),
@@ -136,6 +147,13 @@ test("Computer setup command isolates the slockdev command with a per-server hom
   assert.equal(
     getComputerSetupCommand("dev", "slockdev", "http://localhost:13036"),
     isolatedCommands("dev", "slockdev", " --server-url http://localhost:13036").setup,
+  );
+});
+
+test("Computer setup command enables the system CA for a self-hosted HTTPS server", () => {
+  assert.equal(
+    getComputerSetupCommand("example-workspace", "slockdev", "https://raft.example.test"),
+    'RAFT_HOME="$HOME/.raft-computer-example-workspace" RAFT_COMPUTER_INSTALL_DIR="$HOME/.raft-computer-example-workspace/bin" NODE_USE_SYSTEM_CA=1 "$HOME/.raft-computer-example-workspace/bin/raft-computer" setup /example-workspace --server-url https://raft.example.test',
   );
 });
 

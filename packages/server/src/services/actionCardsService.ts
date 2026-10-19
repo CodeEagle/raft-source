@@ -99,7 +99,7 @@ export function setBeforeActionCardAttemptAuditForTest(
   }
   beforeActionCardAttemptAuditForTest = hook;
 }
-import { actorHasServerCapabilityInServer, actorRoleHasServerCapability, resolveActorContext } from "../lib/actorPermissions";
+import { actorRoleHasServerCapability, resolveActorContext } from "../lib/actorPermissions";
 import { channelActorHasCapability, resolveChannelActorContext } from "../lib/channelActorPermissions";
 import { oauthClientIsUserManagedPredicate } from "./oauthClientManagementPolicy";
 
@@ -1453,8 +1453,10 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
     await assertActionCardWritableInTransaction(tx, args.messageId, args.expectedConfirmationVersion);
     const action = meta.action as ActionCardAction;
     assertActionResultKindMatches(action, args.result);
+    let agentCreateCallerRole: "owner" | "admin" | "member" | "guest" | null = null;
     if (action.type === "agent:create") {
-      if (!await actorHasServerCapabilityInServer(targetServerId, "user", args.userId, "createAgents", tx)) {
+      agentCreateCallerRole = (await resolveActorContext(targetServerId, "user", args.userId, tx)).serverRole;
+      if (!actorRoleHasServerCapability(agentCreateCallerRole, "createAgents")) {
         throw new ActionCardError(
           403,
           "MISSING_CREATE_AGENTS_CAPABILITY",
@@ -1500,23 +1502,31 @@ export async function markActionCardExecuted(args: MarkExecutedArgs): Promise<{
         );
       }
     }
-    if (
-      action.type === "agent:create"
-      && action.requiredComputer
-      && args.result.kind === "agent"
-    ) {
+    if (action.type === "agent:create" && args.result.kind === "agent") {
       const [createdAgent] = await tx
         .select({
           id: agents.id,
           serverId: agents.serverId,
           machineId: agents.machineId,
+          creatorType: agents.creatorType,
+          creatorId: agents.creatorId,
         })
         .from(agents)
         .where(eq(agents.id, args.result.id));
       if (!createdAgent || createdAgent.serverId !== targetServerId) {
         throw new ActionCardError(404, "AGENT_NOT_FOUND", "Created agent not found in this server");
       }
-      if (createdAgent.machineId !== action.requiredComputer) {
+      if (
+        agentCreateCallerRole === "member"
+        && (createdAgent.creatorType !== "user" || createdAgent.creatorId !== args.userId)
+      ) {
+        throw new ActionCardError(
+          403,
+          "AGENT_CREATOR_MISMATCH",
+          "Members may report only an Agent they created",
+        );
+      }
+      if (action.requiredComputer && createdAgent.machineId !== action.requiredComputer) {
         throw new ActionCardError(
           409,
           "REQUIRED_COMPUTER_MISMATCH",

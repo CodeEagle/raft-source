@@ -1382,6 +1382,35 @@ test("history DM consumption scope preserves typed identity and is optional for 
   );
 });
 
+test("message envelopes and history responses preserve stable channel ids", () => {
+  const message = {
+    channel_id: "22222222-2222-4222-8222-222222222222",
+    message_id: "aaaaaaaa-0000-0000-0000-000000000000",
+    content: "channel identity is stable",
+  };
+  const history = agentApiContract.historyRead.response.body.parse({
+    channel_id: message.channel_id,
+    messages: [message],
+    has_more: false,
+    has_older: false,
+    has_newer: false,
+  });
+  assert.equal(history.channel_id, message.channel_id);
+  assert.equal(history.messages[0]?.channel_id, message.channel_id);
+  const resolved = agentApiContract.messageResolve.response.body.parse({ message });
+  assert.equal(resolved.message.channel_id, message.channel_id);
+  assert.equal(
+    agentApiContract.historyRead.response.body.safeParse({
+      channel_id: "",
+      messages: [message],
+      has_more: false,
+      has_older: false,
+      has_newer: false,
+    }).success,
+    false,
+  );
+});
+
 
 test("audience JWT issuance rejects identity overrides and is never automatically retried", () => {
   const body = agentApiContract.integrationToken.request.body;

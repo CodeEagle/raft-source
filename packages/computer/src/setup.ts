@@ -479,7 +479,7 @@ function normalizeMigrationDetection(detection: unknown): SetupAdjudication {
 }
 
 function setupRequiresAdminMessage(targetLabel: string): string {
-  return `Attaching a Computer to ${targetLabel} requires the admin or owner role on this server. You are a member, but only admins/owners can attach — ask a server admin to attach this Computer or grant you admin, then run \`raft-computer setup ${targetLabel}\`.`;
+  return `Adopting or migrating an existing Computer on ${targetLabel} requires the admin or owner role. Members can create their own Computer connection; remove --machine and run \`raft-computer setup ${targetLabel}\` to create a fresh connection, or ask a server admin to perform the migration.`;
 }
 
 function formatExcludedCandidates(excluded: SetupExcludedCandidate[]): string[] {
@@ -1350,20 +1350,28 @@ export async function setupCore(
       }
       emit(`Attachment: already attached to ${label}.`);
     } else {
-      if (targetServer.role !== "owner" && targetServer.role !== "admin") {
+      const canManageMachines = targetServer.role === "owner" || targetServer.role === "admin";
+      const canCreateOwnComputer = targetServer.role === "member";
+      if (!canManageMachines && !canCreateOwnComputer) {
+        throw new ComputerError(
+          "SETUP_REQUIRES_ADMIN",
+          `The ${targetServer.role} role cannot attach a Computer to ${label}. Ask a server admin to grant member, admin, or owner access, then run \`raft-computer setup ${label}\` again.`,
+        );
+      }
+      if (canCreateOwnComputer && typeof opts.machine === "string" && opts.machine.length > 0) {
         throw new ComputerError(
           "SETUP_REQUIRES_ADMIN",
           setupRequiresAdminMessage(label),
         );
       }
 
+    let migrated = false;
+    if (canManageMachines) {
     // §X.4 migration decision — RFC v9.9.
     //
     // Managed-only/no-local/--machine setup must not create a client or issue a roster request.
     let rosterClient: ReturnType<typeof buildRoster> | null = null;
     const getRosterClient = () => (rosterClient ??= buildRoster(baseUrl, session.accessToken));
-
-    let migrated = false;
 
     // One root span for the whole migration choice. Discovery, adopt and
     // decision records are its children.
@@ -1678,6 +1686,7 @@ export async function setupCore(
         attrs: { error_code: err instanceof ComputerError ? err.code : "unexpected" },
       });
       throw err;
+    }
     }
 
     if (!migrated) {

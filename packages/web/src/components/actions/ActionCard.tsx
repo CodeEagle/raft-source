@@ -31,6 +31,7 @@ import { useThreadStore } from "../../store/threadStore";
 import { useMachineStore } from "../../store/machineStore";
 import { useMessageStore } from "../../store/messageStore";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
+import { canCreateAgentForRole } from "../../utils/memberAgentAccess";
 import Banner from "../ui/Banner";
 import CreateAgentDialog from "../agent/CreateAgentDialog";
 import CreateChannelDialog from "../channel/CreateChannelDialog";
@@ -175,7 +176,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
   const currentServerId = useServerStore((state) => state.current?.id);
   const sourceReadOnly = isActionCardReadOnlyInServer(metadata.sourceServerId, currentServerId);
   const currentServerRole = useServerStore((state) => state.current?.role);
-  const { capabilities } = useServerPermissions();
+  const { role: permissionRole, capabilities } = useServerPermissions();
   const action = metadata.action;
   // Joint carriers are shared with peer servers; the action always runs on
   // the card's target server (fixed at prepare time), never the viewer's.
@@ -195,7 +196,7 @@ export function ActionCard({ messageId, metadata, channelId }: Props) {
           && carrierChannel.joined !== true
         )
         ? { id: "actionCard.blocked.notMember" as const }
-        : action.type === "agent:create" && !capabilities.createAgents
+        : action.type === "agent:create" && !canCreateAgentForRole(permissionRole, capabilities)
           ? { id: "actionCard.blocked.needCreateAgents" as const }
           : null;
   const canOperateCard = blockedReason === null;

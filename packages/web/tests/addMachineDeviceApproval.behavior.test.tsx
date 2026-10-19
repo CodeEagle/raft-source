@@ -92,6 +92,34 @@ test("connect computer dialog does not expose inline device code approval", asyn
   assert.ok(screen.getByText("Waiting for computer to connect..."));
 });
 
+test("member advances to Computer setup without registering a legacy machine placeholder", async () => {
+  seedWaitingDialog();
+  useServerStore.setState({
+    current: { ...server, role: "member" },
+    servers: [{ ...server, role: "member" }],
+  } as never);
+  useMachineStore.setState({
+    registerMachine: async () => {
+      throw { response: { data: { error: "The `registerMachines` capability is required to register machines" } } };
+    },
+  } as never);
+
+  render(
+    <MemoryRouter initialEntries={["/s/design"]}>
+      <TestIntlProvider>
+        <AddMachineDialog onClose={() => {}} />
+      </TestIntlProvider>
+    </MemoryRouter>,
+  );
+
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+  });
+
+  assert.ok(await screen.findByText("Waiting for computer to connect..."));
+  assert.ok(screen.queryByText("The `registerMachines` capability is required to register machines") === null);
+});
+
 // task #665 (@Artea): the waiting dot dropped onto a second line under the text.
 // rui Banner is a grid that gives the leading column ONLY to a direct <svg> child
 // or a direct `data-slot="status"` child; the old custom StatusDot was a bare

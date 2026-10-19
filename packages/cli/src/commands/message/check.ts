@@ -13,8 +13,9 @@ import type { CommandRuntimeOptions } from "../../core/context";
 import { CliError } from "../../core/errors";
 import { writeText, adoptCliReplyText, flushText, NL } from "../../core/renderer";
 import { createDaemonApiSurfaceClient } from "../../daemonApiPath";
+import { loadChannelWorkspaceContextsForMessages } from "../../channelWorkspaceContext";
 import { drainInbox } from "./_inbox";
-import { formatAppItemsUnavailable, formatInboxHint, formatMessages, formatTarget } from "./_format";
+import { formatAppItemsUnavailable, formatInboxHint, formatMessagesWithChannelWorkspaceContexts, formatTarget } from "./_format";
 import { recordConsumedExactSeqs } from "./_consumedSeqState";
 import { elideSeenSenders } from "./_senderElision";
 
@@ -53,7 +54,8 @@ export const messageCheckCommand = defineCommand(
         ? "\nNo more new inbox messages.\n"
         : "\n";
     const senders = elideSeenSenders(result.messages, agentContext.agentId);
-    writeText(ctx.io, adoptCliReplyText(`${formatMessages(senders.messages)}${drainStatus}${appInboxStatus}`));
+    const channelContexts = loadChannelWorkspaceContextsForMessages(agentContext, ctx.env, senders.messages);
+    writeText(ctx.io, adoptCliReplyText(`${formatMessagesWithChannelWorkspaceContexts(senders.messages, channelContexts)}${drainStatus}${appInboxStatus}`));
     if (result.inboxHint) writeText(ctx.io, formatInboxHint(result.inboxHint), NL);
     // Task #178: ack leased third-party events only after their bodies reached
     // stdout. If the write or flush fails (EPIPE, closed pipe) nothing is

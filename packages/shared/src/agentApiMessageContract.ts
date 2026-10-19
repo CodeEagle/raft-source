@@ -124,6 +124,7 @@ export const agentApiMessageEnvelopeSchema = lazySchema("agentApiMessageEnvelope
   senderTimezone: z.string().nullable().optional(),
   sender_timezone: z.string().nullable().optional(),
   external_message: agentApiExternalMessageProvenanceSchema.optional(),
+  channel_id: z.string().trim().min(1).optional(),
   channel_type: optionalStringSchema,
   channel_name: optionalStringSchema,
   parent_channel_type: optionalStringSchema,
@@ -288,6 +289,7 @@ export interface AgentApiMessageEnvelope {
   senderTimezone?: string | null;
   sender_timezone?: string | null;
   external_message?: AgentApiExternalMessageProvenance;
+  channel_id?: string;
   channel_type?: string;
   channel_name?: string;
   parent_channel_type?: string;

@@ -187,6 +187,106 @@ test("agent-api attachment download URL: storage without presign answers 409 dow
   }
 });
 
+test("agent-api attachment download streams unsafe or same-origin presigned targets, but redirects safe HTTPS external targets", async ({ app }) => {
+  try {
+    const fx = await seedFixture();
+    const payload = Buffer.from("local bytes");
+    let presignedUrl = "http://storage.internal.test/private/object?sig=http";
+    let storageGets = 0;
+    __setStorageForTests({
+      put: async () => {},
+      get: async () => {
+        storageGets += 1;
+        return Readable.from(payload);
+      },
+      delete: async () => {},
+      getPresignedUrl: async () => presignedUrl,
+    });
+
+    const unsafe = await fetch(`${app.baseUrl}/internal/agent-api/attachments/${fx.visibleId}`, {
+      headers: agentHeaders(fx.readKey),
+      redirect: "manual",
+    });
+    assert.equal(unsafe.status, 200);
+    assert.equal(unsafe.headers.get("location"), null);
+    assert.deepEqual(Buffer.from(await unsafe.arrayBuffer()), payload);
+
+    for (const [label, localUrl] of [
+      ["localhost", "https://localhost:19069/private/object?sig=localhost"],
+      ["localhost trailing dot", "https://localhost.:19069/private/object?sig=localhost-dot"],
+      ["IPv4 loopback", "https://127.0.0.1:19069/private/object?sig=ipv4"],
+      ["IPv6 loopback", "https://[::1]:19069/private/object?sig=ipv6"],
+      ["IPv4-mapped IPv6 loopback", "https://[::ffff:127.0.0.1]:19069/private/object?sig=mapped"],
+    ] as const) {
+      presignedUrl = localUrl;
+      const local = await fetch(`${app.baseUrl}/internal/agent-api/attachments/${fx.visibleId}`, {
+        headers: agentHeaders(fx.readKey),
+        redirect: "manual",
+      });
+      assert.equal(local.status, 200, `${label} target should stream through the server`);
+      assert.equal(local.headers.get("location"), null);
+      assert.deepEqual(Buffer.from(await local.arrayBuffer()), payload);
+    }
+
+    presignedUrl = "https://127.example.com/private/object?sig=dns-name";
+    const dnsLike = await fetch(`${app.baseUrl}/internal/agent-api/attachments/${fx.visibleId}`, {
+      headers: agentHeaders(fx.readKey),
+      redirect: "manual",
+    });
+    assert.equal(dnsLike.status, 302, "127.example.com is not a loopback IP");
+    assert.equal(dnsLike.headers.get("location"), presignedUrl);
+
+    // Exercise same-origin HTTPS independently of the HTTP scheme check. The
+    // test app trusts one reverse proxy hop. Use a public host so this case
+    // cannot pass merely because the target was classified as loopback.
+    app.app.set("trust proxy", 1);
+    const publicHost = `attachments.raft.test:${new URL(app.baseUrl).port}`;
+    presignedUrl = `https://${publicHost}/private/object?sig=same-origin`;
+    const sameOrigin = await fetch(`${app.baseUrl}/internal/agent-api/attachments/${fx.visibleId}`, {
+      headers: {
+        ...agentHeaders(fx.readKey),
+        "X-Forwarded-Host": publicHost,
+        "X-Forwarded-Proto": "https",
+      },
+      redirect: "manual",
+    });
+    assert.equal(sameOrigin.status, 200);
+    assert.equal(sameOrigin.headers.get("location"), null);
+    assert.deepEqual(Buffer.from(await sameOrigin.arrayBuffer()), payload);
+
+    presignedUrl = "https://agent:secret@objects.example.test/private/object?sig=credentialed";
+    const credentialed = await fetch(`${app.baseUrl}/internal/agent-api/attachments/${fx.visibleId}`, {
+      headers: agentHeaders(fx.readKey),
+      redirect: "manual",
+    });
+    assert.equal(credentialed.status, 200, "presigned credentials must never be redirected");
+    assert.equal(credentialed.headers.get("location"), null);
+    assert.deepEqual(Buffer.from(await credentialed.arrayBuffer()), payload);
+
+    presignedUrl = "https://objects.example.test/private/object?sig=unknown-origin";
+    const unknownOrigin = await fetch(`${app.baseUrl}/internal/agent-api/attachments/${fx.visibleId}`, {
+      headers: { ...agentHeaders(fx.readKey), "X-Forwarded-Proto": "not-a-protocol" },
+      redirect: "manual",
+    });
+    assert.equal(unknownOrigin.status, 200, "an unknown request origin must fail closed to streaming");
+    assert.equal(unknownOrigin.headers.get("location"), null);
+    assert.deepEqual(Buffer.from(await unknownOrigin.arrayBuffer()), payload);
+
+    presignedUrl = "https://objects.example.test/private/object?sig=external";
+    const external = await fetch(`${app.baseUrl}/internal/agent-api/attachments/${fx.visibleId}`, {
+      headers: agentHeaders(fx.readKey),
+      redirect: "manual",
+    });
+    assert.equal(external.status, 302);
+    assert.equal(external.headers.get("location"), presignedUrl);
+    assert.equal(await external.text(), "");
+    assert.equal(storageGets, 9, "only unsafe and same-origin targets stream through the server");
+  } finally {
+    resetStorageForTests();
+    await app.close();
+  }
+});
+
 test("agent-api attachment download URL: the signed URL never reaches logs or trace attributes", async ({ app }) => {
   const captured: unknown[][] = [];
   const original = { error: console.error, warn: console.warn, log: console.log, info: console.info };
