@@ -2353,6 +2353,34 @@
       "when": 1791772113400,
       "tag": "0335_nervous_lady_vermin",
       "breakpoints": true
+    },
+    {
+      "idx": 336,
+      "version": "7",
+      "when": 1792336010434,
+      "tag": "0336_channel_workspace_management",
+      "breakpoints": true
+    },
+    {
+      "idx": 337,
+      "version": "7",
+      "when": 1792336989784,
+      "tag": "0337_agent_request_acknowledgements",
+      "breakpoints": true
+    },
+    {
+      "idx": 338,
+      "version": "7",
+      "when": 1792342433404,
+      "tag": "0338_channel_workspace_task_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 339,
+      "version": "7",
+      "when": 1792343294410,
+      "tag": "0339_channel_workspace_task_path_snapshot",
+      "breakpoints": true
     }
   ]
 }

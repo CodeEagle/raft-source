@@ -1,13 +1,90 @@
 import { access, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
 import os from "node:os";
 import { RUNTIME_OUTCOME_OUTBOX_DIR_NAME } from "./runtimeOutcomeOutbox";
 import path from "node:path";
-import type { WorkspaceDirectoryInfo } from "@botiverse/raft-shared";
+import { realpath } from "node:fs/promises";
+import type { WorkspaceDirectoryInfo, WorkspacePathValidationResult } from "@botiverse/raft-shared";
 import { logger } from "./logger";
 
 export interface AgentWorkspaceSeedFile {
   relativePath: string;
   content: string;
+}
+
+/** Resolve and check a user-selected directory on this Computer without
+ * creating files or changing permissions. The resolved path is the identity
+ * used for alias detection and later scheduling. */
+export async function validateWorkspacePath(requestedPath: string): Promise<WorkspacePathValidationResult> {
+  const invalid = (status: WorkspacePathValidationResult["status"]): WorkspacePathValidationResult => ({
+    requestedPath,
+    status,
+  });
+  if (
+    typeof requestedPath !== "string"
+    || requestedPath.length === 0
+    || requestedPath.length > 4096
+    || requestedPath.includes("\0")
+    || requestedPath.split(/[\\/]+/).includes("..")
+  ) {
+    return invalid("invalid_path");
+  }
+  const isHomeRelative = requestedPath === "~" || requestedPath.startsWith("~/") || requestedPath.startsWith("~\\");
+  if (requestedPath.startsWith("~") && !isHomeRelative) return invalid("invalid_path");
+  const expandedPath = requestedPath === "~"
+    ? os.homedir()
+    : isHomeRelative
+      ? path.resolve(os.homedir(), requestedPath.slice(2))
+      : requestedPath;
+  if (!isHomeRelative && !path.isAbsolute(requestedPath)) return invalid("invalid_path");
+
+  try {
+    const canonicalPath = await realpath(expandedPath);
+    const root = path.parse(canonicalPath).root;
+    if (canonicalPath === root) return invalid("invalid_path");
+    const info = await stat(canonicalPath);
+    if (!info.isDirectory()) return invalid("not_directory");
+    await access(canonicalPath, constants.R_OK);
+    return { requestedPath, canonicalPath, status: "available" };
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : "";
+    if (code === "ENOENT") return invalid("missing");
+    if (code === "ENOTDIR") return invalid("not_directory");
+    if (code === "EACCES" || code === "EPERM") return invalid("permission_denied");
+    return invalid("missing");
+  }
+}
+
+/** Recheck a bound directory at the execution boundary, including write and
+ * traversal access. This does not create files or alter permissions. */
+export async function validateWritableWorkspacePath(
+  requestedPath: string,
+  expectedCanonicalPath: string,
+): Promise<WorkspacePathValidationResult> {
+  const result = await validateWorkspacePath(requestedPath);
+  if (result.status !== "available" || !result.canonicalPath) return result;
+  if (result.canonicalPath !== expectedCanonicalPath) {
+    return { requestedPath, status: "invalid_path" };
+  }
+  try {
+    await access(result.canonicalPath, constants.W_OK | constants.X_OK);
+    return result;
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : "";
+    return { requestedPath, status: code === "EACCES" || code === "EPERM" ? "permission_denied" : "missing" };
+  }
+}
+
+export function workspacePathsOverlap(a: string, b: string): boolean {
+  const contains = (parent: string, child: string) => {
+    const relative = path.relative(parent, child);
+    return relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`));
+  };
+  return contains(a, b) || contains(b, a);
 }
 
 export async function initializeAgentWorkspace(

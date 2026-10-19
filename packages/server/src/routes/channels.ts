@@ -1,4 +1,5 @@
 import { projectConversionState } from "@botiverse/raft-shared";
+import { randomUUID } from "node:crypto";
 import { emitChannelConversionCardUpdates } from "../services/channelConversionRealtimeService";
 import { emitJointProjectionUpdates, publishChannelUpdate } from "../services/channelRealtimeEvents";
 import { serializeErrorForLog } from "../tracing/safeErrorLog";
@@ -6,6 +7,8 @@ import { revokeSocketAccess } from "../socket/accessRevocation";
 import { socketUserServerRoom } from "../socket/platformScope";
 import { Router, type Request, type Response, type Router as RouterType } from "express";
 import { hostname } from "node:os";
+import path from "node:path";
+import { and, asc, eq, inArray } from "drizzle-orm";
 import * as channelService from "../services/channelService";
 import { getActiveJointProjectionLocalChannelId, JointChannelLimitError } from "../services/jointChannelLimitService";
 import { resolveGatingParentJointId } from "../services/jointChannelLimitState";
@@ -17,7 +20,7 @@ import * as messageService from "../services/messageService";
 import * as userService from "../services/userService";
 import * as savedService from "../services/savedService";
 import * as activitySyncService from "../services/activitySyncService";
-import { CHANNEL_MANAGEMENT_CAPABILITIES, MAX_JOINT_CHANNEL_SERVERS, SERVER_GUEST_FEATURE_FLAG_KEY, channelTypeSupportsActivityMute, noopTracer, validateName, type ServerCapability, type ActiveSpan, type ServerId, type TraceAttributes, type Tracer } from "@botiverse/raft-shared";
+import { CHANNEL_MANAGEMENT_CAPABILITIES, MAX_JOINT_CHANNEL_SERVERS, SERVER_GUEST_FEATURE_FLAG_KEY, asMachineId, authorizeTaskAction, channelTypeSupportsActivityMute, noopTracer, validateName, type ServerCapability, type ActiveSpan, type ServerId, type TraceAttributes, type Tracer, type WorkspacePathValidationStatus } from "@botiverse/raft-shared";
 import { getServerPlan, getHistoryCutoff, isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
 import {
   CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
@@ -68,6 +71,11 @@ import {
 } from "../services/inboxSuppressionWriters";
 import { getInboxRouteBackpressureAdmission } from "../middleware/inboxRouteBackpressure";
 import { getDb, getPoolMetrics, type DatabaseExecutor } from "../db/index";
+import { channelWorkspaceBindings, channelWorkspaceConfigs, channelWorkspaceTaskRuns, tasks, workspaces } from "../db/schema";
+import * as taskService from "../services/taskService";
+import { emitTaskCreated, emitTaskMessageNew } from "../services/taskRealtimeEvents";
+import { getTaskRealtimeSurfaceTargets, resolveTaskChannelSurface } from "../services/taskChannelSurface";
+import * as machineService from "../services/machineService";
 
 export const channelRouter: RouterType = Router();
 
@@ -81,6 +89,7 @@ guardUuidPathParams(channelRouter, {
   messageId: "Message",
   threadChannelId: "Thread",
   agentId: "Agent",
+  runId: "Workspace task run",
 });
 
 async function attachHumanChannelAuthorization<T extends { id: string }>(
@@ -186,6 +195,85 @@ function resolveNow(req: { app: { get(key: string): unknown } }): Date {
 const CHANNEL_FILES_DEFAULT_LIMIT = 50;
 const CHANNEL_FILES_MAX_LIMIT = 100;
 const THREAD_SUMMARY_PARENT_IDS_MAX = 500;
+const CHANNEL_WORKSPACE_MAX_BINDINGS = 8;
+const UUID_PATH_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+interface ChannelWorkspaceBindingInput {
+  machineId: string;
+  path: string;
+  mode: "reader" | "writer";
+}
+
+function isWorkspacePathSyntacticallyValid(value: string): boolean {
+  if (value.length === 0 || value.length > 4096 || /[\u0000-\u001f]/.test(value)) return false;
+  if (value === "~" || value.startsWith("~/") || value.startsWith("~\\")) {
+    return !value.split(/[\\/]+/).includes("..");
+  }
+  return (path.posix.isAbsolute(value) || path.win32.isAbsolute(value))
+    && !value.split(/[\\/]+/).includes("..");
+}
+
+function parseChannelWorkspaceBindings(value: unknown): ChannelWorkspaceBindingInput[] | null {
+  if (!Array.isArray(value) || value.length > CHANNEL_WORKSPACE_MAX_BINDINGS) return null;
+  const parsed: ChannelWorkspaceBindingInput[] = [];
+  const identities = new Set<string>();
+  for (const entry of value) {
+    if (typeof entry !== "object" || entry === null) return null;
+    const candidate = entry as Record<string, unknown>;
+    if (
+      typeof candidate.machineId !== "string"
+      || !UUID_PATH_PATTERN.test(candidate.machineId)
+      || typeof candidate.path !== "string"
+      || !isWorkspacePathSyntacticallyValid(candidate.path)
+      || (candidate.mode !== "reader" && candidate.mode !== "writer")
+    ) return null;
+    const identity = `${candidate.machineId}\0${candidate.path}`;
+    if (identities.has(identity)) return null;
+    identities.add(identity);
+    parsed.push({ machineId: candidate.machineId, path: candidate.path, mode: candidate.mode });
+  }
+  return parsed;
+}
+
+function workspacePathsOverlap(a: string, b: string, machineOs: string | null | undefined): boolean {
+  const osName = machineOs?.toLowerCase() ?? "";
+  const caseInsensitive = osName.includes("win") || osName.includes("darwin") || osName.includes("mac");
+  const api = osName.includes("win") ? path.win32 : path.posix;
+  const left = caseInsensitive ? a.toLowerCase() : a;
+  const right = caseInsensitive ? b.toLowerCase() : b;
+  const contains = (parent: string, child: string) => {
+    const relative = api.relative(parent, child);
+    return relative === "" || (!api.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${api.sep}`));
+  };
+  return contains(left, right) || contains(right, left);
+}
+
+function workspaceValidationMessage(status: string): string | null {
+  switch (status) {
+    case "available": return null;
+    case "missing": return "Directory does not exist on this Computer";
+    case "not_directory": return "Path is not a directory";
+    case "permission_denied": return "Directory is not readable by the Computer";
+    case "invalid_path": return "Path must be absolute and cannot contain parent-directory segments";
+    case "offline": return "Computer is offline; path has not been checked";
+    case "alias_conflict": return "Directory overlaps another selected workspace";
+    default: return "Path validation is unavailable; this workspace cannot run until it is checked";
+  }
+}
+
+function channelWorkspaceExecutionSupport(runtime: string | null | undefined, executionMode?: string | null) {
+  const codexSandboxProfiles = runtime === "codex" && executionMode !== "external";
+  return {
+    enabled: codexSandboxProfiles,
+    runtime: runtime ?? "unknown",
+    sandboxProfiles: codexSandboxProfiles ? ["read-only", "workspace-write"] as const : [] as const,
+    conversationLane: codexSandboxProfiles ? "workspace_read_only_on_next_start" as const : "unsupported" as const,
+    workerLane: codexSandboxProfiles ? "scheduled" as const : "unsupported" as const,
+    reason: codexSandboxProfiles ? "orchestra_active" as const : "runtime_sandbox_unverified" as const,
+  };
+}
+
+class ChannelWorkspaceRevisionConflict extends Error {}
 // Compatibility ceiling for old web clients that call
 // GET /api/channels/:id/threads without parentMessageIds. New clients should
 // pass the thread-parent message ids visible in their current timeline window;
@@ -3457,6 +3545,684 @@ channelRouter.post("/:id/resume-all-agents", async (req, res) => {
     res.json({ ok: started === agents.length, started, total: agents.length, results });
   } catch {
     res.status(500).json({ error: "Failed to resume agents" });
+  }
+});
+
+// A workspace binding is configuration only. Until the selected runtime has
+// execution-layer permission checks and a recoverable writer lock, these
+// routes must never turn a saved `writer` mode into executable access.
+channelRouter.get("/:id/workspaces/:agentId", async (req, res) => {
+  try {
+    const channel = await channelService.getChannel(req.params.id);
+    if (!channel || channel.serverId !== req.serverId) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if (channel.type !== "channel" && channel.type !== "private" || channel.name === "all") {
+      res.status(400).json({ error: "Workspace bindings are supported only on ordinary channels" });
+      return;
+    }
+    if (!await canSeeChannel(channel, req.userId!, req.serverId!)) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if (!(await actorHasChannelCapability(req.serverId!, channel.id, "user", req.userId!, "editChannelMetadata"))) {
+      res.status(403).json({ error: "You do not have permission to manage channel workspaces" });
+      return;
+    }
+    const agent = await agentService.getAgent(req.params.agentId);
+    if (!agent || agent.serverId !== req.serverId || !await channelService.isChannelAgent(channel.id, agent.id)) {
+      res.status(404).json({ error: "Channel agent not found" });
+      return;
+    }
+    const db = getDb();
+    const [config] = await db.select({ revision: channelWorkspaceConfigs.revision })
+      .from(channelWorkspaceConfigs)
+      .where(and(
+        eq(channelWorkspaceConfigs.channelId, channel.id),
+        eq(channelWorkspaceConfigs.agentId, agent.id),
+      ))
+      .limit(1);
+    const bindings = agent.machineId
+      ? await db.select({
+          workspaceId: workspaces.id,
+          machineId: workspaces.machineId,
+          path: workspaces.requestedPath,
+          canonicalPath: workspaces.canonicalPath,
+          validationStatus: workspaces.validationStatus,
+          validationMessage: workspaces.validationMessage,
+          validatedAt: workspaces.validatedAt,
+          mode: channelWorkspaceBindings.mode,
+          position: channelWorkspaceBindings.position,
+        })
+          .from(channelWorkspaceBindings)
+          .innerJoin(workspaces, eq(channelWorkspaceBindings.workspaceId, workspaces.id))
+          .where(and(
+            eq(channelWorkspaceBindings.channelId, channel.id),
+            eq(channelWorkspaceBindings.agentId, agent.id),
+            eq(workspaces.serverId, req.serverId!),
+            eq(workspaces.machineId, agent.machineId),
+          ))
+          .orderBy(asc(channelWorkspaceBindings.position))
+      : [];
+    res.json({
+      revision: config?.revision ?? 0,
+      bindings,
+      execution: channelWorkspaceExecutionSupport(agent.runtime, agent.executionMode),
+    });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to read channel workspaces",
+      logPrefix: "Failed to read channel workspaces:",
+      err,
+    });
+  }
+});
+
+channelRouter.put("/:id/workspaces/:agentId", async (req, res) => {
+  const expectedRevision = req.body?.expectedRevision;
+  const parsedBindings = parseChannelWorkspaceBindings(req.body?.bindings);
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || !parsedBindings) {
+    res.status(400).json({
+      error: `expectedRevision must be a non-negative integer and bindings must contain at most ${CHANNEL_WORKSPACE_MAX_BINDINGS} valid entries`,
+      code: "invalid_channel_workspace_config",
+    });
+    return;
+  }
+
+  try {
+    const channel = await channelService.getChannel(req.params.id);
+    if (!channel || channel.serverId !== req.serverId) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if (channel.type !== "channel" && channel.type !== "private" || channel.name === "all") {
+      res.status(400).json({ error: "Workspace bindings are supported only on ordinary channels" });
+      return;
+    }
+    if (!await canSeeChannel(channel, req.userId!, req.serverId!)) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if (channel.archivedAt) {
+      res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
+      return;
+    }
+    if (!(await actorHasChannelCapability(req.serverId!, channel.id, "user", req.userId!, "editChannelMetadata"))) {
+      res.status(403).json({ error: "You do not have permission to manage channel workspaces" });
+      return;
+    }
+    const agent = await agentService.getAgent(req.params.agentId);
+    if (!agent || agent.serverId !== req.serverId || !await channelService.isChannelAgent(channel.id, agent.id)) {
+      res.status(404).json({ error: "Channel agent not found" });
+      return;
+    }
+    if (agent.executionMode !== "byoc" || !agent.machineId) {
+      res.status(409).json({
+        error: "Channel workspaces currently require an on-device agent connected to a Computer",
+        code: "workspace_agent_not_on_device",
+      });
+      return;
+    }
+    const machine = await machineService.getMachine(asMachineId(agent.machineId));
+    if (!machine || machine.serverId !== req.serverId) {
+      res.status(409).json({ error: "The agent's Computer is unavailable", code: "workspace_machine_unavailable" });
+      return;
+    }
+    if (parsedBindings.some((binding) => binding.machineId !== agent.machineId)) {
+      res.status(400).json({
+        error: "Every workspace must be on the Computer that runs this agent",
+        code: "workspace_machine_mismatch",
+      });
+      return;
+    }
+
+    const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+    const validations = await Promise.all(parsedBindings.map(async (binding) => {
+      try {
+        const result = await agentOrchestrator.validateMachineWorkspacePath(binding.machineId, binding.path);
+        return {
+          ...binding,
+          canonicalPath: result.canonicalPath ?? null,
+          status: result.status as WorkspacePathValidationStatus | "offline" | "unverified",
+        };
+      } catch {
+        const connected = agentOrchestrator.hasMachineLocally(binding.machineId);
+        return {
+          ...binding,
+          canonicalPath: null,
+          status: connected ? "unverified" as const : "offline" as const,
+        };
+      }
+    }));
+    const available = validations.filter((binding) => binding.status === "available" && binding.canonicalPath);
+    for (let index = 0; index < available.length; index += 1) {
+      const left = available[index]!;
+      for (const right of available.slice(index + 1)) {
+        if (left.machineId === right.machineId && workspacePathsOverlap(left.canonicalPath!, right.canonicalPath!, machine.os)) {
+          res.status(409).json({
+            error: "Selected workspaces overlap on the target Computer",
+            code: "workspace_path_overlap",
+            paths: [left.path, right.path],
+          });
+          return;
+        }
+      }
+    }
+
+    const db = getDb();
+    const revision = await db.transaction(async (tx) => {
+      const nextRevision = expectedRevision + 1;
+      const updated = expectedRevision === 0
+        ? await tx.insert(channelWorkspaceConfigs).values({
+            channelId: channel.id,
+            agentId: agent.id,
+            revision: nextRevision,
+            updatedByUserId: req.userId!,
+            updatedAt: new Date(),
+          }).onConflictDoNothing().returning({ revision: channelWorkspaceConfigs.revision })
+        : await tx.update(channelWorkspaceConfigs).set({
+            revision: nextRevision,
+            updatedByUserId: req.userId!,
+            updatedAt: new Date(),
+          }).where(and(
+            eq(channelWorkspaceConfigs.channelId, channel.id),
+            eq(channelWorkspaceConfigs.agentId, agent.id),
+            eq(channelWorkspaceConfigs.revision, expectedRevision),
+          )).returning({ revision: channelWorkspaceConfigs.revision });
+      if (updated.length === 0) throw new ChannelWorkspaceRevisionConflict();
+
+      await tx.delete(channelWorkspaceBindings).where(and(
+        eq(channelWorkspaceBindings.channelId, channel.id),
+        eq(channelWorkspaceBindings.agentId, agent.id),
+      ));
+
+      for (let position = 0; position < validations.length; position += 1) {
+        const binding = validations[position]!;
+        const now = new Date();
+        let workspace = binding.canonicalPath
+          ? (await tx.select().from(workspaces).where(and(
+              eq(workspaces.serverId, req.serverId!),
+              eq(workspaces.machineId, agent.machineId!),
+              eq(workspaces.canonicalPath, binding.canonicalPath),
+            )).limit(1))[0]
+          : undefined;
+        workspace ??= (await tx.select().from(workspaces).where(and(
+          eq(workspaces.serverId, req.serverId!),
+          eq(workspaces.machineId, agent.machineId!),
+          eq(workspaces.requestedPath, binding.path),
+        )).limit(1))[0];
+
+        const validationMessage = workspaceValidationMessage(binding.status);
+        if (workspace) {
+          const [updatedWorkspace] = await tx.update(workspaces).set({
+            ...(binding.canonicalPath ? { canonicalPath: binding.canonicalPath } : {}),
+            validationStatus: binding.status,
+            validationMessage,
+            ...(binding.status === "offline" || binding.status === "unverified" ? {} : { validatedAt: now }),
+            updatedAt: now,
+          }).where(eq(workspaces.id, workspace.id)).returning();
+          workspace = updatedWorkspace ?? workspace;
+        } else {
+          const [insertedWorkspace] = await tx.insert(workspaces).values({
+            serverId: req.serverId!,
+            machineId: agent.machineId!,
+            requestedPath: binding.path,
+            canonicalPath: binding.canonicalPath,
+            validationStatus: binding.status,
+            validationMessage,
+            validatedAt: binding.status === "offline" || binding.status === "unverified" ? null : now,
+            createdByUserId: req.userId!,
+            createdAt: now,
+            updatedAt: now,
+          }).onConflictDoNothing().returning();
+          workspace = insertedWorkspace ?? (binding.canonicalPath
+            ? (await tx.select().from(workspaces).where(and(
+                eq(workspaces.serverId, req.serverId!),
+                eq(workspaces.machineId, agent.machineId!),
+                eq(workspaces.canonicalPath, binding.canonicalPath),
+              )).limit(1))[0]
+            : (await tx.select().from(workspaces).where(and(
+                eq(workspaces.serverId, req.serverId!),
+                eq(workspaces.machineId, agent.machineId!),
+                eq(workspaces.requestedPath, binding.path),
+              )).limit(1))[0]);
+          if (!workspace) throw new Error("Workspace record could not be persisted");
+        }
+
+        await tx.insert(channelWorkspaceBindings).values({
+          channelId: channel.id,
+          agentId: agent.id,
+          workspaceId: workspace.id,
+          mode: binding.mode,
+          position,
+          createdAt: now,
+        });
+      }
+
+      return updated[0]!.revision;
+    });
+
+    const io = req.app.get("io") as SocketServer | undefined;
+    io?.to(`server:${req.serverId}`).emit("channel:workspace-config-updated", {
+      serverId: req.serverId,
+      channelId: channel.id,
+      agentId: agent.id,
+      revision,
+    });
+    const savedBindings = await db.select({
+      workspaceId: workspaces.id,
+      machineId: workspaces.machineId,
+      path: workspaces.requestedPath,
+      canonicalPath: workspaces.canonicalPath,
+      validationStatus: workspaces.validationStatus,
+      validationMessage: workspaces.validationMessage,
+      mode: channelWorkspaceBindings.mode,
+      position: channelWorkspaceBindings.position,
+    })
+      .from(channelWorkspaceBindings)
+      .innerJoin(workspaces, eq(channelWorkspaceBindings.workspaceId, workspaces.id))
+      .where(and(
+        eq(channelWorkspaceBindings.channelId, channel.id),
+        eq(channelWorkspaceBindings.agentId, agent.id),
+      ))
+      .orderBy(asc(channelWorkspaceBindings.position));
+    res.json({
+      revision,
+      executionEnabled: agent.runtime === "codex" && agent.executionMode === "byoc",
+      execution: channelWorkspaceExecutionSupport(agent.runtime, agent.executionMode),
+      bindings: savedBindings,
+    });
+  } catch (err) {
+    if (err instanceof ChannelWorkspaceRevisionConflict) {
+      const current = await getDb().select({ revision: channelWorkspaceConfigs.revision })
+        .from(channelWorkspaceConfigs)
+        .where(and(
+          eq(channelWorkspaceConfigs.channelId, req.params.id),
+          eq(channelWorkspaceConfigs.agentId, req.params.agentId),
+        ))
+        .limit(1);
+      res.status(409).json({
+        error: "Channel workspace configuration changed; reload it and retry",
+        code: "channel_workspace_revision_conflict",
+        revision: current[0]?.revision ?? 0,
+      });
+      return;
+    }
+    sendJsonServerError(req, res, {
+      error: "Failed to update channel workspaces",
+      logPrefix: "Failed to update channel workspaces:",
+      err,
+    });
+  }
+});
+
+channelRouter.get("/:id/workspaces/:agentId/tasks", async (req, res) => {
+  try {
+    const channel = await channelService.getChannel(req.params.id);
+    if (!channel || channel.serverId !== req.serverId || !await canSeeChannel(channel, req.userId!, req.serverId!)) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if (!(await actorHasChannelCapability(req.serverId!, channel.id, "user", req.userId!, "editChannelMetadata"))) {
+      res.status(403).json({ error: "You do not have permission to manage channel workspaces" });
+      return;
+    }
+    const agent = await agentService.getAgent(req.params.agentId);
+    if (!agent || agent.serverId !== req.serverId || !await channelService.isChannelAgent(channel.id, agent.id)) {
+      res.status(404).json({ error: "Channel agent not found" });
+      return;
+    }
+    const runs = await getDb().select({
+      id: channelWorkspaceTaskRuns.id,
+      status: channelWorkspaceTaskRuns.status,
+      result: channelWorkspaceTaskRuns.result,
+      createdAt: channelWorkspaceTaskRuns.createdAt,
+      updatedAt: channelWorkspaceTaskRuns.updatedAt,
+      taskId: tasks.id,
+      taskNumber: tasks.taskNumber,
+      title: tasks.title,
+      taskStatus: tasks.status,
+      workspaceId: channelWorkspaceTaskRuns.workspaceId,
+    })
+      .from(channelWorkspaceTaskRuns)
+      .innerJoin(tasks, eq(tasks.id, channelWorkspaceTaskRuns.taskId))
+      .where(and(
+        eq(channelWorkspaceTaskRuns.channelId, channel.id),
+        eq(channelWorkspaceTaskRuns.agentId, agent.id),
+      ))
+      .orderBy(asc(channelWorkspaceTaskRuns.createdAt));
+    res.json({ runs });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to read channel workspace tasks",
+      logPrefix: "Failed to read channel workspace tasks:",
+      err,
+    });
+  }
+});
+
+channelRouter.post("/:id/workspaces/:agentId/tasks", async (req, res) => {
+  const workspaceId = req.body?.workspaceId;
+  const idempotencyKey = req.body?.idempotencyKey;
+  const instruction = typeof req.body?.instruction === "string" ? req.body.instruction.trim() : "";
+  if (
+    typeof workspaceId !== "string" || !ANY_UUID_RE.test(workspaceId)
+    || typeof idempotencyKey !== "string" || !ANY_UUID_RE.test(idempotencyKey)
+    || instruction.length === 0 || instruction.length > 32_000
+  ) {
+    res.status(400).json({
+      error: "workspaceId, UUID idempotencyKey, and an instruction up to 32,000 characters are required",
+      code: "invalid_workspace_task",
+    });
+    return;
+  }
+  const title = (typeof req.body?.title === "string" ? req.body.title : instruction.split(/\r?\n/, 1)[0] ?? "")
+    .trim()
+    .slice(0, 240);
+  if (!title) {
+    res.status(400).json({ error: "Task title is required", code: "invalid_workspace_task" });
+    return;
+  }
+
+  try {
+    const channel = await channelService.getChannel(req.params.id);
+    if (!channel || channel.serverId !== req.serverId || !await canSeeChannel(channel, req.userId!, req.serverId!)) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if ((channel.type !== "channel" && channel.type !== "private") || channel.name === "all") {
+      res.status(400).json({ error: "Workspace tasks are supported only on ordinary channels" });
+      return;
+    }
+    if (channel.archivedAt) {
+      res.status(409).json({ error: "This channel is archived", code: "channel_archived" });
+      return;
+    }
+    if (!(await actorHasChannelCapability(req.serverId!, channel.id, "user", req.userId!, "editChannelMetadata"))) {
+      res.status(403).json({ error: "You do not have permission to manage channel workspaces" });
+      return;
+    }
+    const [canReadChannel, canWriteChannel, serverRole, hasAssignTasks] = await Promise.all([
+      channelService.canUserAccessChannel(channel.id, req.userId!, req.serverId!),
+      channelService.canUserPostToChannel(channel.id, req.userId!),
+      getActorServerRoleInServer(req.serverId!, "user", req.userId!),
+      actorHasServerCapabilityInServer(req.serverId!, "user", req.userId!, "assignTasks"),
+    ]);
+    if (!authorizeTaskAction({ action: "create", serverRole, canReadChannel, canWriteChannel }) || !hasAssignTasks) {
+      res.status(403).json({ error: "You do not have permission to create and assign channel tasks" });
+      return;
+    }
+
+    const agent = await agentService.getAgent(req.params.agentId);
+    if (!agent || agent.serverId !== req.serverId || !await channelService.isChannelAgent(channel.id, agent.id)) {
+      res.status(404).json({ error: "Channel agent not found" });
+      return;
+    }
+    if (agent.runtime !== "codex" || agent.executionMode !== "byoc" || !agent.machineId) {
+      res.status(409).json({ error: "Workspace task execution currently supports on-device Codex agents only", code: "workspace_runtime_unsupported" });
+      return;
+    }
+
+    const db = getDb();
+    const [existing] = await db.select().from(channelWorkspaceTaskRuns)
+      .where(and(
+        eq(channelWorkspaceTaskRuns.serverId, req.serverId!),
+        eq(channelWorkspaceTaskRuns.idempotencyKey, idempotencyKey),
+      ))
+      .limit(1);
+    if (existing) {
+      if (existing.channelId !== channel.id || existing.agentId !== agent.id || existing.workspaceId !== workspaceId) {
+        res.status(409).json({ error: "Idempotency key was already used for a different workspace task", code: "workspace_task_idempotency_conflict" });
+        return;
+      }
+      const task = await taskService.getTask(existing.taskId);
+      if (!task || task.title !== title || task.description !== instruction) {
+        res.status(409).json({ error: "Idempotency key was already used for a different workspace task", code: "workspace_task_idempotency_conflict" });
+        return;
+      }
+      const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+      if (existing.status === "queued" || existing.status === "blocked") {
+        void agentOrchestrator.dispatchChannelWorkspaceTask(existing.id).catch((dispatchError) => {
+          console.error("channel.workspace.task duplicate dispatch failed:", serializeErrorForLog(dispatchError));
+        });
+      }
+      res.json({ run: existing, task, dispatchRequested: existing.status === "queued" || existing.status === "blocked", duplicate: true });
+      return;
+    }
+
+    const [binding] = await db.select({
+      workspaceId: workspaces.id,
+      machineId: workspaces.machineId,
+      requestedPath: workspaces.requestedPath,
+      canonicalPath: workspaces.canonicalPath,
+      validationStatus: workspaces.validationStatus,
+      mode: channelWorkspaceBindings.mode,
+      revision: channelWorkspaceConfigs.revision,
+    })
+      .from(channelWorkspaceBindings)
+      .innerJoin(workspaces, eq(workspaces.id, channelWorkspaceBindings.workspaceId))
+      .innerJoin(channelWorkspaceConfigs, and(
+        eq(channelWorkspaceConfigs.channelId, channelWorkspaceBindings.channelId),
+        eq(channelWorkspaceConfigs.agentId, channelWorkspaceBindings.agentId),
+      ))
+      .where(and(
+        eq(channelWorkspaceBindings.channelId, channel.id),
+        eq(channelWorkspaceBindings.agentId, agent.id),
+        eq(channelWorkspaceBindings.workspaceId, workspaceId),
+        eq(workspaces.serverId, req.serverId!),
+        eq(workspaces.machineId, agent.machineId),
+        eq(channelWorkspaceBindings.mode, "writer"),
+        eq(workspaces.validationStatus, "available"),
+      ))
+      .limit(1);
+    if (!binding || !binding.canonicalPath) {
+      res.status(409).json({ error: "Choose an available writer workspace bound to this agent", code: "workspace_writer_binding_required" });
+      return;
+    }
+    const canonicalWorkspacePath = binding.canonicalPath;
+
+    const runId = randomUUID();
+    let created: Awaited<ReturnType<typeof taskService.createTasksWithAssignmentReceipt>>;
+    try {
+      created = await taskService.createTasksWithAssignmentReceipt(
+        channel.id,
+        "user",
+        req.userId!,
+        [{ title, description: instruction }],
+        { type: "agent", id: agent.id },
+        { assigneeName: agent.displayName || agent.name },
+        {
+          beforeCommit: async (tx, result) => {
+            const task = result.tasks[0];
+            const hostMessage = result.hostMessages[0];
+            if (!task || !hostMessage) throw new Error("Workspace task creation did not produce a task message");
+            await tx.insert(channelWorkspaceTaskRuns).values({
+              id: runId,
+              serverId: req.serverId!,
+              channelId: channel.id,
+              agentId: agent.id,
+              machineId: agent.machineId!,
+              taskId: task.id,
+              messageId: hostMessage.id,
+              workspaceId: binding.workspaceId,
+              workspaceRevision: binding.revision,
+              requestedPath: binding.requestedPath,
+              canonicalWorkspacePath,
+              idempotencyKey,
+              status: "queued",
+              requestedByUserId: req.userId!,
+              createdAt: new Date(),
+              updatedAt: new Date(),
+            });
+          },
+        },
+      );
+    } catch (createError) {
+      const pgCode = typeof createError === "object" && createError !== null && "code" in createError
+        ? (createError as { code?: unknown }).code
+        : undefined;
+      if (pgCode === "23505") {
+        const [raced] = await db.select().from(channelWorkspaceTaskRuns)
+          .where(and(
+            eq(channelWorkspaceTaskRuns.serverId, req.serverId!),
+            eq(channelWorkspaceTaskRuns.idempotencyKey, idempotencyKey),
+          ))
+          .limit(1);
+        if (raced) {
+          const racedTask = await taskService.getTask(raced.taskId);
+          if (
+            raced.channelId !== channel.id || raced.agentId !== agent.id
+            || raced.workspaceId !== binding.workspaceId || raced.workspaceRevision !== binding.revision
+            || racedTask?.title !== title || racedTask?.description !== instruction
+          ) {
+            res.status(409).json({ error: "Idempotency key was already used for a different workspace task", code: "workspace_task_idempotency_conflict" });
+            return;
+          }
+          res.json({ run: raced, task: racedTask, duplicate: true });
+          return;
+        }
+      }
+      throw createError;
+    }
+
+    const task = created.tasks[0]!;
+    const run = await db.select().from(channelWorkspaceTaskRuns).where(eq(channelWorkspaceTaskRuns.id, runId)).then((rows) => rows[0]!);
+    const io = req.app.get("io") as SocketServer | undefined;
+    const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+    const fanout = async () => {
+      try {
+        const surface = await resolveTaskChannelSurface(req.serverId!, channel.id);
+        if (surface && io) {
+          const targets = await getTaskRealtimeSurfaceTargets(surface);
+          for (const target of targets) {
+            const projectedTasks = taskService.projectTasksToChannel(created.tasks, target.localChannel);
+            const projectedMessages = created.hostMessages.map((message) => ({ ...message, channelId: target.channelId }));
+            for (const message of projectedMessages) emitTaskMessageNew(io, target, message, task.createdByName || "Unknown");
+            emitTaskCreated(io, target, { channelId: target.channelId, tasks: projectedTasks });
+            await messageService.deliverMessagesToAgents(agentOrchestrator, projectedMessages, task.createdByName || "Unknown");
+          }
+        }
+        if (io) {
+          await messageService.broadcastSystemMessageToLocalSurfaces(
+            io,
+            agentOrchestrator,
+            channel.id,
+            created.assignmentReceipt.content,
+            {
+              inboxFactPolicy: {
+                mode: "record",
+                producer: "task.assignment_receipt",
+                reason: "a workspace task is assigned to its selected on-device agent",
+                causalActor: { type: "user", id: req.userId! },
+              },
+              personalAttentionTargets: [{ type: "agent", id: agent.id, name: agent.displayName || agent.name }],
+              persistedMessage: created.assignmentReceipt.message,
+            },
+          );
+        }
+      } catch (fanoutError) {
+        console.error("channel.workspace.task post-commit fanout failed:", serializeErrorForLog(fanoutError));
+      }
+    };
+    res.json({
+      run,
+      task: taskService.projectTaskToChannel(task, channel),
+      dispatchRequested: true,
+      duplicate: false,
+    });
+    void fanout();
+    void agentOrchestrator.dispatchChannelWorkspaceTask(runId).catch((dispatchError) => {
+      console.error("channel.workspace.task dispatch failed:", serializeErrorForLog(dispatchError));
+    });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to create channel workspace task",
+      logPrefix: "Failed to create channel workspace task:",
+      err,
+    });
+  }
+});
+
+channelRouter.post("/:id/workspaces/:agentId/tasks/:runId/cancel", async (req, res) => {
+  try {
+    const channel = await channelService.getChannel(req.params.id);
+    if (!channel || channel.serverId !== req.serverId || !await canSeeChannel(channel, req.userId!, req.serverId!)) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if (!(await actorHasChannelCapability(req.serverId!, channel.id, "user", req.userId!, "editChannelMetadata"))) {
+      res.status(403).json({ error: "You do not have permission to manage channel workspaces" });
+      return;
+    }
+    const [run] = await getDb().select().from(channelWorkspaceTaskRuns).where(and(
+      eq(channelWorkspaceTaskRuns.id, req.params.runId),
+      eq(channelWorkspaceTaskRuns.channelId, channel.id),
+      eq(channelWorkspaceTaskRuns.agentId, req.params.agentId),
+    )).limit(1);
+    if (!run) {
+      res.status(404).json({ error: "Workspace task run not found" });
+      return;
+    }
+    const updated = ["queued", "starting", "running", "uncertain", "cancel_requested"].includes(run.status)
+      ? (await getDb().update(channelWorkspaceTaskRuns).set({
+          status: "cancel_requested",
+          updatedAt: new Date(),
+        }).where(and(
+          eq(channelWorkspaceTaskRuns.id, run.id),
+          inArray(channelWorkspaceTaskRuns.status, ["queued", "starting", "running", "uncertain", "cancel_requested"]),
+        )).returning())[0] ?? run
+      : run;
+    const orchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+    const sent = await orchestrator.cancelChannelWorkspaceTask(run.agentId, run.id, run.taskId);
+    res.json({ run: updated, cancelSent: sent });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to cancel channel workspace task",
+      logPrefix: "Failed to cancel channel workspace task:",
+      err,
+    });
+  }
+});
+
+channelRouter.post("/:id/workspaces/:agentId/tasks/:runId/retry", async (req, res) => {
+  try {
+    const channel = await channelService.getChannel(req.params.id);
+    if (!channel || channel.serverId !== req.serverId || !await canSeeChannel(channel, req.userId!, req.serverId!)) {
+      res.status(404).json({ error: "Channel not found" });
+      return;
+    }
+    if (!(await actorHasChannelCapability(req.serverId!, channel.id, "user", req.userId!, "editChannelMetadata"))) {
+      res.status(403).json({ error: "You do not have permission to manage channel workspaces" });
+      return;
+    }
+    const [run] = await getDb().select().from(channelWorkspaceTaskRuns).where(and(
+      eq(channelWorkspaceTaskRuns.id, req.params.runId),
+      eq(channelWorkspaceTaskRuns.channelId, channel.id),
+      eq(channelWorkspaceTaskRuns.agentId, req.params.agentId),
+    )).limit(1);
+    if (!run) {
+      res.status(404).json({ error: "Workspace task run not found" });
+      return;
+    }
+    if (run.status !== "queued" && run.status !== "blocked") {
+      res.status(409).json({ error: "Only queued or blocked workspace tasks can be retried", code: "workspace_task_not_retryable" });
+      return;
+    }
+    const queued = run.status === "blocked"
+      ? (await getDb().update(channelWorkspaceTaskRuns).set({ status: "queued", result: null, updatedAt: new Date() })
+          .where(and(eq(channelWorkspaceTaskRuns.id, run.id), eq(channelWorkspaceTaskRuns.status, "blocked")))
+          .returning())[0] ?? run
+      : run;
+    const orchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+    const dispatched = await orchestrator.dispatchChannelWorkspaceTask(run.id);
+    res.json({ run: queued, dispatched });
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to retry channel workspace task",
+      logPrefix: "Failed to retry channel workspace task:",
+      err,
+    });
   }
 });
 

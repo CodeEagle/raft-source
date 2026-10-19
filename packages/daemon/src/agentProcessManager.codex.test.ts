@@ -217,6 +217,7 @@ class FakeCodexDriver implements RuntimeDriver {
   readonly stdoutChannel: RuntimeDriver["stdoutChannel"];
   readonly session = { recovery: "resume_or_fresh" } as const;
   readonly model = { detectedModelsVerifiedAs: "suggestion_only" } as const;
+  readonly workspaceExecutionSandboxModes?: readonly ("read-only" | "workspace-write")[];
   readonly startupReadiness?: RuntimeDriver["startupReadiness"];
   readonly requiresSessionInitForDelivery?: boolean;
   readonly supportsStdinNotification: boolean;
@@ -248,6 +249,7 @@ class FakeCodexDriver implements RuntimeDriver {
     requiresSessionInitForDelivery?: boolean;
   } = {}) {
     this.id = opts.id || "codex";
+    if (this.id === "codex") this.workspaceExecutionSandboxModes = ["read-only", "workspace-write"];
     this.stdoutChannel = this.id === "codex" ? "structured_protocol" : "diagnostic";
     this.supportsStdinNotification = opts.supportsStdinNotification ?? false;
     this.busyDeliveryMode = opts.busyDeliveryMode ?? "none";
@@ -1862,6 +1864,87 @@ test("startAgent releases the local scheduler slot after spawn instead of first 
       maxConcurrentStarts: 1,
       minStartIntervalMs: 25,
     },
+  });
+});
+
+test("configured Codex channel workspaces put new conversation launches in read-only mode", async () => {
+  await withManager(async ({ driver, manager }) => {
+    await manager.startAgent("agent-governed", makeConfig({
+      name: "agent-governed",
+      runtimeContext: {
+        serverId: "server-1",
+        machineId: "machine-1",
+        channelWorkspaceConversationPolicy: {
+          kind: "shared_workspaces_read_only",
+          revision: 4,
+        },
+      },
+    }));
+    await manager.startAgent("agent-unbound", makeConfig({ name: "agent-unbound" }));
+
+    assert.deepEqual(driver.spawnCalls[0]?.workspaceExecution, {
+      lane: "conversation",
+      sandbox: "read-only",
+    });
+    assert.match(String(driver.spawnCalls[0]?.prompt), /Do not try to edit project files in the conversation lane/i);
+    assert.equal(driver.spawnCalls[1]?.workspaceExecution, undefined);
+    assert.equal(driver.spawnCalls.length, 2);
+  });
+});
+
+test("workspace writer dispatch fails closed without a live read-only conversation gate", async () => {
+  await withManager(async ({ manager, dataDir, sent }) => {
+    manager.setMachineDir(dataDir);
+    const result = await manager.enqueueWorkspaceOrchestraJob({
+      id: "workspace-run-1",
+      serverId: "server-1",
+      machineId: "machine-1",
+      channelId: "channel-1",
+      agentId: "agent-1",
+      taskId: "task-1",
+      messageId: "message-1",
+      workspaceId: "workspace-1",
+      requestedPath: path.join(dataDir, "project"),
+      canonicalWorkspacePath: path.join(dataDir, "project"),
+      workspaceRevision: 1,
+      instruction: "Implement the assigned task.",
+    });
+    assert.equal(result, null);
+    assert.equal(manager.listWorkspaceOrchestraJobs().length, 0);
+    assert.ok(sent.some((message) => message.type === "agent:workspace:task:update"
+      && message.runId === "workspace-run-1"
+      && message.status === "blocked"));
+  });
+});
+
+test("a cancel that arrives before the task frame persists a tombstone and blocks later dispatch", async () => {
+  await withManager(async ({ manager, dataDir, sent }) => {
+    manager.setMachineDir(dataDir);
+    const projectPath = path.join(dataDir, "project");
+    const run = {
+      id: "workspace-run-cancel-overtake",
+      serverId: "server-1",
+      machineId: "machine-1",
+      channelId: "channel-1",
+      agentId: "agent-1",
+      taskId: "task-1",
+      messageId: "message-1",
+      workspaceId: "workspace-1",
+      workspaceRevision: 1,
+      requestedPath: projectPath,
+      canonicalWorkspacePath: projectPath,
+      instruction: "Implement the assigned task.",
+    };
+    assert.equal(manager.cancelWorkspaceOrchestraJob(run), true);
+    const executor = (manager as any).workspaceOrchestraExecutor;
+    const duplicate = executor.submit(run, {});
+    assert.equal(duplicate.duplicate, true);
+    assert.equal(duplicate.job.status, "cancelled");
+    assert.equal(manager.listWorkspaceOrchestraJobs().length, 1);
+    assert.equal(manager.listWorkspaceOrchestraJobs()[0]?.status, "cancelled");
+    assert.ok(sent.some((message) => message.type === "agent:workspace:task:update"
+      && message.runId === run.id
+      && message.status === "cancelled"));
   });
 });
 

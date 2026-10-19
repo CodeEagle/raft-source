@@ -1,6 +1,6 @@
 import type { AgentApiHistoryConsumptionScope } from "@botiverse/raft-shared";
 import { readFileSync, rmSync } from "node:fs";
-import { lstat, readFile, readdir, rm, stat } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath, rm, stat } from "node:fs/promises";
 import { createHash, randomInt, randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
@@ -16,6 +16,7 @@ import {
   resolveToolSemantic,
   summarizeToolInput,
   type AgentMessage,
+  type ChannelWorkspaceTaskRunDispatch,
   type MentionDeliveryIdentitySnapshot,
   type MentionDeliveryTerminalErrorCode,
   type MentionDeliveryTransitionStage,
@@ -91,6 +92,8 @@ import {
   type ResolveRuntimeSessionRefOptions,
   type RuntimeSession,
   type RuntimeSendResult,
+  type SpawnContext,
+  createWorkspaceExecutionRuntimeSession,
 } from "./drivers/index";
 import { logger } from "./logger";
 import { bindContextGenerationToSession, configPassiveAx, readContextGeneration, rememberSessionContext, runtimeReportsCompaction, writeContextGeneration } from "./contextGeneration";
@@ -98,7 +101,9 @@ import { elideSeenSendersInMessages, openSenderLedger, senderLedgerPath } from "
 import { resolvePassiveAx } from "./passiveAxGate";
 import { buildCliTransportDir } from "./drivers/cliTransport";
 import { reapOrphanProcesses } from "./daemonOrphanReaper";
-import { deleteWorkspaceDirectory, initializeAgentWorkspace, scanWorkspaceDirectories } from "./workspaces";
+import { deleteWorkspaceDirectory, initializeAgentWorkspace, scanWorkspaceDirectories, validateWorkspacePath, validateWritableWorkspacePath, workspacePathsOverlap } from "./workspaces";
+import { WorkspaceOrchestraStore, type WorkspaceOrchestraJob } from "./workspaceOrchestraStore";
+import { WorkspaceOrchestraExecutor, type WorkspaceOrchestraCompletion } from "./workspaceOrchestraExecutor";
 import { loadChannelWorkspaceContextsSync, type ChannelWorkspaceContext } from "./channelWorkspaceContext";
 import { buildCindyMemoryMd, buildCindySeedFiles } from "./cindy";
 import { AgentStartCoordinator, type AgentStartQueueItem, type PendingStartRebind } from "./agentStartCoordinator";
@@ -681,6 +686,32 @@ const DEFAULT_RUNTIME_START_TIMEOUT_MS = 2 * 60_000;
 const DEFAULT_STALLED_RECOVERY_SIGTERM_TIMEOUT_MS = 10_000;
 const ONBOARDING_MEMORY_SEED_ENV = "SLOCK_ONBOARDING_MEMORY_SEED";
 const FIRST_CINDY_SEED_MODE = "first-cindy";
+const WORKSPACE_WORKER_TIMEOUT_MS = 30 * 60_000;
+const WORKSPACE_WORKER_TERM_WAIT_MS = 3_000;
+const WORKSPACE_WORKER_KILL_WAIT_MS = 5_000;
+
+function probeWorkspaceWorkerGroup(pid: number): boolean | undefined {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error
+      ? (error as { code?: unknown }).code
+      : undefined;
+    return code === "ESRCH" ? false : code === "EPERM" ? true : undefined;
+  }
+}
+
+async function waitForWorkspaceWorkerGroupStop(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    const alive = probeWorkspaceWorkerGroup(pid);
+    if (alive === false) return true;
+    if (alive === undefined) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return probeWorkspaceWorkerGroup(pid) === false;
+}
 
 function getOnboardingSeedMode(config: AgentConfig): string {
   return (config.envVars?.[ONBOARDING_MEMORY_SEED_ENV] || "").trim().toLowerCase();
@@ -1547,6 +1578,8 @@ export class AgentProcessManager {
   private cliTransportTraceDir: string | null = null;
   /** Machine state root, for reading this machine's own trace corpus. */
   private machineDir: string | null = null;
+  private workspaceOrchestra: WorkspaceOrchestraStore | null = null;
+  private workspaceOrchestraExecutor: WorkspaceOrchestraExecutor<AgentProcess> | null = null;
   private readonly deliveryTraceContexts = new WeakMap<AgentMessage, DeliveryTraceContext>();
   private readonly runtimeExitTraceAttrs = new WeakMap<RuntimeSession, Record<string, unknown>>();
   private readonly runtimeProcessBindingFence = new RuntimeProcessBindingFence({
@@ -1772,6 +1805,301 @@ export class AgentProcessManager {
 
   setMachineDir(machineDir: string | null): void {
     this.machineDir = machineDir;
+    if (!machineDir) {
+      this.workspaceOrchestra = null;
+      this.workspaceOrchestraExecutor = null;
+      return;
+    }
+    try {
+      this.workspaceOrchestra = new WorkspaceOrchestraStore(machineDir);
+      this.workspaceOrchestraExecutor = new WorkspaceOrchestraExecutor(
+        this.workspaceOrchestra,
+        (job, conversation, control) => this.runWorkspaceOrchestraJob(job, conversation, control),
+        (job) => {
+          this.sendToServer({
+            type: "agent:workspace:task:update",
+            agentId: job.agentId,
+            runId: job.id,
+            taskId: job.taskId,
+            status: job.status,
+            ...(job.leaseId ? { leaseId: job.leaseId } : {}),
+            ...(job.pid ? { workerPid: job.pid } : {}),
+            ...(job.outcome ? { detail: job.outcome.slice(0, 4000) } : {}),
+          });
+        },
+      );
+    } catch (error) {
+      // A damaged scheduler ledger disables workspace writers but must not
+      // prevent ordinary agent conversations from reconnecting.
+      this.workspaceOrchestra = null;
+      this.workspaceOrchestraExecutor = null;
+      logger.error("[Workspace Orchestra] Persistent scheduler state unavailable; writer execution stays disabled", error);
+    }
+  }
+
+  async enqueueWorkspaceOrchestraJob(input: ChannelWorkspaceTaskRunDispatch) {
+    const report = (status: "blocked" | "failed", detail: string) => {
+      this.sendToServer({
+        type: "agent:workspace:task:update",
+        agentId: input.agentId,
+        runId: input.id,
+        taskId: input.taskId,
+        status,
+        detail: detail.slice(0, 1000),
+      });
+    };
+    const executor = this.workspaceOrchestraExecutor;
+    if (!this.workspaceOrchestra || !executor) {
+      report("blocked", "workspace_scheduler_unavailable");
+      return null;
+    }
+    const conversation = this.agents.get(input.agentId);
+    const policy = conversation?.config.runtimeContext?.channelWorkspaceConversationPolicy;
+    if (
+      !conversation
+      || conversation.exit.kind !== "live"
+      || !conversation.sessionReadyForDelivery
+      || conversation.driver.id !== "codex"
+      || conversation.config.runtime !== "codex"
+      || conversation.config.executionMode !== "byoc"
+      || !policy
+      || policy.kind !== "shared_workspaces_read_only"
+      || policy.revision < input.workspaceRevision
+      || conversation.config.runtimeContext?.serverId !== input.serverId
+      || conversation.config.runtimeContext?.machineId !== input.machineId
+    ) {
+      report("blocked", "conversation_restart_required_for_read_only_policy");
+      return null;
+    }
+    const validatedPath = await validateWritableWorkspacePath(input.requestedPath, input.canonicalWorkspacePath);
+    if (validatedPath.status !== "available" || validatedPath.canonicalPath !== input.canonicalWorkspacePath) {
+      report("blocked", `workspace_revalidation_${validatedPath.status}`);
+      return null;
+    }
+    try {
+      const { job, duplicate } = executor.submit({
+        id: input.id,
+        serverId: input.serverId,
+        machineId: input.machineId,
+        channelId: input.channelId,
+        agentId: input.agentId,
+        taskId: input.taskId,
+        messageId: input.messageId,
+        workspaceId: input.workspaceId,
+        requestedPath: input.requestedPath,
+        canonicalWorkspacePath: input.canonicalWorkspacePath,
+        workspaceRevision: input.workspaceRevision,
+        instruction: input.instruction,
+      }, conversation);
+      return { job, duplicate };
+    } catch (error) {
+      report("failed", error instanceof Error ? error.message : String(error));
+      return null;
+    }
+  }
+
+  cancelWorkspaceOrchestraJob(run: ChannelWorkspaceTaskRunDispatch): boolean {
+    const executor = this.workspaceOrchestraExecutor;
+    const store = this.workspaceOrchestra;
+    if (!executor || !store) return false;
+    let job = executor.get(run.id);
+    if (!job) {
+      try {
+        store.enqueue(run);
+        job = executor.get(run.id);
+      } catch {
+        return false;
+      }
+    }
+    if (!job
+      || job.serverId !== run.serverId
+      || job.machineId !== run.machineId
+      || job.agentId !== run.agentId
+      || job.taskId !== run.taskId) return false;
+    // If cancel overtakes the original task frame, this persisted queued row
+    // becomes a tombstone. A later duplicate dispatch cannot enter the worker lane.
+    executor.cancel(run.id);
+    return true;
+  }
+
+  listWorkspaceOrchestraJobs() {
+    return this.workspaceOrchestraExecutor?.list() ?? this.workspaceOrchestra?.list() ?? [];
+  }
+
+  syncWorkspaceOrchestraRuns(serverId: string | undefined): void {
+    if (!serverId) return;
+    for (const job of this.listWorkspaceOrchestraJobs()) {
+      if (job.serverId !== serverId) continue;
+      this.sendToServer({
+        type: "agent:workspace:task:update",
+        agentId: job.agentId,
+        runId: job.id,
+        taskId: job.taskId,
+        status: job.status,
+        ...(job.leaseId ? { leaseId: job.leaseId } : {}),
+        ...(job.pid ? { workerPid: job.pid } : {}),
+        ...(job.outcome ? { detail: job.outcome.slice(0, 4000) } : {}),
+      });
+    }
+  }
+
+  private async runWorkspaceOrchestraJob(
+    job: WorkspaceOrchestraJob,
+    conversation: AgentProcess,
+    control: { signal: AbortSignal; spawned(pid: number): unknown },
+  ): Promise<WorkspaceOrchestraCompletion> {
+    const confirmNoProcess = (): WorkspaceOrchestraCompletion => ({
+      outcome: "failed",
+      detail: "workspace_worker_not_started",
+      processStoppedConfirmed: true,
+    });
+    if (
+      this.agents.get(job.agentId) !== conversation
+      || conversation.driver.id !== "codex"
+      || conversation.config.runtime !== "codex"
+      || conversation.config.executionMode !== "byoc"
+    ) return confirmNoProcess();
+
+    const policy = conversation.config.runtimeContext?.channelWorkspaceConversationPolicy;
+    if (!policy || policy.revision < job.workspaceRevision) {
+      return { outcome: "failed", detail: "conversation_restart_required_for_read_only_policy", processStoppedConfirmed: true };
+    }
+    const driver = this.driverResolver("codex");
+    const processInstanceId = randomUUID();
+    const config: AgentConfig = {
+      ...conversation.config,
+      sessionId: null,
+      authToken: "",
+      // The worker reports through the daemon protocol. Do not expose a Raft
+      // credential to its shell or managed tool surface.
+      agentCredentialKey: undefined,
+      agentCredentialId: undefined,
+      runtimeContext: {
+        ...(conversation.config.runtimeContext ?? {}),
+        workspacePath: job.canonicalWorkspacePath,
+        channelWorkspaceConversationPolicy: policy,
+      },
+    };
+    const ctx: SpawnContext = {
+      agentId: job.agentId,
+      config,
+      standingPrompt: [
+        `You are a single-task workspace worker for ${config.displayName || config.name}.`,
+        "Work only in the assigned project directory and report a concise outcome.",
+        "Do not use Raft communication tools, change task status, or access other workspaces.",
+      ].join("\n"),
+      prompt: "",
+      workingDirectory: job.canonicalWorkspacePath,
+      workspaceExecution: {
+        lane: "worker",
+        sandbox: "workspace-write",
+        workspaceRevision: job.workspaceRevision,
+        taskId: job.taskId,
+        leaseId: job.leaseId ?? "",
+        canonicalWorkspacePath: job.canonicalWorkspacePath,
+      },
+      slockCliPath: this.slockCliPath,
+      daemonApiKey: "",
+      slockHome: this.slockHome,
+      processInstanceId,
+      assertLaunchCurrent: () => {
+        const current = this.agents.get(job.agentId);
+        const currentPolicy = current?.config.runtimeContext?.channelWorkspaceConversationPolicy;
+        if (
+          current !== conversation
+          || current?.exit.kind !== "live"
+          || !currentPolicy
+          || currentPolicy.revision < job.workspaceRevision
+        ) {
+          throw new Error("conversation_restart_required_for_read_only_policy");
+        }
+      },
+    };
+
+    let session: RuntimeSession | null = null;
+    let output = "";
+    let terminal: { outcome: "succeeded" | "failed" | "cancelled"; detail: string } | null = null;
+    let resolveTerminal!: (value: { outcome: "succeeded" | "failed" | "cancelled"; detail: string }) => void;
+    const terminalPromise = new Promise<{ outcome: "succeeded" | "failed" | "cancelled"; detail: string }>((resolve) => {
+      resolveTerminal = resolve;
+    });
+    const settle = (next: { outcome: "succeeded" | "failed" | "cancelled"; detail: string }) => {
+      if (terminal) return;
+      terminal = next;
+      resolveTerminal(next);
+    };
+    const appendOutput = (text: string) => {
+      if (output.length < 16_000) output += text.slice(0, 16_000 - output.length);
+    };
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const onAbort = () => settle({ outcome: "cancelled", detail: "cancel_requested" });
+    control.signal.addEventListener("abort", onAbort, { once: true });
+
+    try {
+      if (!driver.workspaceExecutionSandboxModes?.includes("workspace-write")) {
+        return { outcome: "failed", detail: "runtime_workspace_write_sandbox_unavailable", processStoppedConfirmed: true };
+      }
+      session = createWorkspaceExecutionRuntimeSession(driver, ctx);
+      session.on("runtime_event", (event) => {
+        if (event.kind === "text") appendOutput(event.text);
+        else if (event.kind === "turn_end") settle({ outcome: "succeeded", detail: "worker_turn_completed" });
+        else if (event.kind === "error") settle({ outcome: "failed", detail: event.message });
+      });
+      session.on("error", (error) => settle({ outcome: "failed", detail: error.message }));
+      session.on("exit", (info) => {
+        if (!terminal) settle({
+          outcome: "failed",
+          detail: `worker_exited_without_turn_end:${info.code ?? info.signal ?? "unknown"}`,
+        });
+      });
+
+      const start = await session.start({ text: job.instruction, sessionId: null });
+      if (typeof session.pid !== "number") {
+        return { outcome: "failed", detail: start.ok ? "workspace_worker_pid_missing" : start.error ?? "workspace_worker_start_failed", processStoppedConfirmed: true };
+      }
+      control.spawned(session.pid);
+      if (!start.ok) settle({ outcome: "failed", detail: start.error ?? "workspace_worker_start_failed" });
+      timeout = setTimeout(() => settle({ outcome: "failed", detail: "workspace_worker_timeout" }), WORKSPACE_WORKER_TIMEOUT_MS);
+      timeout.unref?.();
+      const result = await terminalPromise;
+
+      // Turn end is not process end. Terminate the app-server process group and
+      // keep the directory lease until signal-0 confirms the entire group is gone.
+      await session.stop({ signal: "SIGTERM", reason: "workspace_task_terminal" });
+      const pid = session.pid;
+      let stopped = typeof pid !== "number"
+        ? true
+        : await waitForWorkspaceWorkerGroupStop(pid, WORKSPACE_WORKER_TERM_WAIT_MS);
+      if (!stopped && typeof pid === "number") {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* the group may have exited between probes */ }
+        stopped = await waitForWorkspaceWorkerGroupStop(pid, WORKSPACE_WORKER_KILL_WAIT_MS);
+      }
+      const detail = output.trim().slice(0, 4000) || result.detail;
+      return {
+        outcome: result.outcome,
+        detail: stopped ? detail : `process_stop_unconfirmed: ${detail}`,
+        processStoppedConfirmed: stopped,
+      };
+    } catch (error) {
+      const pid = session?.pid;
+      if (typeof pid !== "number") {
+        return { outcome: "failed", detail: error instanceof Error ? error.message : String(error), processStoppedConfirmed: true };
+      }
+      try { await session?.stop({ signal: "SIGTERM", reason: "workspace_task_start_failure" }); } catch { /* retain lock below if liveness is unknown */ }
+      let stopped = await waitForWorkspaceWorkerGroupStop(pid, WORKSPACE_WORKER_TERM_WAIT_MS);
+      if (!stopped) {
+        try { process.kill(-pid, "SIGKILL"); } catch { /* no-op */ }
+        stopped = await waitForWorkspaceWorkerGroupStop(pid, WORKSPACE_WORKER_KILL_WAIT_MS);
+      }
+      return {
+        outcome: control.signal.aborted ? "cancelled" : "failed",
+        detail: error instanceof Error ? error.message : String(error),
+        processStoppedConfirmed: stopped,
+      };
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      control.signal.removeEventListener("abort", onAbort);
+    }
   }
 
   private assertStartPendingDeliveryInvariants(context: string): void {
@@ -4494,6 +4822,15 @@ export class AgentProcessManager {
         : standingPrompt;
       promptSource = "cold_start";
     }
+    if (
+      driver.id === "codex"
+      && runtimeConfig.runtimeContext?.channelWorkspaceConversationPolicy?.kind === "shared_workspaces_read_only"
+    ) {
+      prompt = composeAxSurfaces(prompt, adoptAxSurfaceText([
+        "Channel workspace policy: this conversation uses a read-only sandbox. Do not try to edit project files in the conversation lane.",
+        "A user-assigned workspace task, when submitted through the workspace task control, runs in a separate worker. Do not claim that conversation work performed a workspace task; continue to answer new messages independently.",
+      ].join("\n")));
+    }
     // task #9: the messages this launch's first input names (tracked mentions
     // among them count as told to this process).
     const firstInputMessages: readonly AgentMessage[] =
@@ -4620,6 +4957,15 @@ export class AgentProcessManager {
       standingPrompt,
       prompt,
       workingDirectory: agentDataDir,
+      ...(runtimeConfig.runtimeContext?.channelWorkspaceConversationPolicy?.kind === "shared_workspaces_read_only"
+        && driver.id === "codex"
+        ? {
+            workspaceExecution: {
+              lane: "conversation" as const,
+              sandbox: "read-only" as const,
+            },
+          }
+        : {}),
       slockCliPath: this.slockCliPath,
       daemonVersion: this.daemonVersion,
       computerVersion: this.computerVersion,
@@ -6828,6 +7174,10 @@ export class AgentProcessManager {
     if (this.coldIdleSweepTimer) clearInterval(this.coldIdleSweepTimer);
     this.coldIdleSweepTimer = null;
     this.cancelAllQueuedAgentStarts("daemon shutdown");
+    // Workspace writer locks must remain held until the independent worker
+    // process groups confirm shutdown; wait for that before tearing down the
+    // conversation runtimes that established the read-only gate.
+    await this.workspaceOrchestraExecutor?.stopAll();
     // RFC 071: starts held for the server capability end without a spawn.
     for (const wait of [...this.capabilityHolds.values()]) wait.cancel();
     this.lifecycleRecords.clearRestartSnapshots();
@@ -7337,6 +7687,16 @@ export class AgentProcessManager {
 
   async scanAllWorkspaces(): Promise<WorkspaceDirectoryInfo[]> {
     return scanWorkspaceDirectories(this.dataDir);
+  }
+
+  async validateWorkspacePath(requestedPath: string) {
+    const result = await validateWorkspacePath(requestedPath);
+    if (result.status !== "available" || !result.canonicalPath) return result;
+    const protectedRoot = await realpath(this.dataDir).catch(() => path.resolve(this.dataDir));
+    if (workspacePathsOverlap(protectedRoot, result.canonicalPath)) {
+      return { requestedPath, status: "invalid_path" as const };
+    }
+    return result;
   }
 
   async deleteWorkspaceDirectory(directoryName: string): Promise<boolean> {

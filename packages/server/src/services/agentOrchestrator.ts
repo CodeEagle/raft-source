@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
 import { closeConnectionsForDrain, MACHINE_DRAIN_CLOSE_CODE, MACHINE_DRAIN_CLOSE_REASON } from "./machineDrain";
 import crypto from "node:crypto";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Server as SocketServer } from "socket.io";
 import type { WebSocket } from "ws";
 import {
@@ -48,6 +49,7 @@ import {
   type ComputerLifecycleExecutionAck,
   type AgentConfig,
   type WorkspaceDirectoryInfo,
+  type WorkspacePathValidationResult,
   type FileNode,
   type TrajectoryEntry,
   type ReasoningEffort,
@@ -69,6 +71,7 @@ import {
   type ExternalAgentActivityIngestRequest,
   type AgentMigrationTransportLeaseSource,
   type AgentMigrationTransportReady,
+  type ChannelWorkspaceTaskRunDispatch,
   type FeedbackTranscriptReportTimeSource,
   type FeedbackMachineEvidenceOutcome,
   type FeedbackTranscriptLookupOutcome,
@@ -129,6 +132,8 @@ import { isProbeCarrierFactLive, parseProbeCarrierMeta } from "./probeCarrierFac
 import type { AppSnapshotComposition } from "./appSnapshotComposition";
 import { boundedErrorClass } from "../tracing/queryTrace";
 import { pgSqlState } from "../db/migrationPreflight";
+import { getDb } from "../db/index";
+import { agentRequestAcknowledgements, channelWorkspaceBindings, channelWorkspaceConfigs, channelWorkspaceTaskRuns, channels, messages, tasks, workspaces } from "../db/schema";
 import {
   addTraceEvent,
   errorClassOf,
@@ -144,6 +149,11 @@ import * as agentRuntimeProfileService from "./agentRuntimeProfileService";
 import * as machineService from "./machineService";
 import * as channelService from "./channelService";
 import * as messageService from "./messageService";
+import * as taskService from "./taskService";
+import { emitTaskUpdated } from "./taskRealtimeEvents";
+import { getTaskRealtimeSurfaceTargets, resolveTaskChannelSurface } from "./taskChannelSurface";
+import { mutateMessageReaction } from "./messageReactionService";
+import { projectRichMessageSocketPayload } from "./messageRealtimeEvents";
 import * as oauthService from "./oauthService";
 import * as mentionDeliveryOccurrenceService from "./mentionDeliveryOccurrenceService";
 import * as agentActivityLogService from "./agentActivityLogService";
@@ -8449,6 +8459,9 @@ export class AgentOrchestrator extends EventEmitter {
             }
             this.retryPendingAgentDeliveriesForMachine(machineId, "ready_reconcile");
             this.retryPendingAgentStartsForMachine(machineId, "ready_reconcile");
+            void this.dispatchPendingWorkspaceTasksForMachine(machineId).catch((err) => {
+              console.error(`[Machine ${machineId}] Failed to redrive pending workspace tasks:`, err);
+            });
             span.end("ok", {
               attrs: {
                 outcome: "processed",
@@ -8631,6 +8644,11 @@ export class AgentOrchestrator extends EventEmitter {
             if (normalizedStatus === "active" && typeof msg.launchId === "string") {
               await this.wakeCrashLoopBreaker.confirmCatchupDelivered(msg.agentId, msg.launchId);
               await this.wakeCrashLoopBreaker.recordStartSucceeded(msg.agentId, msg.launchId);
+            }
+            if (normalizedStatus === "active" && action === "persist-active") {
+              void this.dispatchPendingWorkspaceTasksForAgent(msg.agentId).catch((err) => {
+                console.error(`[Workspace Orchestra] Failed to redispatch pending work for ${msg.agentId}:`, err);
+              });
             }
             if (normalizedStatus === "inactive") {
               const exit = (msg as { exit?: { code: number | null; signal: string | null } }).exit;
@@ -9686,6 +9704,40 @@ export class AgentOrchestrator extends EventEmitter {
             });
             return;
           }
+          if (msg.requestAck) {
+            try {
+              const outcome = await this.recordAgentRequestAcknowledgement({
+                agentId: agent.id,
+                serverId: agent.serverId,
+                messageId: msg.requestAck.messageId,
+                deliverySeq: msg.seq,
+                status: msg.requestAck.status,
+              });
+              this.recordEvent("agent.request_ack.persisted", {
+                outcome,
+                reason: outcome === "persisted" ? "durable_receipt" : "message_or_access_mismatch",
+                agentId: agent.id,
+                messageId: msg.requestAck.messageId,
+                status: msg.requestAck.status,
+              });
+            } catch (err) {
+              this.recordEvent("agent.request_ack.persist_failed", {
+                outcome: "error",
+                reason: errorClassOf(err),
+                agentId: agent.id,
+                messageId: msg.requestAck.messageId,
+              });
+              span.end("error", {
+                attrs: {
+                  outcome: "request-ack-persistence-failed",
+                  reason: "durable_receipt_unavailable",
+                },
+              });
+              // Keep the delivery pending. The server retries until this
+              // receipt is durable, then clears its ordinary inbox ack.
+              return;
+            }
+          }
           if (msg.mentionDelivery) {
             if (
               msg.mentionDelivery.machineId !== machineId
@@ -10025,10 +10077,15 @@ export class AgentOrchestrator extends EventEmitter {
         this.emit(`machine:response:${machineId}`, msg);
         break;
 
+      case "agent:workspace:task:update":
+        await this.handleWorkspaceTaskRunUpdate(machineId, conn, msg);
+        break;
+
       case "agent:workspace:file_tree":
       case "agent:workspace:file_content":
       case "agent:workspace:wiki_ensured":
       case "machine:workspace:scan_result":
+      case "machine:workspace:validate_path_result":
       case "machine:workspace:delete_result":
       case "machine:migration:source_workspace_archive_result":
       case "machine:runtime_models:result":
@@ -11283,6 +11340,108 @@ export class AgentOrchestrator extends EventEmitter {
 
   private agentDeliveryAckKey(msg: Pick<Extract<ServerToMachineMessage, { type: "agent:deliver" }>, "agentId" | "seq" | "deliveryId">): string {
     return msg.deliveryId ? `delivery:${msg.deliveryId}` : `seq:${msg.agentId}:${msg.seq}`;
+  }
+
+  private async recordAgentRequestAcknowledgement(input: {
+    agentId: string;
+    serverId: string;
+    messageId: string;
+    deliverySeq: number;
+    status: "received" | "queued";
+  }): Promise<"persisted" | "ignored"> {
+    const db = getDb();
+    const [message] = await db.select({
+      channelId: messages.channelId,
+      seq: messages.seq,
+      senderType: messages.senderType,
+      messageType: messages.messageType,
+    })
+      .from(messages)
+      .innerJoin(channels, eq(channels.id, messages.channelId))
+      .where(and(
+        eq(messages.id, input.messageId),
+        eq(channels.serverId, input.serverId),
+      ))
+      .limit(1);
+
+    if (
+      !message
+      || message.seq !== input.deliverySeq
+      || message.senderType !== "user"
+      || message.messageType !== "chat"
+      || !await channelService.canAgentAccessChannel(message.channelId, input.agentId)
+    ) {
+      return "ignored";
+    }
+
+    const [receipt] = await db.insert(agentRequestAcknowledgements).values({
+      serverId: input.serverId,
+      messageId: input.messageId,
+      agentId: input.agentId,
+      status: input.status,
+    }).onConflictDoUpdate({
+      target: [
+        agentRequestAcknowledgements.serverId,
+        agentRequestAcknowledgements.messageId,
+        agentRequestAcknowledgements.agentId,
+      ],
+      set: {
+        status: sql`CASE WHEN ${agentRequestAcknowledgements.status} = 'queued' OR excluded.status = 'queued' THEN 'queued' ELSE 'received' END`,
+        updatedAt: new Date(),
+      },
+    }).returning({
+      status: agentRequestAcknowledgements.status,
+      createdAt: agentRequestAcknowledgements.createdAt,
+    });
+
+    if (!receipt) throw new Error("Agent request acknowledgement was not persisted");
+
+    this.io?.to(`channel:${message.channelId}`).emit("agent:request:acknowledged", {
+      serverId: input.serverId,
+      channelId: message.channelId,
+      messageId: input.messageId,
+      agentId: input.agentId,
+      status: receipt.status,
+      createdAt: receipt.createdAt,
+    });
+
+    // 👀 is a server-side receipt presentation. It does not mean the message
+    // was read, claimed, or completed, and never depends on model output.
+    // A repeated durable receipt retries this presentation if an earlier
+    // reaction write failed.
+    try {
+      const reaction = await mutateMessageReaction({
+        channelId: message.channelId,
+        messageId: input.messageId,
+        emoji: "👀",
+        actor: { kind: "agent", id: input.agentId },
+        operation: "add",
+      });
+      if (reaction.changed) {
+        const context = await messageService.getMessageContext(input.messageId, 0, 0, undefined, {
+          forwardedBundleViewerAgentId: input.agentId,
+          forwardedBundleViewerServerId: input.serverId,
+          includeSenderTimezone: true,
+        });
+        const enriched = context?.messages[0];
+        if (enriched) {
+          // message-realtime-producer: agent-orchestrator.request-ack.eyes.updated
+          this.io?.to(`channel:${message.channelId}`).emit(
+            "message:updated",
+            projectRichMessageSocketPayload(messageService.stripViewerScopedAttachmentCommentMetadata(enriched)),
+          );
+        }
+      }
+    } catch (err) {
+      this.recordEvent("agent.request_ack.presentation_failed", {
+        outcome: "error",
+        reason: errorClassOf(err),
+        agentId: input.agentId,
+        messageId: input.messageId,
+      });
+    }
+
+    return "persisted";
   }
 
   /**
@@ -12960,6 +13119,26 @@ export class AgentOrchestrator extends EventEmitter {
 
     const machine = agent.machineId ? await this.loadRuntimeContextMachine(asMachineId(agent.machineId)) : null;
     const daemonVersion = agent.machineId ? this.getMachineDaemonVersion(agent.machineId) : null;
+    const workspaceConfigRows = agent.runtime === "codex" && agent.executionMode === "byoc" && agent.machineId
+      ? await getDb().select({ revision: channelWorkspaceConfigs.revision })
+        .from(channelWorkspaceBindings)
+        .innerJoin(channelWorkspaceConfigs, and(
+          eq(channelWorkspaceConfigs.channelId, channelWorkspaceBindings.channelId),
+          eq(channelWorkspaceConfigs.agentId, channelWorkspaceBindings.agentId),
+        ))
+        .innerJoin(workspaces, and(
+          eq(workspaces.id, channelWorkspaceBindings.workspaceId),
+          eq(workspaces.serverId, agent.serverId),
+          eq(workspaces.machineId, agent.machineId),
+        ))
+        .where(eq(channelWorkspaceBindings.agentId, agent.id))
+      : [];
+    const channelWorkspaceConversationPolicy = workspaceConfigRows.length > 0
+      ? {
+          kind: "shared_workspaces_read_only" as const,
+          revision: Math.max(...workspaceConfigRows.map((row) => row.revision)),
+        }
+      : null;
     const config: AgentConfig = {
       name: agent.name,
       displayName: agent.displayName,
@@ -12983,6 +13162,7 @@ export class AgentOrchestrator extends EventEmitter {
         machineOs: machine?.os ?? null,
         daemonVersion,
         workspacePath: null,
+        ...(channelWorkspaceConversationPolicy ? { channelWorkspaceConversationPolicy } : {}),
       },
     };
     const runtimeProfileControl = await agentRuntimeProfileService.getPendingRuntimeProfileControl(agentId);
@@ -14623,6 +14803,275 @@ export class AgentOrchestrator extends EventEmitter {
 
   // Machine workspace scanning
 
+  /** Deliver an explicitly assigned workspace task to its recorded on-device Codex lane. */
+  async dispatchChannelWorkspaceTask(runId: string): Promise<boolean> {
+    const [row] = await getDb().select({
+      run: channelWorkspaceTaskRuns,
+      taskTitle: tasks.title,
+      taskDescription: tasks.description,
+      channelArchivedAt: channels.archivedAt,
+      channelDeletedAt: channels.deletedAt,
+    })
+      .from(channelWorkspaceTaskRuns)
+      .innerJoin(tasks, eq(tasks.id, channelWorkspaceTaskRuns.taskId))
+      .innerJoin(channels, eq(channels.id, channelWorkspaceTaskRuns.channelId))
+      .where(eq(channelWorkspaceTaskRuns.id, runId))
+      .limit(1);
+    if (!row || (row.run.status !== "queued" && row.run.status !== "blocked")) return false;
+
+    if (row.channelArchivedAt || row.channelDeletedAt) {
+      await getDb().update(channelWorkspaceTaskRuns).set({
+        status: "blocked",
+        result: "channel_archived_or_deleted",
+        updatedAt: new Date(),
+      }).where(and(
+        eq(channelWorkspaceTaskRuns.id, runId),
+        inArray(channelWorkspaceTaskRuns.status, ["queued", "blocked"]),
+      ));
+      return false;
+    }
+
+    const agent = await agentService.getAgent(row.run.agentId);
+    if (
+      !agent
+      || agent.serverId !== row.run.serverId
+      || agent.machineId !== row.run.machineId
+      || agent.runtime !== "codex"
+      || agent.executionMode !== "byoc"
+    ) {
+      await getDb().update(channelWorkspaceTaskRuns).set({
+        status: "blocked",
+        result: "workspace_agent_unavailable_or_unsupported",
+        updatedAt: new Date(),
+      }).where(and(
+        eq(channelWorkspaceTaskRuns.id, runId),
+        inArray(channelWorkspaceTaskRuns.status, ["queued", "blocked"]),
+      ));
+      return false;
+    }
+
+    const run = row.run.status === "blocked"
+      ? (await getDb().update(channelWorkspaceTaskRuns).set({
+          status: "queued",
+          result: null,
+          updatedAt: new Date(),
+        }).where(and(
+          eq(channelWorkspaceTaskRuns.id, runId),
+          eq(channelWorkspaceTaskRuns.status, "blocked"),
+        )).returning())[0] ?? row.run
+      : row.run;
+    const dispatch: ChannelWorkspaceTaskRunDispatch = {
+      id: run.id,
+      serverId: run.serverId,
+      machineId: run.machineId,
+      channelId: run.channelId,
+      agentId: run.agentId,
+      taskId: run.taskId,
+      messageId: run.messageId,
+      workspaceId: run.workspaceId,
+      workspaceRevision: run.workspaceRevision,
+      requestedPath: run.requestedPath,
+      canonicalWorkspacePath: run.canonicalWorkspacePath,
+      instruction: row.taskDescription?.trim() || row.taskTitle,
+    };
+    return this.sendToMachine(run.machineId, { type: "agent:workspace:task", agentId: run.agentId, run: dispatch });
+  }
+
+  /** Pending runs are retried only after a fresh active lifecycle status, such as a manual restart. */
+  private async dispatchPendingWorkspaceTasksForAgent(agentId: string): Promise<void> {
+    const pending = await getDb().select({ id: channelWorkspaceTaskRuns.id })
+      .from(channelWorkspaceTaskRuns)
+      .where(and(
+        eq(channelWorkspaceTaskRuns.agentId, agentId),
+        inArray(channelWorkspaceTaskRuns.status, ["queued", "blocked"]),
+      ));
+    for (const row of pending) {
+      try {
+        await this.dispatchChannelWorkspaceTask(row.id);
+      } catch (err) {
+        console.error(`[Workspace Orchestra] Pending task dispatch failed (${row.id.slice(0, 8)}):`, err);
+      }
+    }
+  }
+
+  private async dispatchPendingWorkspaceTasksForMachine(machineId: string): Promise<void> {
+    const pending = await getDb().select({ id: channelWorkspaceTaskRuns.id })
+      .from(channelWorkspaceTaskRuns)
+      .where(and(
+        eq(channelWorkspaceTaskRuns.machineId, machineId),
+        inArray(channelWorkspaceTaskRuns.status, ["queued", "blocked"]),
+      ));
+    for (const row of pending) {
+      try {
+        await this.dispatchChannelWorkspaceTask(row.id);
+      } catch (err) {
+        console.error(`[Workspace Orchestra] Machine reconnect dispatch failed (${row.id.slice(0, 8)}):`, err);
+      }
+    }
+  }
+
+  async cancelChannelWorkspaceTask(agentId: string, runId: string, taskId: string): Promise<boolean> {
+    const [row] = await getDb().select({ run: channelWorkspaceTaskRuns, taskTitle: tasks.title, taskDescription: tasks.description })
+      .from(channelWorkspaceTaskRuns)
+      .innerJoin(tasks, eq(tasks.id, channelWorkspaceTaskRuns.taskId))
+      .where(and(
+        eq(channelWorkspaceTaskRuns.id, runId),
+        eq(channelWorkspaceTaskRuns.agentId, agentId),
+        eq(channelWorkspaceTaskRuns.taskId, taskId),
+      ))
+      .limit(1);
+    if (!row) return false;
+    const run = row.run;
+    const dispatch: ChannelWorkspaceTaskRunDispatch = {
+      id: run.id,
+      serverId: run.serverId,
+      machineId: run.machineId,
+      channelId: run.channelId,
+      agentId: run.agentId,
+      taskId: run.taskId,
+      messageId: run.messageId,
+      workspaceId: run.workspaceId,
+      workspaceRevision: run.workspaceRevision,
+      requestedPath: run.requestedPath,
+      canonicalWorkspacePath: run.canonicalWorkspacePath,
+      instruction: row.taskDescription?.trim() || row.taskTitle,
+    };
+    return this.sendToMachine(run.machineId, {
+      type: "agent:workspace:task:cancel",
+      agentId,
+      run: dispatch,
+    });
+  }
+
+  private async handleWorkspaceTaskRunUpdate(
+    machineId: string,
+    conn: MachineConnection | undefined,
+    msg: Extract<MachineToServerMessage, { type: "agent:workspace:task:update" }>,
+  ): Promise<void> {
+    const agent = await this.validateMachineAgentMessage(machineId, conn?.serverId ?? null, msg.agentId, msg.type);
+    if (!agent) return;
+    const terminalStatuses = new Set(["succeeded", "failed", "cancelled"]);
+    const run = await getDb().transaction(async (tx) => {
+      const [current] = await tx.select().from(channelWorkspaceTaskRuns)
+        .where(and(
+          eq(channelWorkspaceTaskRuns.id, msg.runId),
+          eq(channelWorkspaceTaskRuns.taskId, msg.taskId),
+          eq(channelWorkspaceTaskRuns.agentId, agent.id),
+          eq(channelWorkspaceTaskRuns.machineId, machineId),
+          eq(channelWorkspaceTaskRuns.serverId, agent.serverId),
+        ))
+        .for("update")
+        .limit(1);
+      if (!current || terminalStatuses.has(current.status)) return null;
+
+      const noLeaseSnapshot = !msg.leaseId
+        && (msg.status === "queued" || msg.status === "blocked" || msg.status === "failed" || msg.status === "cancelled");
+      if (noLeaseSnapshot) {
+        const allowed = msg.status === "queued"
+          ? current.status === "queued"
+          : msg.status === "cancelled"
+            ? current.status === "queued" || current.status === "cancel_requested"
+            : current.status === "queued";
+        if (!allowed) return null;
+      } else {
+        if (!msg.leaseId) return null;
+        if (current.leaseId && current.leaseId !== msg.leaseId) return null;
+        if (current.status === "cancel_requested" && (msg.status === "starting" || msg.status === "running")) return null;
+      }
+      const [updated] = await tx.update(channelWorkspaceTaskRuns).set({
+        status: msg.status,
+        leaseId: msg.leaseId ?? current.leaseId,
+        workerPid: msg.workerPid ?? current.workerPid,
+        result: msg.detail === undefined ? current.result : msg.detail.slice(0, 4000),
+        updatedAt: new Date(),
+      }).where(eq(channelWorkspaceTaskRuns.id, current.id)).returning();
+      return updated ?? null;
+    });
+    if (!run) return;
+
+    if (run.status === "running") {
+      try {
+        const claimed = await taskService.claimTask(run.taskId, "agent", agent.id);
+        if (typeof claimed === "string") {
+          if (claimed !== "already claimed by you") {
+            console.warn(`[Workspace Orchestra] Could not claim task ${run.taskId}: ${claimed}`);
+          }
+        } else {
+          await this.emitWorkspaceTaskUpdated(run.serverId, run.channelId, claimed.row);
+        }
+      } catch (err) {
+        console.error(`[Workspace Orchestra] Failed to update task ${run.taskId} from worker state:`, err);
+      }
+    }
+
+    if (run.status === "succeeded") {
+      try {
+        const [currentTask] = await getDb().select({
+          status: tasks.status,
+          claimedByType: tasks.claimedByType,
+          claimedById: tasks.claimedById,
+        }).from(tasks).where(eq(tasks.id, run.taskId)).limit(1);
+        if (
+          !currentTask
+          || currentTask.claimedByType !== "agent"
+          || currentTask.claimedById !== agent.id
+          || (currentTask.status !== "todo" && currentTask.status !== "in_progress")
+        ) {
+          console.warn(`[Workspace Orchestra] Cannot move task ${run.taskId} to review from its current state`);
+        } else {
+          if (currentTask.status === "todo") {
+            const claimed = await taskService.claimTask(run.taskId, "agent", agent.id);
+            if (typeof claimed === "string") {
+              console.warn(`[Workspace Orchestra] Could not start completed task ${run.taskId}: ${claimed}`);
+            } else {
+              await this.emitWorkspaceTaskUpdated(run.serverId, run.channelId, claimed.row);
+              const updated = await taskService.updateTaskStatus(run.taskId, "in_review", agent.id, "agent");
+              if (typeof updated !== "string") {
+                await this.emitWorkspaceTaskUpdated(run.serverId, run.channelId, updated.row);
+              } else if (updated !== "already in_review") {
+                console.warn(`[Workspace Orchestra] Could not move task ${run.taskId} to review: ${updated}`);
+              }
+            }
+          } else {
+            const updated = await taskService.updateTaskStatus(run.taskId, "in_review", agent.id, "agent");
+            if (typeof updated !== "string") {
+              await this.emitWorkspaceTaskUpdated(run.serverId, run.channelId, updated.row);
+            } else if (updated !== "already in_review") {
+              console.warn(`[Workspace Orchestra] Could not move task ${run.taskId} to review: ${updated}`);
+            }
+          }
+        }
+      } catch (err) {
+        console.error(`[Workspace Orchestra] Failed to move completed task ${run.taskId} to review:`, err);
+      }
+    }
+
+    this.io?.to(`channel:${run.channelId}`).emit("channel:workspace-task-updated", {
+      serverId: run.serverId,
+      channelId: run.channelId,
+      agentId: run.agentId,
+      run: {
+        id: run.id,
+        taskId: run.taskId,
+        workspaceId: run.workspaceId,
+        status: run.status,
+        result: run.result,
+        updatedAt: run.updatedAt,
+      },
+    });
+  }
+
+  private async emitWorkspaceTaskUpdated(serverId: string, channelId: string, row: taskService.TaskRow): Promise<void> {
+    if (!this.io) return;
+    const surface = await resolveTaskChannelSurface(serverId, channelId);
+    if (!surface) return;
+    const enriched = await taskService.enrichSingleLegacyTask(row);
+    for (const target of await getTaskRealtimeSurfaceTargets(surface)) {
+      const projected = taskService.projectTaskToChannel(enriched, target.localChannel);
+      emitTaskUpdated(this.io, target, { channelId: target.channelId, task: projected });
+    }
+  }
+
   async scanMachineWorkspaces(machineId: string): Promise<WorkspaceDirectoryInfo[]> {
     const conn = this.machineConnections.get(machineId);
     if (!conn || conn.ws.readyState !== 1) {
@@ -14650,6 +15099,45 @@ export class AgentOrchestrator extends EventEmitter {
         clearTimeout(timeout);
         this.removeListener(`machine:response:${machineId}`, handler);
         reject(new Error("Failed to send request — machine WebSocket not ready"));
+      }
+    });
+  }
+
+  async validateMachineWorkspacePath(machineId: string, requestedPath: string): Promise<WorkspacePathValidationResult> {
+    const conn = this.machineConnections.get(machineId);
+    if (!conn || conn.ws.readyState !== 1) {
+      throw new Error("Machine is not connected");
+    }
+    const requestId = crypto.randomUUID();
+
+    return new Promise(async (resolve, reject) => {
+      const timeout = setTimeout(() => {
+        this.removeListener(`machine:response:${machineId}`, handler);
+        reject(new Error("Workspace path validation timed out"));
+      }, 8_000);
+
+      const handler = (msg: MachineToServerMessage) => {
+        if (msg.type !== "machine:workspace:validate_path_result" || msg.requestId !== requestId) return;
+        clearTimeout(timeout);
+        this.removeListener(`machine:response:${machineId}`, handler);
+        resolve({
+          requestedPath: msg.requestedPath,
+          status: msg.status,
+          ...(msg.canonicalPath ? { canonicalPath: msg.canonicalPath } : {}),
+        });
+      };
+
+      this.on(`machine:response:${machineId}`, handler);
+      try {
+        await this.sendRequiredToMachine(machineId, {
+          type: "machine:workspace:validate_path",
+          requestId,
+          path: requestedPath,
+        });
+      } catch {
+        clearTimeout(timeout);
+        this.removeListener(`machine:response:${machineId}`, handler);
+        reject(new Error("Failed to send path validation request — machine WebSocket not ready"));
       }
     });
   }

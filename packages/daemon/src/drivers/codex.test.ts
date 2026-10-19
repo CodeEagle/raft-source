@@ -11,7 +11,7 @@ import {
 } from "@botiverse/raft-shared";
 import { buildCodexAppServerArgs, CodexDriver, clearCodexProbeCacheForTests, detectCodexModels, detectCodexModelsFromAppServer, probeCodex, compareCodexVersions, parseCodexVersion, resolveCodexCommand, resolveCodexSpawn } from "./codex";
 import { resolveCodexHomeRootFromEnv } from "./codexHome";
-import type { ParsedEvent, SpawnContext } from "./types";
+import { assertWorkspaceExecutionProfileSupported, type ParsedEvent, type SpawnContext } from "./types";
 import { DAEMON_CORE_TRACE_ATTR_CONTRACTS } from "../core";
 import { traceRows } from "../testing/traceRows";
 
@@ -2713,6 +2713,71 @@ test("codex thread request passes model, reasoning effort, and fast service tier
   assert.equal(request.params.model, "gpt-5.5");
   assert.deepEqual(request.params.config, { model_reasoning_effort: "low" });
   assert.equal(request.params.serviceTier, "fast");
+});
+
+test("Codex workspace lanes map conversation to read-only and worker to workspace-write", () => {
+  const driver = new CodexDriver();
+  const base: SpawnContext = {
+    agentId: "agent-1",
+    config: codexConfig as any,
+    standingPrompt: "SP1",
+    prompt: "dynamic",
+    workingDirectory: "/workspace/project",
+    slockCliPath: "/tmp/cli.js",
+    daemonApiKey: "token",
+  };
+  const conversation = driver.buildThreadRequest({
+    ...base,
+    workspaceExecution: {
+      lane: "conversation",
+      sandbox: "read-only",
+    },
+  });
+  const worker = driver.buildThreadRequest({
+    ...base,
+    config: { ...codexConfig, sessionId: "worker-session" } as any,
+    workspaceExecution: {
+      lane: "worker",
+      sandbox: "workspace-write",
+      workspaceRevision: 3,
+      taskId: "task-123",
+      leaseId: "lease-456",
+      canonicalWorkspacePath: "/workspace/project",
+    },
+  });
+
+  assert.equal(conversation.method, "thread/start");
+  assert.equal(conversation.params.sandbox, "read-only");
+  assert.equal(conversation.params.sandbox_mode, "read-only");
+  assert.equal(conversation.params.config, undefined);
+  assert.deepEqual(worker.params.config?.sandbox_workspace_write, {
+    writable_roots: [],
+    exclude_slash_tmp: true,
+    exclude_tmpdir_env_var: true,
+  });
+  assert.equal(worker.method, "thread/resume");
+  assert.equal(worker.params.sandbox, "workspace-write");
+  assert.equal(worker.params.sandbox_mode, "workspace-write");
+  assert.equal(driver.buildThreadRequest(base).params.sandbox, "danger-full-access");
+  assert.throws(() => assertWorkspaceExecutionProfileSupported({ id: "claude" } as any, {
+    lane: "worker",
+    sandbox: "workspace-write",
+    workspaceRevision: 3,
+    taskId: "task-123",
+    leaseId: "lease-456",
+    canonicalWorkspacePath: "/workspace/project",
+  }), /does not enforce/);
+  assert.throws(() => driver.buildThreadRequest({
+    ...base,
+    workspaceExecution: {
+      lane: "worker",
+      sandbox: "workspace-write",
+      workspaceRevision: 3,
+      taskId: "task-123",
+      leaseId: "",
+      canonicalWorkspacePath: "/workspace/project",
+    },
+  }), /matching canonical path, revision, task id, and active writer lease/);
 });
 
 test("codex driver reads nested error.message from app-server error notifications", () => {

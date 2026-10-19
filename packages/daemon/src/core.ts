@@ -1582,6 +1582,10 @@ function summarizeIncomingMessage(msg: ServerToMachineMessage): string {
       return `(agent=${msg.agentId}, runtime=${msg.config.runtime}, model=${msg.config.model}, session=${msg.config.sessionId || "new"}, wikiPack=${msg.wikiWorkspacePack.packId.slice(0, 12)}${msg.wakeMessage ? ", wake=true" : ""})`;
     case "agent:stop":
       return `(agent=${msg.agentId})`;
+    case "agent:workspace:task":
+      return `(agent=${msg.agentId}, run=${msg.run.id.slice(0, 8)}, task=${msg.run.taskId.slice(0, 8)})`;
+    case "agent:workspace:task:cancel":
+      return `(agent=${msg.agentId}, run=${msg.run.id.slice(0, 8)})`;
     case "agent:wake:outcome":
       return `(agent=${msg.agentId}, wake=${msg.wakeRequestId.slice(0, 8)}, outcome=${msg.outcome}${msg.reason ? `, reason=${msg.reason}` : ""})`;
     case "agent:reset-workspace":
@@ -1956,7 +1960,6 @@ export class DaemonCore {
     }));
     this.agentManager.setTracer(this.tracer);
     this.agentManager.setCliTransportTraceDir(path.join(machineDir, "traces"));
-    this.agentManager.setMachineDir(machineDir);
   }
 
   private installTraceBundleUploader(machineDir: string): void {
@@ -2075,6 +2078,10 @@ export class DaemonCore {
         ownerProvenance: this.options.machineOwnerProvenance,
       });
       logger.info(`[Slock Daemon] Acquired machine lock: ${this.machineLock.lockDir}`);
+      // The production AgentProcessManager exposes the machine-local workspace
+      // orchestra store. Keep injected/minimal managers compatible; without
+      // the hook they simply cannot schedule workspace writers.
+      this.agentManager.setMachineDir?.(this.machineLock.machineDir);
       this.installLocalTraceSink(this.machineLock.machineDir);
       this.installTraceBundleUploader(this.machineLock.machineDir);
       this.installDiskJanitor();
@@ -3859,6 +3866,9 @@ export class DaemonCore {
       seq: ackSeq,
       deliveryId: msg.deliveryId,
       mentionDelivery: msg.mentionDelivery,
+      ...(msg.message.sender_type === "human" && msg.message.message_id
+        ? { requestAck: { messageId: msg.message.message_id, status: "received" as const } }
+        : {}),
       ...(traceparent ? { traceparent } : {}),
     };
     this.connection.send(ack);
@@ -4289,6 +4299,34 @@ export class DaemonCore {
         this.agentManager.stopAgent(msg.agentId);
         break;
 
+      case "agent:workspace:task": {
+        const identity = this.authenticatedMachineContext;
+        if (
+          !identity
+          || msg.run.agentId !== msg.agentId
+          || msg.run.machineId !== identity.machineId
+          || msg.run.serverId !== identity.serverId
+        ) {
+          logger.warn(`[Workspace Orchestra] Refused task dispatch with mismatched authenticated machine context (${msg.run.id.slice(0, 8)})`);
+          break;
+        }
+        void this.agentManager.enqueueWorkspaceOrchestraJob(msg.run).catch((error) => {
+          logger.error(`[Workspace Orchestra] Task dispatch failed (${msg.run.id.slice(0, 8)})`, error);
+        });
+        break;
+      }
+
+      case "agent:workspace:task:cancel":
+        if (
+          this.authenticatedMachineContext
+          && msg.run.agentId === msg.agentId
+          && msg.run.machineId === this.authenticatedMachineContext.machineId
+          && msg.run.serverId === this.authenticatedMachineContext.serverId
+        ) {
+          this.agentManager.cancelWorkspaceOrchestraJob(msg.run);
+        }
+        break;
+
       case "agent:wake:outcome":
         this.agentManager.handleServerWakeOutcome(msg);
         break;
@@ -4589,6 +4627,16 @@ export class DaemonCore {
         logger.info("[Daemon] Scanning all workspace directories");
         this.agentManager.scanAllWorkspaces().then((directories) => {
           this.connection.send({ type: "machine:workspace:scan_result", directories });
+        });
+        break;
+
+      case "machine:workspace:validate_path":
+        void this.agentManager.validateWorkspacePath(msg.path).then((result) => {
+          this.connection.send({
+            type: "machine:workspace:validate_path_result",
+            requestId: msg.requestId,
+            ...result,
+          });
         });
         break;
 
@@ -5022,6 +5070,7 @@ export class DaemonCore {
         : {}),
       ...(lastUpgradeReceipt ? { lastUpgradeReceipt } : {}),
     });
+    this.agentManager.syncWorkspaceOrchestraRuns?.(this.authenticatedMachineContext?.serverId);
     // Fresh disk report shortly after every (re)connect, then hourly.
     this.scheduleDiskStatusReport(DISK_STATUS_FIRST_REPORT_DELAY_MS);
     this.recordDaemonEvent("daemon.ready.sent", {

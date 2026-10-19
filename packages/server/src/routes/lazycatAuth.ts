@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { Router, type Request, type Response } from "express";
+import { Router, type Request, type Response, type Router as RouterType } from "express";
 import { eq } from "drizzle-orm";
 import { fetch } from "undici";
 import { isReservedAgentName, validateName } from "@botiverse/raft-shared";
@@ -12,7 +12,7 @@ import { getRequestLegalMetadata } from "../services/legalAcceptanceService";
 import { normalizeEmail } from "../services/emailNormalization";
 import { parseCookieHeader } from "../services/socialAuthService";
 
-export const lazycatAuthRouter = Router();
+export const lazycatAuthRouter: RouterType = Router();
 const STATE_COOKIE = "lzc_oidc_state";
 
 function callbackUrl(req: Request): string {
