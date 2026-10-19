@@ -1,0 +1,3 @@
+# 开发部署仅覆盖包标识，避免覆盖正式应用。
+package_override:
+  package: cloud.lazycat.app.raft.dev

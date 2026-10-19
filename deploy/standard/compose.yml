@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: raft
+      POSTGRES_USER: raft
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+    command: postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U raft -d raft']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  risingwave:
+    image: risingwavelabs/risingwave:v2.8.0
+    command: single_node --store-directory /risingwave/data
+    volumes: [rwdata:/risingwave/data]
+  server:
+    image: ${RAFT_SERVER_IMAGE:?required}
+    environment:
+      NODE_ENV: production
+      RAFT_DEPLOYMENT_TARGET: standard
+      DATABASE_URL: postgresql://raft:${POSTGRES_PASSWORD:?required}@postgres:5432/raft
+      RISINGWAVE_DATABASE_URL: postgresql://root@risingwave:4566/dev
+      JWT_SECRET: ${JWT_SECRET:?required}
+      SCOPE_ATTESTATION_SECRET: ${SCOPE_ATTESTATION_SECRET:?required}
+      APP_URL: ${APP_URL:?required}
+      UPLOADS_DIR: /data/uploads
+    volumes: [uploads:/data/uploads]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      risingwave:
+        condition: service_started
+    restart: unless-stopped
+  web:
+    image: ${RAFT_WEB_IMAGE:?required}
+    ports: ['127.0.0.1:8080:80']
+    volumes: ['./nginx.conf:/etc/nginx/conf.d/default.conf:ro']
+    depends_on: [server]
+volumes:
+  pgdata:
+  rwdata:
+  uploads:
