@@ -4203,6 +4203,7 @@ export const channelWorkspaceTaskRuns = pgTable("channel_workspace_task_runs", {
   leaseId: text("lease_id"),
   workerPid: integer("worker_pid"),
   result: text("result"),
+  delegation: jsonb("delegation").$type<import("@botiverse/raft-shared").DelegationRecord>(),
   requestedByUserId: uuid("requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

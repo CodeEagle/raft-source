@@ -121,3 +121,77 @@ test("an unconfirmed stop keeps the directory locked as uncertain", async () => 
     await rm(machineDir, { recursive: true, force: true });
   }
 });
+
+test("blocked worker persists checkpoint and only explicit same-owner continuation starts another attempt", async () => {
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "delegation-continuation-"));
+  try {
+    const workspacePath = path.join(machineDir, "project");
+    const contract = { version: 1 as const, taskId: "task-1", runId: "run-1", attemptId: "attempt-1", workerId: "agent-1", mode: "delegated" as const, resource: { id: "workspace-1", revision: 1, root: workspacePath }, requiredCapabilities: ["workspace.write"] };
+    const outcome = { version: 1 as const, kind: "needs_operation" as const, summary: "Commit blocked", operation: { capability: "git.commit", description: "Commit", reason: "policy_denied" as const }, checkpoint: { id: "checkpoint-1", stateFingerprint: "tree abc", completed: ["code"], remaining: ["test"] } };
+    const original = input(workspacePath, { delegation: { version: 1, contract } });
+    const store = new WorkspaceOrchestraStore(machineDir, () => false);
+    const executor = new WorkspaceOrchestraExecutor(store, async (_job, _context, control) => {
+      control.spawned(4567);
+      return { outcome: "blocked", detail: outcome.summary, workerOutcome: outcome, processStoppedConfirmed: true };
+    }, () => undefined);
+    executor.submit(original, {});
+    await waitUntil(() => store.get("run-1")?.status === "blocked");
+    await executor.stopAll();
+    const recovered = new WorkspaceOrchestraStore(machineDir, () => false);
+    assert.deepEqual(recovered.get("run-1")?.delegation?.outcome, outcome);
+    assert.equal(recovered.enqueue(original).job.status, "blocked", "ordinary replay cannot rerun checkpointed work");
+    assert.equal(recovered.claimNext(), null);
+    const next = { ...original, delegation: { version: 1 as const, contract: { ...contract, attemptId: "attempt-2" }, continuation: { previousAttemptId: "attempt-1", checkpointId: "checkpoint-1", workerId: "agent-1", receipt: "Operation completed", checkpoint: outcome.checkpoint } } };
+    assert.throws(() => recovered.enqueue({ ...next, delegation: { ...next.delegation, contract: { ...next.delegation.contract, workerId: "other" } } }), /identity_mismatch/);
+    recovered.enqueue(next);
+    const lease = recovered.claimNext()!;
+    assert.equal(lease.delegation?.contract.workerId, "agent-1");
+    assert.notEqual(lease.leaseId, store.get("run-1")?.leaseId);
+    assert.deepEqual(lease.delegation?.continuation?.checkpoint.remaining, ["test"]);
+    recovered.requestCancel(lease.id);
+    const late = recovered.finish(lease.id, lease.leaseId!, "succeeded", "late success", true, { version: 1, kind: "completed", summary: "late success" });
+    assert.equal(late.status, "cancelled", "cancellation wins completion race");
+  } finally { await rm(machineDir, { recursive: true, force: true }); }
+});
+
+test("blocked result with unconfirmed stop remains uncertain and cannot continue", async () => {
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "delegation-uncertain-"));
+  try {
+    const store = new WorkspaceOrchestraStore(machineDir, () => true);
+    const original = input(path.join(machineDir, "project"));
+    store.enqueue(original);
+    const lease = store.claimNext()!;
+    store.recordWorkerSpawned(lease.id, lease.leaseId!, 5678);
+    store.finish(lease.id, lease.leaseId!, "blocked", "operation blocked", false);
+    assert.equal(store.get(lease.id)?.status, "uncertain");
+    store.enqueue(input(path.join(machineDir, "project", "child"), { id: "run-2", taskId: "task-2", messageId: "message-2" }));
+    assert.equal(store.claimNext(), null);
+  } finally { await rm(machineDir, { recursive: true, force: true }); }
+});
+
+test("a continuation submitted by the blocked callback keeps its own active controller", async () => {
+  const machineDir = await mkdtemp(path.join(os.tmpdir(), "delegation-reentrant-"));
+  try {
+    const workspacePath = path.join(machineDir, "project");
+    const contract = { version: 1 as const, taskId: "task-1", runId: "run-1", attemptId: "first", workerId: "agent-1", mode: "delegated" as const, resource: { id: "workspace-1", revision: 1, root: workspacePath }, requiredCapabilities: ["workspace.write"] };
+    const workerOutcome = { version: 1 as const, kind: "needs_operation" as const, summary: "Blocked", operation: { capability: "git.commit", description: "Commit", reason: "policy_denied" as const }, checkpoint: { id: "checkpoint", stateFingerprint: "tree", completed: [], remaining: ["test"] } };
+    const original = input(workspacePath, { delegation: { version: 1, contract } });
+    const store = new WorkspaceOrchestraStore(machineDir, () => false);
+    let secondStarted = false;
+    const executor = new WorkspaceOrchestraExecutor(store, async (job, _context, control) => {
+      control.spawned(1234);
+      if (job.delegation?.contract.attemptId === "first") return { outcome: "blocked", detail: "blocked", workerOutcome, processStoppedConfirmed: true };
+      secondStarted = true;
+      await new Promise<void>((resolve) => control.signal.addEventListener("abort", () => resolve(), { once: true }));
+      return { outcome: "cancelled", detail: "stopped", processStoppedConfirmed: true };
+    }, (job) => {
+      if (job.status === "blocked") executor.submit({ ...original, delegation: { version: 1, contract: { ...contract, attemptId: "second" }, continuation: { previousAttemptId: "first", checkpointId: "checkpoint", workerId: "agent-1", receipt: "exact operation completed", checkpoint: workerOutcome.checkpoint } } }, {});
+    });
+    executor.submit(original, {});
+    await waitUntil(() => secondStarted);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal((executor as unknown as { active: Map<string, AbortController> }).active.size, 1);
+    await executor.stopAll();
+    assert.equal(store.get("run-1")?.status, "cancelled");
+  } finally { await rm(machineDir, { recursive: true, force: true }); }
+});

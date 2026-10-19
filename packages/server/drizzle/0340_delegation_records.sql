@@ -1,0 +1,1 @@
+ALTER TABLE "channel_workspace_task_runs" ADD COLUMN "delegation" jsonb;

@@ -1,8 +1,10 @@
+import type { DelegationOutcome } from "@botiverse/raft-shared";
 import type { WorkspaceOrchestraJob } from "./workspaceOrchestraStore";
 import { WorkspaceOrchestraStore } from "./workspaceOrchestraStore";
 
 export interface WorkspaceOrchestraCompletion {
-  outcome: "succeeded" | "failed" | "cancelled";
+  outcome: "succeeded" | "failed" | "cancelled" | "blocked";
+  workerOutcome?: DelegationOutcome;
   detail: string;
   processStoppedConfirmed: boolean;
 }
@@ -88,7 +90,7 @@ export class WorkspaceOrchestraExecutor<Context> {
     this.draining = true;
     try {
       while (this.active.size < this.maxConcurrent) {
-        const job = this.store.claimNext((candidate) => this.contexts.has(candidate.id));
+        const job = this.store.claimNext((candidate) => this.contexts.has(candidate.id) && !this.active.has(candidate.id));
         if (!job || !job.leaseId) break;
         const context = this.contexts.get(job.id)!;
         this.contexts.delete(job.id);
@@ -119,6 +121,7 @@ export class WorkspaceOrchestraExecutor<Context> {
         completion.outcome,
         completion.detail,
         completion.processStoppedConfirmed,
+        completion.workerOutcome,
       );
       await this.publish(terminal);
     } catch (error) {

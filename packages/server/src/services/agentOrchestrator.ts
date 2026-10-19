@@ -1,3 +1,4 @@
+import { DAEMON_CAPABILITY_DELEGATION_V1, delegationRecordSchema, delegationOutcomeSchema } from "@botiverse/raft-shared";
 import { EventEmitter } from "node:events";
 import { closeConnectionsForDrain, MACHINE_DRAIN_CLOSE_CODE, MACHINE_DRAIN_CLOSE_REASON } from "./machineDrain";
 import crypto from "node:crypto";
@@ -14809,6 +14810,9 @@ export class AgentOrchestrator extends EventEmitter {
       run: channelWorkspaceTaskRuns,
       taskTitle: tasks.title,
       taskDescription: tasks.description,
+      taskStatus: tasks.status,
+      taskClaimedById: tasks.claimedById,
+      taskClaimedByType: tasks.claimedByType,
       channelArchivedAt: channels.archivedAt,
       channelDeletedAt: channels.deletedAt,
     })
@@ -14818,6 +14822,21 @@ export class AgentOrchestrator extends EventEmitter {
       .where(eq(channelWorkspaceTaskRuns.id, runId))
       .limit(1);
     if (!row || (row.run.status !== "queued" && row.run.status !== "blocked")) return false;
+    // A persisted checkpoint needs an explicit authenticated continuation, never reconnect/retry replay.
+    if (row.run.delegation?.outcome) return false;
+    if (row.run.delegation && (row.taskClaimedByType !== "agent" || row.taskClaimedById !== row.run.agentId
+      || (row.taskStatus !== "todo" && row.taskStatus !== "in_progress")
+      || (row.run.delegation.continuation && row.taskStatus !== "in_progress"))) return false;
+    const delegationConnection = row.run.delegation ? this.machineConnections.get(row.run.machineId) : undefined;
+    // Contracted execution requires the current local socket's explicit protocol capability.
+    // Unknown/remote ownership is not evidence that an older daemon understands the contract.
+    if (row.run.delegation && (!delegationConnection || delegationConnection.serverId !== row.run.serverId
+      || delegationConnection.ws.readyState !== 1 || this.isMachineHeartbeatStale(delegationConnection)
+      || !delegationConnection.capabilities.has(DAEMON_CAPABILITY_DELEGATION_V1))) {
+      await getDb().update(channelWorkspaceTaskRuns).set({ status: "blocked", result: "delegation_protocol_unavailable", updatedAt: new Date() })
+        .where(and(eq(channelWorkspaceTaskRuns.id, runId), inArray(channelWorkspaceTaskRuns.status, ["queued", "blocked"])));
+      return false;
+    }
 
     if (row.channelArchivedAt || row.channelDeletedAt) {
       await getDb().update(channelWorkspaceTaskRuns).set({
@@ -14873,8 +14892,17 @@ export class AgentOrchestrator extends EventEmitter {
       requestedPath: run.requestedPath,
       canonicalWorkspacePath: run.canonicalWorkspacePath,
       instruction: row.taskDescription?.trim() || row.taskTitle,
+      ...(run.delegation ? { delegation: delegationRecordSchema.parse(run.delegation) } : {}),
     };
-    return this.sendToMachine(run.machineId, { type: "agent:workspace:task", agentId: run.agentId, run: dispatch });
+    const message: ServerToMachineMessage = { type: "agent:workspace:task", agentId: run.agentId, run: dispatch };
+    if (run.delegation) {
+      // No await/rerouting between capability validation and this send: a replacement or remote owner must negotiate again.
+      if (!delegationConnection || this.machineConnections.get(run.machineId) !== delegationConnection
+        || delegationConnection.serverId !== run.serverId || delegationConnection.ws.readyState !== 1
+        || this.isMachineHeartbeatStale(delegationConnection) || !delegationConnection.capabilities.has(DAEMON_CAPABILITY_DELEGATION_V1)) return false;
+      try { delegationConnection.ws.send(JSON.stringify(message)); return true; } catch { return false; }
+    }
+    return this.sendToMachine(run.machineId, message);
   }
 
   /** Pending runs are retried only after a fresh active lifecycle status, such as a manual restart. */
@@ -14963,6 +14991,19 @@ export class AgentOrchestrator extends EventEmitter {
         .for("update")
         .limit(1);
       if (!current) return null;
+      let delegation = current.delegation;
+      if (delegation) {
+        const parsed = delegationRecordSchema.safeParse(delegation);
+        if (!parsed.success || msg.delegationAttemptId !== parsed.data.contract.attemptId) return { run: current, applied: false };
+        if (msg.workerOutcome) {
+          const outcome = delegationOutcomeSchema.safeParse(msg.workerOutcome);
+          if (!outcome.success) return { run: current, applied: false };
+          const expected = outcome.data.kind === "completed" ? "succeeded" : outcome.data.kind === "needs_operation" ? "blocked" : outcome.data.kind;
+          if (msg.status !== expected && msg.status !== "uncertain" && msg.status !== "cancelled" && msg.status !== "failed") return { run: current, applied: false };
+          delegation = { ...parsed.data, outcome: outcome.data };
+        } else if (msg.status === "succeeded") return { run: current, applied: false };
+        if (current.status === "blocked" && parsed.data.outcome && msg.status !== "cancelled") return { run: current, applied: false };
+      }
       // Terminal state is monotone. Still acknowledge a duplicate or stale
       // callback with the server's state so the daemon can stop retrying it.
       if (terminalStatuses.has(current.status)) return { run: current, applied: false };
@@ -14983,8 +15024,10 @@ export class AgentOrchestrator extends EventEmitter {
           return { run: current, applied: false };
         }
       }
+      if (current.status === "cancel_requested" && msg.status !== "cancelled" && msg.status !== "uncertain") return { run: current, applied: false };
       const [updated] = await tx.update(channelWorkspaceTaskRuns).set({
         status: msg.status,
+        delegation,
         leaseId: msg.leaseId ?? current.leaseId,
         workerPid: msg.workerPid ?? current.workerPid,
         result: msg.detail === undefined ? current.result : msg.detail.slice(0, 4000),
@@ -15078,6 +15121,7 @@ export class AgentOrchestrator extends EventEmitter {
     if (!conn || conn.ws.readyState !== 1) return;
     const ack: ServerToMachineMessage = {
       type: "agent:workspace:task:update:ack",
+      ...(msg.delegationAttemptId ? { delegationAttemptId: msg.delegationAttemptId } : {}),
       agentId: msg.agentId,
       runId: msg.runId,
       taskId: msg.taskId,

@@ -1448,6 +1448,45 @@ test("retries an unacknowledged terminal workspace update and rejects later stal
   conn.disconnect();
 });
 
+test("fences workspace retries and terminal ACKs by delegation attempt", () => {
+  const clock = new FakeClock();
+  const { conn, getWs } = makeConnection({
+    clock, autoOpen: false, inboundWatchdogMs: 100_000, workspaceTaskUpdateRetryMs: 10,
+  });
+  const first = {
+    type: "agent:workspace:task:update" as const,
+    agentId: "agent-1", runId: "run-1", taskId: "task-1",
+    delegationAttemptId: "attempt-1", status: "failed" as const,
+  };
+  conn.connect();
+  const ws = getWs();
+  ws.emit("open");
+  sendReady(conn);
+  conn.send(first);
+  conn.ackWorkspaceTaskUpdate({ ...first, type: "agent:workspace:task:update:ack", applied: true });
+
+  const continuation = { ...first, delegationAttemptId: "attempt-2", status: "running" as const };
+  conn.send(continuation);
+  assert.equal(ws.sent.length, 3, "previous attempt's terminal watermark cannot drop a continuation");
+
+  // An old server's absent attempt and a late terminal ACK from the old attempt
+  // both fail to acknowledge the new attempt, regardless of status rank.
+  const { delegationAttemptId: _attempt, ...legacy } = first;
+  conn.ackWorkspaceTaskUpdate({ ...legacy, type: "agent:workspace:task:update:ack", applied: false });
+  conn.ackWorkspaceTaskUpdate({ ...first, type: "agent:workspace:task:update:ack", applied: false });
+  conn.ackWorkspaceTaskUpdate({ ...continuation, agentId: "another-agent", type: "agent:workspace:task:update:ack", applied: true });
+  clock.advanceBy(10);
+  assert.equal(ws.sent.length, 4, "unmatched ACKs must leave continuation retries active");
+  assert.equal(JSON.parse(ws.sent.at(-1)!).delegationAttemptId, "attempt-2");
+
+  conn.ackWorkspaceTaskUpdate({ ...continuation, type: "agent:workspace:task:update:ack", applied: true });
+  clock.advanceBy(30);
+  assert.equal(ws.sent.length, 4, "matching attempt ACK stops retries");
+  conn.send({ ...first, status: "running" });
+  assert.equal(ws.sent.length, 4, "late old-attempt callback stays behind its terminal watermark");
+  conn.disconnect();
+});
+
 test("replays an unacknowledged terminal workspace update after reconnect", () => {
   const clock = new FakeClock();
   const fixture = makeConnection({

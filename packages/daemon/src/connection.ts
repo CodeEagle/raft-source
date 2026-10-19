@@ -808,8 +808,14 @@ export class DaemonConnection {
     return { kind: "queued", agentId: msg.agentId, launchIdPresent: Boolean(msg.launchId), replacedPending };
   }
 
-  private workspaceTaskUpdateKey(msg: Pick<WorkspaceTaskUpdateMessage, "runId" | "taskId"> | Pick<WorkspaceTaskUpdateAck, "runId" | "taskId">): string {
-    return `${msg.runId}:${msg.taskId}`;
+  private workspaceTaskUpdateKey(
+    msg: Pick<WorkspaceTaskUpdateMessage, "agentId" | "runId" | "taskId" | "delegationAttemptId">
+      | Pick<WorkspaceTaskUpdateAck, "agentId" | "runId" | "taskId" | "delegationAttemptId">,
+  ): string {
+    // Continuations reuse the run/task but have independent status watermarks.
+    // In particular, a terminal ACK for an older attempt (or a legacy ACK
+    // without an attempt) must never clear the continuation's pending update.
+    return JSON.stringify([msg.agentId, msg.runId, msg.taskId, msg.delegationAttemptId ?? null]);
   }
 
   private sendWorkspaceTaskUpdate(

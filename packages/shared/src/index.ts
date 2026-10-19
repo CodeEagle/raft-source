@@ -1,3 +1,5 @@
+export * from "./delegation";
+import type { DelegationRecord, DelegationOutcome } from "./delegation";
 import type { AnnouncementContent, AnnouncementPresentation } from "../announcement-presentation";
 export { validateAnnouncementPresentation } from "../announcement-presentation";
 export type { AnnouncementContent, AnnouncementPresentation } from "../announcement-presentation";
@@ -763,6 +765,7 @@ export type ChannelWorkspaceTaskRunStatus =
 
 /** Explicit task dispatch into one server-authorized, machine-local workspace. */
 export interface ChannelWorkspaceTaskRunDispatch {
+  delegation?: DelegationRecord;
   id: string;
   serverId: string;
   machineId: string;
@@ -823,6 +826,7 @@ export type ServerToMachineMessage =
    */
   | {
       type: "agent:workspace:task:update:ack";
+      delegationAttemptId?: string;
       agentId: string;
       runId: string;
       taskId: string;
@@ -1497,6 +1501,8 @@ export type MachineToServerMessage =
       leaseId?: string;
       workerPid?: number;
       detail?: string;
+      delegationAttemptId?: string;
+      workerOutcome?: DelegationOutcome;
     }
   | {
       type: "agent:deliver:ack";

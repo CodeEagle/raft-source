@@ -40,6 +40,7 @@ import {
   DAEMON_CAPABILITY_SEQUENCED_STATUS,
   isValidMachineDiskStatus,
   DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
+  DAEMON_CAPABILITY_DELEGATION_V1,
   SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1,
   SERVER_CAPABILITY_START_SPAWN_ERROR_V1,
   type AgentStartNotSpawnedReason,
@@ -5054,6 +5055,7 @@ export class DaemonCore {
         // RFC 071: agent:runtime:outcome v1, process spawned/exited, rebind
         // ack processInstanceId, catchupBatchId echo.
         DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
+        DAEMON_CAPABILITY_DELEGATION_V1,
         ...BUILT_IN_READY_CAPABILITIES,
         ...(this.options.computerControlViaSupervisor
           ? [COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS]
