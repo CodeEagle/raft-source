@@ -67,6 +67,6 @@ LABEL org.opencontainers.image.title="slock-server" \
 
 EXPOSE 3001
 
-# Entrypoint: push DB schema then start server
+# Entrypoint starts the server; apply database migrations separately before deployment.
 RUN chmod +x packages/server/entrypoint.sh
 CMD ["packages/server/entrypoint.sh"]

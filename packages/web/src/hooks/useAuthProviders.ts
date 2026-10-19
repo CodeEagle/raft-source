@@ -11,8 +11,10 @@ export interface AuthProvider {
 
 const DEFAULT_PROVIDERS: AuthProvider[] = [];
 
-let cachedProviders: AuthProvider[] | null = null;
-let providersRequest: Promise<AuthProvider[]> | null = null;
+type AuthCapabilities = { providers: AuthProvider[]; lazycatEnabled: boolean };
+const DEFAULT_CAPABILITIES: AuthCapabilities = { providers: DEFAULT_PROVIDERS, lazycatEnabled: false };
+let cachedProviders: AuthCapabilities | null = null;
+let providersRequest: Promise<AuthCapabilities> | null = null;
 
 export function __resetAuthProvidersForTest(): void {
   cachedProviders = null;
@@ -39,12 +41,12 @@ function normalizeProviders(data: unknown): AuthProvider[] {
     }));
 }
 
-async function fetchAuthProviders(): Promise<AuthProvider[]> {
+async function fetchAuthProviders(): Promise<AuthCapabilities> {
   if (cachedProviders) return cachedProviders;
   if (!providersRequest) {
     providersRequest = api.get("/auth/providers")
-      .then(({ data }) => normalizeProviders(data))
-      .catch(() => DEFAULT_PROVIDERS)
+      .then(({ data }) => ({ providers: normalizeProviders(data), lazycatEnabled: data?.lazycat?.enabled === true }))
+      .catch(() => DEFAULT_CAPABILITIES)
       .finally(() => {
         providersRequest = null;
       });
@@ -55,7 +57,7 @@ async function fetchAuthProviders(): Promise<AuthProvider[]> {
 }
 
 export function useAuthProviders() {
-  const [providers, setProviders] = useState<AuthProvider[]>(cachedProviders ?? DEFAULT_PROVIDERS);
+  const [capabilities, setCapabilities] = useState<AuthCapabilities>(cachedProviders ?? DEFAULT_CAPABILITIES);
   const [loading, setLoading] = useState(!cachedProviders);
 
   useEffect(() => {
@@ -65,10 +67,10 @@ export function useAuthProviders() {
       try {
         const data = await fetchAuthProviders();
         if (!cancelled) {
-          setProviders(data);
+          setCapabilities(data);
         }
       } catch {
-        if (!cancelled) setProviders(DEFAULT_PROVIDERS);
+        if (!cancelled) setCapabilities(DEFAULT_CAPABILITIES);
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -86,9 +88,9 @@ export function useAuthProviders() {
   // 2026-09-15), so the 2026-09-10 desktop hide is removed — social providers show
   // in every shell.
   const enabledProviders = useMemo(
-    () => providers.filter((provider) => provider.enabled),
-    [providers],
+    () => capabilities.providers.filter((provider) => provider.enabled),
+    [capabilities],
   );
 
-  return { providers, enabledProviders, loading };
+  return { providers: capabilities.providers, enabledProviders, loading, lazycatEnabled: !loading && capabilities.lazycatEnabled };
 }

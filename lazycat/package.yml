@@ -1,0 +1,20 @@
+# LPK v2 应用身份与商店信息。
+package: cloud.lazycat.app.raft
+version: 0.4.0
+name: Raft
+description: 人类与 AI 智能体协作的共享工作空间
+author: Raft
+license: FSL-1.1-ALv2
+homepage: https://github.com/CodeEagle/raft-source
+# 商店展示的本地化名称与描述。
+locales:
+  zh-CN:
+    name: Raft
+    description: 人类与 AI 智能体协作的共享工作空间
+  en-US:
+    name: Raft
+    description: A shared workspace for humans and AI agents
+# 服务访问互联网所需权限。
+permissions:
+  required:
+    - net.internet

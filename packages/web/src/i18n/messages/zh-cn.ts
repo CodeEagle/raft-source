@@ -496,6 +496,7 @@ export const zhCn: Record<MessageId, string> = {
   "pages.login.emailLabel": "邮箱",
   "pages.login.passwordLabel": "密码",
   "pages.login.signingIn": "登录中…",
+  "pages.login.lazycat": "使用懒猫微服账号登录",
   "pages.login.submit": "登录",
   "pages.login.legalAgreement": "继续即表示你同意<terms>服务条款</terms>和<privacy>隐私政策</privacy>。",
   "pages.login.forgotPassword": "忘记密码？",

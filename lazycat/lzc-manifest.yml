@@ -1,0 +1,129 @@
+# 应用入口：app 容器由 lzcinit 接管（监听 :80 并按 upstreams 分发），
+# 镜像默认 ENTRYPOINT 不会执行，因此静态前端放在独立的 web service。
+application:
+  subdomain: raft
+  # 开放无需门户登录的路径：Computer CLI/守护进程直接以 sk_* Bearer 鉴权访问
+  # （与公网 api.raft.build 同模型）；其余路径（/ 网页）仍走懒猫强制登录。
+  public_path:
+    - /api/
+    - /internal/
+    - /daemon/
+  # 懒猫账户体系（OIDC SSO）：回调路径对应 server 的 /api/auth/lazycat/callback。
+  # 设置后系统才注入 LAZYCAT_AUTH_OIDC_* 部署期变量（见 services.server.environment）。
+  oidc_redirect_path: /api/auth/lazycat/callback
+  # 按 upstreams 的 backend 分发：/ → web 容器；/api 与 /socket.io → server。
+  # server 路由自带 /api 前缀，需 disable_trim_location 保留前缀；
+  # Socket.IO 走 WebSocket 升级，需 fix_websocket_header。
+  upstreams:
+    # lzcinit 的 location 前缀匹配需尾斜杠：“/api” 只匹配裸路径，“/api/” 才匹配 /api/* 子路径。
+    # 参考官方示例（advanced-route.html 中懒猫网盘用法）与 SPA fallback 语义。
+    - location: /api/
+      backend: http://server:3001
+      disable_trim_location: true
+    # Computer 守护进程的 /internal/computer/* 与 /internal/agent-api/* 直连 server。
+    - location: /internal/
+      backend: http://server:3001
+      disable_trim_location: true
+    # daemon 的 WebSocket 长连接（/daemon/connect）。
+    # 不开 fix_websocket_header：它会在原 header 旁追加正确大小写副本，
+    # Node 合并同名 header 后值含逗号，反而使 ws 握手失败。
+    - location: /daemon/
+      backend: http://server:3001
+      disable_trim_location: true
+    - location: /socket.io/
+      backend: http://server:3001
+      disable_trim_location: true
+    - location: /
+      backend: http://web:80
+  # lzcinit 代理自身与上游可用性（首次迁移+bootstrap 较慢，放宽启动等待）。
+  health_check:
+    test_url: http://127.0.0.1/
+    start_period: 900s
+# 应用内部服务；数据库端口不向外发布。
+services:
+  # Redis：机器副本状态、socket.io 适配器与唤醒锁所需。
+  # 自托管单实例下仅作临时状态用，重启即重建。
+  redis:
+    image: registry.lazycat.cloud/edward/library/redis:4c6b9d7b7a334a2e
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+  # 前端静态服务（nginx）。
+  web:
+    image: embed:web
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1/"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+  # PostgreSQL 主数据库：开启逻辑复制供 RisingWave 使用。
+  postgres:
+    image: registry.lazycat.cloud/invokerlaw/library/postgres:34ecbac1e3701775
+    environment:
+      - POSTGRES_DB=slock
+      - POSTGRES_USER=postgres
+      - POSTGRES_HOST_AUTH_METHOD=trust
+    command: postgres -c wal_level=logical -c max_replication_slots=10 -c max_wal_senders=10 -c max_slot_wal_keep_size=256MB
+    binds:
+      - /lzcapp/var/pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "slock"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+  # RisingWave 单节点流处理服务及其持久化数据。
+  risingwave:
+    image: registry.lazycat.cloud/invokerlaw/risingwavelabs/risingwave:bfb448fcbb649fb2
+    # v2.8 single_node 默认存到 ~/.risingwave；显式指定持久化目录与下方 bind 对应。
+    # 依据：risingwave v2.8.0 src/cmd_all/src/single_node.rs（--store-directory 选项）
+    # 数据放在 /lzcapp/var（机械盘持久目录）：别的 lzcapp 路径重启即丢。
+    # 机械盘 fsync 尾延迟达数秒，靠 risingwave.toml 压低元数据写放大、
+    # 放宽心跳与 GC 节奏来避免 1s barrier/60s 心跳积压拖崩集群（见该文件注释）。
+    command: single_node --store-directory /risingwave/data --config-path /risingwave/data/risingwave.toml
+    binds:
+      - /lzcapp/var/risingwave:/risingwave/data
+    healthcheck:
+      # RisingWave 镜像不含 curl；用 bash /dev/tcp 探测 pgwire 端口（服务就绪的充要信号）。
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/4566"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+  # API 与实时通信服务；启动入口负责等待依赖并迁移数据库。
+  server:
+    image: embed:server
+    depends_on: [postgres, risingwave, redis]
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      # 设备登录审批页与其它对外链接的 Web 根地址（deviceAuth 校验需要）。
+      - APP_URL=__RAFT_APP_URL__
+      - RAFT_DEPLOYMENT_TARGET=lazycat
+      - DATABASE_URL=postgresql://postgres@postgres:5432/slock
+      - RISINGWAVE_DATABASE_URL=postgresql://root@risingwave:4566/dev
+      - UPLOADS_DIR=/lzcapp/var/uploads
+      # Redis：机器副本状态与 socket.io 适配器。
+      - REDIS_URL=redis://redis:6379
+      # scope_attestation 签名密钥（未配时守护进程每次上传 trace 都报 500）。
+      # 懒猫 SSO：授权码交换与用户信息端点，由系统在部署时渲染注入
+      - LAZYCAT_AUTH_OIDC_CLIENT_ID=${LAZYCAT_AUTH_OIDC_CLIENT_ID}
+      - LAZYCAT_AUTH_OIDC_CLIENT_SECRET=${LAZYCAT_AUTH_OIDC_CLIENT_SECRET}
+      - LAZYCAT_AUTH_OIDC_ISSUER_URI=${LAZYCAT_AUTH_OIDC_ISSUER_URI}
+      - LAZYCAT_AUTH_OIDC_AUTH_URI=${LAZYCAT_AUTH_OIDC_AUTH_URI}
+      - LAZYCAT_AUTH_OIDC_TOKEN_URI=${LAZYCAT_AUTH_OIDC_TOKEN_URI}
+      - LAZYCAT_AUTH_OIDC_USERINFO_URI=${LAZYCAT_AUTH_OIDC_USERINFO_URI}
+    binds:
+      - /lzcapp/var/secrets:/lzcapp/var/secrets
+      - /lzcapp/var/uploads:/lzcapp/var/uploads
+    healthcheck:
+      # /livez 是无鉴权探活端点；返回 200 即 DB 可用。镜像含 Node 24。
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/livez').then(r=>process.exit(r.status===200?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 600s

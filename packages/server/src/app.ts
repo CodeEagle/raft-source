@@ -1,3 +1,4 @@
+import { parseDeploymentConfig } from "./config/deployment";
 import express, { type Express, type Request, type RequestHandler } from "express";
 import helmet from "helmet";
 import cors from "cors";
@@ -20,6 +21,7 @@ import {
   agentMigrationControlBodyErrorHandler,
 } from "./routes/agentMigrationControlRequestLimits";
 import { authRouter } from "./routes/auth";
+import { lazycatAuthRouter } from "./routes/lazycatAuth";
 import { agentLoginRouter } from "./routes/agentLogin";
 import { deviceAuthRouter } from "./routes/deviceAuth";
 import { appLoginRouter } from "./routes/appLogin";
@@ -155,7 +157,9 @@ function experimentalInternalSurfaceContract(surface: "computer" | "agent-api"):
 }
 
 export function createApp(options: CreateAppOptions = {}): Express {
+  const deployment = parseDeploymentConfig();
   const app = express();
+  app.locals.deployment = deployment;
   if (options.attachmentUploadSessionService) {
     app.set("attachmentUploadSessionService", options.attachmentUploadSessionService);
   }
@@ -351,6 +355,9 @@ export function createApp(options: CreateAppOptions = {}): Express {
     app.use("/api/computer", authLimiter, computerLegacyMachinesRouter);
   } else {
     console.warn("[device-login-disabled] SLOCK_DEVICE_LOGIN_ENABLED is explicitly off — Computer attach + device authorize are disabled");
+  }
+  if (deployment.target === "lazycat") {
+    app.use("/api/auth/lazycat", authLimiter, lazycatAuthRouter);
   }
   app.use("/api/auth", authLimiter, authRouter);
   app.get("/.well-known/openid-configuration", authLimiter, oidcDiscoveryHandler);

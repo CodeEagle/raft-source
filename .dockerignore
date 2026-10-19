@@ -1,0 +1,24 @@
+# Docker build contexts (packages/*/Dockerfile, lazycat/*.Dockerfile) only need
+# the files they COPY explicitly. Keep transient and local state out of the
+# context tarballs sent to the build daemon.
+node_modules/
+**/node_modules/
+.git/
+.pi/
+dist/
+**/dist/
+**/dist-electron/
+h5-bundle/
+*.log
+.amp/
+.claude/
+lazycat/dist/
+.vercel/
+
+lazycat/.lzc-cli-cache/
+deploy-artifacts/
+**/.env
+**/.env.*
+**/secrets/
+**/*.pem
+**/*.key
