@@ -14951,7 +14951,7 @@ export class AgentOrchestrator extends EventEmitter {
     const agent = await this.validateMachineAgentMessage(machineId, conn?.serverId ?? null, msg.agentId, msg.type);
     if (!agent) return;
     const terminalStatuses = new Set(["succeeded", "failed", "cancelled"]);
-    const run = await getDb().transaction(async (tx) => {
+    const outcome = await getDb().transaction(async (tx) => {
       const [current] = await tx.select().from(channelWorkspaceTaskRuns)
         .where(and(
           eq(channelWorkspaceTaskRuns.id, msg.runId),
@@ -14962,7 +14962,10 @@ export class AgentOrchestrator extends EventEmitter {
         ))
         .for("update")
         .limit(1);
-      if (!current || terminalStatuses.has(current.status)) return null;
+      if (!current) return null;
+      // Terminal state is monotone. Still acknowledge a duplicate or stale
+      // callback with the server's state so the daemon can stop retrying it.
+      if (terminalStatuses.has(current.status)) return { run: current, applied: false };
 
       const noLeaseSnapshot = !msg.leaseId
         && (msg.status === "queued" || msg.status === "blocked" || msg.status === "failed" || msg.status === "cancelled");
@@ -14972,11 +14975,13 @@ export class AgentOrchestrator extends EventEmitter {
           : msg.status === "cancelled"
             ? current.status === "queued" || current.status === "cancel_requested"
             : current.status === "queued";
-        if (!allowed) return null;
+        if (!allowed) return { run: current, applied: false };
       } else {
-        if (!msg.leaseId) return null;
-        if (current.leaseId && current.leaseId !== msg.leaseId) return null;
-        if (current.status === "cancel_requested" && (msg.status === "starting" || msg.status === "running")) return null;
+        if (!msg.leaseId) return { run: current, applied: false };
+        if (current.leaseId && current.leaseId !== msg.leaseId) return { run: current, applied: false };
+        if (current.status === "cancel_requested" && (msg.status === "starting" || msg.status === "running")) {
+          return { run: current, applied: false };
+        }
       }
       const [updated] = await tx.update(channelWorkspaceTaskRuns).set({
         status: msg.status,
@@ -14985,9 +14990,12 @@ export class AgentOrchestrator extends EventEmitter {
         result: msg.detail === undefined ? current.result : msg.detail.slice(0, 4000),
         updatedAt: new Date(),
       }).where(eq(channelWorkspaceTaskRuns.id, current.id)).returning();
-      return updated ?? null;
+      return { run: updated ?? current, applied: Boolean(updated) };
     });
-    if (!run) return;
+    if (!outcome) return;
+    this.sendWorkspaceTaskRunUpdateAck(conn, msg, outcome.run, outcome.applied);
+    if (!outcome.applied) return;
+    const run = outcome.run;
 
     if (run.status === "running") {
       try {
@@ -15059,6 +15067,28 @@ export class AgentOrchestrator extends EventEmitter {
         updatedAt: run.updatedAt,
       },
     });
+  }
+
+  private sendWorkspaceTaskRunUpdateAck(
+    conn: MachineConnection | undefined,
+    msg: Extract<MachineToServerMessage, { type: "agent:workspace:task:update" }>,
+    run: typeof channelWorkspaceTaskRuns.$inferSelect,
+    applied: boolean,
+  ): void {
+    if (!conn || conn.ws.readyState !== 1) return;
+    const ack: ServerToMachineMessage = {
+      type: "agent:workspace:task:update:ack",
+      agentId: msg.agentId,
+      runId: msg.runId,
+      taskId: msg.taskId,
+      status: run.status,
+      applied,
+    };
+    try {
+      conn.ws.send(JSON.stringify(ack));
+    } catch (err) {
+      console.warn(`[Workspace Orchestra] Failed to acknowledge task update ${msg.runId.slice(0, 8)}:`, err);
+    }
   }
 
   private async emitWorkspaceTaskUpdated(serverId: string, channelId: string, row: taskService.TaskRow): Promise<void> {

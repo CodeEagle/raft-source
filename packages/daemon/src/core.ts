@@ -1586,6 +1586,8 @@ function summarizeIncomingMessage(msg: ServerToMachineMessage): string {
       return `(agent=${msg.agentId}, run=${msg.run.id.slice(0, 8)}, task=${msg.run.taskId.slice(0, 8)})`;
     case "agent:workspace:task:cancel":
       return `(agent=${msg.agentId}, run=${msg.run.id.slice(0, 8)})`;
+    case "agent:workspace:task:update:ack":
+      return `(agent=${msg.agentId}, run=${msg.runId.slice(0, 8)}, status=${msg.status}, applied=${msg.applied ? "yes" : "no"})`;
     case "agent:wake:outcome":
       return `(agent=${msg.agentId}, wake=${msg.wakeRequestId.slice(0, 8)}, outcome=${msg.outcome}${msg.reason ? `, reason=${msg.reason}` : ""})`;
     case "agent:reset-workspace":
@@ -4325,6 +4327,10 @@ export class DaemonCore {
         ) {
           this.agentManager.cancelWorkspaceOrchestraJob(msg.run);
         }
+        break;
+
+      case "agent:workspace:task:update:ack":
+        this.connection.ackWorkspaceTaskUpdate(msg);
         break;
 
       case "agent:wake:outcome":

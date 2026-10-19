@@ -279,6 +279,101 @@ test("worker lifecycle updates advance the canonical task to review and persist 
   assert.equal(task?.claimedById, f.agent.id);
 });
 
+test("terminal cancellation callbacks reconcile the server run and ignore late nonterminal events", async ({ app }) => {
+  const f = await fixture("WorkspaceCancelRecon");
+  app.app.set("io", undefined);
+  app.app.set("agentOrchestrator", {
+    validateMachineWorkspacePath: async (_machineId: string, requestedPath: string) => ({
+      requestedPath,
+      canonicalPath: requestedPath,
+      status: "available",
+    }),
+    hasMachineLocally: () => true,
+    dispatchChannelWorkspaceTask: async () => true,
+    cancelChannelWorkspaceTask: async () => true,
+  });
+  const configUrl = `${app.baseUrl}/api/channels/${f.channel.id}/workspaces/${f.agent.id}`;
+  const saved = await fetch(configUrl, {
+    method: "PUT",
+    headers: headers(f.owner.id, f.server.id),
+    body: JSON.stringify({
+      expectedRevision: 0,
+      bindings: [{ machineId: f.machine.id, path: "/workspace/cancellation-reconciliation", mode: "writer" }],
+    }),
+  });
+  assert.equal(saved.status, 200);
+  const config = await saved.json() as { bindings: Array<{ workspaceId: string }> };
+  const response = await fetch(`${configUrl}/tasks`, {
+    method: "POST",
+    headers: headers(f.owner.id, f.server.id),
+    body: JSON.stringify({
+      workspaceId: config.bindings[0]?.workspaceId,
+      instruction: "Run a cancellable worker.",
+      idempotencyKey: randomUUID(),
+    }),
+  });
+  assert.equal(response.status, 200);
+  const created = await response.json() as { run: { id: string }; task: { id: string } };
+
+  const orchestrator = new AgentOrchestrator();
+  (orchestrator as any).validateMachineAgentMessage = async () => f.agent;
+  const acknowledgements: Array<{ status: string; applied: boolean }> = [];
+  const connection = {
+    serverId: f.server.id,
+    ws: {
+      readyState: 1,
+      send: (raw: string) => {
+        const ack = JSON.parse(raw) as { status: string; applied: boolean };
+        acknowledgements.push({ status: ack.status, applied: ack.applied });
+      },
+    },
+  };
+  const update = (status: "starting" | "running" | "cancelled" | "cancel_requested", detail?: string) => ({
+    type: "agent:workspace:task:update",
+    agentId: f.agent.id,
+    runId: created.run.id,
+    taskId: created.task.id,
+    status,
+    leaseId: "cancel-reconcile-lease",
+    ...(status === "running" ? { workerPid: 9876 } : {}),
+    ...(detail ? { detail } : {}),
+  });
+  const deliver = async (status: "starting" | "running" | "cancelled" | "cancel_requested", detail?: string) => {
+    await (orchestrator as any).handleWorkspaceTaskRunUpdate(f.machine.id, connection, update(status, detail));
+  };
+  await deliver("starting");
+  await deliver("running");
+
+  const cancel = await fetch(`${configUrl}/tasks/${created.run.id}/cancel`, {
+    method: "POST",
+    headers: headers(f.owner.id, f.server.id),
+    body: "{}",
+  });
+  assert.equal(cancel.status, 200);
+  assert.equal((await cancel.json() as { run: { status: string } }).run.status, "cancel_requested");
+
+  // The daemon's terminal callback is the source of truth for completion.
+  await deliver("cancelled", "cancel_requested");
+  let [run] = await getDb().select().from(channelWorkspaceTaskRuns).where(eq(channelWorkspaceTaskRuns.id, created.run.id));
+  assert.equal(run?.status, "cancelled");
+  assert.equal(run?.result, "cancel_requested");
+  assert.deepEqual(acknowledgements.at(-1), { status: "cancelled", applied: true });
+
+  // A duplicated terminal callback and an older running/cancelling callback
+  // are both acknowledged/ignored by the state machine and cannot regress the
+  // server-visible terminal state.
+  await deliver("cancelled");
+  await deliver("running");
+  await deliver("cancel_requested");
+  [run] = await getDb().select().from(channelWorkspaceTaskRuns).where(eq(channelWorkspaceTaskRuns.id, created.run.id));
+  assert.equal(run?.status, "cancelled");
+  assert.deepEqual(acknowledgements.slice(-3), [
+    { status: "cancelled", applied: false },
+    { status: "cancelled", applied: false },
+    { status: "cancelled", applied: false },
+  ]);
+});
+
 test("offline paths remain explicitly unavailable and are not redirected to another Computer", async ({ app }) => {
   const f = await fixture("WorkspaceOffline");
   app.app.set("agentOrchestrator", {

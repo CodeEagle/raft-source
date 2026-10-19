@@ -9,6 +9,7 @@ import {
   noopTracer,
   setClockTimeout,
   type ActiveSpan,
+  type ChannelWorkspaceTaskRunStatus,
   type ServerToMachineMessage,
   type MachineToServerMessage,
   type TraceContext,
@@ -20,6 +21,8 @@ import { buildWebSocketOptions } from "./proxy";
 
 type WebSocketOptions = import("ws").ClientOptions;
 type AgentActivityMessage = Extract<MachineToServerMessage, { type: "agent:activity" }>;
+type WorkspaceTaskUpdateMessage = Extract<MachineToServerMessage, { type: "agent:workspace:task:update" }>;
+type WorkspaceTaskUpdateAck = Extract<ServerToMachineMessage, { type: "agent:workspace:task:update:ack" }>;
 
 export type DaemonConnectionControlPlaneTraceEvent =
   | "daemon.connection.disconnected"
@@ -79,6 +82,8 @@ export interface ConnectionOptions {
   proxyEnv?: NodeJS.ProcessEnv;
   /** Override clock / timer primitives for deterministic tests. */
   clock?: Clock;
+  /** Override workspace task update retry interval for testing. Default: 1_000 ms. */
+  workspaceTaskUpdateRetryMs?: number;
   /**
    * Maps the current backoff to the actual reconnect delay. Default: full
    * jitter over max(backoff, RECONNECT_SPREAD_MS). Tests pin it to the backoff.
@@ -103,7 +108,44 @@ function jitteredReconnectDelay(backoffMs: number): number {
 // TCP-level reset. Healthy idle links can answer the probe instead of churning.
 const INBOUND_WATCHDOG_MS = 70_000;
 const CONNECT_TIMEOUT_MS = 30_000;
+const WORKSPACE_TASK_UPDATE_RETRY_MS = 1_000;
 const LEGACY_MACHINE_KEY_MIGRATED_REASON = "legacy_machine_key_migrated";
+
+function isTerminalWorkspaceTaskStatus(status: ChannelWorkspaceTaskRunStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled";
+}
+
+function workspaceTaskStatusRank(status: ChannelWorkspaceTaskRunStatus): number {
+  switch (status) {
+    case "queued": return 10;
+    case "blocked": return 20;
+    case "starting": return 30;
+    case "running": return 40;
+    case "cancel_requested": return 50;
+    case "uncertain": return 60;
+    case "succeeded":
+    case "failed":
+    case "cancelled": return 100;
+  }
+}
+
+function shouldReplaceWorkspaceTaskUpdate(
+  existing: WorkspaceTaskUpdateMessage,
+  next: WorkspaceTaskUpdateMessage,
+): boolean {
+  if (isTerminalWorkspaceTaskStatus(existing.status) && !isTerminalWorkspaceTaskStatus(next.status)) return false;
+  return next.status === existing.status || workspaceTaskStatusRank(next.status) >= workspaceTaskStatusRank(existing.status);
+}
+
+function workspaceTaskUpdateAckSatisfies(
+  pending: WorkspaceTaskUpdateMessage,
+  status: ChannelWorkspaceTaskRunStatus,
+): boolean {
+  if (status === pending.status) return true;
+  if (isTerminalWorkspaceTaskStatus(status)) return true;
+  if (isTerminalWorkspaceTaskStatus(pending.status)) return false;
+  return workspaceTaskStatusRank(status) > workspaceTaskStatusRank(pending.status);
+}
 
 function isTerminalMigratedKeyRejection(statusCode: number, reason: string | null): boolean {
   return statusCode === 401 && reason === LEGACY_MACHINE_KEY_MIGRATED_REASON;
@@ -208,6 +250,15 @@ export class DaemonConnection {
   private lastInboundMessageKind: string | null = null;
   private inboundProbeInFlight = false;
   private readonly pendingActivityByAgent = new Map<string, AgentActivityMessage>();
+  /**
+   * Workspace task updates are durable in the local Orchestra ledger, but the
+   * websocket frame itself is not. Keep the latest monotone state per run
+   * until the server acknowledges it, so a lost terminal callback is retried
+   * on an open socket and replayed after reconnect.
+   */
+  private readonly pendingWorkspaceTaskUpdatesByRun = new Map<string, WorkspaceTaskUpdateMessage>();
+  private readonly terminalWorkspaceTaskStatusByRun = new Map<string, ChannelWorkspaceTaskRunStatus>();
+  private workspaceTaskUpdateRetryTimer: unknown = null;
   private readonly pendingSessionInvalidationByAgent = new Map<
     string,
     Extract<MachineToServerMessage, { type: "agent:session:invalidate" }>
@@ -246,6 +297,7 @@ export class DaemonConnection {
     this.pendingActivityByAgent.clear();
     this.pendingStatusByAgent.clear();
     this.pendingSessionInvalidationByAgent.clear();
+    this.clearWorkspaceTaskUpdateRetry();
     this.clearWatchdog();
     this.clearConnectTimeout();
     if (this.reconnectTimer) {
@@ -285,6 +337,44 @@ export class DaemonConnection {
       });
       return;
     }
+    if (msg.type === "agent:workspace:task:update") {
+      const key = this.workspaceTaskUpdateKey(msg);
+      const terminalStatus = this.terminalWorkspaceTaskStatusByRun.get(key);
+      if (terminalStatus) {
+        this.trace("daemon.connection.outbound_dropped", {
+          outbound_message_kind: msg.type,
+          reason: "terminal_workspace_task_update_already_acknowledged",
+          run_id: msg.runId,
+          status: msg.status,
+          terminal_status: terminalStatus,
+        });
+        return;
+      }
+      const existing = this.pendingWorkspaceTaskUpdatesByRun.get(key);
+      if (existing && !shouldReplaceWorkspaceTaskUpdate(existing, msg)) {
+        this.trace("daemon.connection.outbound_dropped", {
+          outbound_message_kind: msg.type,
+          reason: "stale_workspace_task_update",
+          run_id: msg.runId,
+          status: msg.status,
+          pending_status: existing.status,
+        });
+        return;
+      }
+      this.pendingWorkspaceTaskUpdatesByRun.set(key, msg);
+      if (this.ws?.readyState === WebSocket.OPEN && this.readySentOn === this.ws) {
+        this.sendWorkspaceTaskUpdate(this.ws, msg, "websocket_open");
+      } else {
+        this.trace("daemon.connection.outbound_queued", {
+          outbound_message_kind: msg.type,
+          run_id: msg.runId,
+          status: msg.status,
+          ws_ready_state: this.ws?.readyState ?? null,
+          held_until_ready: true,
+        });
+      }
+      return;
+    }
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.observeLaunchIdentity(msg);
       if (msg.type === "agent:activity") {
@@ -301,6 +391,7 @@ export class DaemonConnection {
       if (msg.type === "ready") {
         this.readySentOn = this.ws;
         this.flushPendingActivity(this.ws);
+        this.flushPendingWorkspaceTaskUpdates(this.ws);
       }
       return;
     }
@@ -441,6 +532,7 @@ export class DaemonConnection {
       this.ws = null;
       this.clearConnectTimeout();
       this.clearWatchdog();
+      this.clearWorkspaceTaskUpdateRetry();
       const reason = reasonBuffer.toString("utf8");
       logger.warn(
         `[Daemon] Disconnected from server (code=${code}, reason=${JSON.stringify(reason)}, reconnecting=${this.shouldConnect})`,
@@ -515,6 +607,25 @@ export class DaemonConnection {
       logger.error(`[Daemon] Failed to handle message from server: ${msg.type}`, err);
       return errorClassOf(err);
     }
+  }
+
+  /** Called by DaemonCore when the server confirms the authoritative run state. */
+  ackWorkspaceTaskUpdate(msg: WorkspaceTaskUpdateAck): void {
+    const key = this.workspaceTaskUpdateKey(msg);
+    const pending = this.pendingWorkspaceTaskUpdatesByRun.get(key);
+    if (!pending || !workspaceTaskUpdateAckSatisfies(pending, msg.status)) return;
+    this.pendingWorkspaceTaskUpdatesByRun.delete(key);
+    if (isTerminalWorkspaceTaskStatus(msg.status)) {
+      this.terminalWorkspaceTaskStatusByRun.set(key, msg.status);
+    }
+    this.trace("daemon.connection.outbound_acknowledged", {
+      outbound_message_kind: "agent:workspace:task:update",
+      run_id: msg.runId,
+      pending_status: pending.status,
+      acknowledged_status: msg.status,
+      applied: msg.applied,
+    });
+    if (this.pendingWorkspaceTaskUpdatesByRun.size === 0) this.clearWorkspaceTaskUpdateRetry();
   }
 
   private armConnectTimeout(ws: WebSocketLike, startedAt: number, connectAttempt: ConnectAttemptSpan) {
@@ -695,6 +806,57 @@ export class DaemonConnection {
     const replacedPending = this.pendingActivityByAgent.has(msg.agentId);
     this.pendingActivityByAgent.set(msg.agentId, msg);
     return { kind: "queued", agentId: msg.agentId, launchIdPresent: Boolean(msg.launchId), replacedPending };
+  }
+
+  private workspaceTaskUpdateKey(msg: Pick<WorkspaceTaskUpdateMessage, "runId" | "taskId"> | Pick<WorkspaceTaskUpdateAck, "runId" | "taskId">): string {
+    return `${msg.runId}:${msg.taskId}`;
+  }
+
+  private sendWorkspaceTaskUpdate(
+    ws: WebSocketLike,
+    msg: WorkspaceTaskUpdateMessage,
+    sendPath: "websocket_open" | "replay",
+  ): void {
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this.readySentOn !== ws) return;
+    try {
+      ws.send(JSON.stringify(msg));
+      this.trace("daemon.connection.outbound_replayed", {
+        outbound_message_kind: msg.type,
+        run_id: msg.runId,
+        status: msg.status,
+        send_path: sendPath,
+      });
+    } catch (error) {
+      logger.warn(`[Daemon] Workspace task update send failed (${msg.runId.slice(0, 8)}): ${String(error)}`);
+    }
+    this.scheduleWorkspaceTaskUpdateRetry();
+  }
+
+  private flushPendingWorkspaceTaskUpdates(ws: WebSocketLike): void {
+    if (this.pendingWorkspaceTaskUpdatesByRun.size === 0) return;
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this.readySentOn !== ws) return;
+    for (const msg of this.pendingWorkspaceTaskUpdatesByRun.values()) {
+      this.sendWorkspaceTaskUpdate(ws, msg, "replay");
+    }
+  }
+
+  private scheduleWorkspaceTaskUpdateRetry(): void {
+    if (this.workspaceTaskUpdateRetryTimer !== null) return;
+    if (this.pendingWorkspaceTaskUpdatesByRun.size === 0) return;
+    if (this.ws?.readyState !== WebSocket.OPEN || this.readySentOn !== this.ws) return;
+    const delayMs = Math.max(1, Math.floor(this.options.workspaceTaskUpdateRetryMs ?? WORKSPACE_TASK_UPDATE_RETRY_MS));
+    this.workspaceTaskUpdateRetryTimer = this.clock.setTimeout(() => {
+      this.workspaceTaskUpdateRetryTimer = null;
+      if (this.ws?.readyState !== WebSocket.OPEN || this.readySentOn !== this.ws) return;
+      this.flushPendingWorkspaceTaskUpdates(this.ws);
+      this.scheduleWorkspaceTaskUpdateRetry();
+    }, delayMs);
+  }
+
+  private clearWorkspaceTaskUpdateRetry(): void {
+    if (this.workspaceTaskUpdateRetryTimer === null) return;
+    this.clock.clearTimeout(this.workspaceTaskUpdateRetryTimer);
+    this.workspaceTaskUpdateRetryTimer = null;
   }
 
   private observeLaunchIdentity(msg: MachineToServerMessage) {

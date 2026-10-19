@@ -329,6 +329,14 @@ export default function ChannelWorkspaceSettings({
 
   const runStatusLabel = (runStatus: WorkspaceRunStatus) => formatMessage({ id: `channel.workspace.runStatus.${runStatus}` });
 
+  const runStatusTone = (runStatus: WorkspaceRunStatus) => {
+    if (runStatus === "cancel_requested") return "text-amber-700 dark:text-amber-300";
+    if (runStatus === "cancelled") return "text-foreground-muted";
+    if (runStatus === "succeeded") return "text-emerald-700 dark:text-emerald-300";
+    if (runStatus === "failed" || runStatus === "blocked") return "text-red-700 dark:text-red-300";
+    return "text-foreground-muted";
+  };
+
   const statusLabel = (binding: WorkspaceDraft) => {
     switch (binding.validationStatus) {
       case "available": return formatMessage({ id: "channel.workspace.available" });
@@ -554,7 +562,14 @@ export default function ChannelWorkspaceSettings({
                       <li key={run.id} className="rounded border border-line-muted p-3" data-testid="channel-workspace-task-run">
                         <div className="flex flex-wrap items-center justify-between gap-2">
                           <p className="text-sm font-medium text-foreground-strong">task #{run.taskNumber} · {run.title}</p>
-                          <span className="text-xs text-foreground-muted">{runStatusLabel(run.status)}</span>
+                          <span
+                            className={`text-xs ${runStatusTone(run.status)}`}
+                            data-testid="channel-workspace-task-run-status"
+                            data-status={run.status}
+                            aria-label={runStatusLabel(run.status)}
+                          >
+                            {runStatusLabel(run.status)}
+                          </span>
                         </div>
                         {run.result && <p className="mt-2 whitespace-pre-wrap break-words text-xs text-foreground-muted">{run.result}</p>}
                         <div className="mt-2 flex gap-2">
