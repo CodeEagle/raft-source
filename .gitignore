@@ -44,3 +44,6 @@ coverage/
 # Machine-local state
 .pi/
 lazycat/.lzc-cli-cache/
+
+# Local build outputs
+deploy-artifacts/
