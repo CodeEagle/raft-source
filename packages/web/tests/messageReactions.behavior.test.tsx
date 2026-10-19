@@ -150,7 +150,7 @@ afterEach(() => {
   resetServerFeatureFlagsForTests();
 });
 
-test("visible reactions render as chips with glyph, count, and reactor summary", async () => {
+test("visible reactions render inline names with glyph and the full reactor summary", async () => {
   const { row, rerenderMessage } = await renderMessage(
     makeMessage([
       { emoji: "👍", count: 2, reactorIds: ["user-1", "user-2"], reactorNames: ["Current User", "Bob"] },
@@ -163,16 +163,55 @@ test("visible reactions render as chips with glyph, count, and reactor summary",
     (b) => b.getAttribute("aria-label") === "👍 reaction from Current User, Bob",
   );
   assert.ok(chip, "reaction chip renders with an aria-label summarizing the reactors");
-  // Sprite-backed glyph + numeric count both appear inside the chip.
+  // Names precede the sprite-backed glyph; the viewer uses the localized label.
   assert.ok(chip.querySelector("[data-reaction-glyph='thumbs_up']"), "chip renders the reaction glyph");
-  assert.match(chip.textContent ?? "", /2/);
+  assert.equal(chip.textContent, "You, Bob");
   // The zero-count reaction never produces a chip.
   assert.equal(row.querySelector("[data-reaction-glyph='party_popper']"), null);
 
   rerenderMessage(makeMessage([
     { emoji: "👍", count: 3, reactorIds: ["user-1", "user-2", "user-3"], reactorNames: ["Current User", "Bob", "Eve"] },
   ]));
-  await waitFor(() => assert.ok(row.querySelector(".reaction-count-bump"), "a changed visible count mounts the shared bump-animation hook"));
+  assert.equal(chip.textContent, "You, Bob +1");
+  assert.equal(chip.getAttribute("aria-label"), "👍 reaction from Current User, Bob, Eve");
+});
+
+test.each([
+  { names: ["Cindy"], count: 1, expected: "Cindy" },
+  { names: ["Cindy", "LunaWork"], count: 2, expected: "Cindy, LunaWork" },
+  { names: ["Cindy", "LunaWork", "Bob", "Eve"], count: 4, expected: "Cindy, LunaWork +2" },
+  { names: [], count: 4, expected: "4" },
+])("reaction names render for $count actors: $expected", async ({ names, count, expected }) => {
+  const { row } = await renderMessage(makeMessage([{
+    emoji: "👀", count,
+    reactorIds: names.map((_, index) => `agent-${index}`),
+    reactorNames: names,
+  }]));
+  const chip = Array.from(row.querySelectorAll<HTMLButtonElement>("button[aria-label]")).find(
+    (button) => button.getAttribute("aria-label")?.startsWith("👀 reaction from"),
+  );
+  assert.ok(chip);
+  assert.equal(chip.textContent, expected);
+  const glyph = chip.querySelector("[data-reaction-glyph]");
+  assert.ok(glyph);
+  if (names.length) {
+    assert.equal(chip.firstElementChild?.textContent, expected);
+    assert.ok(chip.firstElementChild?.classList.contains("truncate"));
+    assert.ok(chip.firstElementChild?.classList.contains("max-w-[9rem]"));
+    assert.equal(chip.lastElementChild, glyph.parentElement);
+  }
+  assert.ok(chip.classList.contains("overflow-hidden"));
+  assert.ok(chip.parentElement?.classList.contains("max-w-full"));
+});
+
+test("unknown actors retain the animated count fallback", async () => {
+  const { row, rerenderMessage } = await renderMessage(makeMessage([
+    { emoji: "👍", count: 2, reactorIds: [], reactorNames: [] },
+  ]));
+  rerenderMessage(makeMessage([
+    { emoji: "👍", count: 3, reactorIds: [], reactorNames: [] },
+  ]));
+  await waitFor(() => assert.equal(row.querySelector(".reaction-count-bump")?.textContent, "3"));
 });
 
 test("read-only reaction summaries stay visible but expose no mutation affordance", async () => {
