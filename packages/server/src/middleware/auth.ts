@@ -33,6 +33,7 @@ declare global {
     interface Request {
       userId?: string;
       sessionFamilyId?: string;
+      authenticatedCredential?: AuthenticatedCredential;
       serverId?: ServerId;
       machineId?: MachineId;
       daemonVersion?: string | null;
@@ -67,7 +68,12 @@ export interface JwtPayload {
   sub: string; // userId
   type: "access" | "refresh";
   familyId?: string;
+  exp?: number;
 }
+
+export type AuthenticatedCredential =
+  | { kind: "user-access-jwt"; token: string; claims: JwtPayload }
+  | { kind: "machine-api-key"; token: string };
 
 export function signAccessToken(userId: string, familyId?: string): string {
   return jwt.sign({ sub: userId, type: "access", ...(familyId ? { familyId } : {}) }, JWT_SECRET(), { expiresIn: "15m" });
@@ -267,6 +273,7 @@ export async function requireFlexAuth(req: Request, res: Response, next: NextFun
     if (payload) {
       req.userId = payload.sub;
       req.sessionFamilyId = payload.familyId;
+      req.authenticatedCredential = { kind: "user-access-jwt", token, claims: payload };
       next();
       return;
     }
@@ -280,6 +287,7 @@ export async function requireFlexAuth(req: Request, res: Response, next: NextFun
     if (payload) {
       req.userId = payload.sub;
       req.sessionFamilyId = payload.familyId;
+      req.authenticatedCredential = { kind: "user-access-jwt", token: queryToken, claims: payload };
       next();
       return;
     }
@@ -516,6 +524,7 @@ export async function requireMachineAuth(req: Request, res: Response, next: Next
       req.machineId = asMachineId(machine.id);
       req.serverId = asServerId(machine.serverId);
       req.daemonVersion = "daemonVersion" in machine ? machine.daemonVersion ?? null : null;
+      req.authenticatedCredential = { kind: "machine-api-key", token: apiKey };
       next();
       return;
     }
@@ -553,6 +562,7 @@ export async function requireMachineAuth(req: Request, res: Response, next: Next
     req.daemonVersion = "daemonVersion" in machine ? machine.daemonVersion ?? null : null;
     req.principalKind = "computer";
     req.computerId = computer.computerId;
+    req.authenticatedCredential = { kind: "machine-api-key", token: apiKey };
     next();
     return;
   }

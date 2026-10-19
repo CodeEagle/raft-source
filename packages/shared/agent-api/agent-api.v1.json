@@ -457,6 +457,10 @@
                     ],
                     "additionalProperties": false
                   },
+                  "channel_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
                   "channel_type": {
                     "type": "string"
                   },
@@ -1012,6 +1016,10 @@
               "type": "string",
               "minLength": 1
             },
+            "channel_id": {
+              "type": "string",
+              "minLength": 1
+            },
             "consumption_scope": {
               "type": "object",
               "properties": {
@@ -1175,6 +1183,10 @@
                       "projection_id"
                     ],
                     "additionalProperties": false
+                  },
+                  "channel_id": {
+                    "type": "string",
+                    "minLength": 1
                   },
                   "channel_type": {
                     "type": "string"
@@ -2340,6 +2352,10 @@
                         ],
                         "additionalProperties": false
                       },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
                       "channel_type": {
                         "type": "string"
                       },
@@ -2858,6 +2874,10 @@
                           "projection_id"
                         ],
                         "additionalProperties": false
+                      },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "channel_type": {
                         "type": "string"
@@ -3455,6 +3475,10 @@
                         ],
                         "additionalProperties": false
                       },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
                       "channel_type": {
                         "type": "string"
                       },
@@ -3973,6 +3997,10 @@
                           "projection_id"
                         ],
                         "additionalProperties": false
+                      },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "channel_type": {
                         "type": "string"
@@ -4743,6 +4771,10 @@
                         ],
                         "additionalProperties": false
                       },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
                       "channel_type": {
                         "type": "string"
                       },
@@ -5261,6 +5293,10 @@
                           "projection_id"
                         ],
                         "additionalProperties": false
+                      },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "channel_type": {
                         "type": "string"
@@ -5858,6 +5894,10 @@
                         ],
                         "additionalProperties": false
                       },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
                       "channel_type": {
                         "type": "string"
                       },
@@ -6376,6 +6416,10 @@
                           "projection_id"
                         ],
                         "additionalProperties": false
+                      },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "channel_type": {
                         "type": "string"
@@ -7051,6 +7095,10 @@
                     "projection_id"
                   ],
                   "additionalProperties": false
+                },
+                "channel_id": {
+                  "type": "string",
+                  "minLength": 1
                 },
                 "channel_type": {
                   "type": "string"
@@ -7968,6 +8016,10 @@
               ],
               "additionalProperties": false
             },
+            "channel_id": {
+              "type": "string",
+              "minLength": 1
+            },
             "channel_type": {
               "type": "string"
             },
@@ -8538,6 +8590,10 @@
                 "projection_id"
               ],
               "additionalProperties": false
+            },
+            "channel_id": {
+              "type": "string",
+              "minLength": 1
             },
             "channel_type": {
               "type": "string"
@@ -10935,6 +10991,10 @@
                     ],
                     "additionalProperties": false
                   },
+                  "channel_id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
                   "channel_type": {
                     "type": "string"
                   },
@@ -13255,6 +13315,10 @@
                         ],
                         "additionalProperties": false
                       },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
                       "channel_type": {
                         "type": "string"
                       },
@@ -13773,6 +13837,10 @@
                           "projection_id"
                         ],
                         "additionalProperties": false
+                      },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "channel_type": {
                         "type": "string"
@@ -15133,6 +15201,10 @@
                         ],
                         "additionalProperties": false
                       },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
                       "channel_type": {
                         "type": "string"
                       },
@@ -15651,6 +15723,10 @@
                           "projection_id"
                         ],
                         "additionalProperties": false
+                      },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "channel_type": {
                         "type": "string"
@@ -16849,6 +16925,10 @@
                         ],
                         "additionalProperties": false
                       },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
+                      },
                       "channel_type": {
                         "type": "string"
                       },
@@ -17367,6 +17447,10 @@
                           "projection_id"
                         ],
                         "additionalProperties": false
+                      },
+                      "channel_id": {
+                        "type": "string",
+                        "minLength": 1
                       },
                       "channel_type": {
                         "type": "string"

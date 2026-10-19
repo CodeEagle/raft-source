@@ -23,8 +23,27 @@ function normalizeComputerVersionPin(version?: string | null): string | null {
 export function computerInstallCommand(
   deploymentEnv?: string,
   version?: string | null,
+  releaseBaseOverride?: string | null,
 ): string {
-  const base = deploymentEnv === "staging" ? COMPUTER_CDN_BASE_STAGING : COMPUTER_CDN_BASE_PROD;
+  const configuredBase = (() => {
+    const raw = releaseBaseOverride?.trim();
+    if (!raw) return null;
+    try {
+      const parsed = new URL(raw);
+      if (
+        (parsed.protocol !== "https:" && parsed.protocol !== "http:")
+        || parsed.username
+        || parsed.password
+        || parsed.search
+        || parsed.hash
+      ) return null;
+      return parsed.toString().replace(/\/$/, "");
+    } catch {
+      return null;
+    }
+  })();
+  const base = configuredBase
+    ?? (deploymentEnv === "staging" ? COMPUTER_CDN_BASE_STAGING : COMPUTER_CDN_BASE_PROD);
   const versionPin = normalizeComputerVersionPin(version);
   const installEnv = [
     ...(deploymentEnv === "staging"
@@ -119,6 +138,7 @@ export function getComputerCommands(
   if (!slug) return null;
 
   const platform = options.platform ?? "mac-linux";
+  const computerInstallBase = import.meta.env?.VITE_COMPUTER_INSTALL_BASE_URL;
 
   const commandServerUrl = deploymentEnv === "production"
     ? isDefaultComputerServerUrl(serverUrl) ? null : serverUrl
@@ -155,10 +175,13 @@ export function getComputerCommands(
     }
 
     const home = `$HOME/.raft-computer-${slug}`;
-    const environment = `RAFT_HOME="${home}" RAFT_COMPUTER_INSTALL_DIR="${home}/bin"`;
+    const systemCa = deploymentEnv === "slockdev" && commandServerUrl?.startsWith("https://")
+      ? " NODE_USE_SYSTEM_CA=1"
+      : "";
+    const environment = `RAFT_HOME="${home}" RAFT_COMPUTER_INSTALL_DIR="${home}/bin"${systemCa}`;
     const binary = `"${home}/bin/raft-computer"`;
     return {
-      install: `${environment} sh -c '${computerInstallCommand(deploymentEnv, options.version)}'`,
+      install: `${environment} sh -c '${computerInstallCommand(deploymentEnv, options.version, computerInstallBase)}'`,
       setup: `${environment} ${binary} setup /${slug}${setupArgs}`,
       installAndSetup: null,
       status: `${environment} ${binary} status`,
@@ -173,11 +196,11 @@ export function getComputerCommands(
   return {
     install: platform === "windows"
       ? windowsComputerInstallCommand(deploymentEnv, options.version)
-      : computerInstallCommand(deploymentEnv, options.version),
+      : computerInstallCommand(deploymentEnv, options.version, computerInstallBase),
     setup: `raft-computer setup /${slug}${setupArgs}`,
     installAndSetup: platform === "windows"
       ? null
-      : `${computerInstallCommand(deploymentEnv, options.version)} -s -- --setup /${slug}${setupArgs}`,
+      : `${computerInstallCommand(deploymentEnv, options.version, computerInstallBase)} -s -- --setup /${slug}${setupArgs}`,
     status: "raft-computer status",
     doctor: "raft-computer doctor",
     restartService: "raft-computer restart",

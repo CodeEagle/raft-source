@@ -10,8 +10,9 @@ import { buildAgentApiRoutePath, createAgentApiSurfaceClient } from "../../agent
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";
 import { CliError, type CliErrorCode } from "../../core/errors";
-import { writeText, NL } from "../../core/renderer";
-import { formatMessages } from "./_format";
+import { writeText, adoptCliReplyText, NL } from "../../core/renderer";
+import { loadChannelWorkspaceContextsForMessages } from "../../channelWorkspaceContext";
+import { formatMessagesWithChannelWorkspaceContexts } from "./_format";
 import { elideSeenSenders } from "./_senderElision";
 
 interface ResolveMessageData {
@@ -26,6 +27,7 @@ interface ResolveMessageData {
     sender_name?: string;
     sender_description?: string | null;
     content?: string;
+    channel_id?: string;
     [key: string]: unknown;
   };
 }
@@ -97,7 +99,8 @@ export const messageResolveCommand = defineCommand(
       parent_channel_type: message.parent_channel_type ?? undefined,
       parent_channel_name: message.parent_channel_name ?? undefined,
     }], agentContext.agentId);
-    writeText(ctx.io, formatMessages(senders.messages), NL);
+    const channelContexts = loadChannelWorkspaceContextsForMessages(agentContext, ctx.env, senders.messages);
+    writeText(ctx.io, adoptCliReplyText(formatMessagesWithChannelWorkspaceContexts(senders.messages, channelContexts)), NL);
     await senders.settle(ctx.io);
   },
 );

@@ -3,8 +3,8 @@
   "package": "@botiverse/raft",
   "runner": "vitest run",
   "testFileGlob": "src/**/*.test.ts",
-  "fileCount": 119,
-  "total": 1153,
+  "fileCount": 120,
+  "total": 1161,
   "files": [
     {
       "file": "src/agentApiNoBypass.test.ts",
@@ -366,6 +366,24 @@
       "cases": [
         {
           "name": "tsdown config inlines runtime deps for the Computer app sidecar CLI"
+        }
+      ]
+    },
+    {
+      "file": "src/channelWorkspaceContext.test.ts",
+      "count": 4,
+      "cases": [
+        {
+          "name": "channel workspace context uses the daemon's injective base64url directory name"
+        },
+        {
+          "name": "channel workspace context never overwrites existing files and bounds loaded bytes"
+        },
+        {
+          "name": "channel workspace context fails closed for symlinked channel files"
+        },
+        {
+          "name": "managed channel context loads each concrete channel once and skips self-hosted/system/third-party messages"
         }
       ]
     },
@@ -2378,10 +2396,16 @@
     },
     {
       "file": "src/commands/message/check.test.ts",
-      "count": 14,
+      "count": 16,
       "cases": [
         {
           "name": "message check command drains inbox through injected ApiClient and writes canonical text"
+        },
+        {
+          "name": "managed message check binds each channel's local files to its own message"
+        },
+        {
+          "name": "message check keeps the body when one channel-local file is unsafe"
         },
         {
           "name": "message check command prints the server's inbox hint after the messages"
@@ -2438,10 +2462,13 @@
     },
     {
       "file": "src/commands/message/read.test.ts",
-      "count": 21,
+      "count": 22,
       "cases": [
         {
           "name": "message read command uses injected ApiClient and writes canonical history"
+        },
+        {
+          "name": "managed message read loads the resolved channel's local files before its history"
         },
         {
           "name": "message read command records consumed boundary for ordinary history reads"
@@ -2507,13 +2534,16 @@
     },
     {
       "file": "src/commands/message/resolve.test.ts",
-      "count": 5,
+      "count": 6,
       "cases": [
         {
           "name": "buildResolvePath: encodes message id on the id-less surface"
         },
         {
           "name": "message resolve command prints a canonical citation row"
+        },
+        {
+          "name": "managed message resolve loads the resolved channel's local files"
         },
         {
           "name": "message resolve prints the server-projected forwarded snapshot verbatim"

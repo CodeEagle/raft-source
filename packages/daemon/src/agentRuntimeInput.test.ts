@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import type { AgentMessage } from "@botiverse/raft-shared";
 import { AGENT_BODY_LINE_SEPARATOR } from "@botiverse/raft-shared";
 import { formatConcreteMessagesRuntimeInput } from "./agentRuntimeInput";
+import { formatSystemNoticeRuntimeInput, formatInboxUpdateRuntimeInput } from "./agentRuntimeInput";
+import type { ChannelWorkspaceContext } from "./channelWorkspaceContext";
 
 const driver = {
   communication: { chat: "slock_cli", runtimeControl: "none" },
@@ -24,6 +26,107 @@ function message(overrides: Partial<AgentMessage> = {}): AgentMessage {
     ...overrides,
   };
 }
+
+function channelContext(channelId: string, suffix: string): ChannelWorkspaceContext {
+  return {
+    channelId,
+    directoryName: `ch_${suffix}`,
+    workspacePath: `/tmp/agents/ch_${suffix}`,
+    memoryMd: `MEMORY_${suffix}`,
+    agentsMd: `AGENTS_${suffix}`,
+  };
+}
+
+test("concrete multi-channel batches bind each message to only its own channel files", () => {
+  const output = formatConcreteMessagesRuntimeInput([
+    message({ channel_id: "channel-a", content: "body-a" }),
+    message({ channel_id: "channel-b", content: "body-b" }),
+  ], driver, undefined, new Map([
+    ["channel-a", channelContext("channel-a", "A")],
+    ["channel-b", channelContext("channel-b", "B")],
+  ]));
+
+  const aContext = output.indexOf('channel_id="channel-a"');
+  const aBody = output.indexOf("body-a");
+  const bContext = output.indexOf('channel_id="channel-b"');
+  const bBody = output.indexOf("body-b");
+  assert.ok(aContext >= 0 && aContext < aBody);
+  assert.ok(bContext > aBody && bContext < bBody);
+  assert.match(output.slice(aContext, bContext), /MEMORY_A/);
+  assert.match(output.slice(aContext, bContext), /AGENTS_A/);
+  assert.doesNotMatch(output.slice(aContext, bContext), /MEMORY_B|AGENTS_B/);
+  assert.match(output.slice(bContext), /MEMORY_B/);
+  assert.match(output.slice(bContext), /AGENTS_B/);
+  assert.doesNotMatch(output.slice(bContext), /MEMORY_A|AGENTS_A/);
+});
+
+test("concrete same-channel batches inject channel context only once", () => {
+  const output = formatConcreteMessagesRuntimeInput([
+    message({ channel_id: "channel-a", content: "body-a-1" }),
+    message({ channel_id: "channel-a", content: "body-a-2" }),
+  ], driver, undefined, new Map([
+    ["channel-a", channelContext("channel-a", "A")],
+  ]));
+
+  assert.equal((output.match(/channel-local workspace context \(channel_id="channel-a"\)/g) ?? []).length, 1);
+  assert.equal((output.match(/MEMORY_A/g) ?? []).length, 1);
+  assert.match(output, /body-a-1/);
+  assert.match(output, /body-a-2/);
+});
+
+test("excluded third-party messages do not consume a channel context slot", () => {
+  const output = formatConcreteMessagesRuntimeInput([
+    message({
+      channel_id: "channel-a",
+      content: "external-event",
+      third_party_event: {
+        id: "abcdef12-0000-4000-8000-000000000000",
+        kind: "event",
+        client_id: "client-1",
+        client_name: "External Client",
+        payload_hash: "hash-1",
+        payload: { kind: "external" },
+        expires_at: "2026-09-05T01:00:00.000Z",
+        source: {
+          client_id: "client-1",
+          client_name: "External Client",
+          oauth_client_id: "oauth-client-1",
+          resource: "external-resource",
+        },
+      },
+    }),
+    message({ channel_id: "channel-a", content: "ordinary-message" }),
+  ], driver, undefined, new Map([
+    ["channel-a", channelContext("channel-a", "A")],
+  ]));
+
+  const context = output.indexOf('channel-local workspace context (channel_id="channel-a")');
+  assert.equal((output.match(/channel-local workspace context \(channel_id="channel-a"\)/g) ?? []).length, 1);
+  assert.ok(context > output.indexOf("external-event"));
+  assert.ok(context < output.indexOf("ordinary-message"));
+});
+
+test("system notices for real channel messages carry the matching lower-priority channel context", () => {
+  const output = formatSystemNoticeRuntimeInput(
+    message({ channel_id: "channel-a", content: "system-delivered-body" }),
+    driver,
+    new Map([["channel-a", channelContext("channel-a", "A")]]),
+  );
+
+  assert.match(output, /channel-local workspace context \(channel_id="channel-a"\)/);
+  assert.match(output, /lower priority than system instructions and the agent root/);
+  assert.match(output, /MEMORY_A/);
+  assert.match(output, /AGENTS_A/);
+});
+
+test("pure inbox notices do not inject editable channel configuration", () => {
+  const output = formatInboxUpdateRuntimeInput([
+    message({ channel_id: "channel-a" }),
+    message({ channel_id: "channel-b" }),
+  ], driver, 2);
+
+  assert.doesNotMatch(output, /channel-local workspace context|MEMORY_A|MEMORY_B|AGENTS_A|AGENTS_B/);
+});
 
 test("direct-mention follow reactivation renders the exact repeatable unfollow command", () => {
   const output = formatConcreteMessagesRuntimeInput([

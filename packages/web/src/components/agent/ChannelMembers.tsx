@@ -24,6 +24,7 @@ import { useChannelMembers } from "../../hooks/useChannelMembers";
 import type { ChannelAgent, ChannelExternalMember, ChannelHuman } from "../../hooks/useChannelMembers";
 import { useProfileStore } from "../../store/profileStore";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
+import { canCreateAgentForRole } from "../../utils/memberAgentAccess";
 import { useAuthStore } from "../../store/authStore";
 import AvatarSlot from "../ui/AvatarSlot";
 import Banner from "../ui/Banner";
@@ -333,7 +334,8 @@ export default function ChannelMembers({
       ? memberServerBadgeLabels(member, currentChannel.serverId)
       : [];
   const totalParticipants = channelAgents.length + channelHumans.length + channelExternalMembers.length;
-  const { capabilities } = useServerPermissions();
+  const { role: currentRole, capabilities } = useServerPermissions();
+  const canCreateAgent = canCreateAgentForRole(currentRole, capabilities);
   const canAddChannelMembers = canUseChannelMemberAction({
     currentUserId,
     currentServerId,
@@ -832,7 +834,7 @@ export default function ChannelMembers({
           but disabled with the reason — hiding it here would recreate the
           dead end this entry exists to remove. */}
       {multiSelect && (
-        capabilities.createAgents ? (
+        canCreateAgent ? (
           <button
             type="button"
             onClick={() => {

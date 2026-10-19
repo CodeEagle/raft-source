@@ -483,6 +483,10 @@ export async function buildAgentResolvedMessagePayload(
   return {
     message_id: message.id,
     seq: message.seq,
+    // Keep the visible channel identity beside every agent-facing message.
+    // The CLI uses this stable id to select channel-local workspace files;
+    // names are presentation-only and can collide across channel kinds.
+    channel_id: channel.id,
     channel_type: channel.type === "thread"
       ? "thread"
       : channel.type === "dm"

@@ -10,6 +10,7 @@ import { CliError } from "../../core/errors";
 import type { CliIo } from "../../core/io";
 import { messageCheckCommand } from "./check";
 import { getConsumedExactSeqs, getConsumedSeq } from "./_consumedSeqState";
+import { channelWorkspaceDirectoryPath } from "../../channelWorkspaceContext";
 
 function memoryIo(): { io: CliIo; stdout: string[]; stderr: string[] } {
   const stdout: string[] = [];
@@ -104,6 +105,91 @@ test("message check command drains inbox through injected ApiClient and writes c
     [7],
     "message check must retain exact rendered seqs without claiming the gaps",
   );
+});
+
+test("managed message check binds each channel's local files to its own message", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "raft-cli-check-channel-context-"));
+  for (const [channelId, suffix] of [["channel-a", "A"], ["channel-b", "B"]] as const) {
+    const channelPath = channelWorkspaceDirectoryPath(workspace, channelId);
+    fs.mkdirSync(channelPath, { recursive: true });
+    fs.writeFileSync(path.join(channelPath, "AGENTS.md"), `AGENTS_${suffix}`, "utf8");
+    fs.writeFileSync(path.join(channelPath, "MEMORY.md"), `MEMORY_${suffix}`, "utf8");
+  }
+  const { io, stdout, stderr } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    env: { SLOCK_CURRENT_WORKSPACE_PATH: workspace },
+    loadAgentContext: () => ({ ...agentContext, clientMode: "managed-runner", secretSource: "agent-proxy-token-env" }),
+    createApiClient: () => ({
+      request: async (): Promise<ApiResponse<unknown>> => ({
+        ok: true,
+        status: 200,
+        error: null,
+        data: agentEvents([
+          { seq: 11, channel_id: "channel-a", channel_type: "channel", channel_name: "alpha", message_id: "aaaaaaaa-0000-0000-0000-000000000000", timestamp: "2026-05-28T00:00:00.000Z", sender_type: "human", sender_name: "alice", content: "body-a" },
+          { seq: 12, channel_id: "channel-a", channel_type: "channel", channel_name: "alpha", message_id: "aaaaaaab-0000-0000-0000-000000000000", timestamp: "2026-05-28T00:00:00.500Z", sender_type: "human", sender_name: "alice", content: "body-a-2" },
+          { seq: 13, channel_id: "channel-b", channel_type: "channel", channel_name: "beta", message_id: "bbbbbbbb-0000-0000-0000-000000000000", timestamp: "2026-05-28T00:00:01.000Z", sender_type: "human", sender_name: "bob", content: "body-b" },
+          { seq: 14, channel_id: "channel-a", channel_type: "channel", channel_name: "alpha", message_id: "cccccccc-0000-0000-0000-000000000000", timestamp: "2026-05-28T00:00:02.000Z", sender_type: "third_party_app", sender_name: "external", content: "third-party-body", third_party_event: { id: "event-1", kind: "external", client_id: "client-1", client_name: "External", payload_hash: "hash", expires_at: "2026-05-28T01:00:00.000Z" } },
+        ]),
+      }),
+    }) as any,
+  });
+
+  await messageCheckCommand.handler(ctx);
+
+  assert.deepEqual(stderr, []);
+  const output = stdout.join("");
+  const aContext = output.indexOf('channel_id="channel-a"');
+  const aBody = output.indexOf("body-a");
+  const aBody2 = output.indexOf("body-a-2");
+  const bContext = output.indexOf('channel_id="channel-b"');
+  const bBody = output.indexOf("body-b");
+  assert.ok(aContext >= 0 && aContext < aBody);
+  assert.ok(aBody < aBody2 && aBody2 < bContext && bContext < bBody);
+  assert.equal((output.match(/channel_id="channel-a"/g) ?? []).length, 1);
+  assert.equal((output.match(/channel_id="channel-b"/g) ?? []).length, 1);
+  assert.match(output.slice(aContext, bContext), /AGENTS_A/);
+  assert.match(output.slice(aContext, bContext), /MEMORY_A/);
+  assert.doesNotMatch(output.slice(aContext, bContext), /AGENTS_B|MEMORY_B/);
+  assert.match(output.slice(bContext), /AGENTS_B/);
+  assert.match(output.slice(bContext), /MEMORY_B/);
+  assert.doesNotMatch(output.slice(bContext), /AGENTS_A|MEMORY_A/);
+  assert.match(output, /third-party-body/);
+});
+
+test("message check keeps the body when one channel-local file is unsafe", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "raft-cli-check-channel-context-error-"));
+  const channelPath = channelWorkspaceDirectoryPath(workspace, "channel-a");
+  fs.mkdirSync(channelPath, { recursive: true });
+  fs.writeFileSync(path.join(channelPath, "AGENTS.md"), "AGENTS_A", "utf8");
+  const outside = path.join(workspace, "outside-memory.md");
+  fs.writeFileSync(outside, "must not load", "utf8");
+  fs.symlinkSync(outside, path.join(channelPath, "MEMORY.md"));
+  const { io, stdout, stderr } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    env: { SLOCK_CURRENT_WORKSPACE_PATH: workspace },
+    loadAgentContext: () => ({ ...agentContext, clientMode: "managed-runner", secretSource: "agent-proxy-token-env" }),
+    createApiClient: () => ({
+      request: async (): Promise<ApiResponse<unknown>> => ({
+        ok: true,
+        status: 200,
+        error: null,
+        data: agentEvents([
+          { seq: 21, channel_id: "channel-a", channel_type: "channel", channel_name: "alpha", message_id: "cccccccc-0000-0000-0000-000000000000", timestamp: "2026-05-28T00:00:00.000Z", sender_type: "human", sender_name: "alice", content: "body-still-visible" },
+        ]),
+      }),
+    }) as any,
+  });
+
+  await messageCheckCommand.handler(ctx);
+
+  assert.deepEqual(stderr, []);
+  const output = stdout.join("");
+  assert.match(output, /channel-local workspace context unavailable/);
+  assert.match(output, /symbolic link/);
+  assert.match(output, /body-still-visible/);
+  assert.doesNotMatch(output, /must not load/);
 });
 
 test("message check command prints the server's inbox hint after the messages", async () => {

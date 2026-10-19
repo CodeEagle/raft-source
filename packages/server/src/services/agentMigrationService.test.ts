@@ -27,6 +27,7 @@ import {
   channelAgents,
   channels,
   machines,
+  serverMembers,
   servers,
   users,
 } from "../db/schema";
@@ -286,6 +287,29 @@ async function seedMigrationFixture() {
   }).returning();
   return { user, server, sourceMachine, targetMachine, agent };
 }
+
+test("server-authorized migration may move a member-created Agent across Computers", async ({ db }) => {
+  const { server, targetMachine, agent } = await seedMigrationFixture();
+  const [member] = await db.insert(users).values({
+    id: "66666666-6666-6666-6666-666666666666",
+    email: "migration-member@example.com",
+    name: "migration-member",
+    passwordHash: "hash",
+    emailVerified: true,
+  }).returning();
+  await db.insert(serverMembers).values({ serverId: server.id, userId: member.id, role: "member" });
+  await db.update(agents)
+    .set({ creatorType: "user", creatorId: member.id })
+    .where(eq(agents.id, agent.id));
+
+  const migration = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+  });
+
+  assert.equal(migration.migration.agentId, agent.id);
+  assert.equal(migration.migration.targetMachineId, targetMachine.id);
+});
 
 test("progress slides the transfer and arrival deadlines, never past six hours from creation", async ({ db }) => {
   const { server, sourceMachine, targetMachine, agent } = await seedMigrationFixture();

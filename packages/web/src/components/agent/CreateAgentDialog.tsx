@@ -50,6 +50,7 @@ import type { RuntimeFormV2Value, RuntimeFormV2Values } from "@botiverse/raft-ru
 import { useProviderConnections } from "../../hooks/useProviderConnections";
 import { useAgentRuntimeProvider } from "../../hooks/useAgentRuntimeProvider";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
+import { filterAgentCreationMachines } from "../../utils/memberAgentAccess";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import Modal from "../Modal";
 import DialogCard from "../ui/DialogCard";
@@ -478,6 +479,11 @@ export default function CreateAgentDialog({
   const { formatMessage } = useIntl();
   const machines = useMachineStore((s) => s.machines);
   const currentServer = useServerStore((s) => s.current);
+  const { role: currentRole, capabilities } = useServerPermissions();
+  const agentCreationMachines = useMemo(
+    () => filterAgentCreationMachines(machines, currentRole),
+    [machines, currentRole],
+  );
   const rescanRuntimes = useMachineStore((s) => s.rescanRuntimes);
   const setShowAddMachine = useMachineStore((s) => s.setShowAddMachine);
   const [runtimesRescanning, setRuntimesRescanning] = useState(false);
@@ -508,17 +514,17 @@ export default function CreateAgentDialog({
     [currentServer, remembersLastConfig],
   );
   const defaultOnline = defaultMachineId
-    && machines.find((m) => m.id === defaultMachineId)?.status === "online"
-    && machineMeetsDaemonRequirement(machines.find((m) => m.id === defaultMachineId), minimumDaemonVersion)
+    && agentCreationMachines.find((m) => m.id === defaultMachineId)?.status === "online"
+    && machineMeetsDaemonRequirement(agentCreationMachines.find((m) => m.id === defaultMachineId), minimumDaemonVersion)
     ? defaultMachineId
     : undefined;
   const prefilledMachine = prefilledMachineId
-    ? machines.find((m) => m.id === prefilledMachineId)
+    ? agentCreationMachines.find((m) => m.id === prefilledMachineId)
     : undefined;
   const prefilledMachineOnline = prefilledMachine?.status === "online"
     && machineMeetsDaemonRequirement(prefilledMachine, minimumDaemonVersion);
   const rememberedMachineOnline = rememberedConfig
-    ? machines.find((machine) =>
+    ? agentCreationMachines.find((machine) =>
       machine.id === rememberedConfig.machineId
       && machine.status === "online"
       && machineMeetsDaemonRequirement(machine, minimumDaemonVersion)
@@ -531,14 +537,14 @@ export default function CreateAgentDialog({
         ? ""
         : defaultOnline
           || rememberedMachineOnline
-          || machines.find((m) => m.status === "online" && machineMeetsDaemonRequirement(m, minimumDaemonVersion))?.id
+          || agentCreationMachines.find((m) => m.status === "online" && machineMeetsDaemonRequirement(m, minimumDaemonVersion))?.id
           || ""
   );
-  const selectedMachine = machines.find((m) => m.id === selectedMachineId);
+  const selectedMachine = agentCreationMachines.find((m) => m.id === selectedMachineId);
   const selectedMachineMeetsDaemonRequirement = machineMeetsDaemonRequirement(selectedMachine, minimumDaemonVersion);
   const createAgentSelectPortalProps = useMemo(() => ({ container: createAgentSelectPortalRef }), []);
 
-  const machineOptions: SelectOption[] = useMemo(() => machines.map((machine) => {
+  const machineOptions: SelectOption[] = useMemo(() => agentCreationMachines.map((machine) => {
     const isOffline = machine.status !== "online";
     const blockedByRequired = prefilledMachineMode === "required" && machine.id !== prefilledMachineId;
     const daemonTooOld = !machineMeetsDaemonRequirement(machine, minimumDaemonVersion);
@@ -558,7 +564,7 @@ export default function CreateAgentDialog({
       label: machine.name + (machine.hostname ? ` (${machine.hostname})` : "") + (isOffline ? formatMessage({ id: "agent.create.offlineSuffix" }) : "") + daemonRequirementLabel,
       disabled: isOffline || blockedByRequired || daemonTooOld,
     };
-  }), [machines, prefilledMachineMode, prefilledMachineId, minimumDaemonVersion, formatMessage]);
+  }), [agentCreationMachines, prefilledMachineMode, prefilledMachineId, minimumDaemonVersion, formatMessage]);
   const machineRuntimeIds = selectedMachine?.runtimes ?? [];
   const runtimeSelectionCatalog = useNewAgentRuntimeOptions(
     previewOnly ? null : selectedMachineId,
@@ -659,7 +665,6 @@ export default function CreateAgentDialog({
     () => !onboarding && !!prefilledName && validateAgentNameReason(prefilledName) !== null,
   );
   const createAgent = useAgentStore((s) => s.createAgent);
-  const { capabilities } = useServerPermissions();
   const channels = useChannelStore((s) => s.channels);
   const allAgents = useAgentStore((s) => s.agents);
   const agents = allAgents.filter((a) => !a.deletedAt);
@@ -1042,26 +1047,26 @@ export default function CreateAgentDialog({
     // be enabled. The waiter below already existed for the prefilled case; it
     // just never covered the plain "machines arrived late" one.
     const defaultMachine = defaultMachineId
-      ? machines.find((m) =>
+      ? agentCreationMachines.find((m) =>
         m.id === defaultMachineId
         && m.status === "online"
         && machineMeetsDaemonRequirement(m, minimumDaemonVersion)
       )
       : undefined;
     const machine = prefilledMachineId
-      ? machines.find((m) =>
+      ? agentCreationMachines.find((m) =>
         m.id === prefilledMachineId
         && machineMeetsDaemonRequirement(m, minimumDaemonVersion)
       )
       : defaultMachine
         ?? (rememberedConfig
-          ? machines.find((m) =>
+          ? agentCreationMachines.find((m) =>
             m.id === rememberedConfig.machineId
             && m.status === "online"
             && machineMeetsDaemonRequirement(m, minimumDaemonVersion)
           )
           : undefined)
-        ?? machines.find((m) =>
+        ?? agentCreationMachines.find((m) =>
           m.status === "online"
           && machineMeetsDaemonRequirement(m, minimumDaemonVersion)
         );
@@ -1096,7 +1101,7 @@ export default function CreateAgentDialog({
     setCommand("");
     // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change, react-doctor/no-chain-state-updates, react-doctor/no-derived-state -- YMNNE-family: pre-existing non-bug site grandfathered; reasoning is seeded from the resolved runtime/model default here, same async-arrival prefill path as the sibling setState lines (see docs/frontend/render-cost-contract.md)
     setReasoningEffort(reconcileReasoningEffort("claude", getDefaultModel("claude"), null));
-  }, [defaultMachineId, machines, minimumDaemonVersion, onboarding, prefilledMachineId, rememberedConfig, selectedMachineId, supportedSet]);
+  }, [agentCreationMachines, defaultMachineId, minimumDaemonVersion, onboarding, prefilledMachineId, rememberedConfig, selectedMachineId, supportedSet]);
 
   // Admission is server-owned and arrives after the raw machine capability list.
   // Keep an existing user choice only while the contextual catalog still admits
@@ -1232,7 +1237,7 @@ export default function CreateAgentDialog({
     (!isExternalMode && (
       !selectedMachineId ||
       (prefilledMachineMode === "required" && selectedMachineId !== prefilledMachineId) ||
-      machines.length === 0 ||
+      agentCreationMachines.length === 0 ||
       !runtime ||
       !supportedSet.has(runtime) ||
       !availableRuntimes.includes(runtime) ||
@@ -1619,7 +1624,7 @@ export default function CreateAgentDialog({
                   air: every option is dead, nothing they choose can be checked, and the one
                   thing they actually need to do is not on the screen. So we say what is
                   missing and offer the action that fixes it. */}
-              {machines.length === 0 ? (
+              {agentCreationMachines.length === 0 ? (
                 <Banner status="info" data-testid="create-cindy-needs-computer">
                   <BannerTitle>{formatMessage({ id: "agent.create.connectComputerFirst" })}</BannerTitle>
                   <BannerDescription>
@@ -1769,7 +1774,7 @@ export default function CreateAgentDialog({
   // An agent runs on a computer. With none connected there is nothing to configure and
   // nothing to create: every field below would be dead, and the one action that unblocks
   // them is not on this screen. Ask for the computer instead (stdrc, 2026-07-13).
-  if (!isExternalMode && machines.length === 0) {
+  if (!isExternalMode && agentCreationMachines.length === 0) {
     return (
       <Modal onClose={onClose}>
         <Card className="w-full max-w-md p-6" data-testid="create-agent-needs-computer">

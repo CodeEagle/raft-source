@@ -10,6 +10,7 @@ import { CliError } from "../../core/errors";
 import type { CliIo } from "../../core/io";
 import { messageReadCommand } from "./read";
 import { getConsumedExactSeqs, getConsumedReadOrder, getConsumedSeq, recordConsumedSeqs } from "./_consumedSeqState";
+import { channelWorkspaceDirectoryPath } from "../../channelWorkspaceContext";
 
 // Hermetic regardless of test order: anything that resolves through the Raft
 // home (legacy import, the published read record) stays in a temp directory.
@@ -107,6 +108,47 @@ test("message read command uses injected ApiClient and writes canonical history"
     [7],
     "around reads may prove only the exact bodies they rendered, never a high-water boundary",
   );
+});
+
+test("managed message read loads the resolved channel's local files before its history", async () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "raft-cli-read-channel-context-"));
+  const channelPath = channelWorkspaceDirectoryPath(workspace, "channel-a");
+  fs.mkdirSync(channelPath, { recursive: true });
+  fs.writeFileSync(path.join(channelPath, "AGENTS.md"), "AGENTS_A", "utf8");
+  fs.writeFileSync(path.join(channelPath, "MEMORY.md"), "MEMORY_A", "utf8");
+  const { io, stdout, stderr } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    env: { SLOCK_CURRENT_WORKSPACE_PATH: workspace },
+    loadAgentContext: () => ({ ...agentContext, clientMode: "managed-runner", secretSource: "agent-proxy-token-env" }),
+    createApiClient: () => ({
+      request: async (): Promise<ApiResponse<unknown>> => ({
+        ok: true,
+        status: 200,
+        error: null,
+        data: {
+          channel_id: "channel-a",
+          target: "#alpha",
+          messages: [
+            { channel_id: "channel-a", seq: 7, id: "aaaaaaaa-0000-0000-0000-000000000000", createdAt: "2026-05-28T00:00:00.000Z", senderType: "human", senderName: "alice", content: "history-a" },
+            { channel_id: "channel-a", seq: 8, id: "aaaaaaab-0000-0000-0000-000000000000", createdAt: "2026-05-28T00:00:01.000Z", senderType: "human", senderName: "alice", content: "history-a-2" },
+          ],
+          has_more: false,
+          has_older: false,
+          has_newer: false,
+        },
+      }),
+    }) as any,
+  });
+
+  await messageReadCommand.handler(ctx, { target: "#alpha" });
+
+  assert.deepEqual(stderr, []);
+  const output = stdout.join("");
+  assert.ok(output.indexOf('channel_id="channel-a"') < output.indexOf("history-a"));
+  assert.equal((output.match(/channel_id="channel-a"/g) ?? []).length, 1);
+  assert.match(output, /AGENTS_A/);
+  assert.match(output, /MEMORY_A/);
 });
 
 test("message read command records consumed boundary for ordinary history reads", async () => {

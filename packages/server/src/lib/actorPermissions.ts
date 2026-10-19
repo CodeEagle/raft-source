@@ -97,8 +97,23 @@ export function userCanActOnAgentResource(
   agent: { creatorType: string | null; creatorId: string | null },
   capability: ServerCapability,
 ): boolean {
-  return hasServerCapability(callerRole, capability)
-    || (agent.creatorType === "user" && agent.creatorId === userId);
+  if (hasServerCapability(callerRole, capability)) return true;
+  if (agent.creatorType !== "user" || agent.creatorId !== userId) return false;
+
+  // Members own the agents they create, but ownership is deliberately narrow:
+  // it grants the normal profile/lifecycle surface only. Server-wide agent
+  // administration (credentials, migrations, workspace reset, integrations,
+  // and similar capability-bearing paths) remains owner/admin authority.
+  if (callerRole === "member") {
+    return capability === "editAgents"
+      || capability === "controlAgentRuntime"
+      || capability === "deleteAgents";
+  }
+
+  // Preserve the historical creator override for owner/admin callers whose
+  // explicit role capability may be projected by a mixed-version caller, but
+  // never let a guest or missing role inherit an object relation.
+  return callerRole === "owner" || callerRole === "admin";
 }
 
 /**

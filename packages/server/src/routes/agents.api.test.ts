@@ -32,9 +32,10 @@ import {
   AgentOrchestrator,
   KimiReasoningEffortUpgradeRequiredError,
 } from "../services/agentOrchestrator";
-import { createServer, getAgentMemberRole, getServer, updateServerOnboardingAgent, removeMember } from "../services/serverService";
+import { addMember, createServer, getAgentMemberRole, getServer, updateServerOnboardingAgent, removeMember } from "../services/serverService";
 import {
   assignMachine as assignAgentMachine,
+  autoAssignMachine,
   createAgent,
   deleteAgent,
   getAgent,
@@ -96,7 +97,7 @@ test("GET /agents/:id answers 404, not 500, for an id that is not a uuid (task #
   assert.deepEqual(await res.json(), { error: "Agent not found" });
 });
 
-test("human members can control agent runtime but cannot fully reset its workspace", async ({ app }) => {
+test("human members cannot control another user's agent runtime", async ({ app }) => {
     const db = getDb();
     const owner = await seedUser("runtime-member-owner@slock.test", "runtime-member-owner");
     const member = await seedUser("runtime-member@slock.test", "runtime-member");
@@ -113,7 +114,7 @@ test("human members can control agent runtime but cannot fully reset its workspa
       method: "POST",
       headers: authHeaders(memberToken, server.id),
     });
-    assert.equal(stop.status, 200);
+    assert.equal(stop.status, 403);
 
     for (const mode of ["restart", "session"] as const) {
       const reset = await fetch(`${app.baseUrl}/api/agents/${agent.id}/reset`, {
@@ -121,7 +122,7 @@ test("human members can control agent runtime but cannot fully reset its workspa
         headers: { ...authHeaders(memberToken, server.id), "Content-Type": "application/json" },
         body: JSON.stringify({ mode }),
       });
-      assert.equal(reset.status, 202, mode);
+      assert.equal(reset.status, 403, mode);
     }
 
     const full = await fetch(`${app.baseUrl}/api/agents/${agent.id}/reset`, {
@@ -131,6 +132,74 @@ test("human members can control agent runtime but cannot fully reset its workspa
     });
     assert.equal(full.status, 403);
     assert.match((await full.json() as { error: string }).error, /resetAgentWorkspace/);
+});
+
+test("member agent creation is bound to the member's own attached Computer", async ({ app }) => {
+  const owner = await seedUser("member-agent-owner@slock.test", "member-agent-owner");
+  const member = await seedUser("member-agent-member@slock.test", "member-agent-member");
+  const server = await createServer("Member Agent Server", `member-agent-${randomUUID()}`, owner.id);
+  await addMember(server.id, member.id, "member");
+
+  const ownerToken = await tokenForHuman(owner.email);
+  const memberToken = await tokenForHuman(member.email);
+  const attach = async (token: string, name: string) => {
+    const response = await fetch(`${app.baseUrl}/api/computer/attach`, {
+      method: "POST",
+      headers: { ...authHeaders(token, server.id), "Content-Type": "application/json" },
+      body: JSON.stringify({ serverSlug: server.slug, name }),
+    });
+    assert.equal(response.status, 201);
+    return await response.json() as { machineId: string };
+  };
+  const memberComputer = await attach(memberToken, "member-agent-computer");
+  const ownerComputer = await attach(ownerToken, "owner-agent-computer");
+
+  const create = (body: Record<string, unknown>) => fetch(`${app.baseUrl}/api/agents`, {
+    method: "POST",
+    headers: { ...authHeaders(memberToken, server.id), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  const withoutComputer = await create({ name: "member-no-computer", runtime: "codex" });
+  assert.equal(withoutComputer.status, 403);
+  assert.equal((await withoutComputer.json() as { code?: string }).code, "member_computer_required");
+
+  const external = await create({ name: "member-external", external: true });
+  assert.equal(external.status, 403);
+  assert.equal((await external.json() as { code?: string }).code, "member_external_agent_forbidden");
+
+  const hosted = await create({ name: "member-hosted", provider: "antiproton" });
+  assert.equal(hosted.status, 403);
+  assert.equal((await hosted.json() as { code?: string }).code, "member_hosted_agent_forbidden");
+
+  const foreignComputer = await create({ name: "member-foreign-computer", runtime: "codex", machineId: ownerComputer.machineId });
+  assert.equal(foreignComputer.status, 403);
+  assert.equal((await foreignComputer.json() as { code?: string }).code, "member_computer_not_owned");
+
+  const valid = await create({ name: "member-owned-agent", runtime: "codex", machineId: memberComputer.machineId });
+  assert.equal(valid.status, 200);
+  const created = await valid.json() as { id: string; creatorId: string; machineId: string | null };
+  assert.equal(created.creatorId, member.id);
+  assert.equal(created.machineId, memberComputer.machineId);
+
+  const ownStop = await fetch(`${app.baseUrl}/api/agents/${created.id}/stop`, {
+    method: "POST",
+    headers: authHeaders(memberToken, server.id),
+  });
+  assert.equal(ownStop.status, 200);
+
+  const assignForeign = await fetch(`${app.baseUrl}/api/agents/${created.id}/assign-machine`, {
+    method: "POST",
+    headers: { ...authHeaders(memberToken, server.id), "Content-Type": "application/json" },
+    body: JSON.stringify({ machineId: ownerComputer.machineId }),
+  });
+  assert.equal(assignForeign.status, 403);
+
+  // If a member Computer disappears, the daemon-online sweep must not silently
+  // move the member-owned Agent onto somebody else's machine.
+  await getDb().delete(machines).where(eq(machines.id, memberComputer.machineId));
+  await autoAssignMachine(server.id, ownerComputer.machineId);
+  assert.equal((await getAgent(created.id))?.machineId, null);
 });
 
 test("reset acknowledges before the lifecycle command finishes", async ({ app }) => {
@@ -5058,7 +5127,7 @@ test("member viewAgents authority reaches runtime options without an owner/admin
     assert.equal(res.status, 200, "member's viewAgents capability must satisfy the runtime-options read gate");
 });
 
-test("bootstrap-token denial names issueAgentCredentials and human creator authority", async () => {
+test("bootstrap-token denial names the issueAgentCredentials capability", async () => {
   const gateKey = "SLOCK_SELF_HOSTED_RUNNER_BOOTSTRAP_ENABLED";
   const oldGate = process.env[gateKey];
   const oldPepper = process.env.AGENT_BOOTSTRAP_TOKEN_PEPPER;
@@ -5094,7 +5163,7 @@ test("bootstrap-token denial names issueAgentCredentials and human creator autho
     const body = await res.json() as { code: string; error: string };
     assert.equal(body.code, "insufficient_role");
     assert.match(body.error, /issueAgentCredentials/);
-    assert.match(body.error, /human creator authority/);
+    assert.doesNotMatch(body.error, /human creator authority/);
     assert.doesNotMatch(body.error, /owners and admins/);
   } finally {
     await app.close();

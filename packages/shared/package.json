@@ -43,6 +43,10 @@
       "types": "./src/agentApiMessageContract.ts",
       "default": "./src/agentApiMessageContract.ts"
     },
+    "./src/channelWorkspaceContextNode": {
+      "types": "./src/channelWorkspaceContextNode.ts",
+      "default": "./src/channelWorkspaceContextNode.ts"
+    },
     "./src/agentApiMessages": {
       "types": "./src/agentApiMessages.ts",
       "default": "./src/agentApiMessages.ts"

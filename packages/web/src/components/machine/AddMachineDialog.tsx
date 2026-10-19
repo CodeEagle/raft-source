@@ -44,6 +44,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
   const registerMachine = useMachineStore((s) => s.registerMachine);
   const renameMachine = useMachineStore((s) => s.renameMachine);
   const serverSlug = useServerStore((s) => s.current?.slug);
+  const serverRole = useServerStore((s) => s.current?.role);
   const deleteMachine = useMachineStore((s) => s.deleteMachine);
   const machines = useMachineStore((s) => s.machines);
 
@@ -120,6 +121,14 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
     setConfirmedComputerMatch(false);
     connectedComputerConfirmationRef.current = null;
     try {
+      // Raft Computer creates and attaches its own backing machine after the
+      // device-code approval. Members intentionally cannot mint the legacy
+      // raw daemon key produced by registerMachine, so start the modern
+      // Computer watcher without creating a placeholder row.
+      if (serverRole === "member") {
+        setStep("waiting");
+        return;
+      }
       const result = await registerMachine("my-computer");
       setApiKey(result.apiKey);
       setMachineId(result.machine.id);
@@ -131,7 +140,7 @@ export default function AddMachineDialog({ onClose }: { onClose: () => void }) {
     } finally {
       setRegistering(false);
     }
-  }, [formatMessage, registerMachine]);
+  }, [formatMessage, registerMachine, serverRole]);
 
   const handleCancel = useCallback(async () => {
     // If we created a raw daemon placeholder but never confirmed a Computer

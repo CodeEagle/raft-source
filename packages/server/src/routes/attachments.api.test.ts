@@ -163,6 +163,58 @@ test("attachment URL route passes the bounded five-minute TTL to storage", async
   }
 });
 
+test("batch attachment URLs report the presigned expiry from one request timestamp", async ({ app }) => {
+  const previousDeploymentEnv = process.env.DEPLOYMENT_ENV;
+  const { userB, serverB, channelB, attachmentId } = await seedCrossServerFixture();
+  const secondAttachmentId = "00000000-0000-4000-8000-000000000004";
+  await getDb().insert(attachments).values({
+    id: secondAttachmentId,
+    channelId: channelB.id,
+    uploaderId: userB.id,
+    uploaderType: "user",
+    filename: "second.txt",
+    mimeType: "text/plain",
+    sizeBytes: 42,
+    storageKey: `${serverB.id}/second.txt`,
+    thumbnailKey: null,
+    contentHash: "second-file",
+  });
+  const tokenB = await tokenForHuman(userB.email);
+  const issuedAt = Date.now();
+  const nowSpy = vi.spyOn(Date, "now").mockReturnValue(issuedAt);
+
+  try {
+    delete process.env.DEPLOYMENT_ENV;
+    __setStorageForTests({
+      async put() {},
+      async get() { throw new Error("streaming is not expected"); },
+      async delete() {},
+      async getPresignedUrl() { return "https://storage.example.test/presigned"; },
+    });
+
+    const response = await fetch(`${app.baseUrl}/api/attachments/urls`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenB}`,
+        "X-Server-Id": serverB.id,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ attachmentIds: [attachmentId, secondAttachmentId] }),
+    });
+    assert.equal(response.status, 200);
+    const body = await response.json() as { urls: Array<{ expiresAt: string | null }> };
+    const expectedExpiresAt = new Date(issuedAt + ATTACHMENT_PRESIGNED_URL_TTL_SECONDS * 1000).toISOString();
+    assert.equal(body.urls.length, 2);
+    assert.deepEqual(body.urls.map((entry) => entry.expiresAt), [expectedExpiresAt, expectedExpiresAt]);
+  } finally {
+    nowSpy.mockRestore();
+    resetStorageForTests();
+    if (previousDeploymentEnv === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = previousDeploymentEnv;
+    await app.close();
+  }
+});
+
 test("attachment URL routing keeps CDN_BASE_URL out of original-file downloads", async ({ app }) => {
   const previousCdnBaseUrl = process.env.CDN_BASE_URL;
   try {
@@ -1343,7 +1395,9 @@ test("GET /api/attachments/:id/url two-hop flow: query-token caller gets a URL c
   );
   assert.equal(hop1.status, 200, `hop 1 expected 200, got ${hop1.status}`);
   const { url: streamUrl, expiresAt } = (await hop1.json()) as { url: string; expiresAt: string | null };
-  assert.equal(expiresAt, null, "local streaming URLs should be cacheable without a presigned expiry");
+  const tokenClaims = jwt.decode(tokenB) as jwt.JwtPayload;
+  assert.equal(typeof tokenClaims.exp, "number", "fixture access token should have an expiry");
+  assert.equal(expiresAt, new Date((tokenClaims.exp as number) * 1000).toISOString());
 
   const parsed = new URL(streamUrl);
   assert.equal(parsed.searchParams.get("token"), tokenB, "hop 1 must propagate query token to the stream URL");
@@ -1364,6 +1418,255 @@ test("GET /api/attachments/:id/url two-hop flow: query-token caller gets a URL c
     hop2.status === 404 || hop2.status === 503,
     `hop 2 must reach storage (404 missing object or 503 unconfigured), got ${hop2.status}`,
   );
+});
+
+test("attachment URLs use the query credential when Authorization is invalid", async ({ app }) => {
+  const previousDeploymentEnv = process.env.DEPLOYMENT_ENV;
+  const { userB, serverB, attachmentId } = await seedCrossServerFixture();
+  const tokenB = await tokenForHuman(userB.email);
+  const tokenClaims = jwt.decode(tokenB) as jwt.JwtPayload;
+  assert.equal(typeof tokenClaims.exp, "number");
+  const expectedExpiresAt = new Date((tokenClaims.exp as number) * 1000).toISOString();
+  const invalidHeader = "Bearer invalid-authorization-token";
+
+  try {
+    process.env.DEPLOYMENT_ENV = "slockdev";
+    __setStorageForTests({
+      async put() {},
+      async delete() {},
+      async get() { throw new Error("streaming is not expected"); },
+      async getPresignedUrl() { return "https://storage.example.test/private"; },
+    });
+
+    const singleRequestUrl = new URL(`${app.baseUrl}/api/attachments/${attachmentId}/url`);
+    singleRequestUrl.searchParams.set("token", tokenB);
+    singleRequestUrl.searchParams.set("serverId", serverB.id);
+    const single = await fetch(singleRequestUrl, {
+      headers: {
+        Authorization: invalidHeader,
+        "X-Server-Id": serverB.id,
+      },
+    });
+    assert.equal(single.status, 200);
+    const singleBody = await single.json() as { url: string; expiresAt: string | null };
+    assert.equal(singleBody.expiresAt, expectedExpiresAt);
+    assert.equal(new URL(singleBody.url).searchParams.get("token"), tokenB);
+    const singleHop2 = await fetch(singleBody.url, { redirect: "manual" });
+    assert.notEqual(singleHop2.status, 401, "single URL must carry the credential that passed auth");
+
+    const batchRequestUrl = new URL(`${app.baseUrl}/api/attachments/urls`);
+    batchRequestUrl.searchParams.set("token", tokenB);
+    batchRequestUrl.searchParams.set("serverId", serverB.id);
+    const batch = await fetch(batchRequestUrl, {
+      method: "POST",
+      headers: {
+        Authorization: invalidHeader,
+        "X-Server-Id": serverB.id,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ attachmentIds: [attachmentId] }),
+    });
+    assert.equal(batch.status, 200);
+    const batchBody = await batch.json() as { urls: Array<{ url: string; expiresAt: string | null }> };
+    assert.equal(batchBody.urls[0]?.expiresAt, expectedExpiresAt);
+    assert.equal(new URL(batchBody.urls[0]?.url ?? "").searchParams.get("token"), tokenB);
+    const batchHop2 = await fetch(batchBody.urls[0]?.url ?? "", { redirect: "manual" });
+    assert.notEqual(batchHop2.status, 401, "batch URL must carry the credential that passed auth");
+  } finally {
+    resetStorageForTests();
+    if (previousDeploymentEnv === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = previousDeploymentEnv;
+  }
+});
+
+test("streaming attachment URLs expose the incoming user access token expiry", async ({ app }) => {
+  const previousDeploymentEnv = process.env.DEPLOYMENT_ENV;
+  const { userB, serverB, attachmentId } = await seedCrossServerFixture();
+  const tokenB = await tokenForHuman(userB.email);
+  const claims = jwt.decode(tokenB) as jwt.JwtPayload;
+  assert.equal(typeof claims.exp, "number", "fixture access token should have an expiry");
+  const expectedExpiresAt = new Date((claims.exp as number) * 1000).toISOString();
+
+  try {
+    process.env.DEPLOYMENT_ENV = "slockdev";
+    __setStorageForTests({
+      async put() {},
+      async delete() {},
+      async get() { throw new Error("streaming is not expected"); },
+      async getPresignedUrl() { return "https://storage.example.test/private"; },
+    });
+
+    const single = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/url`, {
+      headers: {
+        Authorization: `Bearer ${tokenB}`,
+        "X-Server-Id": serverB.id,
+      },
+    });
+    assert.equal(single.status, 200);
+    assert.equal((await single.json() as { expiresAt: string | null }).expiresAt, expectedExpiresAt);
+
+    const batch = await fetch(`${app.baseUrl}/api/attachments/urls`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenB}`,
+        "X-Server-Id": serverB.id,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ attachmentIds: [attachmentId] }),
+    });
+    assert.equal(batch.status, 200);
+    const batchBody = await batch.json() as { urls: Array<{ expiresAt: string | null }> };
+    assert.equal(batchBody.urls[0]?.expiresAt, expectedExpiresAt);
+  } finally {
+    resetStorageForTests();
+    if (previousDeploymentEnv === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = previousDeploymentEnv;
+  }
+});
+
+test("streaming attachment URLs leave expiry unset for user access JWTs without exp", async ({ app }) => {
+  const previousDeploymentEnv = process.env.DEPLOYMENT_ENV;
+  const { userB, serverB, attachmentId } = await seedCrossServerFixture();
+  await tokenForHuman(userB.email);
+  const tokenWithoutExpiry = jwt.sign({ sub: userB.id, type: "access" }, process.env.JWT_SECRET!);
+
+  try {
+    process.env.DEPLOYMENT_ENV = "slockdev";
+    __setStorageForTests({
+      async put() {},
+      async delete() {},
+      async get() { throw new Error("streaming is not expected"); },
+      async getPresignedUrl() { return "https://storage.example.test/private"; },
+    });
+
+    const singleBearer = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/url`, {
+      headers: {
+        Authorization: `Bearer ${tokenWithoutExpiry}`,
+        "X-Server-Id": serverB.id,
+      },
+    });
+    assert.equal(singleBearer.status, 200);
+    assert.equal((await singleBearer.json() as { expiresAt: string | null }).expiresAt, null);
+
+    const singleQueryUrl = new URL(`${app.baseUrl}/api/attachments/${attachmentId}/url`);
+    singleQueryUrl.searchParams.set("token", tokenWithoutExpiry);
+    singleQueryUrl.searchParams.set("serverId", serverB.id);
+    const singleQuery = await fetch(singleQueryUrl);
+    assert.equal(singleQuery.status, 200);
+    assert.equal((await singleQuery.json() as { expiresAt: string | null }).expiresAt, null);
+
+    const batchBearer = await fetch(`${app.baseUrl}/api/attachments/urls`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${tokenWithoutExpiry}`,
+        "X-Server-Id": serverB.id,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ attachmentIds: [attachmentId] }),
+    });
+    assert.equal(batchBearer.status, 200);
+    assert.equal((await batchBearer.json() as { urls: Array<{ expiresAt: string | null }> }).urls[0]?.expiresAt, null);
+
+    const batchQueryUrl = new URL(`${app.baseUrl}/api/attachments/urls`);
+    batchQueryUrl.searchParams.set("token", tokenWithoutExpiry);
+    batchQueryUrl.searchParams.set("serverId", serverB.id);
+    const batchQuery = await fetch(batchQueryUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ attachmentIds: [attachmentId] }),
+    });
+    assert.equal(batchQuery.status, 200);
+    assert.equal((await batchQuery.json() as { urls: Array<{ expiresAt: string | null }> }).urls[0]?.expiresAt, null);
+  } finally {
+    resetStorageForTests();
+    if (previousDeploymentEnv === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = previousDeploymentEnv;
+  }
+});
+
+test("streaming attachment URLs leave expiry unset for a machine API key", async ({ app }) => {
+  const previousDeploymentEnv = process.env.DEPLOYMENT_ENV;
+  const { userB, serverB, attachmentId } = await seedCrossServerFixture();
+  const { apiKey } = await registerMachine(serverB.id, userB.id, "attachment-expiry-machine");
+
+  try {
+    process.env.DEPLOYMENT_ENV = "slockdev";
+    __setStorageForTests({
+      async put() {},
+      async delete() {},
+      async get() { throw new Error("streaming is not expected"); },
+      async getPresignedUrl() { return "https://storage.example.test/private"; },
+    });
+
+    const single = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/url`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    assert.equal(single.status, 200);
+    assert.equal((await single.json() as { expiresAt: string | null }).expiresAt, null);
+
+    const batch = await fetch(`${app.baseUrl}/api/attachments/urls`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ attachmentIds: [attachmentId] }),
+    });
+    assert.equal(batch.status, 200);
+    assert.equal((await batch.json() as { urls: Array<{ expiresAt: string | null }> }).urls[0]?.expiresAt, null);
+  } finally {
+    resetStorageForTests();
+    if (previousDeploymentEnv === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = previousDeploymentEnv;
+  }
+});
+
+test("streaming attachment URLs leave expiry unset for a Computer API key", async ({ app }) => {
+  const previousDeploymentEnv = process.env.DEPLOYMENT_ENV;
+  const { userB, serverB, attachmentId } = await seedCrossServerFixture();
+  const ownerToken = await tokenForHuman(userB.email);
+  const attachRes = await fetch(`${app.baseUrl}/api/computer/attach`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${ownerToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ serverSlug: serverB.slug, name: "attachment-expiry-computer" }),
+  });
+  assert.equal(attachRes.status, 201);
+  const { apiKey } = await attachRes.json() as { apiKey: string };
+  assert.ok(apiKey.startsWith("sk_computer_"));
+
+  try {
+    process.env.DEPLOYMENT_ENV = "slockdev";
+    __setStorageForTests({
+      async put() {},
+      async delete() {},
+      async get() { throw new Error("streaming is not expected"); },
+      async getPresignedUrl() { return "https://storage.example.test/private"; },
+    });
+
+    const single = await fetch(`${app.baseUrl}/api/attachments/${attachmentId}/url`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    });
+    assert.equal(single.status, 200);
+    assert.equal((await single.json() as { expiresAt: string | null }).expiresAt, null);
+
+    const batch = await fetch(`${app.baseUrl}/api/attachments/urls`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ attachmentIds: [attachmentId] }),
+    });
+    assert.equal(batch.status, 200);
+    assert.equal((await batch.json() as { urls: Array<{ expiresAt: string | null }> }).urls[0]?.expiresAt, null);
+  } finally {
+    resetStorageForTests();
+    if (previousDeploymentEnv === undefined) delete process.env.DEPLOYMENT_ENV;
+    else process.env.DEPLOYMENT_ENV = previousDeploymentEnv;
+  }
 });
 
 test("GET /api/attachments/:id/html-preview-url returns scoped preview URL for HTML", async ({ app }) => {

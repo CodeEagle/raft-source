@@ -2532,7 +2532,9 @@ test("agent history and resolved-message reads carry the human sender's time zon
     headers: jsonHeaders(fixture.readOnlyApiKey),
   });
   assert.equal(agentApi.status, 200);
-  const agentApiBody = await agentApi.json() as { messages: Array<{ id: string; senderTimezone?: string | null }> };
+  const agentApiBody = await agentApi.json() as { channel_id?: string; messages: Array<{ id: string; channel_id?: string; senderTimezone?: string | null }> };
+  assert.equal(agentApiBody.channel_id, fixture.channelId);
+  assert.equal(agentApiBody.messages.find((message) => message.id === zoned.id)?.channel_id, fixture.channelId);
   assert.equal(agentApiBody.messages.find((message) => message.id === zoned.id)?.senderTimezone, "Asia/Shanghai");
   assert.equal(agentApiBody.messages.find((message) => message.id === plain.id)?.senderTimezone, null);
 
@@ -2544,6 +2546,7 @@ test("agent history and resolved-message reads carry the human sender's time zon
   assert.equal(legacyBody.messages.find((message) => message.id === zoned.id)?.senderTimezone, "Asia/Shanghai");
 
   const resolved = await resolveAgentVisibleMessagePayload(zoned.id, fixture.serverId, fixture.agentId);
+  assert.equal(resolved?.channel_id, fixture.channelId);
   assert.equal(resolved?.sender_timezone, "Asia/Shanghai");
   const resolvedPlain = await resolveAgentVisibleMessagePayload(plain.id, fixture.serverId, fixture.agentId);
   assert.equal(resolvedPlain?.sender_timezone, null);

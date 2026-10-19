@@ -677,7 +677,38 @@ test("setup: malformed server roster response fails closed without misclassifyin
   });
 });
 
-test("setup: member-only target server fails before migration detection", async () => {
+test("setup: member can create a fresh self-owned Computer attachment", async () => {
+  await withHome(async (home) => {
+    await writeSession(home);
+    const calls: string[] = [];
+    await runSetup(
+      { serverSlug: "/alpha", yes: true },
+      {
+        isTty: false,
+        buildServersClient: () => ({
+          list: async () => ({
+            status: "success",
+            servers: [
+              { id: SERVER_A, name: "Alpha", slug: SLUG_A, role: "member" },
+            ],
+          }),
+        }),
+        detectLegacyMigration: async () => {
+          calls.push("detect");
+          return { kind: "no_local_evidence" };
+        },
+        runAttach: async () => {
+          calls.push("attach");
+          await writeAttach(home);
+        },
+        runStart: async () => { calls.push("start"); },
+      },
+    );
+    assert.deepEqual(calls, ["attach", "start"]);
+  });
+});
+
+test("setup: member cannot adopt an existing machine with --machine", async () => {
   await withHome(async (home) => {
     await writeSession(home);
     const calls: string[] = [];
@@ -685,7 +716,7 @@ test("setup: member-only target server fails before migration detection", async 
     try {
       await assert.rejects(
         () => runSetup(
-          { serverSlug: "/alpha", yes: true },
+          { serverSlug: "/alpha", machine: SERVER_B, yes: true },
           {
             isTty: false,
             buildServersClient: () => ({
@@ -704,24 +735,14 @@ test("setup: member-only target server fails before migration detection", async 
             runStart: async () => { calls.push("start"); },
           },
         ),
-        (e) => e instanceof CliExit && e.code === "SETUP_REQUIRES_ADMIN",
+        (error) => error instanceof CliExit && error.code === "SETUP_REQUIRES_ADMIN",
       );
     } finally {
       cap.restore();
     }
     assert.deepEqual(calls, []);
-    const text = cap.text();
-    assert.equal(countOccurrences(text, /^What happened /gm), 1);
-    assert.equal(countOccurrences(text, /^Next: /gm), 1);
-    assert.equal(countOccurrences(text, /^State: /gm), 1);
-    assert.equal(countOccurrences(text, /^Help: /gm), 1);
-    assert.match(text, /SETUP_REQUIRES_ADMIN/);
-    assert.match(text, /requires the admin or owner role/);
-    assert.match(text, /only admins\/owners can attach/);
-    assert.match(text, /Next: raft-computer setup \/alpha/);
-    assert.match(text, /State: No local Computer state change was confirmed by this command\./);
-    assert.doesNotMatch(text, /What happened \(SETUP_REQUIRES_ADMIN\): What happened/);
-    assert.doesNotMatch(text, /Migration:/);
+    assert.match(cap.text(), /Adopting or migrating an existing Computer/);
+    assert.match(cap.text(), /Members can create their own Computer connection/);
   });
 });
 

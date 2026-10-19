@@ -77,8 +77,8 @@ async function depart(
   assert.equal(membership, undefined, `${how} must delete the Server membership row`);
 }
 
-// R01 (Member half): demotion keeps the exact Agent bundle, and only for that Agent.
-test("R01: an Agent creator demoted from Admin to Member keeps managing that exact Agent and gains no other Agent", async ({ app }) => {
+// R01 (Member half): demotion keeps the safe object-scoped Agent bundle only.
+test("R01: a demoted Agent creator keeps safe authority over that Agent but not privileged operations", async ({ app }) => {
   const ctx = await seedRelation("p3-r01", "admin");
   const own = await createAgent(ctx.server.id, "p3-r01-own", { runtime: "codex", creatorType: "user", creatorId: ctx.related.id });
   const other = await createAgent(ctx.server.id, "p3-r01-other", { runtime: "codex", creatorType: "user", creatorId: ctx.owner.id });
@@ -94,11 +94,11 @@ test("R01: an Agent creator demoted from Admin to Member keeps managing that exa
   assert.equal(patchOwn.status, 200, "agent.update via exact creator relation");
   assert.equal((await patchOwn.json() as { description: string | null }).description, "still mine after demotion");
   assert.equal((await call("POST", `/api/agents/${own.id}/stop`, {})).status, 200, "agent.runtime.controlProcess on own Agent");
-  assert.equal((await call("POST", `/api/agents/${own.id}/reset`, { mode: "full" })).status, 202, "agent.workspace.reset on own Agent");
-  // Credentials are issued only for external Agents; the creator relation is what is under test here.
+  assert.equal((await call("POST", `/api/agents/${own.id}/reset`, { mode: "full" })).status, 403, "workspace reset remains owner/admin-only");
+  // Credential issuance stays owner/admin-only even for a creator relation.
   const ownExternal = await createAgent(ctx.server.id, "p3-r01-own-ext", { runtime: "external", model: "external", creatorType: "user", creatorId: ctx.related.id });
-  assert.equal((await call("POST", `/api/agents/${ownExternal.id}/credentials`, {})).status, 201, "agentCredential.issue on own Agent");
-  assert.equal((await call("POST", `/api/agents/${own.id}/credentials`, {})).status, 400, "managed Agents never get an sk_agent_* from a session");
+  assert.equal((await call("POST", `/api/agents/${ownExternal.id}/credentials`, {})).status, 403, "credential issuance remains owner/admin-only");
+  assert.equal((await call("POST", `/api/agents/${own.id}/credentials`, {})).status, 403, "authorization precedes the managed-Agent type check");
 
   // Member role alone grants none of these on someone else's Agent (truth table 3.2).
   assert.equal((await call("PATCH", `/api/agents/${other.id}`, { description: "must not widen" })).status, 403);

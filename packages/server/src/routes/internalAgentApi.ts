@@ -33,6 +33,7 @@ import { serializeErrorForLog } from "../tracing/safeErrorLog";
 // value; do not move machine-vs-runner auth branching into shared core.
 
 import { randomUUID } from "node:crypto";
+import { isIP } from "node:net";
 import {
   Router,
   type NextFunction,
@@ -1112,15 +1113,25 @@ function toAgentApiMessageEnvelope(message: AgentApiMessageSource, content: stri
     ? "system"
     : toAgentFacingActorTypeFromRow(message.senderType);
   const taskAssigneeType = toAgentFacingNullableActorTypeFromRow(message.taskAssigneeType);
+  const channelId = typeof messageEnvelopeFields.channel_id === "string"
+    ? messageEnvelopeFields.channel_id
+    : typeof messageEnvelopeFields.channelId === "string"
+      ? messageEnvelopeFields.channelId
+      : undefined;
   const external = message.senderType === "external_projection";
   if (external) {
-    return messageService.projectAgentVisibleHttpMessageResponse(
+    const projected = messageService.projectAgentVisibleHttpMessageResponse(
       message as messageService.EnrichedMessageRow,
       content,
     ) as AgentApiMessageEnvelope;
+    return {
+      ...projected,
+      ...(channelId ? { channel_id: channelId } : {}),
+    };
   }
   const envelope: AgentApiMessageEnvelope = {
     ...messageEnvelopeFields,
+    ...(channelId ? { channel_id: channelId } : {}),
     senderName: senderHandle ?? message.senderName ?? undefined,
     senderType,
     taskAssigneeType,
@@ -2516,6 +2527,7 @@ registerAgentApiRoute("historyRead", async (req, res) => {
     }
     sendAgentApiResponse("historyRead", res, {
       target: resolvedHistoryTarget ?? channelRef,
+      channel_id: projectionChannelId,
       ...(dmHistoryScope && channel && { consumption_scope: {
         agent_id: actingAgentId,
         channel_id: projectionChannelId,
@@ -4233,6 +4245,68 @@ function presignAgentApiAttachmentDownload(target: AgentApiAttachmentDownloadTar
   });
 }
 
+function requestOrigin(req: Request): string | null {
+  const protocol = req.protocol;
+  if (protocol !== "http" && protocol !== "https") return null;
+  // Express derives both host and hostname from its configured trust-proxy
+  // policy. Do not read forwarded headers directly here.
+  const host = req.host;
+  if (!host || !req.hostname) return null;
+  try {
+    return new URL(`${protocol}://${host}`).origin;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeHostname(rawHostname: string): string {
+  let hostname = rawHostname.toLowerCase();
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    hostname = hostname.slice(1, -1);
+  }
+  return hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+}
+
+function isLoopbackHostname(rawHostname: string): boolean {
+  const hostname = normalizeHostname(rawHostname);
+  if (hostname === "localhost" || hostname.endsWith(".localhost")) return true;
+
+  const ipVersion = isIP(hostname);
+  if (ipVersion === 4) {
+    return Number(hostname.split(".", 1)[0]) === 127;
+  }
+  if (ipVersion !== 6) return false;
+  if (hostname === "::1") return true;
+
+  // WHATWG URL canonicalizes ::ffff:127.0.0.1 to ::ffff:7f00:1.
+  const mapped = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(hostname);
+  return mapped !== null && (Number.parseInt(mapped[1]!, 16) >> 8) === 0x7f;
+}
+
+/**
+ * Only an HTTPS URL hosted on a different origin is safe to hand to the
+ * agent. Local, non-HTTPS, same-origin, and malformed targets stay server
+ * mediated so a deployment's storage endpoint cannot turn into a client-side
+ * redirect that the agent transport will reject.
+ */
+function shouldStreamAgentAttachmentForPresignedUrl(req: Request, rawUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return true;
+  }
+  if (url.protocol !== "https:") return true;
+  if (url.username || url.password) return true;
+
+  if (isLoopbackHostname(url.hostname)) {
+    return true;
+  }
+
+  const origin = requestOrigin(req);
+  return origin === null || origin === url.origin;
+}
+
 /**
  * Error log for the agent attachment routes: ids and row metadata plus the
  * error class only. The error message is left out on purpose because a
@@ -4264,13 +4338,15 @@ registerAgentApiRoute("attachmentDownload", ...agentApiRequestValidators("attach
     const presigning = presignAgentApiAttachmentDownload(target);
     if (presigning) {
       const presignedUrl = await presigning;
-      res.status(302);
-      res.setHeader("Cache-Control", "private, no-store");
-      res.setHeader("Location", presignedUrl);
-      res.setHeader("Content-Length", "0");
-      res.setHeader("X-Content-Type-Options", "nosniff");
-      res.end();
-      return;
+      if (!shouldStreamAgentAttachmentForPresignedUrl(req, presignedUrl)) {
+        res.status(302);
+        res.setHeader("Cache-Control", "private, no-store");
+        res.setHeader("Location", presignedUrl);
+        res.setHeader("Content-Length", "0");
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.end();
+        return;
+      }
     }
 
     const stream = await storage.get(attachment.storageKey);

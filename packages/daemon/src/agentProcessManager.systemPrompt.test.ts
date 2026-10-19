@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import type { ChildProcess } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { asAxSurfaceText, type AgentConfig, type AgentMessage } from "@botiverse/raft-shared";
@@ -9,6 +9,7 @@ import { setDaemonFetchImplForTests } from "./daemonFetch";
 import { formatResumeEmptyPrompt, formatResumeUnreadSummaryPrompt } from "./agentRuntimeInput";
 import type { RuntimeDriver, SpawnContext } from "./drivers/index";
 import { promptConfig } from "./testing/promptFixture";
+import { channelWorkspaceDirectoryName } from "./channelWorkspaceContext";
 
 class PromptChild extends EventEmitter {
   exitCode: number | null = null;
@@ -144,5 +145,148 @@ test("a concrete wake takes precedence over the empty-resume path without replac
     expect(spawns[0].prompt).not.toBe(formatResumeEmptyPrompt(driver));
     expect(spawns[0].prompt).toContain("#general");
     expect(spawns[0].prompt).not.toContain(wake.content);
+  });
+});
+
+test("concrete channel startup loads its own channel workspace files", async () => {
+  await withPromptManager(true, async ({ manager, spawns }) => {
+    const wake: AgentMessage = {
+      message_id: "wake-channel-context",
+      channel_id: "channel-context-a",
+      channel_name: "general",
+      channel_type: "channel",
+      sender_id: "human-1",
+      sender_name: "bob",
+      sender_type: "human",
+      content: "load this channel's context",
+      timestamp: "2026-09-05T00:00:00.000Z",
+      thread_join_context: {
+        reason: "mentioned",
+        parent_target: "#general",
+        thread_target: "#general:context-a",
+        suggested_read_history_target: "#general:context-a",
+        parent_message: {
+          message_id: "parent-context-a",
+          sender_name: "bob",
+          sender_type: "human",
+          content: "parent",
+          timestamp: "2026-09-05T00:00:00.000Z",
+          seq: 1,
+        },
+        recent_messages: [],
+        history_truncated: false,
+      },
+    };
+    await manager.startAgent("agent-1", promptConfig(), wake);
+    expect(spawns).toHaveLength(1);
+    expect(spawns[0].prompt).toContain('channel-local workspace context (channel_id="channel-context-a")');
+    expect(spawns[0].prompt).toContain("lower priority than system instructions");
+
+    const channelDir = path.join(
+      spawns[0].workingDirectory,
+      "channels",
+      channelWorkspaceDirectoryName("channel-context-a"),
+    );
+    expect(await readFile(path.join(channelDir, "MEMORY.md"), "utf8")).toContain("Channel memory");
+    expect(await readFile(path.join(channelDir, "AGENTS.md"), "utf8")).toContain("Channel instructions");
+  });
+});
+
+test("transient channel notices do not create channel-local configuration", async () => {
+  await withPromptManager(true, async ({ manager, spawns }) => {
+    const wake: AgentMessage = {
+      message_id: "wake-transient-context",
+      channel_id: "channel-transient",
+      channel_name: "general",
+      channel_type: "channel",
+      sender_id: "system",
+      sender_name: "system",
+      sender_type: "system",
+      content: "transient notice",
+      timestamp: "2026-09-05T00:00:00.000Z",
+    };
+    await manager.startAgent("agent-1", promptConfig(), wake, undefined, undefined, undefined, true);
+    expect(spawns[0].prompt).not.toContain("channel-local workspace context");
+    await expect(readdir(path.join(spawns[0].workingDirectory, "channels"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+test("third-party concrete messages do not create channel-local configuration", async () => {
+  await withPromptManager(true, async ({ manager, spawns }) => {
+    const wake: AgentMessage = {
+      message_id: "wake-third-party-context",
+      channel_id: "channel-third-party",
+      channel_name: "external",
+      channel_type: "channel",
+      sender_id: "external",
+      sender_name: "external",
+      sender_type: "human",
+      content: "external event",
+      timestamp: "2026-09-05T00:00:00.000Z",
+      third_party_event: {
+        id: "abcdef12-0000-4000-8000-000000000000",
+        kind: "event",
+        payload: { kind: "external" },
+      } as any,
+      thread_join_context: {
+        reason: "mentioned",
+        parent_target: "#external",
+        thread_target: "#external:third-party",
+        suggested_read_history_target: "#external:third-party",
+        parent_message: {
+          message_id: "parent-third-party",
+          sender_name: "external",
+          sender_type: "human",
+          content: "parent",
+          timestamp: "2026-09-05T00:00:00.000Z",
+          seq: 1,
+        },
+        recent_messages: [],
+        history_truncated: false,
+      },
+    };
+    await manager.startAgent("agent-1", promptConfig(), wake);
+    expect(spawns[0].prompt).not.toContain("channel-local workspace context");
+    await expect(readdir(path.join(spawns[0].workingDirectory, "channels"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
+test("a concrete message from a system sender still loads a real channel context", async () => {
+  await withPromptManager(true, async ({ manager, spawns }) => {
+    const wake: AgentMessage = {
+      message_id: "wake-real-system-channel",
+      channel_id: "channel-system-sender",
+      channel_name: "operations",
+      channel_type: "channel",
+      sender_id: "system-service",
+      sender_name: "system-service",
+      sender_type: "system",
+      content: "system channel event",
+      timestamp: "2026-09-05T00:00:00.000Z",
+      thread_join_context: {
+        reason: "mentioned",
+        parent_target: "#operations",
+        thread_target: "#operations:system-sender",
+        suggested_read_history_target: "#operations:system-sender",
+        parent_message: {
+          message_id: "parent-real-system-channel",
+          sender_name: "system-service",
+          sender_type: "system",
+          content: "parent",
+          timestamp: "2026-09-05T00:00:00.000Z",
+          seq: 1,
+        },
+        recent_messages: [],
+        history_truncated: false,
+      },
+    };
+    await manager.startAgent("agent-1", promptConfig(), wake);
+    expect(spawns[0].prompt).toContain('channel-local workspace context (channel_id="channel-system-sender")');
+    const channelDir = path.join(
+      spawns[0].workingDirectory,
+      "channels",
+      channelWorkspaceDirectoryName("channel-system-sender"),
+    );
+    expect(await readFile(path.join(channelDir, "AGENTS.md"), "utf8")).toContain("Channel instructions");
   });
 });

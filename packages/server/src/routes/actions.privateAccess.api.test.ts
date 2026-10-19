@@ -622,14 +622,18 @@ test("agent:create action card required computer blocks mark-executed mismatch",
   );
 });
 
-test("agent:create action card rejects mark-executed from a member without createAgents", async ({ app }) => {
+test("agent:create action card lets a member report only an Agent they created", async ({ app }) => {
   const db = getDb();
   const owner = await seedUser("action-card-permission-owner@slock.test", "action-card-permission-owner");
   const member = await seedUser("action-card-permission-member@slock.test", "action-card-permission-member");
   const server = await createServer("Action Card Permission", `action-card-permission-${randomUUID()}`, owner.id);
   await db.insert(serverMembers).values({ serverId: server.id, userId: member.id, role: "member" });
   const requester = await createAgent(server.id, "action-card-permission-requester", { runtime: "codex" });
-  const created = await createAgent(server.id, "action-card-permission-created", { runtime: "codex" });
+  const otherUsersAgent = await createAgent(server.id, "action-card-permission-created", {
+    runtime: "codex",
+    creatorType: "user",
+    creatorId: owner.id,
+  });
   const carrier = await createChannel(server.id, "action-card-permission-carrier", undefined, "channel", { type: "user", id: owner.id });
   await addHuman(carrier.id, member.id);
   await addAgent(carrier.id, requester.id);
@@ -646,17 +650,32 @@ test("agent:create action card rejects mark-executed from a member without creat
       messageId: card.messageId,
       serverId: asServerId(server.id),
       userId: member.id,
-      result: { kind: "agent", id: created.id, name: created.name },
+      result: { kind: "agent", id: otherUsersAgent.id, name: otherUsersAgent.name },
     }),
     (err: unknown) => err instanceof ActionCardError
       && err.status === 403
-      && err.code === "MISSING_CREATE_AGENTS_CAPABILITY",
+      && err.code === "AGENT_CREATOR_MISMATCH",
   );
 
   const [row] = await db.select({ actionMetadata: messages.actionMetadata })
     .from(messages)
     .where(eq(messages.id, card.messageId));
   assert.equal((row?.actionMetadata as { state?: string } | null)?.state, "prepared");
+
+  const membersAgent = await createAgent(server.id, "action-card-member-created", {
+    runtime: "codex",
+    creatorType: "user",
+    creatorId: member.id,
+  });
+  const executed = await markActionCardExecuted({
+    messageId: card.messageId,
+    serverId: asServerId(server.id),
+    userId: member.id,
+    result: { kind: "agent", id: membersAgent.id, name: membersAgent.name },
+  });
+  assert.equal(executed.metadata.state, "executed");
+  assert.equal(executed.metadata.result?.kind, "agent");
+  assert.equal(executed.metadata.result?.id, membersAgent.id);
 });
 
 test("agent:create action card rejects incompatible mark-executed result kind", async ({ app }) => {

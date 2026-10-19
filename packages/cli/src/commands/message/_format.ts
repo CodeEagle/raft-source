@@ -29,6 +29,10 @@ import {
   type RaftTargetString,
 } from "@botiverse/raft-shared";
 import type { AgentApiMessageSearchResponse } from "@botiverse/raft-shared";
+import {
+  formatChannelWorkspaceContextBlock,
+  type ChannelWorkspaceContextMap,
+} from "../../channelWorkspaceContext";
 
 // The message-like shapes and the canonical header line live in
 // `@botiverse/raft-shared` (`agentMessageText.ts`) so the SDK renders the same
@@ -79,6 +83,39 @@ export const formatMessages = axSurface(
   },
 );
 
+function channelContextId(message: { channel_id?: unknown; third_party_event?: unknown }): string | undefined {
+  if (message.third_party_event) return undefined;
+  if (typeof message.channel_id !== "string" || message.channel_id.length === 0 || message.channel_id === "system") return undefined;
+  return message.channel_id;
+}
+
+/**
+ * Message-check output keeps the channel-local context directly before the
+ * first concrete message for that channel. The context map is loaded once per
+ * channel and rendered once per channel, so a large batch cannot duplicate a
+ * channel's files into every message while a multi-channel batch still keeps
+ * each context bound to its own messages.
+ */
+export function formatMessagesWithChannelWorkspaceContexts(
+  messages: MessageLike[],
+  contexts?: ChannelWorkspaceContextMap,
+): string {
+  if (messages.length === 0 || !contexts || contexts.size === 0) return formatMessages(messages);
+  const renderedChannelIds = new Set<string>();
+  return messages
+    .map((message) => {
+      const channelId = channelContextId(message);
+      const entry = channelId ? contexts?.get(channelId) : undefined;
+      const line = formatMessageLine(message);
+      const shouldRenderContext = Boolean(entry && channelId && !renderedChannelIds.has(channelId));
+      if (shouldRenderContext && channelId) renderedChannelIds.add(channelId);
+      return shouldRenderContext && entry && channelId
+        ? `${formatChannelWorkspaceContextBlock(channelId, entry)}\n\n${line}`
+        : line;
+    })
+    .join("\n");
+}
+
 /**
  * `message check` hands over a bounded batch, oldest first per conversation;
  * the server reports how many conversations still have unread after it.
@@ -127,6 +164,7 @@ export interface HistoryMessage {
   task_assignee_name?: string | null;
   taskCurrentProjection?: TaskCurrentProjectionLike | null;
   threadId?: string | null;
+  channel_id?: string;
   replyCount?: number | null;
   [key: string]: unknown;
 }
@@ -150,7 +188,14 @@ function buildReplyTarget(channel: string, messageId: string | undefined): strin
   return `${channel}:${messageId.slice(0, 8)}`;
 }
 
-function formatHistoryMessageLine(channel: string, m: HistoryMessage, index: number, total: number): string {
+function formatHistoryMessageLine(
+  channel: string,
+  m: HistoryMessage,
+  index: number,
+  total: number,
+  contexts?: ChannelWorkspaceContextMap,
+  renderedChannelIds?: Set<string>,
+): string {
   const senderName = m.senderName ?? m.sender_name ?? "unknown";
   const senderDescription = m.senderDescription ?? m.sender_description ?? null;
   const messageId = m.id ?? m.message_id ?? "-";
@@ -175,7 +220,14 @@ function formatHistoryMessageLine(channel: string, m: HistoryMessage, index: num
     : "";
   const senderTimezone = typeof m.senderTimezone === "string" ? m.senderTimezone : typeof m.sender_timezone === "string" ? m.sender_timezone : null;
   const handle = formatSenderHandleText(senderName, senderDescription, senderTimezone);
-  return `[${headerParts.join(" ")}] ${handle}: ${indentAgentBodyContinuationLines(m.content ?? "")}${attachSuffix}${taskSuffix}${formatTaskCurrentProjection(m.taskCurrentProjection)}`;
+  const line = `[${headerParts.join(" ")}] ${handle}: ${indentAgentBodyContinuationLines(m.content ?? "")}${attachSuffix}${taskSuffix}${formatTaskCurrentProjection(m.taskCurrentProjection)}`;
+  const channelId = channelContextId(m);
+  const entry = channelId ? contexts?.get(channelId) : undefined;
+  const shouldRenderContext = Boolean(entry && channelId && !renderedChannelIds?.has(channelId));
+  if (shouldRenderContext && channelId) renderedChannelIds?.add(channelId);
+  return shouldRenderContext && entry && channelId
+    ? `${formatChannelWorkspaceContextBlock(channelId, entry)}\n\n${line}`
+    : line;
 }
 
 export interface HistoryData {
@@ -229,12 +281,13 @@ export const formatHistory = axSurface(
   channel: string,
   data: HistoryData,
   opts?: { around?: string; after?: string | number; before?: string | number; unread?: boolean; alreadyShownSeqs?: ReadonlySet<number> },
+  contexts?: ChannelWorkspaceContextMap,
 ): string => {
   const isThreadTarget = isThreadTargetRef(channel);
   const coverage = isThreadTarget
     ? "Coverage: this thread target only."
     : "Coverage: top-level messages in this target only; thread replies are excluded and must be read from their thread targets.";
-  if (opts?.unread) return formatUnreadWindow(channel, data, coverage, opts.alreadyShownSeqs);
+  if (opts?.unread) return formatUnreadWindow(channel, data, coverage, opts.alreadyShownSeqs, contexts);
   if (!data.messages || data.messages.length === 0) return (`${coverage}\n\nNo messages in this target.`);
 
   const messages = data.messages;
@@ -244,12 +297,13 @@ export const formatHistory = axSurface(
   const hasOlder = Boolean(data.has_older ?? (data.has_more && !opts?.after));
   const hasNewer = Boolean(data.has_newer ?? (data.has_more && Boolean(opts?.after)));
 
+  const renderedChannelIds = new Set<string>();
   const formatted = messages
     .map((m, index) => formatHistoryMessageLine(channel, {
       ...m,
       senderName: m.senderName ?? m.sender_name ?? "unknown",
       senderDescription: m.senderDescription ?? m.sender_description ?? null,
-    }, index, count))
+    }, index, count, contexts, renderedChannelIds))
     .join("\n");
 
   const headerLines = [
@@ -285,6 +339,7 @@ function formatUnreadWindow(
   data: HistoryData,
   coverage: string,
   alreadyShownSeqs: ReadonlySet<number> = new Set(),
+  contexts?: ChannelWorkspaceContextMap,
 ): string {
   const readThrough = data.unread_after_seq ?? data.last_read_seq ?? 0;
   const messages = data.messages ?? [];
@@ -313,12 +368,13 @@ function formatUnreadWindow(
     return `${coverage}\n\nNo new unread messages in ${channel}. ${foldNote}${footer ? `\n${footer}` : ""}`;
   }
   const count = shown.length;
+  const renderedChannelIds = new Set<string>();
   const formatted = shown
     .map((m, index) => formatHistoryMessageLine(channel, {
       ...m,
       senderName: m.senderName ?? m.sender_name ?? "unknown",
       senderDescription: m.senderDescription ?? m.sender_description ?? null,
-    }, index, count))
+    }, index, count, contexts, renderedChannelIds))
     .join("\n");
   const header = `Unread window: ${count} returned, seq ${seqRange(shown)}, oldest to newest, starting after your read position (seq ${readThrough}).`;
   // Rows newer than the read position were too recent to mark read (seq order

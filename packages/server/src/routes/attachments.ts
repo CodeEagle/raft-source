@@ -838,17 +838,38 @@ function verifyHtmlPreviewToken(
 function buildAuthenticatedAttachmentUrl(req: Request, pathSuffix = ""): URL {
   const serverUrl = process.env.SERVER_URL || `${req.protocol}://${req.get("host")}`;
   const url = new URL(`${serverUrl}/api/attachments/${req.params.id}${pathSuffix}`);
-  const authHeader = req.headers.authorization;
-  const queryToken = typeof req.query.token === "string" ? req.query.token : null;
-  if (authHeader?.startsWith("Bearer ")) {
-    url.searchParams.set("token", authHeader.slice(7));
-  } else if (queryToken) {
-    url.searchParams.set("token", queryToken);
-  }
+  const credentialToken = req.authenticatedCredential?.token;
+  if (credentialToken) url.searchParams.set("token", credentialToken);
   if (req.serverId) {
     url.searchParams.set("serverId", req.serverId);
   }
   return url;
+}
+
+/**
+ * Return the expiry carried by the authenticated user's access JWT, if the
+ * request used one to reach this route. Machine/computer credentials are not
+ * JWTs and must keep the streaming URL's expiry unset.
+ *
+ * Authentication has already verified the selected credential upstream. This
+ * helper reads the claims attached by that verification so URL metadata
+ * mirrors the token's own `exp` without decoding an unverified candidate,
+ * minting, extending, or exposing another token.
+ */
+function getUserAccessTokenExpiresAt(req: Request): string | null {
+  const credential = req.authenticatedCredential;
+  if (
+    !req.userId
+    || !credential
+    || credential.kind !== "user-access-jwt"
+    || credential.claims.sub !== req.userId
+    || typeof credential.claims.exp !== "number"
+    || !Number.isFinite(credential.claims.exp)
+  ) return null;
+
+  const expiresAt = new Date(credential.claims.exp * 1000);
+  if (!Number.isFinite(expiresAt.getTime())) return null;
+  return expiresAt.toISOString();
 }
 
 function buildHtmlPreviewUrl(req: Request, attachment: typeof attachments.$inferSelect): {
@@ -1180,31 +1201,32 @@ attachmentPublicRouter.post("/urls", async (req, res) => {
       return;
     }
 
+    const shouldUsePresignedUrl = Boolean(storage.getPresignedUrl)
+      && !shouldStreamAttachmentThroughServerForRequest(req);
+    const presignedExpiresAt = shouldUsePresignedUrl
+      ? new Date(Date.now() + ATTACHMENT_PRESIGNED_URL_TTL_SECONDS * 1000).toISOString()
+      : null;
+    const streamingExpiresAt = getUserAccessTokenExpiresAt(req);
     const results = await Promise.all(projections.map(async (projection) => {
       const attachment = await resolveReadableAttachmentForRequest(projection, req);
       // Denied entries are simply omitted; the caller learns nothing about them
       // beyond "no url", exactly as a per-attachment 403 would leave it.
       if (!attachment) return null;
-      if (storage.getPresignedUrl && !shouldStreamAttachmentThroughServerForRequest(req)) {
+      if (shouldUsePresignedUrl && storage.getPresignedUrl) {
         const expiresIn = ATTACHMENT_PRESIGNED_URL_TTL_SECONDS;
         const url = await storage.getPresignedUrl(attachment.storageKey, {
           expiresIn,
           responseContentDisposition: buildAttachmentInlinePreviewContentDisposition(attachment.filename, attachment.mimeType),
         });
-        // expiresAt is intentionally omitted: the caller treats a missing value
-        // as "no client-side expiry" and refetches on load failure, which keeps
-        // this route free of an ambient clock read.
-        return { id: attachment.id, url, expiresAt: null };
+        return { id: attachment.id, url, expiresAt: presignedExpiresAt };
       }
       const serverUrl = getAttachmentStreamingBaseUrl(req);
       const url = new URL(`${serverUrl}/api/attachments/${attachment.id}`);
-      const authHeader = req.headers.authorization;
-      const queryToken = typeof req.query.token === "string" ? req.query.token : null;
-      if (authHeader?.startsWith("Bearer ")) url.searchParams.set("token", authHeader.slice(7));
-      else if (queryToken) url.searchParams.set("token", queryToken);
+      const credentialToken = req.authenticatedCredential?.token;
+      if (credentialToken) url.searchParams.set("token", credentialToken);
       if (req.serverId) url.searchParams.set("serverId", req.serverId);
       url.searchParams.set("disposition", "inline");
-      return { id: attachment.id, url: url.toString(), expiresAt: null };
+      return { id: attachment.id, url: url.toString(), expiresAt: streamingExpiresAt };
     }));
 
     res.json({ urls: results.filter((r): r is NonNullable<typeof r> => r !== null) });
@@ -1254,22 +1276,14 @@ attachmentPublicRouter.get("/:id/url", async (req, res) => {
     }
 
     // Local storage fallback: build absolute URL to the streaming endpoint.
-    // `<img src>` / new-tab downloads cannot set headers, so embed both
-    // token and serverId as query params. `requireServerForFlex` accepts
-    // `serverId` from the query for exactly this path, and `requireFlexAuth`
-    // accepts the token from the query — so when the caller ITSELF reached
-    // this endpoint via `?token=...&serverId=...` (two-hop fresh-tab flow),
-    // propagate the query token rather than dropping it. Spotted by @Cody
-    // in PR #945 review.
+    // `<img src>` / new-tab downloads cannot set headers, so embed the
+    // authenticated credential and serverId as query params. Propagate the
+    // credential that actually passed `requireFlexAuth` so two-hop fresh-tab
+    // downloads do not resurrect a rejected candidate.
     const serverUrl = getAttachmentStreamingBaseUrl(req);
     const url = new URL(`${serverUrl}/api/attachments/${attachment.id}`);
-    const authHeader = req.headers.authorization;
-    const queryToken = typeof req.query.token === "string" ? req.query.token : null;
-    if (authHeader?.startsWith("Bearer ")) {
-      url.searchParams.set("token", authHeader.slice(7));
-    } else if (queryToken) {
-      url.searchParams.set("token", queryToken);
-    }
+    const credentialToken = req.authenticatedCredential?.token;
+    if (credentialToken) url.searchParams.set("token", credentialToken);
     if (req.serverId) {
       url.searchParams.set("serverId", req.serverId);
     }
@@ -1278,7 +1292,7 @@ attachmentPublicRouter.get("/:id/url", async (req, res) => {
     } else if (shouldUseInlinePreviewDisposition(req, attachment.filename, attachment.mimeType)) {
       url.searchParams.set("disposition", "inline");
     }
-    res.json({ url: url.toString(), expiresAt: null });
+    res.json({ url: url.toString(), expiresAt: getUserAccessTokenExpiresAt(req) });
   } catch (err) {
     sendJsonServerError(req, res, { error: "Failed to get attachment URL", logPrefix: "[Attachments] Failed to url attachment", err });
   }

@@ -10,7 +10,7 @@
  */
 import { Router, type Response, type Router as RouterType } from "express";
 import { isAgentRuntimeProviderKind, type AgentRuntimeProviderAvailabilityView } from "@botiverse/raft-shared";
-import { actorHasServerCapabilityInServer } from "../lib/actorPermissions";
+import { actorRoleHasServerCapability, getActorServerRoleInServer } from "../lib/actorPermissions";
 import { AgentRuntimeProviderError } from "../services/agentRuntimeProviderService";
 import { getAgentRuntimeProviderAvailability } from "../services/agentRuntimeProviderFeature";
 
@@ -35,7 +35,12 @@ agentRuntimeProviderRouter.get("/:kind", async (req, res, next) => {
       res.status(404).json({ error: "Unknown runtime provider", code: "agent_runtime_provider_unknown" });
       return;
     }
-    if (!await actorHasServerCapabilityInServer(req.serverId!, "user", req.userId!, "createAgents")) {
+    const callerRole = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+    // Members can create only a managed Agent on a Computer they attached.
+    // The provider probe is part of the hosted/external creation path and is
+    // intentionally owner/admin-only, even though members receive the shared
+    // createAgents capability for their managed path.
+    if (!callerRole || callerRole === "member" || !actorRoleHasServerCapability(callerRole, "createAgents")) {
       res.status(403).json({ error: "createAgents capability required", code: "agent_runtime_provider_forbidden" });
       return;
     }
