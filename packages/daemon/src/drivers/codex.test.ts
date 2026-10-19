@@ -2780,6 +2780,40 @@ test("Codex workspace lanes map conversation to read-only and worker to workspac
   }), /matching canonical path, revision, task id, and active writer lease/);
 });
 
+test("read-only conversations retain Raft network access on initial and follow-up turns", () => {
+  const driver = new CodexDriver();
+  const base: SpawnContext = {
+    agentId: "agent-1",
+    config: codexConfig as any,
+    standingPrompt: "SP1",
+    prompt: "dynamic",
+    workingDirectory: "/workspace/project",
+    slockCliPath: "/tmp/cli.js",
+    daemonApiKey: "token",
+  };
+  driver.buildThreadRequest({
+    ...base,
+    workspaceExecution: { lane: "conversation", sandbox: "read-only" },
+  });
+  const writes = captureCodexStdin(driver);
+  const internals = driver as any;
+  internals.pendingInitialPrompt = "read Raft inbox";
+  driver.parseLine(JSON.stringify({
+    method: "thread/started",
+    params: { thread: { id: "conversation-thread" } },
+  }));
+  const initial = parseOnlyJsonRpcWrite(writes);
+  assert.equal(initial.method, "turn/start");
+  assert.deepEqual(initial.params.sandboxPolicy, { type: "readOnly", networkAccess: true });
+  const followup = JSON.parse(driver.encodeStdinMessage("reply on Raft", null, { mode: "idle" })!);
+  assert.deepEqual(followup.params.sandboxPolicy, initial.params.sandboxPolicy);
+
+  // Reusing the driver for a normal launch must not leak a conversation override.
+  driver.buildThreadRequest(base);
+  const normal = JSON.parse(driver.encodeStdinMessage("normal turn", null, { mode: "idle" })!);
+  assert.equal(normal.params.sandboxPolicy, undefined);
+});
+
 test("codex driver reads nested error.message from app-server error notifications", () => {
   const driver = new CodexDriver();
   const events = driver.parseLine(JSON.stringify({
