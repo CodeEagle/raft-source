@@ -74,6 +74,7 @@ function makeConnection(opts: {
   minReconnectDelayMs?: number;
   proxyEnv?: NodeJS.ProcessEnv;
   clock?: Clock;
+  workspaceTaskUpdateRetryMs?: number;
   autoOpen?: boolean;
   tracer?: Tracer;
 } = {}): {
@@ -102,6 +103,7 @@ function makeConnection(opts: {
     minReconnectDelayMs: opts.minReconnectDelayMs ?? 1000,
     proxyEnv: opts.proxyEnv,
     clock: opts.clock,
+    workspaceTaskUpdateRetryMs: opts.workspaceTaskUpdateRetryMs,
     wsFactory: (url: string, options) => {
       currentWsUrl = url;
       currentWsOptions = options;
@@ -1381,6 +1383,107 @@ test("replays each agent's latest status and activity only after ready, in clien
       ["agent:status", "agent-1", "active", 4],
     ],
   );
+});
+
+test("retries an unacknowledged terminal workspace update and rejects later stale states", () => {
+  const clock = new FakeClock();
+  let conn!: DaemonConnection;
+  const fixture = makeConnection({
+    clock,
+    autoOpen: false,
+    inboundWatchdogMs: 100_000,
+    workspaceTaskUpdateRetryMs: 10,
+    onMessage: (msg) => {
+      if (msg.type === "agent:workspace:task:update:ack") conn.ackWorkspaceTaskUpdate(msg);
+    },
+  });
+  conn = fixture.conn;
+  const cancelled: MachineToServerMessage = {
+    type: "agent:workspace:task:update",
+    agentId: "agent-1",
+    runId: "run-1",
+    taskId: "task-1",
+    status: "cancelled",
+    leaseId: "lease-1",
+    detail: "cancel_requested",
+  };
+  const stale: MachineToServerMessage = {
+    ...cancelled,
+    status: "cancel_requested",
+  };
+
+  conn.send(cancelled);
+  conn.connect();
+  const ws = fixture.getWs();
+  ws.emit("open");
+  sendReady(conn);
+  assert.deepEqual(ws.sent.map((raw) => {
+    const parsed = JSON.parse(raw) as { type: string; status?: string };
+    return parsed.status ?? parsed.type;
+  }), ["ready", "cancelled"]);
+
+  // An out-of-order local callback cannot replace the terminal callback.
+  conn.send(stale);
+  assert.equal(ws.sent.length, 2);
+
+  // A lost callback is retried on the still-open socket.
+  clock.advanceBy(10);
+  assert.equal(ws.sent.length, 3);
+  assert.equal((JSON.parse(ws.sent.at(-1) ?? "{}") as { status?: string }).status, "cancelled");
+
+  ws.receiveMessage({
+    type: "agent:workspace:task:update:ack",
+    agentId: "agent-1",
+    runId: "run-1",
+    taskId: "task-1",
+    status: "cancelled",
+    applied: true,
+  });
+  clock.advanceBy(30);
+  assert.equal(ws.sent.length, 3, "ack should stop terminal retries");
+
+  // The terminal watermark also protects against a late callback after ack.
+  conn.send(stale);
+  assert.equal(ws.sent.length, 3);
+  conn.disconnect();
+});
+
+test("replays an unacknowledged terminal workspace update after reconnect", () => {
+  const clock = new FakeClock();
+  const fixture = makeConnection({
+    clock,
+    autoOpen: false,
+    inboundWatchdogMs: 100_000,
+    workspaceTaskUpdateRetryMs: 10,
+    minReconnectDelayMs: 10,
+  });
+  const { conn, getAllWs } = fixture;
+  const cancelled: MachineToServerMessage = {
+    type: "agent:workspace:task:update",
+    agentId: "agent-1",
+    runId: "run-reconnect",
+    taskId: "task-reconnect",
+    status: "cancelled",
+    leaseId: "lease-reconnect",
+  };
+
+  conn.connect();
+  const first = getAllWs()[0]!;
+  first.emit("open");
+  sendReady(conn);
+  conn.send(cancelled);
+  assert.equal(first.sent.length, 2);
+
+  first.serverClose(1006);
+  clock.advanceBy(10);
+  const second = getAllWs()[1]!;
+  second.emit("open");
+  sendReady(conn);
+  assert.deepEqual(second.sent.map((raw) => {
+    const parsed = JSON.parse(raw) as { type: string; status?: string };
+    return parsed.status ?? parsed.type;
+  }), ["ready", "cancelled"]);
+  conn.disconnect();
 });
 
 test("holds status again on a new socket until that socket's ready (RFC 069 §8)", async () => {

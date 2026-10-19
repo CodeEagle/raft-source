@@ -816,6 +816,20 @@ export type ServerToMachineMessage =
   | { type: "agent:workspace:task"; agentId: string; run: ChannelWorkspaceTaskRunDispatch }
   | { type: "agent:workspace:task:cancel"; agentId: string; run: ChannelWorkspaceTaskRunDispatch }
   /**
+   * Acknowledgement for a daemon workspace-run update. `status` is the
+   * server's authoritative status after applying (or deliberately ignoring)
+   * the update, so a daemon can stop retrying an already-converged terminal
+   * run without allowing a stale event to move it backwards.
+   */
+  | {
+      type: "agent:workspace:task:update:ack";
+      agentId: string;
+      runId: string;
+      taskId: string;
+      status: ChannelWorkspaceTaskRunStatus;
+      applied: boolean;
+    }
+  /**
    * Answer to a daemon `agent:wake:request` (task #1103). `dispatched` means
    * the Server issued its ordinary `agent:start` for this agent; `refused` is
    * terminal for this request and carries why, so the daemon can surface it
