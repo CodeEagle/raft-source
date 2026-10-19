@@ -290,3 +290,32 @@ test("a concrete message from a system sender still loads a real channel context
     expect(await readFile(path.join(channelDir, "AGENTS.md"), "utf8")).toContain("Channel instructions");
   });
 });
+
+test("an ordinary channel message delivered at runtime still creates its channel workspace", async () => {
+  await withPromptManager(true, async ({ manager, spawns }) => {
+    await manager.startAgent("agent-1", promptConfig({ description: "role" }));
+    expect(spawns).toHaveLength(1);
+    const message: AgentMessage = {
+      message_id: "plain-channel-message",
+      channel_id: "channel-plain",
+      channel_name: "general",
+      channel_type: "channel",
+      sender_id: "human-1",
+      sender_name: "bob",
+      sender_type: "human",
+      content: "plain channel message body",
+      timestamp: "2026-09-05T00:00:00.000Z",
+    };
+    // No thread_join_context: this is an ordinary channel delivery, which
+    // must still ensure the channel-local workspace exists.
+    const ap = (manager as any).agents.get("agent-1");
+    (manager as any).deliverInboxUpdateViaStdin("agent-1", ap, [message], "idle", "test_plain_channel_delivery");
+    const channelDir = path.join(
+      spawns[0].workingDirectory,
+      "channels",
+      channelWorkspaceDirectoryName("channel-plain"),
+    );
+    expect(await readFile(path.join(channelDir, "MEMORY.md"), "utf8")).toContain("Channel memory");
+    expect(await readFile(path.join(channelDir, "AGENTS.md"), "utf8")).toContain("Channel instructions");
+  });
+});
