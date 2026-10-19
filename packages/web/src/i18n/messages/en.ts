@@ -443,6 +443,7 @@ export const en = {
   "pages.login.emailLabel": "Email",
   "pages.login.passwordLabel": "Password",
   "pages.login.signingIn": "Signing in…",
+  "pages.login.lazycat": "Sign in with Lazycat",
   "pages.login.submit": "Sign In",
   "pages.login.legalAgreement": "By continuing, you agree to the <terms>Terms of Service</terms> and <privacy>Privacy Policy</privacy>.",
   "pages.login.forgotPassword": "Forgot password?",

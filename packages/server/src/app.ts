@@ -20,6 +20,7 @@ import {
   agentMigrationControlBodyErrorHandler,
 } from "./routes/agentMigrationControlRequestLimits";
 import { authRouter } from "./routes/auth";
+import { lazycatAuthRouter } from "./routes/lazycatAuth";
 import { agentLoginRouter } from "./routes/agentLogin";
 import { deviceAuthRouter } from "./routes/deviceAuth";
 import { appLoginRouter } from "./routes/appLogin";
@@ -352,6 +353,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   } else {
     console.warn("[device-login-disabled] SLOCK_DEVICE_LOGIN_ENABLED is explicitly off — Computer attach + device authorize are disabled");
   }
+  app.use("/api/auth/lazycat", authLimiter, lazycatAuthRouter);
   app.use("/api/auth", authLimiter, authRouter);
   app.get("/.well-known/openid-configuration", authLimiter, oidcDiscoveryHandler);
   app.use("/api/oauth", authLimiter, express.urlencoded({ extended: false }), oauthRouter);

@@ -138,6 +138,12 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
           </Button>
         </form>
 
+        <div className="mt-4 text-center">
+          <a href="/api/auth/lazycat/start" className="font-medium text-accent-strong hover:underline focus-visible:underline theme-brutal:text-brutal-pink">
+            {formatMessage({ id: "pages.login.lazycat" })}
+          </a>
+        </div>
+
         {enabledProviders.length > 0 && (
           <>
             <div className="my-4 flex items-center gap-3">
