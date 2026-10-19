@@ -40,3 +40,7 @@ scripts/app-name-ratchet-baseline.txt.mutating
 
 # vitest coverage reports (e.g. packages/sync-core test:coverage)
 coverage/
+
+# Machine-local state
+.pi/
+lazycat/.lzc-cli-cache/
