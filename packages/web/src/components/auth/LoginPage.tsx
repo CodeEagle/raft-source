@@ -24,7 +24,7 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
   const { formatMessage } = useIntl();
   const login = useAuthStore((s) => s.login);
   const loading = useAuthStore((s) => s.loading);
-  const { enabledProviders } = useAuthProviders();
+  const { enabledProviders, lazycatEnabled } = useAuthProviders();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -138,11 +138,11 @@ export default function LoginPage({ onSwitchToRegister, onForgotPassword }: Logi
           </Button>
         </form>
 
-        <div className="mt-4 text-center">
+        {lazycatEnabled && <div className="mt-4 text-center">
           <a href="/api/auth/lazycat/start" className="font-medium text-accent-strong hover:underline focus-visible:underline theme-brutal:text-brutal-pink">
             {formatMessage({ id: "pages.login.lazycat" })}
           </a>
-        </div>
+        </div>}
 
         {enabledProviders.length > 0 && (
           <>

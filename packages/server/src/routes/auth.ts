@@ -632,7 +632,7 @@ authRouter.get("/providers", async (req, res) => {
       enabled: await isSocialAuthProviderAvailable(provider, platform),
     })));
 
-  res.json({ providers });
+  res.json({ providers, lazycat: { enabled: req.app.locals.deployment?.target === "lazycat" } });
 });
 
 authRouter.get("/identities", requireAuth, async (req, res) => {

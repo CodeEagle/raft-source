@@ -2,6 +2,7 @@ import { getChannelConversionAudienceCutover, applyChannelConversionAudienceReal
 import { startChannelConversionWorker } from "./services/channelConversionWorker";
 import { emitChannelConversionCompletion, emitChannelConversionState, emitJointLimitStateChange } from "./routes/channels";
 import "dotenv/config";
+import { parseDeploymentConfig } from "./config/deployment";
 
 // Safety net: log unhandled rejections instead of crashing the process
 process.on("unhandledRejection", (reason, promise) => {
@@ -94,6 +95,8 @@ if (process.env.NODE_ENV === "production" && !isRisingWaveConfigured()) {
 }
 
 async function bootstrap() {
+  // Fail preflight before opening database connections or starting workers.
+  parseDeploymentConfig();
   // The shared Agent API contract schemas are built on first use (so a short
   // `raft` CLI call builds only its own route's). The server builds them all
   // here instead: a broken schema fails startup, not the first request to its

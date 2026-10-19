@@ -15,10 +15,8 @@ import { parseCookieHeader } from "../services/socialAuthService";
 export const lazycatAuthRouter: RouterType = Router();
 const STATE_COOKIE = "lzc_oidc_state";
 
-function callbackUrl(req: Request): string {
-  const origin = process.env.LAZYCAT_APP_DOMAIN
-    ? `https://${process.env.LAZYCAT_APP_DOMAIN}`
-    : `${req.protocol}://${req.get("host")}`;
+function callbackUrl(_req: Request): string {
+  const origin = new URL(process.env.APP_URL!).origin;
   return `${origin}/api/auth/lazycat/callback`;
 }
 
