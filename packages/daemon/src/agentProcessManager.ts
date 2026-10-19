@@ -4475,7 +4475,7 @@ export class AgentProcessManager {
           renderedStartupThreadContextMessages,
           driver,
           pendingInboxNotice,
-          this.loadChannelWorkspaceContexts(agentId, agentDataDir, renderedStartupThreadContextMessages),
+          this.loadChannelWorkspaceContexts(agentId, agentDataDir, startingInboxProjection.messages),
         );
         promptSource = "starting_thread_context";
       } else {
@@ -10709,13 +10709,11 @@ export class AgentProcessManager {
     const runtimeProjection = this.projectThreadJoinContextsForRuntimeInput(agentId, messages);
     const renderedContextMessageSet = new Set(runtimeProjection.renderedContextMessages);
     const pendingNoticeMessages = messages.filter((message) => !renderedContextMessageSet.has(message));
-    const channelWorkspaceContexts = runtimeProjection.renderedContextMessages.length > 0
-      ? this.loadChannelWorkspaceContexts(
-        agentId,
-        path.join(this.dataDir, agentId),
-        runtimeProjection.renderedContextMessages,
-      )
-      : new Map<string, ChannelWorkspaceContext>();
+    const channelWorkspaceContexts = this.loadChannelWorkspaceContexts(
+      agentId,
+      path.join(this.dataDir, agentId),
+      runtimeProjection.messages,
+    );
     const rows = projectAgentInboxSnapshot(messages);
     const senderElision = this.elideSeenSenders(agentId, ap, runtimeProjection.renderedContextMessages);
     const prompt = runtimeProjection.renderedContextMessages.length > 0
