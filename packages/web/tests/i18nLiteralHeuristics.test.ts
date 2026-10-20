@@ -24,7 +24,7 @@ test("looksEnglish rejects ids, paths, and technical tokens", () => {
   assert.equal(looksEnglish("/settings/profile"), false);
   assert.equal(looksEnglish("task_status_todo"), false);
   assert.equal(looksEnglish("AGENT_NOT_FOUND"), false);
-  assert.equal(looksEnglish("bg-brutal-lime"), false);
+  assert.equal(looksEnglish("bg-palette-lime"), false);
   assert.equal(looksEnglish("sign-in"), false);
   assert.equal(looksEnglish("online"), false);
   assert.equal(looksEnglish("void | Promise"), false);
@@ -58,7 +58,7 @@ test("looksLikeDisplayProse trims edges and accepts U+2026 display ellipsis labe
   assert.equal(looksLikeDisplayProse("  /settings/profile  "), false);
   assert.equal(looksLikeDisplayProse("  task_status_todo  "), false);
   assert.equal(looksLikeDisplayProse("  AGENT_NOT_FOUND  "), false);
-  assert.equal(looksLikeDisplayProse("bg-brutal-lime"), false);
+  assert.equal(looksLikeDisplayProse("bg-palette-lime"), false);
   assert.equal(looksLikeDisplayProse("sign-in"), false);
   assert.equal(looksLikeDisplayProse("AgentStatus"), false);
 });

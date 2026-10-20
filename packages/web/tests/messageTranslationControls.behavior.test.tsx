@@ -301,7 +301,9 @@ test("MessageItem thread badge opens the first unread reply and keeps unread plu
   assert.match(badge.textContent ?? "", /draft/);
   // The unread state rides the RUI Badge soft/information recipe now.
   assert.equal(badge.getAttribute("data-slot"), "badge");
-  assert.match(badge.className, /\bbg-info-muted\b/);
+  assert.equal(badge.getAttribute("data-appearance"), "soft");
+  assert.equal(badge.getAttribute("data-variant"), "information");
+  assert.match(badge.className, /(?:^| )bg-info-soft(?: |$)/);
   assert.equal(screen.getAllByTestId("message-thread-replies-badge").length, 1);
   fireEvent.click(badge);
 

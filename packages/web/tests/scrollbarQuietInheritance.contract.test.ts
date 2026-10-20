@@ -18,7 +18,7 @@ import { test } from "vitest";
 const css = readFileSync(resolve(import.meta.dirname, "../src/index.css"), "utf8");
 
 test("the hover rule changes scrollbar-color only behind an inheritance stop", () => {
-  const stop = css.search(/\.scrollbar-quiet\s*>\s*\*\s*\{\s*scrollbar-color:\s*rgba\([^)]*\)\s+transparent;\s*\}/);
+  const stop = css.search(/\.scrollbar-quiet\s*>\s*\*\s*\{\s*scrollbar-color:\s*[^;{}]+\s+transparent;\s*\}/);
   const base = css.search(/\n\s*\.scrollbar-quiet\s*\{/);
   const hover = css.search(/\.scrollbar-quiet:hover\s*\{\s*scrollbar-color:/);
   assert.ok(hover >= 0, "the hover darkening still exists (design intent)");
@@ -29,7 +29,7 @@ test("the hover rule changes scrollbar-color only behind an inheritance stop", (
 test("the stop uses the same resting color as the scroller (no visual change at rest)", () => {
   const color = (re: RegExp) => (css.match(re) ?? [])[1];
   assert.equal(
-    color(/\.scrollbar-quiet\s*>\s*\*\s*\{\s*scrollbar-color:\s*(rgba\([^)]*\))/),
-    color(/\n\s*\.scrollbar-quiet\s*\{\s*scrollbar-color:\s*(rgba\([^)]*\))/),
+    color(/\.scrollbar-quiet\s*>\s*\*\s*\{\s*scrollbar-color:\s*([^;{}]+?)\s+transparent;/),
+    color(/\n\s*\.scrollbar-quiet\s*\{\s*scrollbar-color:\s*([^;{}]+?)\s+transparent;/),
   );
 });

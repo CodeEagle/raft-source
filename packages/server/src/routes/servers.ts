@@ -1,3 +1,5 @@
+import { setRequestTraceComputerTarget } from "../middleware/requestObservability";
+import { markAgentArchiveWorkspaceDeleted } from "../services/agentArchiveService";
 import { Router, type Request, type RequestHandler, type Router as RouterType } from "express";
 import { kickAppNotificationDelivery } from "../services/appNotificationDeliveryService";
 import multer from "multer";
@@ -16,6 +18,7 @@ import { countAgents, countMachines, countChannels, getHistoryCutoff, HumanSeatL
 import type { AgentOrchestrator } from "../services/agentOrchestrator";
 import { planMentionRedriveHttpStatus } from "../services/agentOrchestrator";
 import { buildMachineReadModel } from "../services/machineReadModel";
+import { sameMachineGroupsForServer } from "../services/computerHostIdentityService";
 import {
   getComputerLinkedMachineAttachers,
   getComputerLinkedMachineCreators,
@@ -48,6 +51,7 @@ import {
   type ServerSetupAction,
 } from "../services/serverSetupStateService";
 import { hasServerCompletedSetupForProjection } from "../services/serverSetupCompletionService";
+import { ensureHostedCindy } from "../services/hostedCindyService";
 import { handleMachineLocalRouting, sendMachineAffinityUnavailable } from "../machineLocalReplay";
 import {
   isRemoteUpgradeSupported, asMachineId, COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY, COMPUTER_CAPABILITY_SUPERVISOR_MUTATIONS, currentDate, INVALID_EMAIL_MESSAGE, PUBLIC_SERVER_FEATURE_FLAG_KEY, RUNTIME_ACCOUNT_USAGE_PROVIDERS, SERVER_GUEST_FEATURE_FLAG_KEY, SERVER_SYSTEM_NOTIFICATIONS_CONTRACT_VERSION, systemAttentionReceiptInputSchema, validateEmailAddress, validateNewServerSlug, type RuntimeAccountUsageProvider, type ServerCapability, type ServerModelLabelCatalog, type ServerPlan, type ServerRole } from "@botiverse/raft-shared";
@@ -57,11 +61,13 @@ import { actorHasServerCapabilityInServer, actorRoleHasServerCapability, getActo
 import { FencedAuthorizationDeniedError, ServerMembershipRevokedError, withActorMembershipFence } from "../lib/actorMembershipFence";
 import { createScopeAttestation } from "../lib/scopeAttestation";
 import { getDb, type DatabaseExecutor } from "../db/index";
+import { backfillServerChannelPublicIds } from "../services/publicIdBackfill";
 import { agents as agentsTable, channelAgents, channelHumans, channels, computerLifecycleOperations, computers as computersTable, machines as machinesTable, servers } from "../db/schema";
 import { requireServerMatchesParam } from "../middleware/auth";
-import { addTraceEvent, createTraceDbQueryTracer, errorClassOf, tracePhase } from "../tracing/semanticTrace";
+import { addTraceEvent, createTraceDbQueryTracer, errorClassOf, recordTraceEvent, tracePhase } from "../tracing/semanticTrace";
 import { traceRouteFailure } from "../tracing/routeFailure";
 import { respondToRisingWaveOverload, sendJsonServerError } from "./errorResponse";
+import { readWithStaleOnOverload, resolveSoftTimeoutMs, STALE_RESPONSE_HEADER } from "./rwStaleRead";
 import type { DbQueryTracer } from "../tracing/dbQueryTrace";
 import {
   createAvatarUpload,
@@ -86,8 +92,9 @@ import {
   setRuntimeFormCopyHeaders,
 } from "../services/runtimeFormV2Copy";
 import { BuiltInModelCatalogError } from "../services/builtinModelCatalogCompatibility";
-import { evaluateFeatureFlag, REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY } from "../services/featureFlagService";
+import { evaluateFeatureFlag, evaluateFeatureFlags, REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY } from "../services/featureFlagService";
 import {
+  computerUpgradeRequestTraceAttrs,
   createComputerUpgradeRequest,
   failUndeliveredComputerUpgradeRequest,
   listLatestComputerUpgradeRequests,
@@ -785,7 +792,22 @@ function hydrateSidebarPinnedResponse(
 serverRouter.get("/", async (req, res) => {
   try {
     const servers = await serverService.getOrderedUserServers(req.userId!);
-    res.json(servers);
+    // Members see whether the server's public page is live, so the app can
+    // mark it (cindyz, #wg-rbac:cbca4ee7). Live = the owner made it public AND
+    // the rollout gate is on for it, evaluated exactly as the anonymous public
+    // route does (server + web, no user), so the mark can never disagree with
+    // what a logged-out visitor gets. One batch evaluation for all public
+    // servers (fixed query count). The owner-only `publiclyVisible` itself is
+    // not sent. (Ark, #wg-rbac:cbca4ee7.)
+    const publicIds = servers.filter((server) => server.publiclyVisible).map((server) => server.id);
+    const gates = publicIds.length > 0
+      ? await evaluateFeatureFlags(publicIds.map((serverId) => ({ key: PUBLIC_SERVER_FEATURE_FLAG_KEY, serverId, platform: "web" as const })))
+      : [];
+    const live = new Set(publicIds.filter((_, index) => gates[index]?.enabled === true));
+    res.json(servers.map(({ publiclyVisible: _publiclyVisible, ...server }) => ({
+      ...server,
+      publicPageLive: live.has(server.id),
+    })));
   } catch {
     res.status(500).json({ error: "Failed to list servers" });
   }
@@ -827,69 +849,81 @@ serverRouter.patch("/order", async (req, res) => {
 serverRouter.get("/unread-summary", async (req, res) => {
   try {
     addTraceEvent("unread_summary.load.started");
-    const memberships = await tracePhase(
-      () => serverService.getUserServers(req.userId!, {
-        traceQuery: createTraceDbQueryTracer("server_memberships.loaded"),
-      }),
-      (_durationMs, result) => ({
-        name: "server_memberships.loaded",
-        attrs: {
-          servers_count: result.length,
-        },
-      }),
-    );
-    const summaryInputs = memberships.map((membership) => {
-      const historyCutoff = getHistoryCutoff((membership.plan ?? "free") as ServerPlan);
-      return {
-        serverId: membership.id,
-        historyCutoff,
-      };
-    });
-    const unreadCounts = await tracePhase(
-      () => channelService.getSidebarUnreadSummaryCounts(memberships.map((membership) => membership.id), req.userId!, {
-        traceQuery: createTraceDbQueryTracer("unread_summary.loaded"),
-      }),
-      (_durationMs, result) => {
-        const counts = Object.values(result);
-        return {
-          name: "unread_summary.loaded",
-          attrs: {
-            servers_count: memberships.length,
-            servers_with_unread_count: counts.filter((count) => count > 0).length,
-            total_unread_count: counts.reduce((sum, count) => sum + count, 0),
+    const { value: summary, stale, staleReason, traceAttrs: staleTraceAttrs } = await readWithStaleOnOverload({
+      surface: "servers_unread_summary",
+      userId: req.userId!,
+      scope: "all",
+      softTimeoutMs: resolveSoftTimeoutMs(),
+      load: async () => {
+        const memberships = await tracePhase(
+          () => serverService.getUserServers(req.userId!, {
+            traceQuery: createTraceDbQueryTracer("server_memberships.loaded"),
+          }),
+          (_durationMs, result) => ({
+            name: "server_memberships.loaded",
+            attrs: {
+              servers_count: result.length,
+            },
+          }),
+        );
+        const summaryInputs = memberships.map((membership) => {
+          const historyCutoff = getHistoryCutoff((membership.plan ?? "free") as ServerPlan);
+          return {
+            serverId: membership.id,
+            historyCutoff,
+          };
+        });
+        const unreadCounts = await tracePhase(
+          () => channelService.getSidebarUnreadSummaryCounts(memberships.map((membership) => membership.id), req.userId!, {
+            traceQuery: createTraceDbQueryTracer("unread_summary.loaded"),
+          }),
+          (_durationMs, result) => {
+            const counts = Object.values(result);
+            return {
+              name: "unread_summary.loaded",
+              attrs: {
+                servers_count: memberships.length,
+                servers_with_unread_count: counts.filter((count) => count > 0).length,
+                total_unread_count: counts.reduce((sum, count) => sum + count, 0),
+              },
+            };
           },
-        };
+        );
+        // task #235: per-server Activity unread — see activityUnreadSummaryService
+        // for the authority/fail-closed contract. The batch loader gets this
+        // phase's db tracer so the ONE set-based statement stays visible in the
+        // request trace like the other summary queries.
+        const activityUnreadByServer = await tracePhase(
+          () => computeActivityUnreadCounts(summaryInputs, req.userId!, (inputs, userId) =>
+            channelService.getActivityUnreadTotalsBatch(inputs, userId, {
+              traceQuery: createTraceDbQueryTracer("activity_unread_summary.loaded"),
+            })),
+          (_durationMs, counts) => ({
+            name: "activity_unread_summary.loaded",
+            attrs: {
+              servers_count: summaryInputs.length,
+              computed_count: counts.size,
+              failed_count: summaryInputs.length - counts.size,
+            },
+          }),
+        );
+        const summary = memberships.map((membership) => {
+          const activityUnreadCount = activityUnreadByServer.get(membership.id);
+          return {
+            serverId: membership.id,
+            unreadCount: unreadCounts[membership.id] ?? 0,
+            serverPushMuted: !!membership.serverPushMuted,
+            // Attached only when known — the wire distinguishes 0 from absent.
+            ...(activityUnreadCount !== undefined ? { activityUnreadCount } : {}),
+          };
+        });
+        return summary;
       },
-    );
-    // task #235: per-server Activity unread — see activityUnreadSummaryService
-    // for the authority/fail-closed contract. The batch loader gets this
-    // phase's db tracer so the ONE set-based statement stays visible in the
-    // request trace like the other summary queries.
-    const activityUnreadByServer = await tracePhase(
-      () => computeActivityUnreadCounts(summaryInputs, req.userId!, (inputs, userId) =>
-        channelService.getActivityUnreadTotalsBatch(inputs, userId, {
-          traceQuery: createTraceDbQueryTracer("activity_unread_summary.loaded"),
-        })),
-      (_durationMs, counts) => ({
-        name: "activity_unread_summary.loaded",
-        attrs: {
-          servers_count: summaryInputs.length,
-          computed_count: counts.size,
-          failed_count: summaryInputs.length - counts.size,
-        },
-      }),
-    );
-    const summary = memberships.map((membership) => {
-      const activityUnreadCount = activityUnreadByServer.get(membership.id);
-      return {
-        serverId: membership.id,
-        unreadCount: unreadCounts[membership.id] ?? 0,
-        serverPushMuted: !!membership.serverPushMuted,
-        // Attached only when known — the wire distinguishes 0 from absent.
-        ...(activityUnreadCount !== undefined ? { activityUnreadCount } : {}),
-      };
     });
+    if (stale) res.setHeader(STALE_RESPONSE_HEADER, staleReason ?? "rw_overloaded");
     addTraceEvent("response.ready", {
+      ...staleTraceAttrs,
+      stale_served: stale,
       servers_count: summary.length,
       servers_with_unread_count: summary.filter((item) => item.unreadCount > 0).length,
       total_unread_count: summary.reduce((sum, item) => sum + item.unreadCount, 0),
@@ -915,6 +949,9 @@ serverRouter.post("/", async (req, res) => {
       return;
     }
     const server = await serverService.createServer(name, slug, req.userId!);
+    // antiproton_cindy: the onboarding agent is a hosted Cindy, created right after the
+    // server commits (no computer needed). Best effort; the setup projection backstops it.
+    await ensureHostedCindy({ serverId: server.id, ownerUserId: req.userId!, site: "server_create" });
     res.json(server);
   } catch (err: any) {
     const msg = err?.message || "";
@@ -1330,6 +1367,12 @@ serverRouter.get("/:id/onboarding-settings", async (req, res) => {
 serverRouter.get("/:id/setup-projection", async (req, res) => {
   const actor = { type: "user" as const, id: req.userId! };
   const orchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
+  // Backstop: a server that committed without its hosted Cindy gets one when its owner
+  // loads setup. Idempotent; a no-op unless antiproton_cindy is on and none exists.
+  const ownerServer = await serverService.getServer(req.params.id);
+  if (ownerServer && ownerServer.ownerId === req.userId && !ownerServer.onboardingAgentId) {
+    await ensureHostedCindy({ serverId: ownerServer.id, ownerUserId: ownerServer.ownerId, site: "setup_backstop" });
+  }
   const projection = await routeServerSetupStateService(orchestrator).resolveServerSetup({
     serverId: req.params.id,
     actor,
@@ -2267,7 +2310,18 @@ serverRouter.patch("/:id/sidebar-order", async (req, res) => {
       res.status(404).json({ error: "Member not found" });
       return;
     }
-    const responseOrder = hydrateSidebarPinnedResponse(sidebarOrder, allowedIds);
+    // PATCH is authoritative to the Web store in the same way GET is. Re-read
+    // through the sanitized projection so ids deleted since they were stored
+    // cannot be reintroduced by a sparse update response.
+    const sanitizedSidebarOrder = await serverService.getSanitizedMemberSidebarOrder(
+      req.params.id,
+      req.userId!,
+    );
+    if (!sanitizedSidebarOrder) {
+      res.status(404).json({ error: "Member not found" });
+      return;
+    }
+    const responseOrder = hydrateSidebarPinnedResponse(sanitizedSidebarOrder, allowedIds);
     if (currentPinnedOrder && responseOrder.pinnedVersion !== currentPinnedOrder.pinnedVersion) {
       emitPinnedUpdated(req, responseOrder);
     }
@@ -2760,6 +2814,10 @@ serverRouter.get("/:id/machines", async (req, res) => {
     const agentCountsByMachine = await machineService.countActiveAgentsByMachine(req.params.id, {
       traceQuery: createTraceDbQueryTracer("machines.agent_counts.loaded"),
     });
+    // Same-machine grouping for everyone who may list these Computers
+    // (viewMachines); null while computer_host_identity_v0 is off, and then
+    // the field is left out entirely.
+    const sameMachineGroups = await sameMachineGroupsForServer(req.params.id, machines.map((m) => m.id)).catch(() => null);
     const enriched = await tracePhase(
       () => Promise.all(
         machines.map(async (m) => {
@@ -2771,6 +2829,7 @@ serverRouter.get("/:id/machines", async (req, res) => {
           return {
             ...readModel,
             creator: computerLinkedMachineCreators.get(m.id) ?? null,
+            ...(sameMachineGroups ? { sameMachineGroup: sameMachineGroups.get(m.id) ?? null } : {}),
           };
         }),
       ),
@@ -3112,6 +3171,16 @@ serverRouter.post("/:id/machines/:machineId/rotate-key", async (req, res) => {
   }
 });
 
+// Telemetry only: a missing or failing lookup costs the attribute, never the
+// upgrade request.
+function traceOsVariant(agentOrchestrator: AgentOrchestrator, machineId: string): string {
+  try {
+    return agentOrchestrator.getMachineOsVariant?.(machineId) ?? "";
+  } catch {
+    return "";
+  }
+}
+
 // Remote restart / upgrade of a managed Computer (admin/owner only).
 // Relays a command over the machine's live WS to the Computer service IPC
 // (restart → restart-service, upgrade → upgrade-start). Only valid for a
@@ -3254,9 +3323,10 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
         });
         return;
       }
+      const platform = normalizeComputerPlatform(machine.os);
       const decision = await computerBroadcastPolicyEvaluator(req.app)({
         source: sourceFact,
-        platform: normalizeComputerPlatform(machine.os),
+        platform,
         requestedTargetVersion,
         now: new Date(agentOrchestrator.getCurrentTimeMs()),
         serverId: req.params.id,
@@ -3303,7 +3373,11 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
       if (created) {
         const { sent } = await agentOrchestrator.sendComputerUpgrade(machine.id, row.targetVersion, row.id);
         if (!sent) {
-          await failUndeliveredComputerUpgradeRequest(row.id, new Date(agentOrchestrator.getCurrentTimeMs()));
+          const failed = await failUndeliveredComputerUpgradeRequest(row.id, new Date(agentOrchestrator.getCurrentTimeMs()));
+          recordTraceEvent("server.computer.upgrade_request.undelivered", {
+            ...(failed ? computerUpgradeRequestTraceAttrs(failed) : { request_id: row.id, server_id: req.params.id, machine_id: machine.id }),
+            source_version: sourceFact?.version ?? "",
+          });
           res.status(409).json({ error: "Computer is not online", code: "computer_offline" });
           return;
         }
@@ -3313,6 +3387,9 @@ serverRouter.post("/:id/machines/:machineId/computer/:action", async (req, res) 
         server_id: req.params.id,
         machine_id: machine.id,
         target_version: row.targetVersion,
+        source_version: sourceFact?.version ?? "",
+        platform: platform ? `${platform.os}-${platform.architecture}` : "",
+        os_variant: traceOsVariant(agentOrchestrator, machine.id),
         created,
       });
       res.status(created ? 201 : 200).json({ upgradeRequest: projectComputerUpgradeRequest(row) });
@@ -3925,6 +4002,13 @@ const handleRuntimeFormOptionSource = (protocol: 1 | 2): RequestHandler<{ id: st
       res.status(403).json({ error: "The `editMachines` capability or machine creator authority is required to inspect runtime form option sources" });
       return;
     }
+    setRequestTraceComputerTarget(res, {
+      machineId: machine.id,
+      computerVersion: machine.computerVersion,
+      daemonVersion: machine.daemonVersion,
+      runtime: req.params.runtimeId,
+      sourceId: req.params.sourceId,
+    });
     // Option values are the same on both protocols; v1 serves them only for the
     // runtimes that have a v1 form.
     const v1 = protocol === 1 ? runtimeFormV1Entry(req.params.runtimeId) : null;
@@ -3963,6 +4047,7 @@ const handleRuntimeFormOptionSource = (protocol: 1 | 2): RequestHandler<{ id: st
       connectionsVisible,
       // A client's retry of a non-live source (`option_source.status`), v2 only.
       refresh: protocol === 2 && req.query.refresh === "1",
+      sourceStatus: protocol === 2,
       agentOrchestrator,
       routeToComputer: () => handleMachineLocalRouting(
         req,
@@ -4122,6 +4207,12 @@ serverRouter.get("/:id/machines/:machineId/runtime-models/:runtime", async (req,
       return;
     }
     observedDaemonVersion = machine.daemonVersion;
+    setRequestTraceComputerTarget(res, {
+      machineId: machine.id,
+      computerVersion: machine.computerVersion,
+      daemonVersion: machine.daemonVersion,
+      runtime: req.params.runtime,
+    });
 
     const agentOrchestrator = req.app.get("agentOrchestrator") as AgentOrchestrator;
 
@@ -4509,6 +4600,8 @@ serverRouter.delete("/:id/machines/:machineId/workspaces/:directoryName", async 
       res.status(500).json({ error: "Failed to delete workspace directory" });
       return;
     }
+    // An archived agent's record now says its workspace is gone.
+    await markAgentArchiveWorkspaceDeleted(req.params.directoryName, req.params.machineId);
     res.json({ ok: true });
   } catch (err: any) {
     sendJsonServerError(req, res, {
@@ -4552,6 +4645,7 @@ serverRouter.get("/:id/public-visibility", async (req, res) => {
       .select({
         publiclyVisible: servers.publiclyVisible,
         publicGuestJoinEnabled: servers.publicGuestJoinEnabled,
+        publicSearchEnabled: servers.publicSearchEnabled,
         slug: servers.slug,
       })
       .from(servers)
@@ -4575,6 +4669,7 @@ serverRouter.get("/:id/public-visibility", async (req, res) => {
     res.json({
       publiclyVisible: server.publiclyVisible,
       publicGuestJoinEnabled: server.publicGuestJoinEnabled,
+      publicSearchEnabled: server.publicSearchEnabled,
       slug: server.slug,
       exposedChannels: exposed,
     });
@@ -4605,18 +4700,27 @@ serverRouter.patch("/:id/public-visibility", async (req, res) => {
       res.status(400).json({ error: "publiclyVisible must be a boolean" });
       return;
     }
-    const [updated] = await getDb()
-      .update(servers)
-      .set({
-        publiclyVisible,
-        ...(publiclyVisible ? {} : { publicGuestJoinEnabled: false }),
-        updatedAt: new Date(),
-      })
-      .where(eq(servers.id, req.params.id))
-      .returning({
-        publiclyVisible: servers.publiclyVisible,
-        publicGuestJoinEnabled: servers.publicGuestJoinEnabled,
-      });
+    const [updated] = await getDb().transaction(async (tx) => {
+      const result = await tx
+        .update(servers)
+        .set({
+          publiclyVisible,
+          ...(publiclyVisible ? {} : { publicGuestJoinEnabled: false }),
+          updatedAt: new Date(),
+        })
+        .where(eq(servers.id, req.params.id))
+        .returning({
+          publiclyVisible: servers.publiclyVisible,
+          publicGuestJoinEnabled: servers.publicGuestJoinEnabled,
+          publicSearchEnabled: servers.publicSearchEnabled,
+        });
+      // Public server SEO: channels and threads created before public ids
+      // existed have none, and a row without one is never indexable. Fill
+      // them when the server goes public, in the same transaction, so a
+      // public server never has unaddressable content.
+      if (result[0]?.publiclyVisible) await backfillServerChannelPublicIds(tx, req.params.id);
+      return result;
+    });
     if (!updated) {
       res.status(404).json({ error: "Server not found" });
       return;
@@ -4624,6 +4728,57 @@ serverRouter.patch("/:id/public-visibility", async (req, res) => {
     res.json(updated);
   } catch {
     res.status(500).json({ error: "Failed to update public visibility" });
+  }
+});
+
+// Public server SEO — the owner's "Allow search" switch. Owner only, like
+// public visibility, and only meaningful while the server is public: it never
+// makes anything readable, it only decides whether readable content may be
+// indexed on raft.build (routes/publicSearch.ts).
+serverRouter.patch("/:id/public-search", async (req, res) => {
+  try {
+    const callerRole = await getActorServerRoleInServer(req.params.id, "user", req.userId!);
+    if (callerRole !== "owner") {
+      res.status(403).json({ error: "Only the server owner can manage public search" });
+      return;
+    }
+    const gate = await evaluateFeatureFlag({
+      key: PUBLIC_SERVER_FEATURE_FLAG_KEY,
+      serverId: req.params.id,
+      userId: req.userId!,
+      platform: "web",
+    });
+    if (!gate.enabled) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const { publicSearchEnabled } = req.body ?? {};
+    if (typeof publicSearchEnabled !== "boolean") {
+      res.status(400).json({ error: "publicSearchEnabled must be a boolean" });
+      return;
+    }
+    // The role read above is only an early answer. The write re-authorizes
+    // under a share lock on the caller's membership row, so an owner demoted
+    // or removed concurrently either waits for this write or makes it fail.
+    const [updated] = await withActorMembershipFence(req.params.id, req.userId!, async (tx, lockedRole) => {
+      if (lockedRole !== "owner") throw new FencedAuthorizationDeniedError("forbidden");
+      return tx
+        .update(servers)
+        .set({ publicSearchEnabled, updatedAt: new Date() })
+        .where(eq(servers.id, req.params.id))
+        .returning({ publicSearchEnabled: servers.publicSearchEnabled });
+    });
+    if (!updated) {
+      res.status(404).json({ error: "Server not found" });
+      return;
+    }
+    res.json(updated);
+  } catch (error) {
+    if (error instanceof ServerMembershipRevokedError || error instanceof FencedAuthorizationDeniedError) {
+      res.status(403).json({ error: "Only the server owner can manage public search" });
+      return;
+    }
+    res.status(500).json({ error: "Failed to update public search" });
   }
 });
 

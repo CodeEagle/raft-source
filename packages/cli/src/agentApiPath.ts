@@ -1,3 +1,15 @@
+import type {
+  AgentApiClientFailure,
+  AgentApiClientResult,
+  AgentApiRawFailure,
+  AgentApiRawResult,
+  AgentApiRawTransport,
+  AgentApiRequestBodyByRoute,
+  AgentApiRequestParamsByRoute,
+  AgentApiRequestQueryByRoute,
+  AgentApiResponseByRoute,
+  AgentApiRouteKey,
+} from "@botiverse/raft-shared";
 import {
   buildAgentApiRawRoutePath,
   buildLegacyAgentApiPath,
@@ -7,17 +19,7 @@ import {
   getAgentApiResponseKind,
   parseAgentApiResponse,
   requestAgentApiRawRoute,
-  type AgentApiClientFailure,
-  type AgentApiClientResult,
-  type AgentApiRawFailure,
-  type AgentApiRawResult,
-  type AgentApiRawTransport,
-  type AgentApiRequestBodyByRoute,
-  type AgentApiRequestParamsByRoute,
-  type AgentApiRequestQueryByRoute,
-  type AgentApiResponseByRoute,
-  type AgentApiRouteKey,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import type { ApiResponse, BinaryResponse } from "./client";
 import { apiFailureError } from "./core/apiFailure";

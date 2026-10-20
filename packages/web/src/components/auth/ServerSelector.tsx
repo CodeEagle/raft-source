@@ -7,7 +7,7 @@ import type { Server } from "../../store/serverStore";
 import { useAuthStore } from "../../store/authStore";
 import Banner from "../ui/Banner";
 import TextLink from "../ui/TextLink";
-import { Input, Button } from "raft-ui";
+import { Input, Button, ListRowGroup } from "@botiverse/raft-ui";
 import CenteredCardFrame from "./CenteredCardFrame";
 import { AuthPageIntro } from "./AuthPageFrame";
 import FormField from "../ui/FormField";
@@ -135,25 +135,27 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
         >
           <>
             <div>
-              <div className="font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-foreground-muted theme-brutal:text-black/50">
+              {/* The onboarding step label (DS ScreenOnboarding): Space Mono 12.
+                  Its copy is a sentence, not a "Step 1 of 3" count, so it keeps
+                  sentence case, not all caps. */}
+              <div className="font-mono text-mono-meta text-foreground-hint">
                 {title}
               </div>
-              <h1 className="mt-2 text-2xl font-bold leading-tight text-foreground-strong theme-brutal:text-black">
+              <h1 className="mt-2 text-title text-foreground sm:text-display">
                 {formatMessage({ id: "pages.serverSelector.nameTheServer" })}
               </h1>
-              <p className="mt-2 text-sm leading-5 text-foreground-muted theme-brutal:text-black/65">
+              <p className="mt-3 text-subhead text-foreground-muted">
                 {formatMessage({ id: "pages.serverSelector.serverIsWorkspace" })}
               </p>
             </div>
             <form onSubmit={handleCreate} className="flex flex-col gap-3">
               {error && (
-                <Banner intent="warning" className="font-bold">
+                <Banner intent="warning">
                   {error}
                 </Banner>
               )}
               <FormField
                 label={formatMessage({ id: "pages.serverSelector.serverNameLabel" })}
-                labelStyle="plain"
                 hint={formatMessage({ id: "pages.serverSelector.serverNameHelp" })}
                 htmlFor="server-create-name"
               >
@@ -169,7 +171,6 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
               </FormField>
               <FormField
                 label={formatMessage({ id: "pages.serverSelector.serverUrlLabel" })}
-                labelStyle="plain"
                 hint={formatMessage({ id: "pages.serverSelector.serverUrlHelp" })}
                 htmlFor="server-create-slug"
               >
@@ -187,7 +188,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                   to go back to. */}
               <Button
                 type="submit"
-                size="lg"
+                size="xl"
                 variant="accent"
                 className="w-full"
               >
@@ -211,11 +212,11 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
 
           <form onSubmit={handleCreate} className="space-y-3">
             {error && (
-              <Banner intent="warning" className="font-bold">
+              <Banner intent="warning">
                 {error}
               </Banner>
             )}
-            <FormField label={formatMessage({ id: "pages.serverSelector.serverNameLabel" })} labelStyle="plain">
+            <FormField label={formatMessage({ id: "pages.serverSelector.serverNameLabel" })}>
               <Input
                 type="text"
                 value={name}
@@ -225,7 +226,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
                 required
               />
             </FormField>
-            <FormField label={formatMessage({ id: "pages.serverSelector.urlSlugLabel" })} labelStyle="plain">
+            <FormField label={formatMessage({ id: "pages.serverSelector.urlSlugLabel" })}>
               <SlugInput
                 type="text"
                 value={slug}
@@ -238,7 +239,7 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
               {hasServers && (
                 <Button
                   type="button"
-                  variant="outline"
+                  variant="ghost"
                   size="lg"
                   className="flex-1"
                   onClick={handleCancelCreate}
@@ -272,32 +273,33 @@ export default function ServerSelector({ onSelect }: ServerSelectorProps) {
         />
 
         {servers.length > 0 && (
-          <div
+          // DS ListRow › `rf-list--inset`: one card holding the servers.
+          <ListRowGroup
             data-testid="server-selector-list"
-            className="mb-6 space-y-2"
+            className="mb-6"
           >
             {servers.map((server) => (
               <ServerOptionCard key={server.id} server={server} switchPending={switchPending} onSelect={handleSelect} />
             ))}
-          </div>
+          </ListRowGroup>
         )}
 
         {error && (
-          <Banner intent="warning" className="mb-3 font-bold">
+          <Banner intent="warning" className="mb-3">
             {error}
           </Banner>
         )}
 
         <Button
           onClick={handleShowCreate}
-          size="lg"
+          size="xl"
           variant="accent"
           className="w-full"
         >
           {formatMessage({ id: "pages.serverSelector.createNewServerAction" })}
         </Button>
         <div className="mt-3 text-center">
-          <TextLink className="text-sm font-bold" onClick={handleLogout}>
+          <TextLink className="text-footnote" onClick={handleLogout}>
             {formatMessage({ id: "pages.serverSelector.logOut" })}
           </TextLink>
         </div>

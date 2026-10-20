@@ -54,6 +54,8 @@ export interface Server {
   serverPushMuted?: boolean;
   notificationPrefsVersion?: number;
   serverOrderVersion?: number;
+  /** The server's public page is live (public and rolled out); from GET /servers. */
+  publicPageLive?: boolean;
   createdAt: string;
 }
 

@@ -1,3 +1,4 @@
+import { ambientProcessEnv } from "../processEnvPatch";
 import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { spawn, execFileSync } from "node:child_process";
 import { spawnRuntimeChild } from "./runtimeChild";
@@ -10,8 +11,18 @@ import { assertWorkspaceExecutionProfileSupported, type RuntimeDriver, type Spaw
 import { buildCliTransportSystemPrompt, prepareCliTransport } from "./cliTransport";
 import { codexStateRootCandidates, resolveCodexHomeRootFromEnv } from "./codexHome";
 import { detectNodeHostKind, NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch";
-import { firstExistingPath, lookupCommandOnPath, resolveCommandOnPath, withWindowsUserEnvironment, type ProbeDeps } from "./probe";
-import { resolveWindowsDirectLaunch } from "./windowsLaunch";
+import {
+  firstExistingPath,
+  lookupCommandOnPath,
+  lookupCommandOnPathAsync,
+  resolveCommandOnPath,
+  resolveCommandOnPathAsync,
+  withWindowsUserEnvironment,
+  withWindowsUserEnvironmentAsync,
+  type ProbeDeps,
+} from "./probe";
+import { killProbeTreeAndSettle, ProbeChildError, runProbeChild } from "./probeChild";
+import { resolveWindowsDirectLaunch, resolveWindowsDirectLaunchAsync } from "./windowsLaunch";
 import {
   CodexEventNormalizer,
   parseCodexJsonRpcLine,
@@ -42,6 +53,14 @@ const CODEX_APP_SERVER_PROBE_ARGS = ["app-server", "--help"] as const;
 
 /** Escape hatch: absolute path or PATH name. Checked before PATH discovery. */
 const CODEX_BIN_ENV = "CODEX_BIN";
+/**
+ * Budget for the `npm root -g` child that locates a global npm Codex install on
+ * Windows (task #1263). It ran unbounded before: a hung npm (corrupt cache,
+ * slow network-backed profile) stalled the whole synchronous runtime detection
+ * round, which runs before the daemon's `ready`. Same value as the other probe
+ * children (`readCommandVersion`, the app-server probe, the PATH lookup steps).
+ */
+export const CODEX_NPM_ROOT_TIMEOUT_MS = 5000;
 
 type CodexProbeCacheEntry = {
   mtimeMs: number;
@@ -83,6 +102,8 @@ interface CodexSpawnCandidateDiscovery {
   rejected: string[];
   /** Why the `codex` PATH lookup resolved nothing; absent when it resolved a command. */
   pathMissReason?: RuntimeProbeUnavailableReason;
+  /** Path-free observations that reject nothing and never change classification (e.g. a timed-out discovery step). */
+  notes: string[];
 }
 
 type ExplicitCodexBinResolution =
@@ -94,36 +115,43 @@ function isWindowsSandboxRunner(commandPath: string): boolean {
   return path.basename(commandPath).toLowerCase().startsWith("codex-command-runner");
 }
 
-function resolveWindowsNpmCodexEntry(deps: ProbeDeps = {}): string | null {
+function resolveWindowsNpmCodexEntry(deps: ProbeDeps = {}): { entry: string | null; note?: string } {
   const existsSyncFn = deps.existsSyncFn ?? existsSync;
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? ambientProcessEnv();
   const winPath = path.win32;
+  let note: string | undefined;
 
   try {
     const globalRoot = String(execFileSyncFn("npm", ["root", "-g"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       env,
+      timeout: CODEX_NPM_ROOT_TIMEOUT_MS,
     })).trim();
     const candidate = winPath.join(globalRoot, "@openai", "codex", "bin", "codex.js");
-    if (existsSyncFn(candidate)) return candidate;
-  } catch {
-    // ignore
+    if (existsSyncFn(candidate)) return { entry: candidate };
+  } catch (error) {
+    // A missing or failing npm is an expected state and stays silent; only a
+    // child killed at the budget is worth a (path-free) note, because the global
+    // npm install was then not searched at all rather than found empty.
+    if ((error as { code?: unknown }).code === "ETIMEDOUT") {
+      note = `npm_global discovery: \`npm root -g\` did not finish within ${CODEX_NPM_ROOT_TIMEOUT_MS} ms, so the global npm install was not searched and a Codex installed only there is not ruled out`;
+    }
   }
 
   const cmdPath = resolveCommandOnPath("codex", deps);
   if (cmdPath) {
     const candidate = winPath.join(winPath.dirname(cmdPath), "node_modules", "@openai", "codex", "bin", "codex.js");
-    if (existsSyncFn(candidate)) return candidate;
+    if (existsSyncFn(candidate)) return { entry: candidate, ...(note ? { note } : {}) };
   }
 
-  return null;
+  return { entry: null, ...(note ? { note } : {}) };
 }
 
 function resolveWindowsCodexDesktopEntry(deps: ProbeDeps = {}): string | null {
   const existsSyncFn = deps.existsSyncFn ?? existsSync;
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? ambientProcessEnv();
   const homeDir = deps.homeDir;
   const winPath = path.win32;
   const localAppDataRoots = [
@@ -153,11 +181,13 @@ function codexSpawnCandidates(deps: ProbeDeps = {}): CodexSpawnCandidateDiscover
     const candidates: CodexSpawnCandidate[] = [];
     const rejected: string[] = [];
 
-    const npmEntry = resolveWindowsNpmCodexEntry(deps);
+    const npm = resolveWindowsNpmCodexEntry(deps);
+    const notes = npm.note ? [npm.note] : [];
+    const npmEntry = npm.entry;
     if (npmEntry) {
       try {
         const nodeHost = resolveNodeHostLaunch({
-          env: deps.env ?? process.env,
+          env: deps.env ?? ambientProcessEnv(),
           execPath: deps.execPath,
           execIsElectron: deps.execIsElectron,
           execIsSea: deps.execIsSea,
@@ -199,7 +229,7 @@ function codexSpawnCandidates(deps: ProbeDeps = {}): CodexSpawnCandidateDiscover
       });
     }
 
-    return { candidates, rejected, ...(pathMissReason ? { pathMissReason } : {}) };
+    return { candidates, rejected, notes, ...(pathMissReason ? { pathMissReason } : {}) };
   }
 
   const candidates: CodexSpawnCandidate[] = [];
@@ -228,7 +258,7 @@ function codexSpawnCandidates(deps: ProbeDeps = {}): CodexSpawnCandidateDiscover
     }
   }
 
-  return { candidates, rejected: [], ...(pathMissReason ? { pathMissReason } : {}) };
+  return { candidates, rejected: [], notes: [], ...(pathMissReason ? { pathMissReason } : {}) };
 }
 
 export function resolveCodexCommand(deps: ProbeDeps = {}): string | null {
@@ -238,7 +268,7 @@ export function resolveCodexCommand(deps: ProbeDeps = {}): string | null {
 
   const platform = deps.platform ?? process.platform;
   if (platform === "win32") {
-    const npmEntry = resolveWindowsNpmCodexEntry(deps);
+    const npmEntry = resolveWindowsNpmCodexEntry(deps).entry;
     if (npmEntry) return npmEntry;
 
     const command = resolveCommandOnPath("codex", deps);
@@ -341,7 +371,7 @@ export function clearCodexProbeCacheForTests(): void {
 }
 
 function describeSearchPath(deps: ProbeDeps): string {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? ambientProcessEnv();
   const pathValue = env.PATH ?? env.Path ?? "(unset)";
   if ((deps.platform ?? process.platform) === "win32") {
     return pathValue === "(unset)" || pathValue.trim().length === 0
@@ -353,7 +383,7 @@ function describeSearchPath(deps: ProbeDeps): string {
 }
 
 function darwinDesktopCodexPaths(deps: ProbeDeps): string[] {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? ambientProcessEnv();
   const home = deps.homeDir ?? env.HOME ?? os.homedir();
   return [
     ...CODEX_DESKTOP_BUNDLE_PATHS,
@@ -367,7 +397,7 @@ function darwinDesktopCodexPaths(deps: ProbeDeps): string[] {
  * it never competes in multi-candidate version arbitration.
  */
 function resolveExplicitCodexBin(deps: ProbeDeps): ExplicitCodexBinResolution {
-  const env = deps.env ?? process.env;
+  const env = deps.env ?? ambientProcessEnv();
   const raw = env[CODEX_BIN_ENV]?.trim();
   if (!raw) return { status: "unset" };
 
@@ -456,7 +486,7 @@ function probeCodexCandidate(
   deps: ProbeDeps = {},
 ): { failure: string | null; version: string | null } {
   const execFileSyncFn = deps.execFileSyncFn ?? execFileSync;
-  const env = withWindowsUserEnvironment(candidate.env ?? deps.env ?? process.env, deps);
+  const env = withWindowsUserEnvironment(candidate.env ?? deps.env ?? ambientProcessEnv(), deps);
   const stat = readCandidateStat(candidate, deps);
   const cacheKey = codexCandidateCacheKey(candidate);
   if (stat) {
@@ -569,6 +599,7 @@ function resolveCompatibleCodexCandidate(deps: ProbeDeps = {}): {
 
   const discovery = codexSpawnCandidates(deps);
   rejected.push(...discovery.rejected);
+  notes.push(...discovery.notes);
   for (const candidate of discovery.candidates) {
     const { failure, version } = probeCodexCandidate(candidate, deps);
     if (failure) {
@@ -694,10 +725,17 @@ function isCodexThreadWriterBusyError(message: string): boolean {
     || /\balready\s+has\s+an\s+active\s+writer\b/i.test(message);
 }
 
-type CodexRecoverableResumeErrorKind = "missing_rollout" | "thread_writer_busy";
+// task #14: a thread the user archived in the Codex app refuses resume with
+// "session <id> is archived. Run `codex unarchive <id>` ...".
+function isCodexThreadArchivedError(message: string): boolean {
+  return /\bis\s+archived\b/i.test(message);
+}
+
+type CodexRecoverableResumeErrorKind = "missing_rollout" | "thread_writer_busy" | "archived";
 type CodexResumeRecoverySource =
   | "codex_resume_missing_rollout"
-  | "codex_resume_thread_writer_busy";
+  | "codex_resume_thread_writer_busy"
+  | "codex_resume_archived";
 
 export type CodexResumeErrorClassification =
   | {
@@ -714,18 +752,23 @@ export type CodexResumeErrorClassification =
     };
 
 function codexResumeRecoverySource(kind: CodexRecoverableResumeErrorKind): CodexResumeRecoverySource {
-  return kind === "missing_rollout" ? "codex_resume_missing_rollout" : "codex_resume_thread_writer_busy";
+  if (kind === "missing_rollout") return "codex_resume_missing_rollout";
+  if (kind === "archived") return "codex_resume_archived";
+  return "codex_resume_thread_writer_busy";
 }
 
 function codexResumeRecoveryMessage(kind: CodexRecoverableResumeErrorKind): string {
   if (kind === "thread_writer_busy") {
-    return "Codex could not resume its previous thread because another writer is active; Slock started a fresh Codex thread.";
+    return "Codex could not resume its previous thread because another writer is active; Raft started a fresh Codex thread.";
   }
-  return "Codex could not resume its previous thread; Slock started a fresh Codex thread.";
+  if (kind === "archived") {
+    return "Codex could not resume its previous thread because it is archived and could not be unarchived; Raft started a fresh Codex thread.";
+  }
+  return "Codex could not resume its previous thread; Raft started a fresh Codex thread.";
 }
 
 function codexResumeRecoveryDetails(): string {
-  return "Use Slock conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.";
+  return "Use Raft conversation history and local MEMORY.md/notes as the recovery point; do not assume prior Codex thread context is loaded.";
 }
 
 function prependCodexRecoveryNotice(prompt: string, recovery: Extract<ParsedEvent, { kind: "runtime_recovery" }>): string {
@@ -763,6 +806,10 @@ function buildCodexResumeRecovery(
 }
 
 export function classifyCodexResumeError(message: string, requestedSessionId?: string): CodexResumeErrorClassification {
+  if (isCodexThreadArchivedError(message)) {
+    return buildCodexResumeRecovery("archived", requestedSessionId);
+  }
+
   if (isCodexMissingRolloutError(message)) {
     return buildCodexResumeRecovery("missing_rollout", requestedSessionId);
   }
@@ -782,6 +829,11 @@ export function classifyCodexResumeError(message: string, requestedSessionId?: s
     kind: "terminal_error",
     resumeErrorClass: "unknown",
   };
+}
+
+export function codexThreadName(agentName: string | null | undefined): string | null {
+  const trimmed = agentName?.trim();
+  return trimmed ? `Raft · ${trimmed}` : null;
 }
 
 function hasJsonRpcField(message: JsonRpcMessage, field: "result" | "error"): boolean {
@@ -928,6 +980,20 @@ export class CodexDriver implements RuntimeDriver {
   private lastThreadRequestMethod: "thread/start" | "thread/resume" | null = null;
   private pendingResumeFallbackParams: Record<string, any> | null = null;
   private pendingResumeThreadId: string | null = null;
+  private pendingResumeParams: Record<string, unknown> | null = null;
+  // task #14: one unarchive attempt per spawn; the retried resume (or the
+  // fresh-thread fallback when unarchive fails) waits on this request.
+  private archivedUnarchiveAttempted = false;
+  private pendingUnarchive: {
+    requestId: JsonRpcId;
+    resumeParams: Record<string, unknown>;
+    freshParams: Record<string, unknown>;
+    classification: Extract<CodexResumeErrorClassification, { recoveryAction: "fallback_fresh_thread" }>;
+  } | null = null;
+  // task #14: "Raft · <agent>" so Raft threads are recognisable in the Codex
+  // app sidebar; responses are ignored (older app-servers lack the method).
+  private threadName: string | null = null;
+  private threadNameRequestIds = new Set<JsonRpcId>();
   private pendingInitialTurnRequestId: JsonRpcId | null = null;
   private pendingInitialTurnInput: unknown = null;
   private pendingDeliveryRequests = new Map<JsonRpcId, { method: "turn/start" | "turn/steer"; input: unknown; turnId: string | null }>();
@@ -972,6 +1038,11 @@ export class CodexDriver implements RuntimeDriver {
     this.lastThreadRequestMethod = null;
     this.pendingResumeFallbackParams = null;
     this.pendingResumeThreadId = null;
+    this.pendingResumeParams = null;
+    this.archivedUnarchiveAttempted = false;
+    this.pendingUnarchive = null;
+    this.threadName = codexThreadName(ctx.config.displayName || ctx.config.name);
+    this.threadNameRequestIds.clear();
     this.pendingInitialTurnRequestId = null;
     this.pendingInitialTurnInput = null;
     this.pendingDeliveryRequests.clear();
@@ -1007,7 +1078,10 @@ export class CodexDriver implements RuntimeDriver {
 
     const args = buildCodexAppServerArgs(managedMcp);
 
-    const { command, args: spawnArgs, shell, source, env } = resolveCodexSpawn(args, { env: spawnEnv });
+    // task #1277: candidate discovery and the app-server probes run as bounded
+    // probe children under this start attempt's signal; a cancelled lookup is
+    // rethrown, never a verdict, and nothing is written to the probe cache.
+    const { command, args: spawnArgs, shell, source, env } = await resolveCodexSpawnAsync(args, { env: spawnEnv, signal: ctx.launchSignal });
     const launchSpan = ctx.tracer?.startSpan("daemon.runtime.node_host_launch", {
       surface: "daemon",
       kind: "internal",
@@ -1028,6 +1102,8 @@ export class CodexDriver implements RuntimeDriver {
     });
     // task #365: after the last await, right before the child exists.
     ctx.assertLaunchCurrent?.();
+    // A start stopped while the candidate search ran must not create a child.
+    if (ctx.launchSignal?.aborted) throw new ProbeChildError("codex launch cancelled before the child was created", { code: "ABORT_ERR" });
     let proc: ChildProcess;
     try {
       proc = spawnRuntimeChild(command, spawnArgs, {
@@ -1073,7 +1149,7 @@ export class CodexDriver implements RuntimeDriver {
     if (isCodexServerRequest(message)) {
       this.sendErrorResponse(
         message.id,
-        `Codex app-server request "${message.method}" is not supported by the non-interactive Slock daemon`,
+        `Codex app-server request "${message.method}" is not supported by the non-interactive Raft daemon`,
       );
       return events;
     }
@@ -1131,6 +1207,35 @@ export class CodexDriver implements RuntimeDriver {
       return events;
     }
 
+    if (isResponse && message.id !== undefined && this.threadNameRequestIds.delete(message.id)) {
+      return events;
+    }
+
+    if (isResponse && this.pendingUnarchive && message.id === this.pendingUnarchive.requestId) {
+      const { resumeParams, freshParams, classification } = this.pendingUnarchive;
+      this.pendingUnarchive = null;
+      if (hasJsonRpcField(message, "error")) {
+        events.push(classification.telemetry);
+        events.push(classification.recovery);
+        if (this.pendingInitialPrompt) {
+          this.pendingInitialPrompt = prependCodexRecoveryNotice(this.pendingInitialPrompt, classification.recovery);
+        }
+        this.sendThreadRequest("thread/start", freshParams);
+        return events;
+      }
+      events.push({
+        kind: "telemetry",
+        name: "recovery",
+        source: "codex_resume_unarchived",
+        attrs: {
+          resume_error_class: "archived",
+          recovery_action: "unarchive_resume",
+        },
+      });
+      this.sendThreadRequest("thread/resume", resumeParams);
+      return events;
+    }
+
     if (isResponse && message.id === this.pendingThreadRequestId) {
       if (hasJsonRpcField(message, "error")) {
         const errorMessage = message.error?.message || "Codex app-server request failed";
@@ -1138,6 +1243,27 @@ export class CodexDriver implements RuntimeDriver {
         const resumeErrorClassification = requestMethod === "thread/resume"
           ? classifyCodexResumeError(errorMessage, this.pendingResumeThreadId || undefined)
           : null;
+        if (
+          resumeErrorClassification?.kind === "archived"
+          && resumeErrorClassification.recoveryAction === "fallback_fresh_thread"
+          && !this.archivedUnarchiveAttempted
+          && this.pendingResumeThreadId
+          && this.pendingResumeParams
+          && this.pendingResumeFallbackParams
+        ) {
+          // task #14: the user archived this thread in the Codex app. Unarchive
+          // and resume it so the agent keeps its context (the thread reappears
+          // in the sidebar); start fresh only if unarchive fails.
+          this.archivedUnarchiveAttempted = true;
+          this.pendingUnarchive = {
+            requestId: this.sendRequest("thread/unarchive", { threadId: this.pendingResumeThreadId }),
+            resumeParams: this.pendingResumeParams,
+            freshParams: this.pendingResumeFallbackParams,
+            classification: resumeErrorClassification,
+          };
+          this.pendingThreadRequestId = null;
+          return events;
+        }
         if (
           this.pendingResumeFallbackParams &&
           resumeErrorClassification?.recoveryAction === "fallback_fresh_thread"
@@ -1170,9 +1296,11 @@ export class CodexDriver implements RuntimeDriver {
       this.pendingThreadRequestMethod = null;
       this.pendingResumeFallbackParams = null;
       this.pendingResumeThreadId = null;
+      this.pendingResumeParams = null;
       if (requestMethod) {
         events.push(this.runtimeToolingObservation(requestMethod));
       }
+      this.nameThreadIfUnnamed(message.result);
     }
 
     if (isResponse && message.id === this.pendingInitialTurnRequestId) {
@@ -1332,6 +1460,16 @@ export class CodexDriver implements RuntimeDriver {
     return id;
   }
 
+  /** Names the thread unless it already has a name (the user's rename wins). */
+  private nameThreadIfUnnamed(result: unknown): void {
+    if (!this.threadName) return;
+    const thread = (result as { thread?: { id?: unknown; name?: unknown } } | null)?.thread;
+    const threadId = typeof thread?.id === "string" ? thread.id : null;
+    if (!threadId) return;
+    if (typeof thread?.name === "string" && thread.name.trim()) return;
+    this.threadNameRequestIds.add(this.sendRequest("thread/name/set", { threadId, name: this.threadName }));
+  }
+
   private sendErrorResponse(id: JsonRpcId, message: string) {
     this.process?.stdin?.write(JSON.stringify({
       jsonrpc: "2.0",
@@ -1359,7 +1497,9 @@ export class CodexDriver implements RuntimeDriver {
     this.lastThreadRequestMethod = method;
     this.pendingResumeFallbackParams = null;
     this.pendingResumeThreadId = null;
+    this.pendingResumeParams = null;
     if (method === "thread/resume") {
+      this.pendingResumeParams = params;
       // excludeTurns only applies to resume; do not forward it to thread/start.
       const { threadId: _threadId, excludeTurns: _excludeTurns, ...freshParams } = params;
       this.pendingResumeFallbackParams = freshParams;
@@ -1473,6 +1613,8 @@ interface CodexModelListDetectionOptions {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   timeoutMs?: number;
+  /** task #1277 — probe seams and the operation-scoped cancel (`signal`) for the candidate search. */
+  deps?: ProbeDeps;
 }
 
 function asNonEmptyString(value: unknown): string | null {
@@ -1578,26 +1720,362 @@ function codexModelSetFromAppServerEntries(entries: unknown[]): RuntimeModelSet 
   return models.length > 0 ? { models, default: defaultModel } : null;
 }
 
+// ── task #1277: asynchronous twins of the candidate discovery above ─────────
+//
+// Used by the form's model detection (detectCodexModelsFromAppServer): the
+// same candidates, arbitration, probe cache and rejection texts as the
+// synchronous resolver, with every child (`npm root -g`, the PATH lookups,
+// the app-server probe, the --version read) run through runProbeChild instead
+// of execFileSync. The synchronous resolver stays for the launch path and the
+// detection child until their own PRs.
+
+async function resolveWindowsNpmCodexEntryAsync(deps: ProbeDeps = {}): Promise<{ entry: string | null; note?: string }> {
+  const existsSyncFn = deps.existsSyncFn ?? existsSync;
+  const runChild = deps.runProbeChildFn ?? runProbeChild;
+  const env = deps.env ?? ambientProcessEnv();
+  const winPath = path.win32;
+  let note: string | undefined;
+
+  try {
+    const globalRoot = (await runChild("npm", ["root", "-g"], {
+      env,
+      timeoutMs: CODEX_NPM_ROOT_TIMEOUT_MS,
+      stderr: "ignore",
+      platform: deps.platform ?? process.platform,
+      signal: deps.signal,
+    })).stdout.trim();
+    const candidate = winPath.join(globalRoot, "@openai", "codex", "bin", "codex.js");
+    if (existsSyncFn(candidate)) return { entry: candidate };
+  } catch (error) {
+    // A cancelled discovery stops here, with the runner's cleanup evidence
+    // intact (an unconfirmed cleanup must not be replaced by a later, cleaner
+    // error); nothing below runs on its behalf.
+    if (error instanceof ProbeChildError && error.code === "ABORT_ERR") throw error;
+    if ((error as { code?: unknown }).code === "ETIMEDOUT") {
+      note = `npm_global discovery: \`npm root -g\` did not finish within ${CODEX_NPM_ROOT_TIMEOUT_MS} ms, so the global npm install was not searched and a Codex installed only there is not ruled out`;
+    }
+  }
+
+  const cmdPath = await resolveCommandOnPathAsync("codex", deps);
+  if (cmdPath) {
+    const candidate = winPath.join(winPath.dirname(cmdPath), "node_modules", "@openai", "codex", "bin", "codex.js");
+    if (existsSyncFn(candidate)) return { entry: candidate, ...(note ? { note } : {}) };
+  }
+
+  return { entry: null, ...(note ? { note } : {}) };
+}
+
+async function windowsDirectCodexCandidateAsync(
+  source: CodexSpawnCandidate["source"],
+  command: string,
+  deps: ProbeDeps,
+): Promise<CodexSpawnCandidate | string> {
+  try {
+    const launch = await resolveWindowsDirectLaunchAsync("codex", command, [], deps);
+    return {
+      source,
+      command: launch.command,
+      argsPrefix: launch.args,
+      shell: false,
+      ...(launch.env ? { env: launch.env } : {}),
+    };
+  } catch (error) {
+    if (!(error instanceof RuntimeExecutableNotFoundError)) throw error;
+    return `${source} batch wrapper rejected: ${error.reason ?? "unresolved"}`;
+  }
+}
+
+async function resolveExplicitCodexBinAsync(deps: ProbeDeps): Promise<ExplicitCodexBinResolution> {
+  const env = deps.env ?? ambientProcessEnv();
+  const raw = env[CODEX_BIN_ENV]?.trim();
+  if (!raw) return { status: "unset" };
+
+  const platform = deps.platform ?? process.platform;
+  const existsSyncFn = deps.existsSyncFn ?? existsSync;
+
+  let command: string | null = null;
+  if (path.isAbsolute(raw) || /^[A-Za-z]:[\\/]/.test(raw) || raw.startsWith("\\\\")) {
+    command = existsSyncFn(raw) ? raw : null;
+    if (!command) return { status: "invalid", raw, reason: "path does not exist" };
+  } else {
+    command = await resolveCommandOnPathAsync(raw, deps);
+    if (!command) return { status: "invalid", raw, reason: "not found on PATH" };
+  }
+
+  if (platform === "win32" && isWindowsSandboxRunner(command)) {
+    return { status: "invalid", raw, reason: "points at codex-command-runner sandbox helper, not the Codex CLI" };
+  }
+
+  if (platform === "win32") {
+    const direct = await windowsDirectCodexCandidateAsync("explicit_bin", command, deps);
+    if (typeof direct === "string") return { status: "invalid", raw, reason: direct };
+    return { status: "resolved", candidate: direct };
+  }
+
+  return { status: "resolved", candidate: { source: "explicit_bin", command, argsPrefix: [], shell: false } };
+}
+
+async function codexSpawnCandidatesAsync(deps: ProbeDeps = {}): Promise<CodexSpawnCandidateDiscovery> {
+  const platform = deps.platform ?? process.platform;
+  if (platform === "win32") {
+    const candidates: CodexSpawnCandidate[] = [];
+    const rejected: string[] = [];
+
+    const npm = await resolveWindowsNpmCodexEntryAsync(deps);
+    const notes = npm.note ? [npm.note] : [];
+    const npmEntry = npm.entry;
+    if (npmEntry) {
+      try {
+        const nodeHost = resolveNodeHostLaunch({
+          env: deps.env ?? ambientProcessEnv(),
+          execPath: deps.execPath,
+          execIsElectron: deps.execIsElectron,
+          execIsSea: deps.execIsSea,
+          hasNodeRuntime: deps.hasNodeRuntime,
+        });
+        candidates.push({ source: "npm_global", command: nodeHost.command, argsPrefix: [npmEntry], shell: false, env: nodeHost.env });
+      } catch (error) {
+        if (!(error instanceof NodeHostUnavailableError)) throw error;
+        rejected.push(`npm_global JavaScript entry rejected: ${error.kind} (host_kind=${error.hostKind})`);
+      }
+    }
+
+    const { command, missReason: pathMissReason } = await lookupCommandOnPathAsync("codex", deps);
+    if (command && !isWindowsSandboxRunner(command)) {
+      const direct = await windowsDirectCodexCandidateAsync("path", command, deps);
+      if (typeof direct === "string") rejected.push(direct);
+      else candidates.push(direct);
+    }
+
+    const desktopEntry = resolveWindowsCodexDesktopEntry(deps);
+    if (desktopEntry && !candidates.some((candidate) => candidate.command === desktopEntry)) {
+      candidates.push({ source: "desktop_install", command: desktopEntry, argsPrefix: [], shell: false });
+    }
+
+    return { candidates, rejected, notes, ...(pathMissReason ? { pathMissReason } : {}) };
+  }
+
+  const candidates: CodexSpawnCandidate[] = [];
+  const { command: pathCommand, missReason: pathMissReason } = await lookupCommandOnPathAsync("codex", deps);
+  if (pathCommand) candidates.push({ source: "path", command: pathCommand, argsPrefix: [], shell: false });
+
+  if (platform === "darwin") {
+    const existsSyncFn = deps.existsSyncFn ?? existsSync;
+    for (const bundlePath of darwinDesktopCodexPaths(deps)) {
+      if (!existsSyncFn(bundlePath)) continue;
+      if (candidates.some((candidate) => candidate.command === bundlePath)) continue;
+      candidates.push({ source: "desktop_bundle", command: bundlePath, argsPrefix: [], shell: false });
+    }
+  }
+
+  return { candidates, rejected: [], notes: [], ...(pathMissReason ? { pathMissReason } : {}) };
+}
+
+/** Shares `codexProbeCache` with the synchronous probe: the two can never disagree on a cached verdict. */
+async function probeCodexCandidateAsync(
+  candidate: CodexSpawnCandidate,
+  deps: ProbeDeps = {},
+): Promise<{ failure: string | null; version: string | null }> {
+  const runChild = deps.runProbeChildFn ?? runProbeChild;
+  const platform = deps.platform ?? process.platform;
+  const env = await withWindowsUserEnvironmentAsync(candidate.env ?? deps.env ?? ambientProcessEnv(), deps);
+  const stat = readCandidateStat(candidate, deps);
+  const cacheKey = codexCandidateCacheKey(candidate);
+  if (stat) {
+    const cached = codexProbeCache.get(cacheKey);
+    if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+      return { failure: cached.failure, version: cached.version };
+    }
+  }
+
+  let failure: string | null = null;
+  try {
+    await runChild(candidate.command, [...candidate.argsPrefix, ...CODEX_APP_SERVER_PROBE_ARGS], {
+      env,
+      timeoutMs: 5000,
+      shell: candidate.shell,
+      platform,
+      signal: deps.signal,
+    });
+  } catch (error) {
+    // A cancelled probe is not a verdict about the candidate: it must not be
+    // classified, and above all not written to the shared cache, where it
+    // would reject this candidate for every later resolution.
+    if (error instanceof ProbeChildError && error.code === "ABORT_ERR") throw error;
+    failure = describeCodexProbeFailure(error);
+  }
+
+  let version: string | null = null;
+  if (!failure) {
+    try {
+      const { stdout } = await runChild(candidate.command, [...candidate.argsPrefix, "--version"], {
+        env,
+        timeoutMs: 5000,
+        shell: candidate.shell,
+        platform,
+        signal: deps.signal,
+      });
+      version = stdout.trim().split(/\r?\n/)[0] || null;
+    } catch (error) {
+      // Same rule for the version read: a cancel is not "unknown version".
+      if (error instanceof ProbeChildError && error.code === "ABORT_ERR") throw error;
+      version = null;
+    }
+  }
+
+  if (stat) {
+    codexProbeCache.set(cacheKey, { mtimeMs: stat.mtimeMs, size: stat.size, appServerOk: failure === null, version, failure });
+  }
+  return { failure, version };
+}
+
+async function resolveCompatibleCodexCandidateAsync(deps: ProbeDeps = {}): Promise<ReturnType<typeof resolveCompatibleCodexCandidate>> {
+  const rejected: string[] = [];
+  const notes: string[] = [];
+
+  const explicit = await resolveExplicitCodexBinAsync(deps);
+  if (explicit.status === "invalid") {
+    return { candidate: null, rejected: [`${CODEX_BIN_ENV}=${explicit.raw} rejected: ${explicit.reason}`], version: null, notes: [], explicitOverrideFailed: true };
+  }
+  if (explicit.status === "resolved") {
+    const { failure, version } = await probeCodexCandidateAsync(explicit.candidate, deps);
+    if (failure) {
+      return {
+        candidate: null,
+        rejected: [`${CODEX_BIN_ENV}=${formatCodexCandidate(explicit.candidate)} rejected: app-server probe ${failure}`],
+        version: null,
+        notes: [],
+        explicitOverrideFailed: true,
+      };
+    }
+    notes.push(
+      `using ${CODEX_BIN_ENV} override ${formatCodexCandidate(explicit.candidate)}` +
+      (version ? ` (${version})` : "") +
+      "; automatic PATH/desktop discovery skipped",
+    );
+    return { candidate: explicit.candidate, rejected: [], version, notes, explicitOverrideFailed: false };
+  }
+
+  let best: { candidate: CodexSpawnCandidate; version: string | null } | null = null;
+  const discovery = await codexSpawnCandidatesAsync(deps);
+  rejected.push(...discovery.rejected);
+  notes.push(...discovery.notes);
+  // Candidates are probed one after another, as the synchronous resolver does,
+  // so version arbitration sees them in the same order.
+  for (const candidate of discovery.candidates) {
+    const { failure, version } = await probeCodexCandidateAsync(candidate, deps);
+    if (failure) {
+      rejected.push(`${candidate.source} ${formatCodexCandidate(candidate)} rejected: app-server probe ${failure}`);
+      continue;
+    }
+    if (!best) {
+      best = { candidate, version };
+      continue;
+    }
+    const cmp = compareCodexVersions(version, best.version);
+    if (cmp !== null && cmp > 0) {
+      notes.push(
+        `selected ${formatCodexCandidate(candidate)} (${version ?? "unknown"}) over ` +
+        `${formatCodexCandidate(best.candidate)} (${best.version ?? "unknown"}) by version`,
+      );
+      best = { candidate, version };
+    }
+  }
+
+  return {
+    candidate: best?.candidate ?? null,
+    rejected,
+    version: best?.version ?? null,
+    notes,
+    explicitOverrideFailed: false,
+    ...(discovery.pathMissReason ? { pathMissReason: discovery.pathMissReason } : {}),
+  };
+}
+
+/** task #1277 — {@link resolveCodexSpawn} off the event loop; same selection and the same error texts. */
+export async function resolveCodexSpawnAsync(commandArgs: string[], deps: ProbeDeps = {}): Promise<ReturnType<typeof resolveCodexSpawn>> {
+  const { candidate, rejected, explicitOverrideFailed } = await resolveCompatibleCodexCandidateAsync(deps);
+  if (candidate) {
+    return {
+      command: candidate.command,
+      args: [...candidate.argsPrefix, ...commandArgs],
+      shell: candidate.shell,
+      source: candidate.source,
+      ...(candidate.env ? { env: candidate.env } : {}),
+    };
+  }
+
+  const search = describeSearchPath(deps);
+  const rejectedNote = rejected.length > 0 ? ` Rejected candidates: ${rejected.join("; ")}.` : "";
+  const restartNote = " Restart the Raft daemon after changing PATH or installing Codex so the new environment is picked up.";
+
+  if (explicitOverrideFailed) {
+    throw new Error(
+      `${CODEX_BIN_ENV} is set but does not resolve to a usable Codex CLI app-server entry point.` +
+      rejectedNote +
+      ` (${search}).` +
+      " Fix or unset CODEX_BIN; automatic PATH/desktop discovery is not used while the override is set." +
+      restartNote,
+    );
+  }
+
+  if ((deps.platform ?? process.platform) === "win32") {
+    const wrapperReason = rejected.map((note) => /batch wrapper rejected: (\w+)/.exec(note)?.[1]).find(Boolean);
+    throw new RuntimeExecutableNotFoundError({ runtimeId: "codex", reason: wrapperReason, message:
+      "Cannot resolve a compatible Codex CLI app-server entry point on Windows. " +
+      "Install Codex Desktop or install @openai/codex globally via npm (npm i -g @openai/codex). " +
+      "Ignoring .codex/.sandbox-bin/codex-command-runner because it is a sandbox helper, not the Codex CLI." +
+      ` (${search}).` +
+      rejectedNote +
+      restartNote });
+  }
+
+  throw new RuntimeExecutableNotFoundError({ runtimeId: "codex", message:
+    `Cannot resolve a compatible Codex CLI app-server entry point (${search}).` +
+    rejectedNote +
+    restartNote });
+}
+
 export async function detectCodexModelsFromAppServer(
   options: CodexModelListDetectionOptions = {},
 ): Promise<RuntimeModelSet | null> {
-  const env = options.env ?? process.env;
+  const env = options.env ?? ambientProcessEnv();
+  const signal = options.deps?.signal;
   let launch: { command: string; args: string[]; shell: boolean; env?: NodeJS.ProcessEnv };
   try {
-    launch = resolveCodexSpawn(["app-server", "--listen", "stdio://"], { env });
-  } catch {
+    // task #1277: the candidate search and probes run as bounded probe
+    // children, so a form request no longer blocks the daemon on them.
+    launch = await resolveCodexSpawnAsync(["app-server", "--listen", "stdio://"], { ...options.deps, env });
+  } catch (error) {
+    // A cancelled detection is not a verdict: the abort travels up unchanged.
+    if (error instanceof ProbeChildError && error.code === "ABORT_ERR") throw error;
     return null;
   }
+  if (signal?.aborted) throw new ProbeChildError("codex model detection aborted before the app-server started", { code: "ABORT_ERR" });
 
-  return await new Promise<RuntimeModelSet | null>((resolve) => {
+  return await new Promise<RuntimeModelSet | null>((resolve, reject) => {
     const timeoutMs = options.timeoutMs ?? 5000;
     const proc = spawn(launch.command, launch.args, {
       cwd: options.cwd ?? process.cwd(),
       stdio: ["pipe", "pipe", "ignore"],
       env: launch.env ?? env,
       shell: launch.shell,
+      // task #1277: its own process group, so a cancel can end the whole
+      // app-server tree, not only the direct child.
+      detached: process.platform !== "win32",
     });
     let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      // Cancel holds the operation until the bounded tree cleanup settles; the
+      // rejection says whether the exit was observed.
+      void killProbeTreeAndSettle(proc).then((cleanup) => {
+        reject(new ProbeChildError("codex model detection aborted", { code: "ABORT_ERR", cleanup }));
+      });
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
     let buffer = "";
     let requestId = 0;
     let initializeRequestId: JsonRpcId | null = null;
@@ -1609,6 +2087,7 @@ export async function detectCodexModelsFromAppServer(
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       proc.kill();
       resolve(result);
     };

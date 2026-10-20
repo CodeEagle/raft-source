@@ -18,6 +18,14 @@ allowBuilds:
 # pnpm 11+ refuses packages published less than a day ago. Packages we
 # publish ourselves are exempt, so a fresh raft-ui release can be installed
 # right away.
+#
+# Set explicitly so pnpm is strict: pnpm's built-in default is the same day but
+# not strict, and then `pnpm install` takes an immature third-party version and
+# adds it to minimumReleaseAgeExclude below by itself. Strict, the install
+# fails instead. Wait until the version is a day old and install again; do not
+# add an exemption (scripts/ci/check-release-age-exclusions.mjs rejects any
+# entry other than ours).
+minimumReleaseAge: 1440
 minimumReleaseAgeExclude:
   - raft-ui
   - "@botiverse/*"

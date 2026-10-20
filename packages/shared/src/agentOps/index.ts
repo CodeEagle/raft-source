@@ -24,4 +24,7 @@ export * from "./mentions";
 export * from "./manual";
 export * from "./state";
 export * from "./actions";
+export * from "./apps";
 export * from "./requestSchema";
+export * from "./mcp";
+export * from "./raftbench";

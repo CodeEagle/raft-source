@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useIntl } from "react-intl";
-import { ChevronRight } from "lucide-react";
 import type { Channel } from "../../store/channelStore";
 import { useChannelStore } from "../../store/channelStore";
 import type { Message, MessageAttachment } from "../../store/messageStore";
@@ -446,12 +445,8 @@ export default function ForwardComposerDialog({
             { target: delivery.destination.type === "dm" ? "DM" : `#${delivery.destination.name}` },
           ), {
             action: {
-              label: (
-                <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
-                  {formatMessage({ id: "message.forwardComposer.viewInChat" })}
-                  <ChevronRight aria-hidden="true" className="size-4" strokeWidth={2.5} />
-                </span>
-              ),
+              // DS Toast: the action is underlined text, no glyph.
+              label: formatMessage({ id: "message.forwardComposer.viewInChat" }),
               onClick: () => {
                 if (delivery.destination.type === "dm") nav.toDmMessage(delivery.destination.id, delivery.message.id);
                 else nav.toMessage(delivery.destination.id, delivery.message.id);

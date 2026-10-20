@@ -1,6 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
-import { Switch } from "raft-ui";
+import { FormSection, Separator, Switch } from "@botiverse/raft-ui";
+import { ROW_DESCRIPTION_CLASS, ROW_TITLE_CLASS } from "./channelSettingsClasses";
 import { useServerStore } from "../../store/serverStore";
 import {
   hasSidebarPinnedRef,
@@ -65,22 +66,21 @@ export function ChannelPreferencesSection({
   const handleToggleCollapse = useCallback(() => toggleCollapse?.(), [toggleCollapse]);
 
   return (
-    <section className="mt-5" data-testid="channel-settings-preferences">
-      <h3 className="text-base font-bold text-foreground-strong">
-        {formatMessage({ id: "message.chatPanel.overflow.preferencesGroup" })}
-      </h3>
-      <div className="mt-2 divide-y divide-black/10">
+    <FormSection
+      data-testid="channel-settings-preferences"
+      title={formatMessage({ id: "message.chatPanel.overflow.preferencesGroup" })}
+    >
+      <div>
         <div className="flex items-center justify-between gap-3 py-3">
           <div className="min-w-0">
-            <h4 id="channel-settings-pin-label" className="text-sm font-medium text-foreground-strong">
+            <h4 id="channel-settings-pin-label" className={ROW_TITLE_CLASS}>
               {formatMessage({ id: "message.channelSettings.pinTitle" })}
             </h4>
-            <p className="mt-1 text-xs font-normal text-foreground-muted">
+            <p className={ROW_DESCRIPTION_CLASS}>
               {formatMessage({ id: "message.channelSettings.pinDescription" })}
             </p>
           </div>
           <Switch
-            size="md"
             checked={isPinned}
             onCheckedChange={handleTogglePin}
             aria-labelledby="channel-settings-pin-label"
@@ -89,17 +89,18 @@ export function ChannelPreferencesSection({
           />
         </div>
         {isPanel && activityMute && (
+          <>
+          <Separator />
           <div className="flex items-center justify-between gap-3 py-3">
             <div className="min-w-0">
-              <h4 id="channel-settings-mute-label" className="text-sm font-medium text-foreground-strong">
+              <h4 id="channel-settings-mute-label" className={ROW_TITLE_CLASS}>
                 {formatMessage({ id: "message.channelSettings.muteActivityTitle" })}
               </h4>
-              <p className="mt-1 text-xs font-normal text-foreground-muted">
+              <p className={ROW_DESCRIPTION_CLASS}>
                 {formatMessage({ id: "message.channelSettings.muteActivityDescription" })}
               </p>
             </div>
             <Switch
-              size="md"
               checked={activityMute.muted}
               disabled={activityMute.busy}
               onCheckedChange={handleToggleMute}
@@ -108,19 +109,21 @@ export function ChannelPreferencesSection({
               data-testid="channel-overflow-mute-switch"
             />
           </div>
+          </>
         )}
         {collapseLongMessages && (
+          <>
+          <Separator />
           <div className="flex items-center justify-between gap-3 py-3">
             <div className="min-w-0">
-              <h4 id="channel-settings-collapse-label" className="text-sm font-medium text-foreground-strong">
+              <h4 id="channel-settings-collapse-label" className={ROW_TITLE_CLASS}>
                 {formatMessage({ id: "message.channelSettings.collapseLongMessagesTitle" })}
               </h4>
-              <p className="mt-1 text-xs font-normal text-foreground-muted">
+              <p className={ROW_DESCRIPTION_CLASS}>
                 {formatMessage({ id: "message.channelSettings.collapseLongMessagesDescription" })}
               </p>
             </div>
             <Switch
-              size="md"
               checked={collapseLongMessages.enabled}
               disabled={collapseLongMessages.busy}
               onCheckedChange={handleToggleCollapse}
@@ -129,8 +132,9 @@ export function ChannelPreferencesSection({
               data-testid="channel-settings-collapse-switch"
             />
           </div>
+          </>
         )}
       </div>
-    </section>
+    </FormSection>
   );
 }

@@ -1,6 +1,6 @@
 {
   "name": "@botiverse/raft-web",
-  "version": "1.21.12",
+  "version": "1.21.23",
   "license": "FSL-1.1-ALv2",
   "private": true,
   "type": "module",
@@ -25,7 +25,7 @@
     "test:feedback-entry": "pnpm run build:feedback && node scripts/check-native-feedback-entry.mjs"
   },
   "dependencies": {
-    "@botiverse/hands-feedback-react": "0.4.1",
+    "@botiverse/hands-feedback-react": "0.4.3",
     "@botiverse/raft-runtime-form": "workspace:*",
     "@botiverse/raft-shared": "workspace:*",
     "@botiverse/raft-sync-core": "workspace:*",
@@ -43,13 +43,13 @@
     "html-to-image": "^1.11.13",
     "lucide-react": "^1.55.0",
     "mermaid": "11.17.2",
-    "raft-ui": "0.5.52",
+    "@botiverse/raft-ui": "0.7.0",
+    "raft-ui": "npm:@botiverse/raft-ui@0.7.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-intl": "^7.1.11",
     "react-markdown": "^10.1.0",
     "react-router-dom": "^7.18.4",
-    "rehype-raw": "^7.0.0",
     "rehype-sanitize": "^6.0.0",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1",
@@ -67,6 +67,7 @@
     "@testing-library/react": "^16.3.3",
     "@types/d3-selection": "^3.0.12",
     "@types/d3-zoom": "^3.0.9",
+    "@types/mdast": "^4.0.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
@@ -85,6 +86,7 @@
     "sharp": "^0.35.5",
     "tailwindcss": "^4.3.3",
     "typescript": "^6.0.3",
+    "vfile": "^6.0.3",
     "vite": "^8.3.4",
     "vitest": "^5.0.3"
   }

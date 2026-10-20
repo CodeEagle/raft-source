@@ -1,8 +1,13 @@
 import { SLACK_BRIDGE_PRODUCT_FEATURE_FLAG_KEYS as SHARED_SLACK_BRIDGE_PRODUCT_FEATURE_FLAG_KEYS } from "../feature-flag-taxonomy";
 
 export const AGENT_MIGRATION_FEATURE_FLAG_KEY = "agent_migration_v0";
+/**
+ * Migrating an agent to Raft hosted (task #16), on top of agent_migration_v0,
+ * Pro and antiproton_hosted_runtime. Server-stage, default off, no rules: it
+ * opens per server once the whole flow (completion included) has shipped.
+ */
+export const AGENT_MIGRATION_HOSTED_FEATURE_FLAG_KEY = "agent_migration_hosted_v0";
 export const APPLE_WEB_LOGIN_FEATURE_FLAG_KEY = "apple_web_login_v0";
-export const CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY = "chat_grid_layout_v0";
 export const CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY = "channel_manager_role_actions_v0";
 export const PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY = "provider_connections_v0";
 /** Hosted agent runtime on antiproton (raft-agent-provider.v1). Server-stage, default off. */
@@ -13,7 +18,11 @@ export const SERVER_LABS_UI_FEATURE_FLAG_KEY = "server_labs_ui_v0";
 export const SERVER_GUEST_FEATURE_FLAG_KEY = "server_guest_v0";
 /** Web remote Computer upgrade, v2 (request → reconnect readback). Default off. */
 export const REMOTE_COMPUTER_UPGRADE_V2_FEATURE_FLAG_KEY = "remote_computer_upgrade_v2";
+/** "Same physical machine" grouping of Computers: the Server asks for, stores and shows a per-server host hash. Server-scoped, default off. */
+export const COMPUTER_HOST_IDENTITY_FEATURE_FLAG_KEY = "computer_host_identity_v0";
 export const PUBLIC_SERVER_FEATURE_FLAG_KEY = "public_server_v0";
+/** Public server SEO: indexing master switch for the search API (raft.build pages and sitemap). Default off. */
+export const PUBLIC_SERVER_SEARCH_INDEX_FEATURE_FLAG_KEY = "public_server_search_index_v0";
 export const COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY = "composer_resource_references_v0";
 
 export const SLACK_BRIDGE_FEATURE_FLAG_KEYS = {
@@ -46,3 +55,6 @@ export type SlackBridgeFeatureFlagKey =
 export const CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY = "channel_to_joint_conversion_v0";
 export * from "./featureFlagRolloutGuardrail";
 export * from "./featureFlagClientRules";
+
+/** Sidebar parent+followed-thread read-all; enable only after all read workers support the mutation. */
+export const SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY = "sidebar_mark_all_read_v0";

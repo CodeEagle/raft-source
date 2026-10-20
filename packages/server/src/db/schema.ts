@@ -1,8 +1,10 @@
-import type { AnnouncementContent, MentionDeliveryTerminalDecision } from "@botiverse/raft-shared";
-import { pgTable, text, timestamp, integer, bigint, bigserial, uuid, primaryKey, unique, uniqueIndex, index, json, jsonb, boolean, customType, check, date, foreignKey } from "drizzle-orm/pg-core";
+import type { ActivityTurnSummary, AnnouncementAudience, AnnouncementAudienceSnapshot, AnnouncementContent, MentionDeliveryTerminalDecision } from "@botiverse/raft-shared";
+import { pgTable, text, timestamp, integer, bigint, bigserial, uuid, primaryKey, unique, uniqueIndex, index, json, jsonb, boolean, customType, check, date, foreignKey, type AnyPgColumn } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import type {
+  AgentMigrationHostedImportLimits,
+  AgentMigrationHostedImportSummary,
   AgentMigrationSourceBuildProgress,
   AgentMigrationTransferSummary,
   AgentRuntimeErrorState,
@@ -237,7 +239,7 @@ export const socialAuthCompletions = pgTable("social_auth_completions", {
   mode: text("mode", { enum: ["login", "link"] }).notNull(),
   intendedAction: text("intended_action", { enum: ["login", "link"] }).notNull(),
   status: text("status", {
-    enum: ["pending_provider", "provider_processing", "provider_completed", "completed", "failed", "expired"],
+    enum: ["pending_provider", "provider_processing", "provider_completed", "pending_link", "completed", "failed", "expired"],
   }).notNull().default("provider_completed"),
   codeChallenge: text("code_challenge"),
   userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
@@ -319,6 +321,12 @@ export const servers = pgTable("servers", {
   // The database constraint below prevents a latent join permission surviving
   // while public visibility is off and unexpectedly reviving later.
   publicGuestJoinEnabled: boolean("public_guest_join_enabled").notNull().default(false),
+  // Public server SEO (#proj-public-server-seo). Whether a public server's
+  // pages may be indexed on raft.build. Reading stays governed by
+  // publiclyVisible; this only decides search indexing. Default true, but
+  // nothing is exposed by the default alone: the indexing master switch
+  // (public_server_search_index_v0) stays closed until owners are notified.
+  publicSearchEnabled: boolean("public_search_enabled").notNull().default(true),
   plan: text("plan", { enum: ["free", "founder", "partner", "pro"] }).notNull().default("free"),
   translationEnabled: boolean("translation_enabled").notNull().default(false),
   // RFC-067 §3.6: the owner's workspace-wide product-analytics switch. When
@@ -383,6 +391,10 @@ export const serverMembers = pgTable("server_members", {
   onboardingOwnerOpenerV2MessageIds: json("onboarding_owner_opener_v2_message_ids").$type<string[]>().notNull().default([]),
   onboardingOwnerOpenerV2Version: text("onboarding_owner_opener_v2_version"),
   onboardingOwnerOpenerV2Topics: json("onboarding_owner_opener_v2_topics").$type<string[]>().notNull().default([]),
+  // One sender at a time: a trigger claims the opener before briefing and
+  // posting it, so concurrent entry points cannot send it twice. A claim older
+  // than the lease (a sender that died) can be taken over.
+  onboardingOwnerOpenerClaimedAt: timestamp("onboarding_owner_opener_claimed_at", { withTimezone: true }),
   crossChannelHintShownAt: timestamp("cross_channel_hint_shown_at", { withTimezone: true }),
   allChannelUnlockInstructionSentAt: timestamp("all_channel_unlock_instruction_sent_at", { withTimezone: true }),
   sidebarChannelOrder: json("sidebar_channel_order").$type<string[]>(),
@@ -564,6 +576,10 @@ export const featureFlags = pgTable("feature_flags", {
   defaultEnabled: boolean("default_enabled").notNull().default(false),
   defaultVariant: text("default_variant"),
   salt: text("salt").notNull(),
+  // Task #205: the flag may be read before login through GET /api/public/feature-flags. Only its
+  // kill switch, enabled bit, platform rules and default decide the answer there; no identity rule
+  // can match without a user or server.
+  preAuthEvaluable: boolean("pre_auth_evaluable").notNull().default(false),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
@@ -968,6 +984,10 @@ export const agents = pgTable("agents", {
   // (minus DMs). Only that user sets or clears it, and only on an agent they
   // created. Effective only while `identity_borrowing` is on for the server.
   assistantOwnerUserId: uuid("assistant_owner_user_id").references(() => users.id, { onDelete: "set null" }),
+  // App-owned Bot: when set, this agent is a managed Bot identity bound to
+  // the given installation. Sender remains `sender_type=agent` (design-v3).
+  // The binding row carries the durable install/server/handle contract.
+  managedByAppInstallId: uuid("managed_by_app_install_id").references((): AnyPgColumn => oauthClientInstalls.id, { onDelete: "set null" }),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
@@ -983,6 +1003,34 @@ export const agents = pgTable("agents", {
   index("idx_agents_created_at").on(t.createdAt),
 ]);
 
+// Agent archive: one row per archived (soft-deleted) agent that has a
+// workspace decision. Agents deleted before archive existed have no row.
+export const agentArchives = pgTable("agent_archives", {
+  agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  archivedAt: timestamp("archived_at", { withTimezone: true }).notNull().defaultNow(),
+  archivedByUserId: uuid("archived_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  // The Computer that holds the workspace. Not an FK: the workspace evidence
+  // outlives the Computer row, and `agents.daemon_id` is cleared on archive.
+  machineId: uuid("machine_id"),
+  machineNameSnapshot: text("machine_name_snapshot"),
+  workspaceState: text("workspace_state", { enum: ["on_computer", "deleted", "unknown"] }).notNull(),
+  pendingOp: text("pending_op", { enum: ["delete"] }),
+  opId: uuid("op_id"),
+  opRequestedAt: timestamp("op_requested_at", { withTimezone: true }),
+  opRequestedByUserId: uuid("op_requested_by_user_id").references(() => users.id, { onDelete: "set null" }),
+  // Lease: set when the op is sent to the Computer.
+  opDispatchedAt: timestamp("op_dispatched_at", { withTimezone: true }),
+  opAttempts: integer("op_attempts").notNull().default(0),
+  lastErrorCode: text("last_error_code"),
+  lastErrorAt: timestamp("last_error_at", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index("idx_agent_archives_server").on(t.serverId),
+  index("idx_agent_archives_pending").on(t.machineId).where(sql`pending_op is not null`),
+  check("agent_archives_op_consistent", sql`(${t.pendingOp} is null) = (${t.opId} is null)`),
+]);
+
 export const agentMigrations = pgTable("agent_migrations", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
@@ -990,11 +1038,15 @@ export const agentMigrations = pgTable("agent_migrations", {
   // Historical identity snapshots, intentionally not entity FKs. Terminal
   // migration evidence must survive after a Computer is deleted.
   sourceMachineId: uuid("source_machine_id").notNull(),
-  targetMachineId: uuid("target_machine_id").notNull(),
+  // A Computer target names its machine; a hosted target has no machine, so
+  // both target columns are null (agent_migrations_target_kind_shape). Hosted
+  // details live in agent_migration_hosted_targets.
+  targetKind: text("target_kind", { enum: ["computer", "hosted"] }).notNull().default("computer"),
+  targetMachineId: uuid("target_machine_id"),
   // Frozen names are mandatory durable evidence. The migration backfills
   // historical rows before applying these NOT NULL constraints.
   sourceMachineNameSnapshot: text("source_machine_name_snapshot").notNull(),
-  targetMachineNameSnapshot: text("target_machine_name_snapshot").notNull(),
+  targetMachineNameSnapshot: text("target_machine_name_snapshot"),
   receiptChannelId: uuid("receipt_channel_id").references(() => channels.id, { onDelete: "restrict" }),
   state: text("state", {
     enum: [
@@ -1124,9 +1176,50 @@ export const agentMigrations = pgTable("agent_migrations", {
   index("idx_agent_migrations_target_machine").on(t.targetMachineId),
   uniqueIndex("idx_agent_migrations_active_agent").on(t.agentId).where(sql`${t.state} IN ('provisioning', 'prep', 'ready', 'in_transit', 'arriving', 'starting')`),
   check("agent_migrations_distinct_machines", sql`${t.sourceMachineId} <> ${t.targetMachineId}`),
+  check("agent_migrations_target_kind_shape", sql`(${t.targetKind} = 'computer' AND ${t.targetMachineId} IS NOT NULL AND ${t.targetMachineNameSnapshot} IS NOT NULL) OR (${t.targetKind} = 'hosted' AND ${t.targetMachineId} IS NULL AND ${t.targetMachineNameSnapshot} IS NULL)`),
   check("agent_migrations_contract_version_check", sql`${t.contractVersion} >= 1`),
   check("agent_migrations_receipt_contract_version_check", sql`${t.contractVersion} >= 2`),
 ]);
+
+/** The agent's runtime columns just before a hosted switch; read only to revert a never-created provider agent. */
+export type AgentMigrationHostedRuntimeSnapshot = {
+  runtime: string;
+  model: string;
+  reasoningEffort: string | null;
+  envVarsPresent: boolean;
+  machineId: string;
+  /**
+   * `{runtimeConfig, envVars}` as AES-GCM ciphertext (encryptProviderSecret,
+   * scope = the migration id). Both can hold secrets (env values, a builtin
+   * provider's API key), so they are never stored in the clear; only the
+   * never-created revert decrypts them.
+   */
+  encryptedRuntime: string;
+};
+
+// One row per migration whose target is Raft hosted (target_kind = 'hosted').
+// Only the hosted import path reads it; Computer migrations never have a row.
+export const agentMigrationHostedTargets = pgTable("agent_migration_hosted_targets", {
+  migrationId: uuid("migration_id").primaryKey().references(() => agentMigrations.id, { onDelete: "cascade" }),
+  provider: text("provider", { enum: ["antiproton"] }).notNull(),
+  // A model offered by the provider and picked in the dialog; null = provider default.
+  hostedModel: text("hosted_model"),
+  // GET /provision/import-limits, fixed at preflight.
+  importLimits: jsonb("import_limits").$type<AgentMigrationHostedImportLimits>(),
+  // The agent's runtime columns just before the switch, for the never-created
+  // revert only. envVars is recorded as present/absent, never its values.
+  runtimeSnapshot: jsonb("runtime_snapshot").$type<AgentMigrationHostedRuntimeSnapshot>(),
+  // Filtered file set in object storage; deleted once the migration completes.
+  fileSetObjectKey: text("file_set_object_key"),
+  fileSetSha256: text("file_set_sha256"),
+  importSummary: jsonb("import_summary").$type<AgentMigrationHostedImportSummary>(),
+  reviewReadyAt: timestamp("review_ready_at", { withTimezone: true }),
+  reviewConfirmedAt: timestamp("review_confirmed_at", { withTimezone: true }),
+  importerLeaseId: text("importer_lease_id"),
+  importerLeaseExpiresAt: timestamp("importer_lease_expires_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 export const agentMigrationChunkReceipts = pgTable("agent_migration_chunk_receipts", {
   migrationId: uuid("migration_id").notNull().references(() => agentMigrations.id, { onDelete: "cascade" }),
@@ -1174,6 +1267,11 @@ export const oauthClients = pgTable("oauth_clients", {
   homepageUrl: text("homepage_url"),
   returnUrl: text("return_url"),
   agentManifestUrl: text("agent_manifest_url"),
+  // Optional installation onboarding. URL changes invalidate prior completion;
+  // progress never grants permissions or changes OAuth availability.
+  setupUrl: text("setup_url"),
+  setupDescription: text("setup_description"),
+  setupRevision: integer("setup_revision").notNull().default(1),
   // Agent-facing "when to use this app" hint (task #319). Nullable; empty is
   // stored as null by the write path. Hard cap 160 code points, no control
   // characters, single line — enforced again by the shared validator on both
@@ -1185,8 +1283,7 @@ export const oauthClients = pgTable("oauth_clients", {
   logoStorageKey: text("logo_storage_key"),
   category: text("category").default("Other").notNull(),
   dataAccessSummary: text("data_access_summary"),
-  // NULL is only for pre-migration local clients using the legacy operator policy.
-  // New registrations default off; an explicit false always wins over that policy.
+  // Unread since Agent JWT became built in; kept one release for rollback, then dropped.
   agentJwtEnabled: boolean("agent_jwt_enabled").default(false),
   enabled: boolean("enabled").default(true).notNull(),
   humanMarketplaceVisible: boolean("human_marketplace_visible").default(true).notNull(),
@@ -1203,6 +1300,11 @@ export const oauthClients = pgTable("oauth_clients", {
   // on the same server, may regenerate the client secret. Never overwritten by
   // rotation — rotation changes the secret, not ownership.
   ownerAgentId: uuid("owner_agent_id").references(() => agents.id, { onDelete: "set null" }),
+  // App-owned Bot capability declaration (design-v3). Declaration alone does
+  // not create or grant a Bot; install-time grant + activation still required.
+  // Only editable while enabled=true on a private/non-published app OR when the
+  // current publish revision already includes this capability.
+  enableBot: boolean("enable_bot").notNull().default(false),
   // RFC 051 outbound authority is derived from immutable request revisions.
   // These fields are the closed runtime ceiling; remote manifests are never
   // consulted while authorizing pull or delivery.
@@ -1214,6 +1316,7 @@ export const oauthClients = pgTable("oauth_clients", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
+  check("oauth_clients_setup_revision_positive", sql`${t.setupRevision} > 0`),
   index("idx_oauth_clients_server").on(t.serverId),
   // Declared as a UNIQUE constraint. A unique index alone would also back the
   // composite FK from official_app_registry; migration 0281 adopts the index
@@ -1293,7 +1396,7 @@ export const oauthClientInstalls = pgTable("oauth_client_installs", {
   installedByUserId: uuid("installed_by_user_id").references(() => users.id, { onDelete: "cascade" }),
   installedByAgentId: uuid("installed_by_agent_id").references(() => agents.id, { onDelete: "cascade" }),
   installedBySystem: boolean("installed_by_system").notNull().default(false),
-  // Target-Server consent, separate from publisher support and data-read groups.
+  // Unread since Agent JWT became built in; kept one release for rollback, then dropped.
   agentJwtEnabled: boolean("agent_jwt_enabled").notNull().default(false),
   status: text("status", { enum: ["active", "suspended"] }).notNull().default("active"),
   approvedRequestRevisionId: uuid("approved_request_revision_id").references(() => oauthAppPermissionRevisions.id, { onDelete: "set null" }),
@@ -1301,9 +1404,19 @@ export const oauthClientInstalls = pgTable("oauth_client_installs", {
   subscribedEvents: jsonb("subscribed_events").$type<string[]>().notNull().default([]),
   grantRevision: integer("grant_revision").notNull().default(0),
   subscriptionRevision: integer("subscription_revision").notNull().default(0),
+  setupCompletedRevision: integer("setup_completed_revision"),
+  setupCompletedAt: timestamp("setup_completed_at", { withTimezone: true }),
+  // Per-installation Bot grant: set at install approval or explicit opt-in.
+  // NULL = no Bot declared/requested; 'granted' = binding may be created.
+  // Set separately from global App enablement; revoking never back-fills.
+  botGrant: text("bot_grant", { enum: ["pending", "granted", "revoked"] }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
+  check("oauth_client_installs_setup_completion_valid", sql`
+    (${t.setupCompletedRevision} IS NULL AND ${t.setupCompletedAt} IS NULL)
+    OR (${t.setupCompletedRevision} IS NOT NULL AND ${t.setupCompletedRevision} > 0 AND ${t.setupCompletedAt} IS NOT NULL)
+  `),
   uniqueIndex("idx_oauth_client_installs_server_client").on(t.serverId, t.clientId),
   index("idx_oauth_client_installs_client").on(t.clientId),
   check(
@@ -1315,6 +1428,35 @@ export const oauthClientInstalls = pgTable("oauth_client_installs", {
   index("idx_oauth_client_installs_status").on(t.clientId, t.status),
   check("oauth_client_installs_grant_revision_nonnegative", sql`${t.grantRevision} >= 0`),
   check("oauth_client_installs_subscription_revision_nonnegative", sql`${t.subscriptionRevision} >= 0`),
+]);
+
+// App-owned Bot identity binding. One App has at most one active Bot per
+// installation (unique index on install_id, state != 'uninstalled'). The Bot's
+// agent_id is immutable once assigned; generation/tombstone survive reinstall.
+// display name conflicts are resolved at activation; handle is the app's
+// stable client-ID-derived handle, not the agent's Raft name.
+export const appBotBindings = pgTable("app_bot_bindings", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  installId: uuid("install_id").notNull().references(() => oauthClientInstalls.id, { onDelete: "cascade" }),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "restrict" }),
+  generation: integer("generation").notNull().default(1),
+  state: text("state", { enum: ["active", "disabled", "uninstalled"] }).notNull().default("active"),
+  handle: text("handle").notNull(),
+  requestedPermissions: jsonb("requested_permissions").$type<string[]>().notNull().default([]),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  disabledAt: timestamp("disabled_at", { withTimezone: true }),
+  uninstalledAt: timestamp("uninstalled_at", { withTimezone: true }),
+}, (t) => [
+  // Exactly one live (non-uninstalled) Bot per install.
+  uniqueIndex("idx_app_bot_install_live").on(t.installId).where(sql`state != 'uninstalled'`),
+  // The Bot agent is attributed to exactly one install.
+  uniqueIndex("idx_app_bot_agent_install").on(t.agentId).where(sql`state = 'active'`),
+  index("idx_app_bot_server").on(t.serverId),
+  index("idx_app_bot_state").on(t.installId, t.state),
+  check("app_bot_generation_positive", sql`${t.generation} > 0`),
+  check("app_bot_handle_nonempty", sql`length(btrim(${t.handle})) > 0`),
 ]);
 
 // Sticky policy state is deliberately independent of the installation row:
@@ -1578,7 +1720,7 @@ export const thirdPartyAgentEvents = pgTable("third_party_agent_events", {
   // invisible to every client.
   clientId: uuid("client_id").references(() => oauthClients.id, { onDelete: "cascade" }),
   // A Raft system app's event (RFC 074 §2 assistant doorbell: "system.assistant").
-  systemApp: text("system_app", { enum: ["system.assistant"] }),
+  systemApp: text("system_app", { enum: ["system.assistant", "system.raftbench"] }),
   accessTokenId: uuid("access_token_id").references(() => oauthAccessTokens.id, { onDelete: "set null" }),
   externalEventId: text("external_event_id"),
   kind: text("kind", { enum: ["event", "notification", "action_request"] }).notNull(),
@@ -1730,6 +1872,54 @@ export const channels = pgTable("channels", {
   check("channels_guest_joinable_requires_visible", sql`NOT ${t.guestJoinable} OR ${t.guestVisible}`),
 ]);
 
+// Public server SEO (#proj-public-server-seo): stable public routing ids for
+// raft.build URLs and the lastmod stamps of what public pages show. Kept out
+// of `servers` / `channels` on purpose: those rows are returned whole by many
+// member and agent routes, and a routing id must only ever leave the server
+// through the search API, after its predicate passed (Ark). Ids are 128
+// random bits (gen_random_uuid() as 32 hex), never derived from the row id,
+// and never change once issued.
+//
+// Rows are created by the 0347 triggers (every new server; every new channel
+// and thread), by the 0347 backfill (all servers; live channels and threads
+// of servers public at the time) and when a server goes public. A channel
+// without a row is never indexable. `public_changed_at` is stamped by the
+// 0347 update triggers only, never by app code.
+export const serverPublicRoutes = pgTable("server_public_routes", {
+  serverId: uuid("server_id").primaryKey().references(() => servers.id, { onDelete: "cascade" }),
+  publicId: text("public_id").notNull().unique().default(sql`replace(gen_random_uuid()::text, '-', '')`),
+  // Name, slug, avatar, public/search switches or deletion last changed.
+  publicChangedAt: timestamp("public_changed_at", { withTimezone: true }),
+});
+
+export const channelPublicRoutes = pgTable("channel_public_routes", {
+  channelId: uuid("channel_id").primaryKey().references(() => channels.id, { onDelete: "cascade" }),
+  publicId: text("public_id").notNull().unique().default(sql`replace(gen_random_uuid()::text, '-', '')`),
+  // Name, description, type, Guest visibility, archive or deletion last
+  // changed while the row was or became a Guest-visible live channel, or for
+  // a thread. Private channel edits never set it.
+  publicChangedAt: timestamp("public_changed_at", { withTimezone: true }),
+});
+
+// Public server SEO, task #4: service credentials for the raft.build Pages
+// Function (lib/publicSearchServiceAccess.ts). Only SHA-256 digests of the
+// tokens are stored. Read on every service request, so removing or replacing
+// a row takes effect on the next request without a deploy. One current key
+// (no expiry) per client, enforced here; at most one previous key, which
+// stops working at its `expires_at`. Rows are managed by operators.
+export const publicSearchServiceKeys = pgTable("public_search_service_keys", {
+  keyId: text("key_id").primaryKey(),
+  clientId: text("client_id").notNull(),
+  sha256: text("sha256").notNull(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_public_search_service_keys_current").on(t.clientId).where(sql`expires_at IS NULL`),
+  index("idx_public_search_service_keys_client").on(t.clientId),
+  check("public_search_service_keys_key_id_shape", sql`${t.keyId} ~ '^[A-Za-z0-9_-]{1,32}$'`),
+  check("public_search_service_keys_sha256_shape", sql`${t.sha256} ~ '^[0-9a-f]{64}$'`),
+]);
+
 // Durable DM provenance. Membership rows are intentionally mutable (for
 // example, deleting an agent removes channel_agents), so they cannot be the
 // source of truth for whether a one-human DM is a self-DM. New/adopted DMs get
@@ -1803,7 +1993,14 @@ export const jointChannelInvites = pgTable("joint_channel_invites", {
   expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   acceptedAt: timestamp("accepted_at", { withTimezone: true }),
+  // How an accepted invite was accepted (RFC 075 §4.5): "invitee" when the
+  // invited admin accepted it (email link or in-app), "same_admin" when the
+  // inviter administers both servers and connected directly without email.
+  // NULL for pending/declined/expired invites and for invites accepted before
+  // this column existed.
+  acceptedVia: text("accepted_via", { enum: ["invitee", "same_admin"] }),
 }, (t) => [
+  check("joint_channel_invites_accepted_via_known", sql`${t.acceptedVia} IS NULL OR ${t.acceptedVia} IN ('invitee', 'same_admin')`),
   uniqueIndex("idx_joint_channel_invites_token_hash").on(t.tokenHash),
   uniqueIndex("idx_joint_channel_invites_pending_target_user").on(t.jointChannelId, t.toServerId, t.invitedUserId).where(sql`status = 'pending'`),
   index("idx_joint_channel_invites_to_server").on(t.toServerId, t.status),
@@ -2244,6 +2441,15 @@ export const externalAppInstalls = pgTable("external_app_installs", {
   providerBotId: text("provider_bot_id"),
   workspaceName: text("workspace_name"),
   lastVerifiedAt: timestamp("last_verified_at", { withTimezone: true }),
+  // Last lifecycle reconcile result for agent-mention usergroups; drives the
+  // settings hint (e.g. workspace restricts usergroup creation to admins).
+  agentMentionSync: jsonb("agent_mention_sync").$type<{
+    state: "synced" | "degraded";
+    slackError: string | null;
+    expected: number;
+    actual: number;
+    observedAt: string;
+  }>(),
   installGrantRenewalLeaseOwner: text("install_grant_renewal_lease_owner"),
   installGrantRenewalLeaseExpiresAt: timestamp("install_grant_renewal_lease_expires_at", { withTimezone: true }),
   installGrantRenewalNextAttemptAt: timestamp("install_grant_renewal_next_attempt_at", { withTimezone: true }),
@@ -3790,10 +3996,18 @@ export const machines = pgTable("daemons", {
   runtimes: json("runtimes").$type<string[]>(),
   hostname: text("hostname"),
   os: text("os"),
+  // Coarse machine kind for the Computer icon (shared DEVICE_CLASSES), from
+  // the daemon's `ready`; null when unknown or reported by an older daemon.
+  deviceClass: text("device_class"),
   daemonVersion: text("daemon_version"),
   computerVersion: text("computer_version"),
   computerVersionReportedAt: timestamp("computer_version_reported_at", { withTimezone: true }),
   lastHeartbeat: timestamp("last_heartbeat", { withTimezone: true }),
+  // When this Computer first came online (onboarding funnel, T3). The row is
+  // created when its key is minted and `last_heartbeat` is overwritten, so
+  // nothing else records it. Set once on `machine:online`; null for machines
+  // that never connected or that last connected before the column existed.
+  firstConnectedAt: timestamp("first_connected_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   legacyKeyMigratedAt: timestamp("legacy_key_migrated_at", { withTimezone: true }),
 }, (t) => [
@@ -3864,6 +4078,16 @@ export const channelWorkspaceBindings = pgTable("channel_workspace_bindings", {
   check("channel_workspace_bindings_mode_check", sql`${t.mode} IN ('reader', 'writer')`),
   check("channel_workspace_bindings_position_check", sql`${t.position} BETWEEN 0 AND 7`),
 ]);
+
+// Same-machine grouping (computer_host_identity_v0): the daemon's per-server
+// HMAC(hardware ID, serverId). Its own table, not a `daemons` column, so no
+// machine-row read can return it; it leaves the Server only as an opaque
+// per-response group label. Deleted with the machine.
+export const computerHostIdentities = pgTable("computer_host_identities", {
+  machineId: uuid("daemon_id").primaryKey().references(() => machines.id, { onDelete: "cascade" }),
+  hostIdHash: text("host_id_hash").notNull(),
+  reportedAt: timestamp("reported_at", { withTimezone: true }).notNull(),
+});
 
 // Tasks — THE CANONICAL TASK TABLE (v1.4).
 //
@@ -4258,7 +4482,7 @@ export const readMutations = pgTable("read_mutations", {
   mutationId: uuid("mutation_id").notNull(),
   payloadHash: text("payload_hash").notNull(),
   authoritySeq: bigint("authority_seq", { mode: "number" }).notNull(),
-  kind: text("kind", { enum: ["row_read", "row_unread", "channel_read_all", "global_read_all", "done"] }).notNull(),
+  kind: text("kind", { enum: ["row_read", "row_unread", "channel_read_all", "conversation_read_all", "global_read_all", "done"] }).notNull(),
   scopeId: uuid("scope_id"),
   requestedThroughSeq: integer("requested_through_seq"),
   // RFC 057 phase-A shadow of requested_through_seq (nullable like its authority).
@@ -4305,7 +4529,7 @@ export const readMutations = pgTable("read_mutations", {
   check("read_mutations_attempt_count_nonnegative", sql`${t.attemptCount} >= 0`),
   check("read_mutations_scope_shape", sql`
     (${t.kind} = 'global_read_all' AND ${t.scopeId} IS NULL AND ${t.requestedThroughSeq} IS NULL AND ${t.doneTargetKind} IS NULL AND ${t.doneThroughSeq} IS NULL)
-    OR (${t.kind} = 'channel_read_all' AND ${t.scopeId} IS NOT NULL AND ${t.requestedThroughSeq} IS NULL AND ${t.doneTargetKind} IS NULL AND ${t.doneThroughSeq} IS NULL)
+    OR (${t.kind} IN ('channel_read_all', 'conversation_read_all') AND ${t.scopeId} IS NOT NULL AND ${t.requestedThroughSeq} IS NULL AND ${t.doneTargetKind} IS NULL AND ${t.doneThroughSeq} IS NULL)
     OR (${t.kind} IN ('row_read', 'row_unread') AND ${t.scopeId} IS NOT NULL AND ${t.requestedThroughSeq} IS NOT NULL AND ${t.requestedThroughSeq} >= 0 AND ${t.doneTargetKind} IS NULL AND ${t.doneThroughSeq} IS NULL)
     OR (${t.kind} = 'done' AND ${t.scopeId} IS NOT NULL AND ${t.requestedThroughSeq} IS NULL AND ${t.doneTargetKind} IN ('channel', 'thread') AND ${t.doneThroughSeq} IS NOT NULL AND ${t.doneThroughSeq} > 0)
   `),
@@ -4760,342 +4984,6 @@ export const webhookEvents = pgTable("webhook_events", {
   processedAt: timestamp("processed_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
-export const billingPaidHistoryCoverage = pgTable("billing_paid_history_coverage", {
-  environment: text("environment").notNull(),
-  livemode: boolean("livemode").notNull(),
-  coverageOriginAt: timestamp("coverage_origin_at", { withTimezone: true }).notNull(),
-  coverageWatermarkAt: timestamp("coverage_watermark_at", { withTimezone: true }).notNull(),
-  completedAt: timestamp("completed_at", { withTimezone: true }),
-  source: text("source").notNull(),
-  auditActor: text("audit_actor"),
-  auditReason: text("audit_reason").notNull(),
-  unresolvedIdentityCount: integer("unresolved_identity_count").notNull().default(0),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [
-  primaryKey({ columns: [t.environment, t.livemode] }),
-  check("billing_paid_history_coverage_unresolved_nonnegative", sql`${t.unresolvedIdentityCount} >= 0`),
-  check("billing_paid_history_coverage_window_valid", sql`${t.coverageWatermarkAt} >= ${t.coverageOriginAt}`),
-  check("billing_paid_history_coverage_completed_covers_window", sql`${t.completedAt} IS NULL OR ${t.completedAt} >= ${t.coverageWatermarkAt}`),
-]);
-
-export const billingPaidIdentityEvents = pgTable("billing_paid_identity_events", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  environment: text("environment").notNull(),
-  livemode: boolean("livemode").notNull(),
-  stripeEventId: text("stripe_event_id").notNull(),
-  stripeInvoiceId: text("stripe_invoice_id").notNull(),
-  stripeSubscriptionId: text("stripe_subscription_id"),
-  stripeCustomerId: text("stripe_customer_id"),
-  paidFactKind: text("paid_fact_kind", { enum: ["pro_invoice_paid"] }).notNull(),
-  stripeProductId: text("stripe_product_id").notNull(),
-  stripePriceId: text("stripe_price_id").notNull(),
-  serverId: uuid("server_id"),
-  payerUserId: uuid("payer_user_id"),
-  ownerUserId: uuid("owner_user_id"),
-  identityResolutionState: text("identity_resolution_state", { enum: ["resolved", "parked"] }).notNull(),
-  paidAt: timestamp("paid_at", { withTimezone: true }).notNull(),
-  currency: text("currency").notNull(),
-  invoiceSubtotal: integer("invoice_subtotal").notNull(),
-  invoiceTotal: integer("invoice_total").notNull(),
-  amountPaid: integer("amount_paid").notNull(),
-  observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
-  source: text("source").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [
-  uniqueIndex("idx_billing_paid_identity_event_env_mode_event").on(t.environment, t.livemode, t.stripeEventId),
-  uniqueIndex("idx_billing_paid_identity_event_env_mode_invoice").on(t.environment, t.livemode, t.stripeInvoiceId),
-  index("idx_billing_paid_identity_events_server").on(t.serverId),
-  index("idx_billing_paid_identity_events_payer").on(t.payerUserId),
-  index("idx_billing_paid_identity_events_owner").on(t.ownerUserId),
-  index("idx_billing_paid_identity_events_customer").on(t.stripeCustomerId),
-  check(
-    "billing_paid_identity_events_identity_state_consistent",
-    sql`(
-      ${t.identityResolutionState} = 'resolved'
-      AND ${t.serverId} IS NOT NULL
-      AND ${t.payerUserId} IS NOT NULL
-      AND ${t.ownerUserId} IS NOT NULL
-    ) OR ${t.identityResolutionState} = 'parked'`,
-  ),
-  check("billing_paid_identity_events_amounts_nonnegative", sql`${t.invoiceSubtotal} >= 0 AND ${t.invoiceTotal} >= 0 AND ${t.amountPaid} >= 0`),
-  check("billing_paid_identity_events_currency_lower", sql`${t.currency} = lower(${t.currency})`),
-  check("billing_paid_identity_events_fact_kind_known", sql`${t.paidFactKind} = 'pro_invoice_paid'`),
-  check("billing_paid_identity_events_identity_state_known", sql`${t.identityResolutionState} IN ('resolved', 'parked')`),
-]);
-
-export const billingPaidIdentityResolutions = pgTable("billing_paid_identity_resolutions", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  paidIdentityEventId: uuid("paid_identity_event_id").notNull().references(() => billingPaidIdentityEvents.id, { onDelete: "restrict" }),
-  serverId: uuid("server_id").notNull(),
-  payerUserId: uuid("payer_user_id").notNull(),
-  ownerUserId: uuid("owner_user_id").notNull(),
-  resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
-  source: text("source").notNull(),
-  auditActor: text("audit_actor"),
-  auditReason: text("audit_reason").notNull(),
-}, (t) => [
-  uniqueIndex("idx_billing_paid_identity_resolutions_event").on(t.paidIdentityEventId),
-  index("idx_billing_paid_identity_resolutions_server").on(t.serverId),
-  index("idx_billing_paid_identity_resolutions_payer").on(t.payerUserId),
-  index("idx_billing_paid_identity_resolutions_owner").on(t.ownerUserId),
-]);
-
-export const referralDiscountCampaigns = pgTable("referral_discount_campaigns", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  name: text("name").notNull(),
-  status: text("status", { enum: ["draft", "active", "paused", "archived"] }).notNull().default("draft"),
-  providerState: text("provider_state", { enum: ["pending", "ready", "failed", "disabled"] }).notNull().default("pending"),
-  providerProvisioningStartedAt: timestamp("provider_provisioning_started_at", { withTimezone: true }),
-  stripeCouponId: text("stripe_coupon_id"),
-  providerStrategy: text("provider_strategy").notNull(),
-  providerErrorCode: text("provider_error_code"),
-  providerErrorMessage: text("provider_error_message"),
-  providerSyncedAt: timestamp("provider_synced_at", { withTimezone: true }),
-  percentOff: integer("percent_off").notNull(),
-  durationMonths: integer("duration_months").notNull(),
-  currency: text("currency").notNull().default("usd"),
-  productScope: text("product_scope", { enum: ["pro"] }).notNull().default("pro"),
-  billingIntervalScope: text("billing_interval_scope", { enum: ["monthly", "annual", "both"] }).notNull().default("both"),
-  maxPaidRedemptions: integer("max_paid_redemptions"),
-  liveReservedCount: integer("live_reserved_count").notNull().default(0),
-  qualifiedCount: integer("qualified_count").notNull().default(0),
-  startsAt: timestamp("starts_at", { withTimezone: true }),
-  expiresAt: timestamp("expires_at", { withTimezone: true }),
-  createdByUserId: uuid("created_by_user_id").references(() => users.id, { onDelete: "set null" }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-  archivedAt: timestamp("archived_at", { withTimezone: true }),
-  mutationReason: text("mutation_reason").notNull(),
-}, (t) => [
-  check("referral_discount_campaigns_percent_range", sql`${t.percentOff} > 0 AND ${t.percentOff} <= 100`),
-  check("referral_discount_campaigns_duration_positive", sql`${t.durationMonths} > 0`),
-  check("referral_discount_campaigns_currency_lower", sql`${t.currency} = lower(${t.currency})`),
-  check("referral_discount_campaigns_counts_nonnegative", sql`${t.liveReservedCount} >= 0 AND ${t.qualifiedCount} >= 0`),
-  check("referral_discount_campaigns_cap_nonnegative", sql`${t.maxPaidRedemptions} IS NULL OR ${t.maxPaidRedemptions} >= 0`),
-  check("referral_discount_campaigns_counts_within_cap", sql`${t.maxPaidRedemptions} IS NULL OR (${t.liveReservedCount} + ${t.qualifiedCount}) <= ${t.maxPaidRedemptions}`),
-  check("referral_discount_campaigns_status_known", sql`${t.status} IN ('draft', 'active', 'paused', 'archived')`),
-  check("referral_discount_campaigns_provider_state_known", sql`${t.providerState} IN ('pending', 'ready', 'failed', 'disabled')`),
-  check("referral_discount_campaigns_product_scope_known", sql`${t.productScope} = 'pro'`),
-  check("referral_discount_campaigns_billing_interval_scope_known", sql`${t.billingIntervalScope} IN ('monthly', 'annual', 'both')`),
-]);
-
-export const referralDiscountCodes = pgTable("referral_discount_codes", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  campaignId: uuid("campaign_id").notNull().references(() => referralDiscountCampaigns.id, { onDelete: "cascade" }),
-  referrerUserId: uuid("referrer_user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
-  displayCode: text("display_code").notNull(),
-  normalizedCode: text("normalized_code").notNull(),
-  status: text("status", { enum: ["active", "paused", "revoked", "expired"] }).notNull().default("active"),
-  providerState: text("provider_state", { enum: ["pending", "ready", "failed", "disabled"] }).notNull().default("pending"),
-  providerProvisioningStartedAt: timestamp("provider_provisioning_started_at", { withTimezone: true }),
-  stripePromotionCodeId: text("stripe_promotion_code_id"),
-  providerErrorCode: text("provider_error_code"),
-  providerErrorMessage: text("provider_error_message"),
-  providerSyncedAt: timestamp("provider_synced_at", { withTimezone: true }),
-  maxPaidRedemptions: integer("max_paid_redemptions"),
-  liveReservedCount: integer("live_reserved_count").notNull().default(0),
-  qualifiedCount: integer("qualified_count").notNull().default(0),
-  expiresAt: timestamp("expires_at", { withTimezone: true }),
-  issuedByUserId: uuid("issued_by_user_id").references(() => users.id, { onDelete: "set null" }),
-  issuedReason: text("issued_reason").notNull(),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [
-  uniqueIndex("idx_referral_discount_codes_normalized").on(t.normalizedCode),
-  index("idx_referral_discount_codes_campaign").on(t.campaignId),
-  index("idx_referral_discount_codes_referrer").on(t.referrerUserId),
-  check("referral_discount_codes_normalized_lower", sql`${t.normalizedCode} = lower(${t.normalizedCode})`),
-  check("referral_discount_codes_counts_nonnegative", sql`${t.liveReservedCount} >= 0 AND ${t.qualifiedCount} >= 0`),
-  check("referral_discount_codes_cap_nonnegative", sql`${t.maxPaidRedemptions} IS NULL OR ${t.maxPaidRedemptions} >= 0`),
-  check("referral_discount_codes_counts_within_cap", sql`${t.maxPaidRedemptions} IS NULL OR (${t.liveReservedCount} + ${t.qualifiedCount}) <= ${t.maxPaidRedemptions}`),
-  check("referral_discount_codes_status_known", sql`${t.status} IN ('active', 'paused', 'revoked', 'expired')`),
-  check("referral_discount_codes_provider_state_known", sql`${t.providerState} IN ('pending', 'ready', 'failed', 'disabled')`),
-]);
-
-export const referralDiscountRedemptions = pgTable("referral_discount_redemptions", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  campaignId: uuid("campaign_id").notNull().references(() => referralDiscountCampaigns.id, { onDelete: "restrict" }),
-  codeId: uuid("code_id").notNull().references(() => referralDiscountCodes.id, { onDelete: "restrict" }),
-  referrerUserId: uuid("referrer_user_id").notNull(),
-  referredServerId: uuid("referred_server_id").notNull().references(() => servers.id, { onDelete: "restrict" }),
-  redeemingUserId: uuid("redeeming_user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
-  stripeCustomerId: text("stripe_customer_id"),
-  stripeCheckoutSessionId: text("stripe_checkout_session_id"),
-  stripeSubscriptionId: text("stripe_subscription_id"),
-  firstPaidInvoiceId: text("first_paid_invoice_id"),
-  targetProductScope: text("target_product_scope", { enum: ["pro"] }).notNull().default("pro"),
-  targetBillingInterval: text("target_billing_interval", { enum: ["monthly", "annual"] }).notNull().default("monthly"),
-  acquisitionState: text("acquisition_state", {
-    enum: ["reserved", "checkout_created", "checkout_completed", "qualified", "checkout_expired", "void"],
-  }).notNull().default("reserved"),
-  qualificationDisposition: text("qualification_disposition", { enum: ["none", "qualified", "reversed"] }).notNull().default("none"),
-  financialRisk: text("financial_risk", { enum: ["clear", "disputed"] }).notNull().default("clear"),
-  capSlotState: text("cap_slot_state", { enum: ["held", "consumed", "released"] }).notNull().default("held"),
-  reservationExpiresAt: timestamp("reservation_expires_at", { withTimezone: true }).notNull(),
-  referralCheckoutIdempotencyKey: text("referral_checkout_idempotency_key"),
-  internalReason: text("internal_reason"),
-  reservedAt: timestamp("reserved_at", { withTimezone: true }).notNull().defaultNow(),
-  checkoutCreatedAt: timestamp("checkout_created_at", { withTimezone: true }),
-  checkoutCompletedAt: timestamp("checkout_completed_at", { withTimezone: true }),
-  qualifiedAt: timestamp("qualified_at", { withTimezone: true }),
-  terminalAt: timestamp("terminal_at", { withTimezone: true }),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [
-  index("idx_referral_discount_redemptions_campaign").on(t.campaignId),
-  index("idx_referral_discount_redemptions_code").on(t.codeId),
-  index("idx_referral_discount_redemptions_server").on(t.referredServerId),
-  index("idx_referral_discount_redemptions_redeeming_user").on(t.redeemingUserId),
-  index("idx_referral_discount_redemptions_customer").on(t.stripeCustomerId),
-  uniqueIndex("idx_referral_discount_redemptions_session").on(t.stripeCheckoutSessionId),
-  uniqueIndex("idx_referral_discount_redemptions_invoice").on(t.firstPaidInvoiceId),
-  uniqueIndex("idx_referral_discount_redemptions_active_server")
-    .on(t.referredServerId)
-    .where(sql`${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')`),
-  uniqueIndex("idx_referral_discount_redemptions_active_user")
-    .on(t.redeemingUserId)
-    .where(sql`${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')`),
-  uniqueIndex("idx_referral_discount_redemptions_active_customer")
-    .on(t.stripeCustomerId)
-    .where(sql`${t.stripeCustomerId} IS NOT NULL AND ${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')`),
-  uniqueIndex("idx_referral_discount_redemptions_success_server")
-    .on(t.referredServerId)
-    .where(sql`${t.acquisitionState} = 'qualified'`),
-  uniqueIndex("idx_referral_discount_redemptions_success_user")
-    .on(t.redeemingUserId)
-    .where(sql`${t.acquisitionState} = 'qualified'`),
-  uniqueIndex("idx_referral_discount_redemptions_success_customer")
-    .on(t.stripeCustomerId)
-    .where(sql`${t.stripeCustomerId} IS NOT NULL AND ${t.acquisitionState} = 'qualified'`),
-  check(
-    "referral_discount_redemptions_qualification_consistent",
-    sql`(
-      ${t.acquisitionState} = 'qualified'
-      AND ${t.qualificationDisposition} IN ('qualified', 'reversed')
-      AND ${t.capSlotState} = 'consumed'
-    ) OR (
-      ${t.acquisitionState} <> 'qualified'
-      AND ${t.qualificationDisposition} = 'none'
-    )`,
-  ),
-  check(
-    "referral_discount_redemptions_cap_slot_consistent",
-    sql`(
-      ${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed')
-      AND ${t.capSlotState} = 'held'
-    ) OR (
-      ${t.acquisitionState} = 'qualified'
-      AND ${t.capSlotState} = 'consumed'
-    ) OR (
-      ${t.acquisitionState} IN ('checkout_expired', 'void')
-      AND ${t.capSlotState} = 'released'
-    )`,
-  ),
-  check("referral_discount_redemptions_acquisition_state_known", sql`${t.acquisitionState} IN ('reserved', 'checkout_created', 'checkout_completed', 'qualified', 'checkout_expired', 'void')`),
-  check("referral_discount_redemptions_product_scope_known", sql`${t.targetProductScope} = 'pro'`),
-  check("referral_discount_redemptions_billing_interval_known", sql`${t.targetBillingInterval} IN ('monthly', 'annual')`),
-  check("referral_discount_redemptions_disposition_known", sql`${t.qualificationDisposition} IN ('none', 'qualified', 'reversed')`),
-  check("referral_discount_redemptions_financial_risk_known", sql`${t.financialRisk} IN ('clear', 'disputed')`),
-  check("referral_discount_redemptions_cap_slot_known", sql`${t.capSlotState} IN ('held', 'consumed', 'released')`),
-]);
-
-export const referralDiscountProviderOperations = pgTable("referral_discount_provider_operations", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  environment: text("environment").notNull(),
-  livemode: boolean("livemode").notNull(),
-  operationType: text("operation_type", {
-    enum: ["campaign_coupon_create", "code_promotion_create", "checkout_session_create"],
-  }).notNull(),
-  localTargetId: uuid("local_target_id").notNull(),
-  state: text("state", { enum: ["intent", "provider_started", "confirmed", "failed", "parked"] }).notNull().default("intent"),
-  idempotencyKey: text("idempotency_key").notNull(),
-  requestFingerprint: text("request_fingerprint").notNull(),
-  requestPayload: jsonb("request_payload").$type<Record<string, unknown>>().notNull().default({}),
-  providerObjectId: text("provider_object_id"),
-  providerRequestId: text("provider_request_id"),
-  attemptCount: integer("attempt_count").notNull().default(0),
-  sanitizedErrorCode: text("sanitized_error_code"),
-  sanitizedErrorMessage: text("sanitized_error_message"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [
-  uniqueIndex("idx_referral_discount_provider_operations_target")
-    .on(t.environment, t.livemode, t.operationType, t.localTargetId),
-  index("idx_referral_discount_provider_operations_state").on(t.state),
-  check("referral_discount_provider_operations_operation_known", sql`${t.operationType} IN ('campaign_coupon_create', 'code_promotion_create', 'checkout_session_create')`),
-  check("referral_discount_provider_operations_state_known", sql`${t.state} IN ('intent', 'provider_started', 'confirmed', 'failed', 'parked')`),
-  check("referral_discount_provider_operations_attempts_nonnegative", sql`${t.attemptCount} >= 0`),
-]);
-
-export const referralDiscountProviderEvents = pgTable("referral_discount_provider_events", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  environment: text("environment").notNull(),
-  livemode: boolean("livemode").notNull(),
-  stripeEventId: text("stripe_event_id").notNull(),
-  stripeEventType: text("stripe_event_type").notNull(),
-  providerObjectId: text("provider_object_id"),
-  sourceApiVersion: text("source_api_version"),
-  payloadHash: text("payload_hash").notNull(),
-  normalizedPayload: jsonb("normalized_payload").$type<Record<string, unknown>>().notNull().default({}),
-  processingState: text("processing_state", { enum: ["parked", "applied"] }).notNull().default("parked"),
-  sanitizedErrorCode: text("sanitized_error_code"),
-  sanitizedErrorMessage: text("sanitized_error_message"),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [
-  uniqueIndex("idx_referral_discount_provider_events_event").on(t.environment, t.livemode, t.stripeEventId),
-  index("idx_referral_discount_provider_events_object").on(t.providerObjectId),
-  check("referral_discount_provider_events_processing_state_known", sql`${t.processingState} IN ('parked', 'applied')`),
-]);
-
-export const referralDiscountFinancialAdjustments = pgTable("referral_discount_financial_adjustments", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  environment: text("environment").notNull(),
-  livemode: boolean("livemode").notNull(),
-  kind: text("kind", { enum: ["refund", "credit_note", "dispute_opened", "dispute_won", "dispute_lost"] }).notNull(),
-  providerFactId: text("provider_fact_id").notNull(),
-  providerFactSequence: integer("provider_fact_sequence").notNull().default(0),
-  stripeEventId: text("stripe_event_id").notNull(),
-  stripeInvoiceId: text("stripe_invoice_id").notNull(),
-  stripeRefundId: text("stripe_refund_id"),
-  stripeCreditNoteId: text("stripe_credit_note_id"),
-  stripeDisputeId: text("stripe_dispute_id"),
-  stripeChargeId: text("stripe_charge_id"),
-  currency: text("currency").notNull(),
-  amount: integer("amount").notNull(),
-  netRevenueDelta: integer("net_revenue_delta").notNull(),
-  fullEconomicReversal: boolean("full_economic_reversal").notNull().default(false),
-  observedAt: timestamp("observed_at", { withTimezone: true }).notNull().defaultNow(),
-  sanitizedReason: text("sanitized_reason"),
-  observedRedemptionId: uuid("observed_redemption_id").references(() => referralDiscountRedemptions.id, { onDelete: "restrict" }),
-  resolvedRedemptionId: uuid("resolved_redemption_id").references(() => referralDiscountRedemptions.id, { onDelete: "restrict" }),
-  processingState: text("processing_state", { enum: ["parked", "applied"] }).notNull().default("parked"),
-  appliedAt: timestamp("applied_at", { withTimezone: true }),
-}, (t) => [
-  uniqueIndex("idx_referral_discount_adjustments_provider_fact").on(t.environment, t.livemode, t.kind, t.providerFactId, t.stripeEventId),
-  index("idx_referral_discount_adjustments_observed_redemption").on(t.observedRedemptionId),
-  index("idx_referral_discount_adjustments_resolved_redemption").on(t.resolvedRedemptionId),
-  index("idx_referral_discount_adjustments_invoice").on(t.stripeInvoiceId),
-  check("referral_discount_adjustments_amount_nonnegative", sql`${t.amount} >= 0`),
-  check("referral_discount_adjustments_currency_lower", sql`${t.currency} = lower(${t.currency})`),
-  check("referral_discount_adjustments_kind_known", sql`${t.kind} IN ('refund', 'credit_note', 'dispute_opened', 'dispute_won', 'dispute_lost')`),
-  check("referral_discount_adjustments_processing_state_known", sql`${t.processingState} IN ('parked', 'applied')`),
-  check("referral_discount_adjustments_applied_has_redemption", sql`${t.processingState} <> 'applied' OR (${t.resolvedRedemptionId} IS NOT NULL AND ${t.appliedAt} IS NOT NULL)`),
-]);
-
-export const referralDiscountFinancialAdjustmentResolutions = pgTable("referral_discount_financial_adjustment_resolutions", {
-  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
-  financialAdjustmentId: uuid("financial_adjustment_id").notNull().references(() => referralDiscountFinancialAdjustments.id, { onDelete: "restrict" }),
-  redemptionId: uuid("redemption_id").notNull().references(() => referralDiscountRedemptions.id, { onDelete: "restrict" }),
-  resolvedAt: timestamp("resolved_at", { withTimezone: true }).notNull().defaultNow(),
-  source: text("source").notNull(),
-  auditActor: text("audit_actor"),
-  auditReason: text("audit_reason").notNull(),
-}, (t) => [
-  uniqueIndex("idx_referral_discount_adjustment_resolutions_adjustment").on(t.financialAdjustmentId),
-  index("idx_referral_discount_adjustment_resolutions_redemption").on(t.redemptionId),
-]);
-
 // Attachment objects — immutable stored bytes and their physical metadata.
 //
 // Phase A of RFC 049 only establishes the additive object/projection boundary.
@@ -5463,6 +5351,23 @@ export const attachments = pgTable("attachments", {
         AND ${t.revokedByType} IN ('user', 'agent', 'machine', 'system'))`,
   ),
 ]);
+
+// Cache for expensive on-demand document previews (GET /attachments/:id/preview,
+// services/attachmentPreviews/previewCache.ts). Only results that were slow or
+// came from a heavy provider are stored; cheap text/markdown previews are
+// recomputed. A row is reused only while `content_key` (the original's storage
+// identity) and `provider_version` still match. Read access is checked before
+// the cache is consulted, so a row grants nothing on its own. `last_hit_at` is
+// kept for a future eviction sweep.
+export const attachmentPreviewCache = pgTable("attachment_preview_cache", {
+  attachmentId: uuid("attachment_id").primaryKey().references(() => attachments.id, { onDelete: "cascade" }),
+  contentKey: text("content_key").notNull(),
+  providerVersion: integer("provider_version").notNull(),
+  preview: jsonb("preview").notNull(),
+  computeMs: integer("compute_ms").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  lastHitAt: timestamp("last_hit_at", { withTimezone: true }).notNull().defaultNow(),
+});
 
 // Provider-neutral identity for one external file. Private provider locators
 // and credentials never enter this table; adapters persist only stable IDs and
@@ -5915,6 +5820,30 @@ export const agentActivityEvents = pgTable("agent_activity_events", {
 ]);
 
 /**
+ * One row per finished agent turn (RFC 069 §6 `agent_activity_summary_v2`;
+ * task #17 Activity overview). `summary` is `ActivityTurnSummary`: times,
+ * outcome, trigger, action counts, problem steps, last reply id; never tool
+ * input/output or message bodies. Written by the daemon (a `turn_summary`
+ * trajectory entry) or rebuilt by the server for agents without a daemon;
+ * `turn_key` makes the write an upsert, so a late event rebuilds its turn.
+ * Additive table: nothing else reads or writes it.
+ */
+export const agentActivitySummaryV2 = pgTable("agent_activity_summary_v2", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  turnKey: text("turn_key").notNull(),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
+  endedAt: timestamp("ended_at", { withTimezone: true }).notNull(),
+  outcome: text("outcome").notNull(),
+  summary: jsonb("summary").$type<ActivityTurnSummary>().notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  uniqueIndex("idx_agent_activity_summary_v2_agent_turn").on(t.agentId, t.turnKey),
+  index("idx_agent_activity_summary_v2_agent_ended").on(t.agentId, t.endedAt),
+]);
+
+/**
  * Thread contract (authoritative).
  * =============================================================================
  * Thread channels split two authorities that regular channels conflate:
@@ -6021,7 +5950,7 @@ export const threadFollows = pgTable("thread_follows", {
 export const pushRegistrations = pgTable("push_registrations", {
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   installationId: text("installation_id").notNull(),
-  provider: text("provider", { enum: ["apns"] }).notNull(),
+  provider: text("provider", { enum: ["apns", "fcm"] }).notNull(),
   userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
   serverId: uuid("server_id").references(() => servers.id, { onDelete: "set null" }),
   sessionFamilyId: uuid("session_family_id").references(() => sessionFamilies.id, { onDelete: "set null" }),
@@ -6038,7 +5967,7 @@ export const pushRegistrations = pgTable("push_registrations", {
   index("idx_push_registrations_binding").on(t.userId, t.serverId),
   index("idx_push_registrations_family").on(t.sessionFamilyId),
   index("idx_push_registrations_provider_env").on(t.provider, t.env),
-  check("push_registrations_provider_check", sql`${t.provider} IN ('apns')`),
+  check("push_registrations_provider_check", sql`${t.provider} IN ('apns', 'fcm')`),
   check("push_registrations_env_check", sql`${t.env} IN ('sandbox', 'production')`),
 ]);
 
@@ -6069,6 +5998,9 @@ export const mobilePushOutbox = pgTable("mobile_push_outbox", {
 }, (t) => [
   uniqueIndex("idx_mobile_push_outbox_unique_fact").on(t.receiverType, t.receiverId, t.sourceChannelId, t.messageId),
   index("idx_mobile_push_outbox_pending").on(t.status, t.createdAt),
+  // The drain's candidate read (migration 0357); built CONCURRENTLY in
+  // staging/prod by db:create-mobile-push-outbox-active-index first.
+  index("idx_mobile_push_outbox_active_created").on(t.createdAt).where(sql`${t.status} IN ('pending', 'processing')`),
   index("idx_mobile_push_outbox_message").on(t.messageId),
   check("mobile_push_outbox_receiver_type_check", sql`${t.receiverType} IN ('user')`),
   check("mobile_push_outbox_kind_check", sql`${t.kind} IN ('channel', 'dm', 'thread')`),
@@ -6168,6 +6100,8 @@ export const announcementImageAssets = pgTable("announcement_image_assets", {
 });
 
 export const announcements = pgTable("announcements", {
+  audience: jsonb("audience").$type<AnnouncementAudience>().notNull().default({ type: "all" }),
+  deliveryVersion: integer("delivery_version").notNull().default(1),
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   title: text("title").notNull(),
   pages: json("pages").$type<Array<{ title?: string; body: string }>>().notNull(),
@@ -6204,6 +6138,8 @@ export const userAnnouncementDismissals = pgTable("user_announcement_dismissals"
 ]);
 
 export const announcementAuditEvents = pgTable("announcement_audit_events", {
+  audienceSnapshot: jsonb("audience_snapshot").$type<AnnouncementAudienceSnapshot>(),
+  reachCount: integer("reach_count"),
   id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
   announcementId: uuid("announcement_id").notNull().references(() => announcements.id, { onDelete: "cascade" }),
   actorUserId: uuid("actor_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -6635,6 +6571,13 @@ export const mentionDeliveryOccurrences = pgTable("mention_delivery_occurrences"
 }, (t) => [
   uniqueIndex("idx_mention_delivery_occurrences_message_agent").on(t.messageId, t.agentId),
   index("idx_mention_delivery_occurrences_machine_state").on(t.machineIdSnapshot, t.state),
+  // Agent-side recovery (listRecoverableMentionDeliveriesForAgent) filters by agent_id over
+  // unacked, non-terminal rows that carry a delivery payload (~5% of the table; open rows
+  // without a payload are skipped by recovery and would only cost heap rechecks). Built
+  // CONCURRENTLY outside the migration first (scripts/create-mention-delivery-agent-open-index.ts).
+  index("idx_mention_delivery_occurrences_agent_payload_open")
+    .on(t.agentId, t.state)
+    .where(sql`${t.ackedAt} IS NULL AND ${t.terminalErrorAt} IS NULL AND ${t.deliveryPayload} IS NOT NULL`),
   // The right-hand side is an AND over TWO columns, and that AND is the hole (@Hipp, PR #6700
   // comment 5359756944, measured on pglite): "right side is false" has two causes — neither column
   // set, or exactly one set — and a biconditional cannot separate them. So a row with
@@ -6763,7 +6706,8 @@ export const agentScopes = pgTable("agent_scopes", {
 //   2. middleware extracts `apiKeyPrefix`
 //      → SELECT row WHERE prefix = ? AND revoked_at IS NULL
 //        (served by partial index `idx_agent_credentials_prefix_active`)
-//   3. argon2id verify on `apiKeyHash`
+//   3. constant-time HMAC compare on `apiKeyHmac` when set; otherwise argon2id
+//      verify on `apiKeyHash`, then backfill `apiKeyHmac`
 //   4. on success: `req.actingAgentId = row.agentId`,
 //      `req.principalKind = 'agent_credential'`,
 //      `req.agentCredentialId = row.id`,
@@ -6815,6 +6759,15 @@ export const agentCredentials = pgTable("agent_credentials", {
   // argon2id of the raw `sk_agent_*` key. Returned exactly once at mint;
   // never persisted in raw form. Verified constant-time post-lookup.
   apiKeyHash: text("api_key_hash").notNull(),
+  // HMAC-SHA-256(AGENT_API_KEY_HMAC_SECRET, raw key) as raw bytes. The fast
+  // verifier: when set, auth compares it in constant time and skips argon2
+  // (the key is 256 random bits, so argon2's stretching adds nothing). NULL on
+  // rows minted before it existed or while the secret is unset; those verify
+  // with argon2 and backfill it. Not a lookup key — rows are still found by
+  // `apiKeyPrefix`, so no index.
+  apiKeyHmac: customType<{ data: Buffer; driverData: Buffer }>({
+    dataType: () => "bytea",
+  })("api_key_hmac"),
   // First N chars of raw key for O(1) lookup at auth time. Not identity —
   // a `tokenLookupHash`-style HMAC could replace it later, but partial-
   // prefix is enough at v0 scale and matches the existing `sk_machine_*`
@@ -7103,6 +7056,15 @@ export const computers = pgTable("computers", {
   apiKeyHash: text("api_key_hash").notNull(),
   // First N chars of raw key for O(1) lookup at auth time.
   apiKeyPrefix: text("api_key_prefix").notNull(),
+  // HMAC-SHA-256(AGENT_API_KEY_HMAC_SECRET, raw key) as raw bytes: the fast
+  // verifier, same scheme and secret as `agent_credentials.api_key_hmac`.
+  // When set (and the secret is configured) auth compares it in constant time
+  // and skips argon2. NULL on rows from before it existed or while the secret
+  // is unset; those verify with argon2 and backfill it. Written together with
+  // `apiKeyHash` on every mint/rotation. Not a lookup key, so no index.
+  apiKeyHmac: customType<{ data: Buffer; driverData: Buffer }>({
+    dataType: () => "bytea",
+  })("api_key_hmac"),
   // User who attached the Computer (audit trail). May be null for
   // future device-code / bootstrap-token attachment flows.
   attachedByUserId: uuid("attached_by_user_id").references(() => users.id, { onDelete: "set null" }),
@@ -7484,6 +7446,8 @@ export const agentRuntimeProvisions = pgTable("agent_runtime_provisions", {
   agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
   serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
   provider: text("provider", { enum: ["antiproton"] }).notNull(),
+  // Frozen at creation: a canary provision never falls back to the official provider.
+  providerTarget: text("provider_target", { enum: ["default", "canary"] }).notNull().default("default"),
   state: text("state", { enum: ["provisioning", "active", "failed", "deleting", "deleted"] }).notNull(),
   providerAgentId: text("provider_agent_id"),
   credentialId: uuid("credential_id").references(() => agentCredentials.id, { onDelete: "set null" }),
@@ -7492,6 +7456,11 @@ export const agentRuntimeProvisions = pgTable("agent_runtime_provisions", {
   // answers 409 to a changed body under the same Idempotency-Key).
   provisionedName: text("provisioned_name").notNull(),
   provisionedInstructions: text("provisioned_instructions").notNull(),
+  // The model the creator picked, sent as `model` on the POST; null = the
+  // provider's default (the field is left out). Only a retry after the
+  // provider refused the model (422 unknown_model / 409 model_locked) changes it.
+  provisionedModel: text("provisioned_model"),
+  provisionedProfile: text("provisioned_profile", { enum: ["raftbench_service"] }),
   desiredRevision: integer("desired_revision").notNull().default(0),
   syncedRevision: integer("synced_revision").notNull().default(0),
   attemptCount: integer("attempt_count").notNull().default(0),
@@ -7509,10 +7478,72 @@ export const agentRuntimeProvisions = pgTable("agent_runtime_provisions", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   activatedAt: timestamp("activated_at", { withTimezone: true }),
   deletedAt: timestamp("deleted_at", { withTimezone: true }),
+  // Workspace import after create (hosted Cindy's seed files, a computer
+  // agent's migrated workspace). Set at create; the row is then POSTed with
+  // `awaitImport: true` and, once active, imported exactly once. Import
+  // errors are kept apart from the POST's: a failed import never re-POSTs.
+  importSource: text("import_source"),
+  importRef: text("import_ref"),
+  importedAt: timestamp("imported_at", { withTimezone: true }),
+  importFailedAt: timestamp("import_failed_at", { withTimezone: true }),
+  importErrorCode: text("import_error_code"),
+  importErrorMessage: text("import_error_message"),
+  importErrorHttpStatus: integer("import_error_http_status"),
+  importErrorAt: timestamp("import_error_at", { withTimezone: true }),
+  // A hosted Cindy that failed or timed out during setup gets one automatic
+  // retry; this records it, so the second failure falls back to a computer.
+  setupRetryAt: timestamp("setup_retry_at", { withTimezone: true }),
+  /** How that retry ended: ok (she became ready) or failed (the fallback is next). */
+  setupRetryOutcome: text("setup_retry_outcome", { enum: ["ok", "failed"] }),
 }, (t) => [
+  check("agent_runtime_provisions_target_check", sql`${t.providerTarget} IN ('default', 'canary')`),
+  check("agent_runtime_provisions_canary_profile_check", sql`${t.providerTarget} = 'default' OR ${t.provisionedProfile} IS NOT DISTINCT FROM 'raftbench_service'`),
   index("idx_agent_runtime_provisions_server").on(t.serverId),
   index("idx_agent_runtime_provisions_due").on(t.nextAttemptAt)
-    .where(sql`state IN ('provisioning', 'deleting') OR (state = 'active' AND desired_revision > synced_revision)`),
+    .where(sql`state IN ('provisioning', 'deleting') OR (state = 'active' AND (desired_revision > synced_revision OR (import_source IS NOT NULL AND imported_at IS NULL AND import_failed_at IS NULL)))`),
+]);
+
+/**
+ * The plan a hosting provider last confirmed for a server (its daily spend
+ * limit tier). The provision worker PUTs the server's current plan whenever it
+ * differs, for servers that have a hosted agent.
+ */
+/**
+ * The daily pull of hosted spend from the provider, one row per (UTC day,
+ * scope). A scope is `server:<id>` (that server's per-agent spend) or
+ * `onboarding` (the platform onboarding budget). A row completes once, so a
+ * day's events are written once; `pull_id` tags them for the reader.
+ */
+export const hostedRuntimeSpendPulls = pgTable("hosted_runtime_spend_pulls", {
+  day: date("day").notNull(),
+  scope: text("scope").notNull(),
+  pullId: uuid("pull_id").notNull().defaultRandom(),
+  completedAt: timestamp("completed_at", { withTimezone: true }),
+  attempts: integer("attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+  leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+  lastErrorCode: text("last_error_code"),
+}, (t) => [
+  primaryKey({ columns: [t.day, t.scope] }),
+]);
+
+export const hostedRuntimeServerPlans = pgTable("hosted_runtime_server_plans", {
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  provider: text("provider", { enum: ["antiproton"] }).notNull(),
+  /** Last plan the provider acknowledged; null until the first PUT succeeds. */
+  syncedPlan: text("synced_plan", { enum: ["free", "pro"] }),
+  syncedAt: timestamp("synced_at", { withTimezone: true }),
+  failedAttempts: integer("failed_attempts").notNull().default(0),
+  nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+  lastErrorCode: text("last_error_code"),
+  /** Last `antiproton_model_picker` state the provider acknowledged; null until the first PUT succeeds. */
+  syncedModelPicker: boolean("synced_model_picker"),
+  modelPickerSyncedAt: timestamp("model_picker_synced_at", { withTimezone: true }),
+  modelPickerFailedAttempts: integer("model_picker_failed_attempts").notNull().default(0),
+  modelPickerNextAttemptAt: timestamp("model_picker_next_attempt_at", { withTimezone: true }),
+  modelPickerLastErrorCode: text("model_picker_last_error_code"),
+}, (t) => [
+  primaryKey({ columns: [t.serverId, t.provider] }),
 ]);
 
 // Computer-scoped provider probes (Phase 2A foundation). An intent is the
@@ -7724,3 +7755,61 @@ export const durableTasks = pgTable("durable_tasks", {
   check("durable_tasks_state_check", sql`${t.state} IN ('open', 'succeeded', 'needs_attention')`),
   check("durable_tasks_attempts_check", sql`${t.attempts} >= 1 AND ${t.maxAttempts} >= 1`),
 ]);
+
+// Staging RaftBench pilot: one configuration and latest run per server, no history library.
+/** Dedicated analysis identities remain restricted even while unassigned. */
+export const raftbenchServiceAgents = pgTable("raftbench_service_agents", {
+  agentId: uuid("agent_id").primaryKey().references(() => agents.id, { onDelete: "cascade" }),
+  serverId: uuid("server_id").notNull().references(() => servers.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [index("idx_raftbench_service_agents_server").on(t.serverId)]);
+
+export const raftbenchConfigs = pgTable("raftbench_configs", {
+  configuredByUserId: uuid("configured_by_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  serverId: uuid("server_id").primaryKey().references(() => servers.id, { onDelete: "cascade" }),
+  enabled: boolean("enabled").notNull().default(false),
+  revision: integer("revision").notNull().default(1),
+  agentId: uuid("agent_id").references(() => agents.id, { onDelete: "set null" }),
+  channelIds: jsonb("channel_ids").$type<string[]>().notNull().default([]),
+  readMessages: bigint("read_messages", { mode: "number" }).notNull().default(0),
+  readThroughSeq: bigint("read_through_seq", { mode: "number" }).notNull().default(0),
+  completedBatches: integer("completed_batches").notNull().default(0),
+  scannedThroughAt: timestamp("scanned_through_at", { withTimezone: true }),
+  historyFrom: timestamp("history_from", { withTimezone: true }),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [uniqueIndex("idx_raftbench_configs_agent").on(t.agentId).where(sql`${t.agentId} IS NOT NULL`)]);
+export const raftbenchLatestRuns = pgTable("raftbench_latest_runs", {
+  serverId: uuid("server_id").primaryKey().references(() => raftbenchConfigs.serverId, { onDelete: "cascade" }),
+  runId: uuid("run_id").notNull().unique().$defaultFn(() => randomUUID()),
+  revision: integer("revision").notNull(),
+  agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+  status: text("status", { enum: ["queued", "running", "ready", "partial", "failed"] }).notNull(),
+  from: timestamp("from_at", { withTimezone: true }).notNull(),
+  to: timestamp("to_at", { withTimezone: true }).notNull(),
+  // Only source references and page checkpoints. Raw source text is never copied here.
+  fetched: jsonb("fetched").$type<Array<{ target: string; messageId: string; channelId: string; sourceVersion?: string }>>().notNull().default([]),
+  nextSeq: bigint("next_seq", { mode: "number" }).notNull().default(0),
+  startAfterSeq: bigint("start_after_seq", { mode: "number" }).notNull().default(0),
+  failureCount: integer("failure_count").notNull().default(0),
+  skippedRanges: jsonb("skipped_ranges").$type<Array<{ from: string; to: string; messages: number | null }>>().notNull().default([]),
+  sourceCharacters: integer("source_characters").notNull().default(0),
+  stopReason: text("stop_reason", { enum: ["more_pages", "message_limit", "char_limit", "window_end"] }).notNull().default("more_pages"),
+  exhausted: boolean("exhausted").notNull().default(false),
+  report: jsonb("report").$type<import("@botiverse/raft-shared").RaftbenchReport>(),
+  submissionHash: text("submission_hash"),
+  receiptId: uuid("receipt_id"),
+  failureReason: text("failure_reason"),
+  startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+});
+
+// Latest analysis scope only: derived findings survive batch rotation, never source text.
+export const raftbenchFindings = pgTable("raftbench_findings", {
+  id: uuid("id").primaryKey().$defaultFn(() => randomUUID()),
+  serverId: uuid("server_id").notNull().references(() => raftbenchConfigs.serverId, { onDelete: "cascade" }),
+  revision: integer("revision").notNull(),
+  fingerprint: text("fingerprint").notNull(),
+  pattern: jsonb("pattern").$type<import("@botiverse/raft-shared").RaftbenchReport["patterns"][number]>().notNull(),
+  sourceRefs: jsonb("source_refs").$type<Array<{ messageId: string; channelId: string; storageChannelId: string; sourceVersion: string }>>().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+}, t => [uniqueIndex("idx_raftbench_finding_fingerprint").on(t.serverId, t.revision, t.fingerprint)]);

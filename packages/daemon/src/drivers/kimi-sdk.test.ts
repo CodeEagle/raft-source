@@ -16,7 +16,10 @@ import {
   createKimiAgentSessionForContext,
   createKimiSdkEventMappingState,
   detectKimiSdkModels,
+  loadKimiSdk,
+  kimiToolResultOutcome,
   mapKimiSdkEventToParsedEvents,
+  resolveKimiHome,
   setKimiSdkEventMappingSession,
   typedKimiStartError,
   type KimiSessionFactory,
@@ -27,6 +30,7 @@ import {
   KimiError,
   LocalKaos,
   createKimiHarness,
+  resolveKimiHome as sdkResolveKimiHome,
   type Event as KimiSdkEvent,
   type GoalSnapshot,
   type KimiHarness,
@@ -335,7 +339,7 @@ test("mapKimiSdkEventToParsedEvents — content-streaming events map to the righ
         name: "shell",
         args: { command: "ls" },
       },
-      expected: [{ kind: "tool_call", name: "shell", input: { command: "ls" } }],
+      expected: [{ kind: "tool_call", name: "shell", input: { command: "ls" }, callId: "t1" }],
     },
     {
       event: {
@@ -345,7 +349,7 @@ test("mapKimiSdkEventToParsedEvents — content-streaming events map to the righ
         toolCallId: "t1",
         output: "ok",
       },
-      expected: [{ kind: "tool_output", name: "" }],
+      expected: [{ kind: "tool_output", name: "", callId: "t1" }],
     },
     {
       event: { ...eventBase(), type: "compaction.started", trigger: "auto" },
@@ -516,9 +520,37 @@ test("source guard — kimi-sdk.ts must NOT contain wildcard mapping (every Kimi
   );
   assert.match(
     source,
-    /type Event as KimiSdkEvent/,
+    /import type \{[^}]*\bEvent as KimiSdkEvent\b/,
     "kimi-sdk.ts must import the SDK Event type as the closed-mapping input",
   );
+});
+
+test("source guard — kimi-sdk.ts loads the Kimi SDK lazily, never at daemon startup", () => {
+  const source = readFileSync(fileURLToPath(new URL("./kimi-sdk.ts", import.meta.url)), "utf8");
+  // A value import (or a side-effect import) would build the SDK's ~8k zod
+  // schemas in every runner, Kimi agents or not. Types only; values go
+  // through loadKimiSdk().
+  const imports = [...source.matchAll(/^import\s+(type\s+)?[^;]*?from\s+"@botiverse\/kimi-code-sdk[^"]*";/gms)];
+  assert.ok(imports.length > 0);
+  for (const [statement, typeOnly] of imports) assert.ok(typeOnly, `value import of the Kimi SDK: ${statement}`);
+  assert.doesNotMatch(source, /^import\s+"@botiverse\/kimi-code-sdk/m);
+  assert.match(source, /import\("@botiverse\/kimi-code-sdk"\)/);
+});
+
+test("resolveKimiHome matches the SDK's resolver without loading the SDK", () => {
+  const saved = process.env.KIMI_CODE_HOME;
+  try {
+    delete process.env.KIMI_CODE_HOME;
+    assert.equal(resolveKimiHome(), sdkResolveKimiHome());
+    assert.equal(resolveKimiHome("/explicit/home"), sdkResolveKimiHome("/explicit/home"));
+    process.env.KIMI_CODE_HOME = "/env/kimi-home";
+    assert.equal(resolveKimiHome(), sdkResolveKimiHome());
+    assert.equal(resolveKimiHome(), "/env/kimi-home");
+    assert.equal(resolveKimiHome("/explicit/home"), sdkResolveKimiHome("/explicit/home"));
+  } finally {
+    if (saved === undefined) delete process.env.KIMI_CODE_HOME;
+    else process.env.KIMI_CODE_HOME = saved;
+  }
 });
 
 test("KimiSdkDriver registers with id 'kimi-sdk' and is distinct from the legacy 'kimi' driver", () => {
@@ -1972,6 +2004,9 @@ test("LocalKaos per-session PATH resolves bare `raft` to the current launch wrap
 
 
 test("Kimi start failures map to typed reasons instead of the generic runtime_spawn_failed (task #1221)", async () => {
+  // A KimiError can only reach the daemon after a launch loaded the SDK; this
+  // test builds them directly, so load it the way a launch does.
+  await loadKimiSdk();
   const notConfigured = new KimiError(
     "config.invalid",
     'Model "devin/swe-2" is not configured in config.toml. Add a [models."devin/swe-2"] entry with max_context_size.',
@@ -2093,4 +2128,12 @@ test("task #365: a launch that turns stale during a failed kimi resume does not 
       assert.equal(created, 1, "control: a current launch falls back to a fresh session");
     }
   }
+});
+
+test("task #17: a Kimi tool result reports ok, and a non-zero Bash exit is an ok call with the exit code", () => {
+  assert.deepEqual(kimiToolResultOutcome({ isError: false, output: "done" }), { ok: true });
+  assert.deepEqual(kimiToolResultOutcome({ output: "done" }), {}, "isError absent: unknown, not success");
+  assert.deepEqual(kimiToolResultOutcome({ isError: true, output: "Command failed with exit code: 3." }), { ok: true, exitCode: 3 });
+  assert.deepEqual(kimiToolResultOutcome({ isError: true, output: { message: "Command failed with exit code: 1.", brief: "Failed with exit code: 1" } }), { ok: true, exitCode: 1 });
+  assert.deepEqual(kimiToolResultOutcome({ isError: true, output: "Permission denied" }), { ok: false });
 });

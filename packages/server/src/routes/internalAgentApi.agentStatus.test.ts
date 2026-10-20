@@ -164,15 +164,16 @@ test("latest occurredAt wins, replays are deduped by eventId, and a future occur
   await postActivity(app, f.apiKey, [{ eventId: "newer", status: "working", detail: "Editing files", occurredAt: iso(t0 + 5_000) }]);
   assert.equal(live(orchestrator, f.agentId)?.activity, "working");
 
-  // An older status arriving late does not override the newer one; the hook
-  // it rides on is still logged.
+  // An older status arriving late does not override the newer one; it and the
+  // hook it rides on are still logged as history (task #17: the hook's
+  // Tool finished outcome row and the reported status itself).
   const older = await postActivity(app, f.apiKey, [
     { eventId: "older", hookEventName: "PostToolUse", toolName: "Bash", toolOutput: "ok", status: "online", occurredAt: iso(t0) },
   ]);
   assert.equal(older.body.acceptedCount, 1);
   assert.deepEqual(live(orchestrator, f.agentId), { activity: "working", detail: "Editing files", detailKind: "external_activity" });
   const olderRow = (await loggedEntries(f.agentId)).find((row) => row.dedupeKey === "external-agent-activity:older");
-  assert.deepEqual(olderRow?.entries.map((entry) => entry.kind), ["system"]);
+  assert.deepEqual(olderRow?.entries.map((entry) => entry.kind === "status" ? `status:${entry.detailKind}` : entry.kind), ["system", "status:tool_end", "status:external_activity"]);
 
   // Replaying an accepted eventId (even with a newer time) is skipped.
   const replay = await postActivity(app, f.apiKey, [

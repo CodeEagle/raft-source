@@ -9,7 +9,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
   Spinner,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 
 export interface SelectModeToolbarProps {
@@ -121,12 +121,12 @@ export default function SelectModeToolbar({
   // forward, common copy-link, and a More menu for lower-frequency actions.
   return (
     <div
-      className="relative z-30 border-t border-primary-edge bg-primary-soft safe-bottom-action-bar text-primary-strong theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
+      className="relative z-30 border-t border-line-seam bg-layer-canvas safe-bottom-action-bar text-foreground"
       data-testid="select-mode-toolbar"
     >
       <div className="flex items-center gap-1 px-2 py-2 sm:gap-1.5 sm:px-2">
         <span
-          className="font-mono text-xs font-bold text-primary-strong/70 theme-brutal:text-black/70 whitespace-nowrap"
+          className="whitespace-nowrap font-mono text-mono-meta text-foreground-muted"
           data-testid="select-mode-count"
         >
           {formatMessage({ id: "message.selectModeToolbar.selectedCount" }, { count })}
@@ -157,7 +157,7 @@ export default function SelectModeToolbar({
             onClick={exit}
            
             size={compactCancel ? "icon-sm" : "sm"}
-            variant="outline"
+            variant="ghost"
             aria-label={cancelLabel}
             data-slot="button"
             className={toolbarButtonClass}

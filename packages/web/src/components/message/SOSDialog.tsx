@@ -1,4 +1,4 @@
-import { Textarea, Button } from "raft-ui";
+import { Textarea, Button } from "@botiverse/raft-ui";
 import { useCallback, useState, useRef, useEffect } from "react";
 import type { ChangeEvent } from "react";
 import { useIntl } from "react-intl";
@@ -94,7 +94,7 @@ export default function SOSDialog({
 
         {phase === "confirm" && (
           <>
-            <p className="mb-5 text-sm leading-relaxed text-foreground-muted theme-brutal:text-black/75" data-slot="sos-dialog-content">
+            <p className="mb-5 text-subhead text-foreground-muted" data-slot="sos-dialog-content">
               {formatMessage({ id: "message.sos.confirmWarning" }, { channel: channelName })}
             </p>
 
@@ -102,17 +102,16 @@ export default function SOSDialog({
             <div className="flex justify-end gap-3">
               <Button
                 onClick={onClose}
-                size="sm"
-                variant="outline"
+                size="lg"
+                variant="ghost"
               >
                 {formatMessage({ id: "common.confirm.cancel" })}
               </Button>
               <Button
                 onClick={handleStop}
                 disabled={stopping}
-                size="sm"
+                size="lg"
                 variant="warning"
-                className="disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {stopping
                   ? formatMessage({ id: "message.sos.stopping" })
@@ -127,7 +126,7 @@ export default function SOSDialog({
             <Banner intent="success" density="sm" className="mb-3 font-bold">
               {formatMessage({ id: "message.sos.allStopped" })}
             </Banner>
-            <p className="mb-2 text-sm">
+            <p className="mb-2 text-subhead text-foreground-muted">
               {formatMessage({ id: "message.sos.guidanceHint" })}
             </p>
             {resumeShortfall && (
@@ -149,15 +148,15 @@ export default function SOSDialog({
               value={guidance}
               onChange={handleGuidanceChange}
               placeholder={formatMessage({ id: "message.sos.guidancePlaceholder" })}
-              className="mb-4 w-full resize-none p-3 text-sm"
+              className="mb-4 w-full resize-none"
               rows={4}
               disabled={resuming}
             />
             <div className="flex justify-end gap-3">
               <Button
                 onClick={onClose}
-                size="sm"
-                variant="outline"
+                size="lg"
+                variant="ghost"
                 disabled={resuming}
               >
                 {formatMessage({ id: "message.sos.keepStopped" })}
@@ -165,9 +164,8 @@ export default function SOSDialog({
               <Button
                 onClick={handleResume}
                 disabled={!guidance.trim() || resuming}
-                size="sm"
-                variant="success"
-                className="disabled:cursor-not-allowed disabled:opacity-50"
+                size="lg"
+                variant="primary"
               >
                 {resuming
                   ? formatMessage({ id: "message.sos.resuming" })

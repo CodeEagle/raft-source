@@ -58,7 +58,7 @@ export function AttachmentCommentRefChip({
         )}
       </div>
       {commentRef.anchorQuote ? (
-        <div className="mb-1 whitespace-pre-wrap break-words border-l-2 border-line-muted pl-2 text-xs italic text-foreground-muted theme-brutal:border-black/20 theme-brutal:text-black/55">
+        <div className="mb-1 whitespace-pre-wrap break-words border-l-2 border-line-seam pl-2.5 text-caption font-normal text-foreground-muted">
           {commentRef.anchorQuote}
         </div>
       ) : null}

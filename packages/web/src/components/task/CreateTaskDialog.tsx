@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import { Plus } from "lucide-react";
@@ -60,7 +60,7 @@ export default function CreateTaskDialog({
     <DialogCard title={formatMessage({ id: "task.create.heading" }, { count: isBatch ? 2 : 1 })} onClose={onClose}>
         <form onSubmit={handleSubmit} className="space-y-4">
           {error && (
-            <Banner intent="warning" className="font-bold">
+            <Banner intent="warning">
               {error}
             </Banner>
           )}
@@ -81,27 +81,25 @@ export default function CreateTaskDialog({
               variant="outline"
               type="button"
               onClick={addRow}
-              className="px-2 py-1 text-xs font-bold flex items-center gap-1 mt-3"
+              className="mt-1"
             >
-              <Plus size={12} />
+              <Plus size={16} />
               {formatMessage({ id: "task.create.addAnother" })}
             </Button>
           </div>
 
-          <div className="flex justify-end gap-3">
-            <Button size="sm"
-              variant="outline"
+          <div className="flex justify-end gap-2">
+            <Button size="lg"
+              variant="ghost"
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm"
             >
               {formatMessage({ id: "common.confirm.cancel" })}
             </Button>
-            <Button size="sm"
+            <Button size="lg"
               variant="accent"
               type="submit"
               disabled={submitting}
-              className="px-4 py-2 text-sm"
             >
               {submitting
                 ? formatMessage({ id: "task.create.submitting" })

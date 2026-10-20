@@ -50,8 +50,21 @@ export function apiFailureError(
  *   unknown/missing diagnostics: the proxy log records the underlying transport
  *   error and its cause, which the receipt does not carry, so inspecting it is
  *   the right first step.
+ *
+ * The agent reading this cannot open daemon logs or traces, so every class
+ * starts with what it can do (retry once, without doing a write twice; then
+ * hand the correlation id to the Computer's owner), and the diagnosis above
+ * follows for whoever investigates.
  */
+const PROXY_FAILURE_AGENT_STEP =
+  "Retry once in a few seconds; if the command writes something, first check whether it already took effect, so it is not done twice. "
+  + "If it keeps failing, tell your Computer's owner and include the correlation id. For whoever investigates: ";
+
 export function proxyFailureNextAction(proxy: ApiProxyDiagnostics | null | undefined): string {
+  return PROXY_FAILURE_AGENT_STEP + proxyFailureDiagnosis(proxy);
+}
+
+function proxyFailureDiagnosis(proxy: ApiProxyDiagnostics | null | undefined): string {
   if (proxy?.failureClass === "upstream_http_response") {
     const status = typeof proxy.upstreamStatus === "number" ? `HTTP ${proxy.upstreamStatus}` : "a 5xx";
     return `The local daemon proxy relayed ${status} from upstream and discarded the upstream response body; `

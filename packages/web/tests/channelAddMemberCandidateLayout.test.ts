@@ -160,7 +160,7 @@ async function openAddMemberModal(channelId: string) {
     ),
   );
 
-  fireEvent.click(screen.getByRole("button", { name: "View participants" }));
+  fireEvent.click(screen.getByRole("button", { name: "Members" }));
   fireEvent.click(await screen.findByRole("button", { name: "Add Member" }));
 }
 
@@ -202,7 +202,7 @@ test("channel add-member candidates render descriptions as behavior, not source 
   assert.equal(agentDescription.getAttribute("title"), null);
   assert.ok(agentDescription.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.match(agentDescription.className, /truncate/);
-  assert.match(agentDescription.className, /text-xs/);
+  assert.match(agentDescription.className, /text-caption/);
 
   const humanRow = getCandidateRow("Design Partner");
   assert.match(humanRow.className, /items-center/);
@@ -215,7 +215,7 @@ test("channel add-member candidates render descriptions as behavior, not source 
   assert.equal(humanDescription.getAttribute("title"), null);
   assert.ok(humanDescription.hasAttribute("data-base-ui-tooltip-trigger"));
   assert.match(humanDescription.className, /truncate/);
-  assert.match(humanDescription.className, /text-xs/);
+  assert.match(humanDescription.className, /text-caption/);
 
   const blankAgentRow = getCandidateRow("Blank Agent");
   assert.match(blankAgentRow.className, /items-center/);
@@ -318,7 +318,7 @@ test("channel participants distinguish Slack projections from Raft members", asy
       createElement(ChannelMembers, { channelId: channel.id }),
     ),
   );
-  fireEvent.click(await screen.findByRole("button", { name: "View participants" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Members" }));
 
   await screen.findByText("Taylor from Slack");
   assert.ok(screen.getByText("Slack participants"));

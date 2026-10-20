@@ -1,4 +1,10 @@
 export { verifyBundledPiOAuth } from "./bundledPiOAuth";
+export { verifyBundledKimiSdk } from "./drivers/index";
+import {
+  observeRuntimeCliVersions,
+  readRuntimeCliVersionState,
+  writeRuntimeCliVersionState,
+} from "./runtimeCliVersionTracker";
 import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,6 +48,8 @@ import {
   DAEMON_CAPABILITY_RUNTIME_OUTCOME_V1,
   DAEMON_CAPABILITY_DELEGATION_V1,
   SERVER_CAPABILITY_RUNTIME_OUTCOME_ACK_V1,
+  SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1,
+  type RuntimeDetectionReport,
   SERVER_CAPABILITY_START_SPAWN_ERROR_V1,
   type AgentStartNotSpawnedReason,
 } from "@botiverse/raft-shared";
@@ -83,6 +91,7 @@ import {
   BUILT_IN_READY_CAPABILITIES,
   createBuiltInLocalScheduleRuntime,
 } from "./registry.manifest";
+import { runRuntimeDetectionRound, type RuntimeDetectionRoundHandle, type RuntimeDetectionRoundOptions, type RuntimeDetectionRoundResult } from "./runtimeDetectionRound";
 import { logger } from "./logger";
 import { runFeedbackTranscriptRequest } from "./feedbackTranscriptOutcomeUpload";
 import {
@@ -102,7 +111,8 @@ import {
 } from "@botiverse/raft-trace-client";
 import { DaemonTraceBundleUploader } from "./traceBundleUpload";
 import { ProbeGate } from "./probeGate";
-import { SLOCK_HOME_ENV, listLegacyRaftStatePaths, resolveRaftHome, resolveRaftHomePath } from "./raftHome";
+import { RuntimeModelSourceCache, type RuntimeModelCacheRead } from "./runtimeModels/modelSourceCache";
+import { RAFT_HOME_ENV, SLOCK_HOME_ENV, listLegacyRaftStatePaths, resolveRaftHome, resolveRaftHomePath } from "./raftHome";
 import { regenerateExistingOpencliWrappers } from "./drivers/cliTransport";
 import { daemonFetch } from "./daemonFetch";
 import {
@@ -115,8 +125,8 @@ import {
 import { isProviderProbeRuntime } from "@botiverse/raft-shared";
 import { VERSION as PI_SDK_VERSION } from "@earendil-works/pi-coding-agent";
 import { asProviderProbeId } from "@botiverse/raft-shared";
-import { warmContractSchemas } from "@botiverse/raft-shared";
 import { assertLegacyDaemonKeyNotAdoptedByComputer } from "./computerMigrationGuard";
+import { PROCESS_MEMORY_TRACE_ATTRS, serviceMemoryAttrs, startProcessMemoryReporter } from "./processMemory";
 import { buildRuntimeModelSourceResultMessage } from "./runtimeModelSourceProjection";
 import {
   archiveCompletedAgentMigrationSourceWorkspace,
@@ -149,7 +159,11 @@ import {
 } from "./agentMigrationResumableBundle";
 
 export * from "./legacySupervisor";
+import { hostOsVariant } from "./osVariant";
+import { hostDeviceClass, knownHostDeviceClass } from "./deviceClass";
+import { hostIdHash } from "./hostIdentity";
 import { readSecretFileSync } from "./secretFile";
+import { RecentDeliveryIds } from "./recentDeliveryIds";
 import {
   createRuntimeAccountUsageCollector,
   type RuntimeAccountUsageCollector,
@@ -424,7 +438,10 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
     },
   },
   "daemon.lifecycle.stop": {
-    spanAttrs: ["machine_lock_present"],
+    spanAttrs: ["machine_lock_present", "shutdown_reason", "stop_source", "stop_signal", "uptime_ms"],
+  },
+  "daemon.process.memory": {
+    spanAttrs: [...PROCESS_MEMORY_TRACE_ATTRS],
   },
   "daemon.runner_credential_mint": {
     spanAttrs: ["agentId", "runtime"],
@@ -556,6 +573,12 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "http_status",
       "normalized_code",
       "response_started",
+      "body_size_bucket",
+      "response_complete",
+      "failure_class",
+      // Closed set: scrubbedProxyCauseCode maps anything unknown to
+      // UPSTREAM_TRANSPORT_FAILURE, so no raw error text reaches the span.
+      "cause_code",
     ],
   },
   "daemon.runtime_profile.control.received": {
@@ -583,7 +606,9 @@ export const DAEMON_CORE_TRACE_ATTR_CONTRACTS = {
       "daemon.pi.models.services_ready": ["available_models_count", "diagnostics_count", "diagnostic_info_count", "diagnostic_warning_count"],
       "daemon.pi.models.result": ["available_models_count", "returned_models_count", "diagnostics_count", "diagnostic_info_count", "diagnostic_warning_count", "outcome"],
     },
-    endAttrs: ["outcome", "models_count", "default_model_present", "verified_as", "error_class"],
+    // cache (fresh/stale/miss/forced/static) and joined_in_flight say why a read
+    // was fast or slow; the handler set them but they were dropped here.
+    endAttrs: ["outcome", "models_count", "default_model_present", "verified_as", "error_class", "cache", "joined_in_flight"],
   },
   // task #510: per-prompt span. `prompts_in_flight` is the cross-agent concurrency
   // observable — under the old process-env-patch lock it could never exceed 1
@@ -800,6 +825,20 @@ export const DAEMON_CLI_USAGE = "Usage: slock-daemon --server-url <url> --api-ke
 export interface ParsedDaemonCliArgs {
   serverUrl: string;
   apiKey: string;
+}
+
+/**
+ * task #1268: one detection round, reserved synchronously BEFORE the pending
+ * ready is awaited (so concurrent rescans coalesce instead of starting two
+ * children) and owned until it settles or is abandoned. `handle` is null while
+ * the pending frame is in flight; `abandoned` makes every continuation a no-op.
+ */
+interface DetectionRoundRecord {
+  handle: RuntimeDetectionRoundHandle | null;
+  generation: number;
+  roundId: number;
+  publishCatalogForce: boolean;
+  abandoned: boolean;
 }
 
 export interface RuntimeDetection {
@@ -1218,6 +1257,17 @@ export function sanitizeCatalogModels(
   return out;
 }
 
+// Who asked this daemon to stop. The host knows (the Computer service records
+// its own kills); a signal it did not send is "external_signal". A caller that
+// names no source records "unspecified", so a missing attr only means an older
+// daemon.
+export type DaemonStopSource = "service_shutdown" | "service_unmanaged" | "external_signal" | "unspecified";
+
+export interface DaemonStopOptions {
+  source?: DaemonStopSource;
+  signal?: NodeJS.Signals;
+}
+
 export interface DaemonCoreOptions {
   serverUrl: string;
   apiKey: string;
@@ -1236,6 +1286,10 @@ export interface DaemonCoreOptions {
   hostname?: string;
   osDescription?: string;
   runtimeDetector?: () => RuntimeDetection;
+  /** task #1268: runs one detection round in a child (default: the real child runner); tests inject a fake. */
+  runtimeDetectionRound?: (options: RuntimeDetectionRoundOptions) => RuntimeDetectionRoundHandle;
+  /** task #1268: whole-round deadline passed to the child runner (default: runner's own). */
+  runtimeDetectionDeadlineMs?: number;
   connectionOptions?: Partial<Pick<ConnectionOptions, "inboundWatchdogMs" | "minReconnectDelayMs" | "wsFactory" | "proxyEnv" | "clock">>;
   connectionFactory?: (options: ConnectionOptions) => DaemonConnection;
   agentManagerFactory?: (
@@ -1246,6 +1300,10 @@ export interface DaemonCoreOptions {
   defaultAgentEnvVarsProvider?: DefaultAgentEnvVarsProvider;
   /** Seam for tests — injected into the ReminderCache so timers can be faked. */
   reminderClock?: Clock;
+  /** Where the Computer reads this process's latest memory sample (doctor). */
+  processMemorySamplePath?: string | null;
+  /** The Computer service's memory sample, carried on this process's memory event. */
+  serviceMemorySamplePath?: string | null;
   tracer?: Tracer;
   localTrace?: boolean;
   localTraceMaxFileBytes?: number;
@@ -1463,7 +1521,20 @@ export function resolveRaftCliPathOrEmpty(moduleUrl: string = import.meta.url): 
 
 export { runBundledRaftCli } from "./bundledRaftCli";
 
-export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
+/** task #1268: one runtime's outcome, reported as the round progresses (the detection child streams these). */
+export interface RuntimeDetectionCheckedRuntime {
+  runtime: string;
+  available: boolean;
+  version?: string;
+  diagnostic?: string;
+  unavailableReason?: RuntimeProbeUnavailableReason;
+}
+
+export interface RuntimeDetectionHooks {
+  onRuntimeChecked?: (checked: RuntimeDetectionCheckedRuntime) => void;
+}
+
+export function detectRuntimes(tracer: Tracer = noopTracer, hooks: RuntimeDetectionHooks = {}): RuntimeDetection {
   const ids: string[] = [];
   const versions: Record<string, string> = {};
   const diagnostics: Record<string, string> = {};
@@ -1486,12 +1557,21 @@ export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
           if (probe.version) versions[runtime.id] = probe.version;
           if (probe.diagnostic) diagnostics[runtime.id] = probe.diagnostic;
           if (probe.unavailableReason) unavailableReasons[runtime.id] = probe.unavailableReason;
+          hooks.onRuntimeChecked?.({
+            runtime: runtime.id,
+            available: false,
+            ...(probe.version ? { version: probe.version } : {}),
+            ...(probe.diagnostic ? { diagnostic: probe.diagnostic } : {}),
+            ...(probe.unavailableReason ? { unavailableReason: probe.unavailableReason } : {}),
+          });
           span.addEvent("daemon.runtime.detect.checked", {
             runtime: runtime.id,
             outcome: "unavailable",
             version_present: Boolean(probe.version),
             diagnostic_present: Boolean(probe.diagnostic),
             ...(probe.diagnostic ? { diagnostic: probe.diagnostic } : {}),
+            // task #1240: lookup phase/ms/budget/outcome, never values or paths.
+            ...(probe.lookupTiming ? { lookup_timing: probe.lookupTiming } : {}),
             binary_path_present: false,
           });
           continue;
@@ -1499,12 +1579,19 @@ export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
         ids.push(runtime.id);
         if (probe.version) versions[runtime.id] = probe.version;
         if (probe.diagnostic) diagnostics[runtime.id] = probe.diagnostic;
+        hooks.onRuntimeChecked?.({
+          runtime: runtime.id,
+          available: true,
+          ...(probe.version ? { version: probe.version } : {}),
+          ...(probe.diagnostic ? { diagnostic: probe.diagnostic } : {}),
+        });
         span.addEvent("daemon.runtime.detect.checked", {
           runtime: runtime.id,
           outcome: "available",
           version_present: Boolean(probe.version),
           diagnostic_present: Boolean(probe.diagnostic),
           ...(probe.diagnostic ? { diagnostic: probe.diagnostic } : {}),
+          ...(probe.lookupTiming ? { lookup_timing: probe.lookupTiming } : {}),
           binary_path_present: false,
         });
         continue;
@@ -1526,6 +1613,7 @@ export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
       if (version) {
         versions[runtime.id] = version;
       }
+      hooks.onRuntimeChecked?.({ runtime: runtime.id, available: true, ...(version ? { version } : {}) });
       span.addEvent("daemon.runtime.detect.checked", {
         runtime: runtime.id,
         outcome: "available",
@@ -1536,6 +1624,7 @@ export function detectRuntimes(tracer: Tracer = noopTracer): RuntimeDetection {
       break;
     }
     if (!detectedByPath) {
+      hooks.onRuntimeChecked?.({ runtime: runtime.id, available: false });
       span.addEvent("daemon.runtime.detect.checked", {
         runtime: runtime.id,
         outcome: "unavailable",
@@ -1678,6 +1767,15 @@ export function selectWakeDeliveryIndex(deliveries: readonly AgentDeliverMessage
   return deliveries.findIndex((delivery) => delivery.transient !== true && !delivery.mentionDelivery);
 }
 
+/** SLOCK_HOME values a DaemonCore set itself (it was not given one), so a later core does not take them as chosen. */
+const slockHomesSetByDaemon = new Set<string>();
+
+function raftHomeEnvIsExplicit(): boolean {
+  if (process.env[RAFT_HOME_ENV]?.trim()) return true;
+  const slockHome = process.env[SLOCK_HOME_ENV]?.trim();
+  return Boolean(slockHome) && !slockHomesSetByDaemon.has(slockHome!);
+}
+
 export class DaemonCore {
   private readonly options: DaemonCoreOptions;
   private readonly daemonVersion: string;
@@ -1688,6 +1786,7 @@ export class DaemonCore {
   private readonly computerVersion: string | null;
   private readonly slockCliPath: string;
   private readonly slockHome: string;
+  private readonly raftHomeExplicit: boolean;
   /**
    * Archive requests are retried by the server (and a cross-disk copy can
    * outlive the server's 15s wait), so a retry for the same agent joins the
@@ -1717,8 +1816,26 @@ export class DaemonCore {
   private lastReadyRuntimes: readonly string[] = [];
   /** Runtime ids + versions from the last `ready`; a change lifts the reconnect throttle. */
   private lastReadyRuntimeSignature = "";
+  /** task #1268: capabilities from this connection's `machine:context` (authoritative); null until it arrives. */
+  private serverContextCapabilities: Set<string> | null = null;
+  /** task #1268: the in-flight detection round, bound to the connection generation that started it. */
+  private detectionRound: DetectionRoundRecord | null = null;
+  private detectionRoundSeq = 0;
+  /**
+   * task #1268: every ready publication (synchronous inventory, pending, final
+   * round result) claims a ticket BEFORE its first await; `sendReadyFrame`
+   * re-checks the ticket right before `connection.send`, so a frame prepared
+   * earlier can never be sent after a newer inventory (a pending held by
+   * lifecycle acks while a synchronous rescan completes would otherwise leave
+   * the server pending forever).
+   */
+  private readyPublicationSeq = 0;
+  /** task #1268: a rescan asked for while a round was running; one more round follows, never a parallel one. */
+  private detectionRescanRequested = false;
   /** Runtime CLI versions from the last ready frame, by runtime id (for start traces). */
   private lastReadyRuntimeVersions: Record<string, string> = {};
+  /** Serializes the runtime CLI version record writes (one detection at a time). */
+  private runtimeCliVersionWrite: Promise<void> = Promise.resolve();
   private catalogPublishInFlight = false;
   private catalogPublishQueued: { force: boolean } | null = null;
   private lastCatalogPublish: { atMs: number; runtimeSignature: string } | null = null;
@@ -1740,17 +1857,21 @@ export class DaemonCore {
   private localTraceSink: LocalRotatingTraceSink | null = null;
   private traceBundleUploader: DaemonTraceBundleUploader | null = null;
   private diskJanitor: { stop(): void } | null = null;
+  private processMemoryReporter: { stop(): void } | null = null;
+  private startedAtMs: number | null = null;
   private raftDiskFootprint: { atMs: number; value: Promise<RaftDiskFootprint> } | null = null;
   private diskStatusTimer: ReturnType<typeof setTimeout> | null = null;
   private diskStatusReportsEnabled = true;
   private readonly coreStartingAgentIds = new Set<string>();
   private readonly coreStartPendingDeliveries = new Map<string, AgentDeliverMessage[]>();
+  private readonly recentlyAckedDeliveryIds = new RecentDeliveryIds();
   private readonly acceptedStartDispatches = new Map<string, AgentStartAckMessage>();
   private readonly acceptingStartDispatches = new Map<string, Promise<AgentStartAckMessage>>();
   private readonly handledComputerControlOperationIds = new Set<string>();
   private readonly runtimeAccountUsageCollector: RuntimeAccountUsageCollector;
   /** Overlapping model / usage probes for the same key join one run instead of each spawning a CLI (probeGate.ts). Uncapped across keys so no probe waits past the server's request budget. */
   private readonly probeGate = new ProbeGate();
+  private readonly runtimeModelCache = new RuntimeModelSourceCache(currentTimeMs);
   private static readonly START_DISPATCH_RECEIPT_CACHE_SIZE = 1_024;
 
   constructor(options: DaemonCoreOptions) {
@@ -1764,8 +1885,15 @@ export class DaemonCore {
     // single-binary where the CLI is bundled into the executable, not on disk.
     // Crashing the whole runner at construction (pre-connect) was wrong.
     this.slockCliPath = options.slockCliPath ?? resolveRaftCliPathOrEmpty();
+    // The runtime CLI record is machine state: write it only to a Raft home
+    // someone chose (option or RAFT_HOME/SLOCK_HOME, as the Computer service
+    // sets), never to a fallback a test or ad-hoc run landed on.
+    this.raftHomeExplicit = Boolean(options.slockHome) || raftHomeEnvIsExplicit();
     this.slockHome = options.slockHome ? path.resolve(options.slockHome) : resolveRaftHome();
-    if (!options.slockHome) process.env[SLOCK_HOME_ENV] = this.slockHome;
+    if (!options.slockHome) {
+      process.env[SLOCK_HOME_ENV] = this.slockHome;
+      if (!this.raftHomeExplicit) slockHomesSetByDaemon.add(this.slockHome);
+    }
     this.injectedTracer = Boolean(options.tracer);
     this.tracer = this.withDaemonTraceScope(options.tracer ?? noopTracer);
     this.runtimeDetector = options.runtimeDetector ?? (() => detectRuntimes(this.tracer));
@@ -2052,10 +2180,11 @@ export class DaemonCore {
 
   start() {
     logger.info("[Slock Daemon] Starting...");
-    // The shared contract schemas are built on first use so a short `raft` CLI
-    // call builds only its own route's. The daemon is long-lived: build them
-    // all here so a broken schema fails startup, not a later request.
-    warmContractSchemas();
+    void hostDeviceClass();
+    // The shared contract schemas stay lazy here (built on first use). Do not
+    // warm them: the daemon parses only a handful, and building all of them
+    // costs every runner ~38 MB of heap. Broken schemas are caught by
+    // shared's lazySchema tests and the server's startup warm.
     // RFC 071: reload un-acked evidence; it is resent with its original identities.
     this.runtimeOutcomeOutbox.load();
     logger.info(`[Slock Daemon] ${SLOCK_HOME_ENV}=${this.slockHome}`);
@@ -2074,6 +2203,7 @@ export class DaemonCore {
       // The trace sink only exists after the lock is taken, so the start time
       // is captured first and given to the span once the sink is ready.
       const startTimeMs = currentTimeMs();
+      this.startedAtMs = startTimeMs;
       this.machineLock = acquireDaemonMachineLock({
         apiKey: this.options.apiKey,
         serverUrl: this.options.serverUrl,
@@ -2088,6 +2218,17 @@ export class DaemonCore {
       this.installLocalTraceSink(this.machineLock.machineDir);
       this.installTraceBundleUploader(this.machineLock.machineDir);
       this.installDiskJanitor();
+      this.processMemoryReporter = startProcessMemoryReporter({
+        clock: this.appScheduleClock,
+        trace: (attrs) => this.recordDaemonEvent("daemon.process.memory", attrs),
+        context: () => ({
+          process_instance_id: this.daemonInstanceId,
+          ...this.agentManager.getRunningAgentLoad(),
+          ...serviceMemoryAttrs(this.options.serviceMemorySamplePath, this.appScheduleClock.now()),
+        }),
+        samplePath: this.options.processMemorySamplePath ?? null,
+        onWriteError: (error) => logger.warn(`[Slock Daemon] Could not write the memory sample: ${String(error)}`),
+      });
       lifecycleSpan = this.tracer.startSpan("daemon.lifecycle.start", {
         surface: "daemon",
         kind: "internal",
@@ -2105,6 +2246,8 @@ export class DaemonCore {
       lifecycleSpan?.end("error", { attrs: { error_class: errorClassOf(err) } });
       this.traceBundleUploader?.stop();
       this.traceBundleUploader = null;
+      this.processMemoryReporter?.stop();
+      this.processMemoryReporter = null;
       this.machineLock.release();
       this.machineLock = null;
       throw err;
@@ -2112,7 +2255,9 @@ export class DaemonCore {
     lifecycleSpan?.end("ok");
   }
 
-  async stop() {
+  async stop(options: DaemonStopOptions = {}) {
+    // task #1268: a detection child must not outlive the daemon.
+    this.abandonDetectionRound("stop");
     logger.info("[Slock Daemon] Shutting down...");
     const shutdownReason = this.resolveMachineShutdownReason();
     const span = this.tracer.startSpan("daemon.lifecycle.stop", {
@@ -2121,6 +2266,11 @@ export class DaemonCore {
       attrs: {
         machine_lock_present: Boolean(this.machineLock),
         shutdown_reason: shutdownReason,
+        // A run of short uptimes is a restart loop (signal-driven exits never
+        // reach the Computer's crash budget, so nothing else surfaces it).
+        stop_source: options.source ?? "unspecified",
+        ...(options.signal ? { stop_signal: options.signal } : {}),
+        ...(this.startedAtMs !== null ? { uptime_ms: currentTimeMs() - this.startedAtMs } : {}),
       },
     });
     this.localScheduleRuntime.stop();
@@ -2129,6 +2279,8 @@ export class DaemonCore {
     this.scopedAppStorageObserver = null;
     this.traceBundleUploader?.stop();
     this.traceBundleUploader = null;
+    this.processMemoryReporter?.stop();
+    this.processMemoryReporter = null;
     this.diskJanitor?.stop();
     this.diskJanitor = null;
     this.diskStatusReportsEnabled = false;
@@ -3672,6 +3824,26 @@ export class DaemonCore {
     }
   }
 
+  /**
+   * Same-machine grouping: answer with this machine's hash for the
+   * authenticated server only. No context (or a conflicting one) or no
+   * readable hardware ID means no reply; the Computer is then not grouped.
+   */
+  private async replyHostIdentity(): Promise<void> {
+    const serverId = this.machineContextConflict ? undefined : this.authenticatedMachineContext?.serverId;
+    if (!serverId) {
+      this.recordDaemonEvent("daemon.host_identity.skipped", { reason: "no_context" });
+      return;
+    }
+    const hash = await hostIdHash(serverId);
+    if (!hash) {
+      this.recordDaemonEvent("daemon.host_identity.skipped", { reason: "no_hardware_id" });
+      return;
+    }
+    this.connection.send({ type: "machine:host_identity", hostIdHash: hash });
+    this.recordDaemonEvent("daemon.host_identity.sent", {});
+  }
+
   private bindAuthenticatedMachineContext(
     context: Extract<ServerToMachineMessage, { type: "machine:context" }>,
   ): void {
@@ -4252,6 +4424,7 @@ export class DaemonCore {
     switch (msg.type) {
       case "machine:context":
         this.bindAuthenticatedMachineContext(msg);
+        this.observeServerContextCapabilities(msg.capabilities ?? []);
         // RFC 071 outbox: deliver only to a server that acknowledges; an older
         // server (or a context conflict) pauses delivery and keeps the queue.
         this.serverAcksRuntimeOutcomes = !this.machineContextConflict
@@ -4268,6 +4441,10 @@ export class DaemonCore {
             && (msg.capabilities ?? []).includes(SERVER_CAPABILITY_START_SPAWN_ERROR_V1),
           connectionEpochId: typeof msg.connectionEpochId === "string" && msg.connectionEpochId ? msg.connectionEpochId : null,
         });
+        break;
+
+      case "machine:host_identity:request":
+        void this.replyHostIdentity();
         break;
 
       case "agent:outcome:ack":
@@ -4350,6 +4527,13 @@ export class DaemonCore {
 
       case "agent:deliver":
       {
+        // Task #1295: a re-send of a plain delivery this daemon already acked
+        // (the ack was late, not lost) gets the ack again and nothing else.
+        // Mentions have their own duplicate_pending handling.
+        if (!msg.mentionDelivery && msg.deliveryId && this.recentlyAckedDeliveryIds.has(msg.deliveryId, Date.now())) {
+          this.sendDeliveryAck(msg, msg.traceparent);
+          break;
+        }
         const parent = parseTraceparent(msg.traceparent);
         const span = this.tracer.startSpan("daemon.agent.delivery", {
           parent,
@@ -4428,6 +4612,7 @@ export class DaemonCore {
             const ackSeq = msg.seq > 0 ? msg.seq : msg.message.seq ?? 0;
             span.addEvent("daemon.ack.sent", { seq: ackSeq });
             this.sendDeliveryAck(msg, formatTraceparent(span.context));
+            if (msg.deliveryId) this.recentlyAckedDeliveryIds.remember(msg.deliveryId, Date.now());
             span.end("ok", { attrs: { outcome: "ack-sent", ackSeq, deliveryId: msg.deliveryId } });
           }, (err: unknown) => {
             logger.error(`[Agent ${msg.agentId}] Delivery handling failed`, err);
@@ -4660,8 +4845,9 @@ export class DaemonCore {
       // result message needed.
       case "machine:runtimes:rescan":
         if (this.connection.connected) {
-          void this.emitReady().then((readySent) => {
-            if (readySent) this.requestRuntimeModelCatalogPublish(true);
+          void this.emitReady(undefined, { publishCatalogForce: true }).then((readySent) => {
+            // task #1268: with async detection the catalog follows the round's inventory, not the pending frame.
+            if (readySent && !this.detectionRound) this.requestRuntimeModelCatalogPublish(true);
           });
         }
         break;
@@ -4705,12 +4891,12 @@ export class DaemonCore {
           kind: "internal",
           attrs: {
             runtime: msg.runtime,
-            requestId: msg.requestId,
+            request_id: msg.requestId,
           },
         });
         const joinedInFlight = this.probeGate.activeKeys.includes(`runtime_models:${msg.runtime}`);
-        const detect = this.detectRuntimeModelOutcome(msg.runtime, span);
-        void detect.then((detectedOutcome) => {
+        const detect = this.readRuntimeModelOutcome(msg.runtime, span, msg.force === true);
+        void detect.then(({ outcome: detectedOutcome, cache }) => {
           const resultMessage = buildRuntimeModelSourceResultMessage(
             msg.requestId,
             detectedOutcome,
@@ -4724,6 +4910,7 @@ export class DaemonCore {
                 outcome: "models_returned",
                 models_count: outcome.value.models.length,
                 joined_in_flight: joinedInFlight,
+                cache,
                 default_model_present: Boolean(outcome.value.default),
                 verified_as: driver?.model.detectedModelsVerifiedAs ?? "suggestion_only",
               },
@@ -4734,6 +4921,7 @@ export class DaemonCore {
                 outcome: outcome.kind,
                 models_count: 0,
                 joined_in_flight: joinedInFlight,
+                cache,
               },
             });
           }
@@ -4845,7 +5033,9 @@ export class DaemonCore {
                   ? "self_relaunch_unavailable"
                   : /(?:^|\b)UPGRADE_START_REJECTED(?:\b|:)/.test(message)
                     ? "upgrade_start_rejected"
-                    : "computer_control_failed";
+                    : /(?:^|\b)UPGRADE_INSTALLER_FAILED(?:\b|:)/.test(message)
+                      ? "upgrade_installer_failed"
+                      : "computer_control_failed";
               logger.error(
                 `[Daemon] computer:${action} control handler failed: ${message}`,
               );
@@ -4866,6 +5056,8 @@ export class DaemonCore {
               // (recordRemoteUpgradeRefusal) that the next `ready` relays if
               // this message is lost; a busy or unreachable seam leaves no
               // receipt, so a lost message there waits out the request deadline.
+              // An installer that gave up without stopping the service
+              // (UPGRADE_INSTALLER_FAILED) is settled the same way.
               this.connection.send({
                 type: "computer:upgrade:done",
                 requestId,
@@ -4899,6 +5091,40 @@ export class DaemonCore {
    * the unsolicited catalog push. Shares the probe gate key, so a push and a
    * request for the same runtime join one detection instead of spawning twice.
    */
+  /**
+   * The on-demand read behind a form's model list: served from the
+   * stale-while-revalidate cache unless `force` (the form's refresh action).
+   * Runtimes without their own detection answer from a static catalog and
+   * need no cache.
+   */
+  private readRuntimeModelOutcome(
+    runtime: string,
+    span: ActiveSpan,
+    force: boolean,
+  ): Promise<{ outcome: RuntimeModelSourceOutcome; cache: RuntimeModelCacheRead | "static" }> {
+    if (typeof getDriver(runtime)?.detectModels !== "function") {
+      return this.detectRuntimeModelOutcome(runtime, span).then((outcome) => ({ outcome, cache: "static" as const }));
+    }
+    return this.runtimeModelCache.read(runtime, (mode) => {
+      if (mode === "foreground") return this.detectRuntimeModelOutcome(runtime, span);
+      const refreshSpan = this.tracer.startSpan("daemon.runtime_models.refresh", {
+        surface: "daemon",
+        kind: "internal",
+        attrs: { runtime },
+      });
+      return this.detectRuntimeModelOutcome(runtime, refreshSpan).then(
+        (outcome) => {
+          refreshSpan.end("ok", { attrs: { outcome: outcome.kind } });
+          return outcome;
+        },
+        (err: unknown) => {
+          refreshSpan.end("error", { attrs: { outcome: "error", error_class: errorClassOf(err) } });
+          throw err;
+        },
+      );
+    }, { force });
+  }
+
   private detectRuntimeModelOutcome(runtime: string, span: ActiveSpan): Promise<RuntimeModelSourceOutcome> {
     const driver = getDriver(runtime);
     const staticSource = driver ? getStaticRuntimeModelSourceSet(runtime) : undefined;
@@ -4976,6 +5202,8 @@ export class DaemonCore {
       });
       try {
         const outcome = await this.detectRuntimeModelOutcome(runtime, span);
+        // The connect-time push always detects afresh; it also warms the form cache.
+        this.runtimeModelCache.store(runtime, outcome);
         const models = outcome.kind === "live" ? sanitizeCatalogModels(outcome.value.models) : [];
         if (models.length > 0) {
           if (!sameConnection()) {
@@ -4996,16 +5224,84 @@ export class DaemonCore {
     if (this.connection.connected) void this.emitReady();
   }
 
-  private async emitReady(expectedLifecycleGeneration?: number): Promise<boolean> {
+  /** task #1268: may this connection's `ready` defer detection to a child round? Context wins over the handshake header. */
+  private asyncDetectionAllowed(): boolean {
+    const capabilities = this.serverContextCapabilities ?? new Set(this.connection.handshakeServerCapabilities);
+    return capabilities.has(SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1);
+  }
+
+  private observeServerContextCapabilities(capabilities: readonly string[]): void {
+    this.serverContextCapabilities = new Set(capabilities);
+    const header = new Set(this.connection.handshakeServerCapabilities);
+    const headerSaid = header.has(SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1);
+    const contextSays = this.serverContextCapabilities.has(SERVER_CAPABILITY_RUNTIME_DETECTION_ASYNC_V1);
+    if (headerSaid === contextSays) return;
+    // The header is only a pre-read of the context. A round already started on
+    // the header's word keeps running: its final frame carries the full
+    // inventory, which a server without the capability reads as an ordinary
+    // ready. A header that under-reported simply means the first ready was
+    // synchronous; later rescans follow the context.
+    logger.warn(`[Daemon] Server capability mismatch for runtime detection: header=${headerSaid} context=${contextSays}; following machine:context`);
+    this.recordDaemonEvent("daemon.runtime.detect.capability_mismatch", {
+      header_async: headerSaid,
+      context_async: contextSays,
+      round_in_flight: Boolean(this.detectionRound),
+    });
+  }
+
+  private abandonDetectionRound(reason: "reconnect" | "disconnect" | "stop" | "superseded_by_sync"): void {
+    const round = this.detectionRound;
+    this.detectionRescanRequested = false;
+    if (!round) return;
+    this.detectionRound = null;
+    round.abandoned = true;
+    this.recordDaemonEvent("daemon.runtime.detect.round_abandoned", {
+      round_id: round.roundId,
+      reason,
+      child_started: Boolean(round.handle),
+    }, "cancelled");
+    round.handle?.cancel();
+  }
+
+  /**
+   * Compare this detection's runtime CLI versions with the last ones recorded
+   * on this Raft home: every change is a trace event; a downgrade also stays
+   * as a notice for `raft-computer status` (see runtimeCliVersionTracker).
+   * Best-effort: a failed read or write never affects detection or ready.
+   */
+  private trackRuntimeCliVersions(detected: Record<string, string>): void {
+    if (!this.raftHomeExplicit) return;
+    this.runtimeCliVersionWrite = this.runtimeCliVersionWrite.then(async () => {
+      const state = await readRuntimeCliVersionState(this.slockHome);
+      const { changes, next } = observeRuntimeCliVersions(state, detected, currentDate());
+      for (const change of changes) {
+        this.recordDaemonEvent("daemon.runtime.cli_changed", {
+          runtime: change.runtime,
+          from_version: change.from,
+          to_version: change.to,
+          direction: change.direction,
+        }, change.direction === "downgrade" ? "error" : "ok");
+        if (change.direction === "downgrade") {
+          logger.warn(`[Daemon] ${change.runtime} CLI went from ${change.from} to ${change.to}; an older copy may be earlier on this Computer's PATH (see \`raft-computer status\`)`);
+        }
+      }
+      if (JSON.stringify(next) !== JSON.stringify(state)) await writeRuntimeCliVersionState(this.slockHome, next);
+    }).catch((error: unknown) => {
+      logger.warn(`[Daemon] Runtime CLI version record not updated: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  private applyDetectionInventory(detection: RuntimeDetection): { runtimes: string[]; runtimeVersions: Record<string, string> } {
     const {
       ids: runtimes,
       versions: runtimeVersions,
       diagnostics: runtimeDiagnostics = {},
       unavailableReasons: runtimeUnavailableReasons = {},
-    } = this.runtimeDetector();
+    } = detection;
     this.lastReadyRuntimes = runtimes;
     this.lastReadyRuntimeSignature = JSON.stringify(runtimes.map((id) => [id, runtimeVersions[id] ?? null]));
     this.lastReadyRuntimeVersions = runtimeVersions;
+    this.trackRuntimeCliVersions(runtimeVersions);
     const runtimeInfo = runtimes.map((id) => runtimeVersions[id] ? `${id} (${runtimeVersions[id]})` : id);
     logger.info(`[Daemon] Detected runtimes: ${runtimeInfo.join(", ") || "none"}`);
     for (const [runtime, diagnostic] of Object.entries(runtimeDiagnostics)) {
@@ -5016,6 +5312,141 @@ export class DaemonCore {
       if (notInstalled) logger.info(message);
       else logger.warn(message);
     }
+    return { runtimes, runtimeVersions };
+  }
+
+  private async emitReady(
+    expectedLifecycleGeneration?: number,
+    options: { publishCatalogForce?: boolean } = {},
+  ): Promise<boolean> {
+    if (this.asyncDetectionAllowed()) {
+      return this.emitReadyWithDetectionRound(expectedLifecycleGeneration, options.publishCatalogForce ?? false);
+    }
+    // Every inventory publication, synchronous or from a round, is ordered
+    // through the single round record: a synchronous ready supersedes any round
+    // still in flight (its result would be older than what is sent now), so a
+    // capability downgrade followed by a rescan can never be overwritten later.
+    this.abandonDetectionRound("superseded_by_sync");
+    const ticket = ++this.readyPublicationSeq;
+    const inventory = this.applyDetectionInventory(this.runtimeDetector());
+    return this.sendReadyFrame({ inventory }, expectedLifecycleGeneration, ticket);
+  }
+
+  /**
+   * task #1268: `ready` first (no inventory, `runtimeDetection: pending`), then
+   * one detection round in a child; its result lands only on the connection
+   * generation that started it and is followed by a second ready carrying the
+   * inventory and `complete` / `incomplete`. A rescan during a round queues
+   * exactly one more round instead of a parallel one.
+   */
+  private async emitReadyWithDetectionRound(expectedLifecycleGeneration: number | undefined, publishCatalogForce: boolean): Promise<boolean> {
+    const generation = this.lifecycleOriginConnectionGeneration;
+    if (this.detectionRound && this.detectionRound.generation === generation) {
+      this.detectionRescanRequested = true;
+      this.detectionRound.publishCatalogForce ||= publishCatalogForce;
+      this.recordDaemonEvent("daemon.runtime.detect.rescan_coalesced", {
+        round_id: this.detectionRound.roundId,
+        child_started: Boolean(this.detectionRound.handle),
+      });
+      return true;
+    }
+    // Reserve the round before the first await: a second rescan arriving while
+    // the pending frame is in flight must coalesce, not start a second child.
+    const round: DetectionRoundRecord = { handle: null, generation, roundId: ++this.detectionRoundSeq, publishCatalogForce, abandoned: false };
+    this.detectionRound = round;
+    this.recordDaemonEvent("daemon.runtime.detect.round_reserved", { round_id: round.roundId, connection_generation: generation });
+    const ticket = ++this.readyPublicationSeq;
+    const sent = await this.sendReadyFrame({ inventory: null, runtimeDetection: { status: "pending" } }, expectedLifecycleGeneration, ticket);
+    // Disconnected, stopped or superseded while the frame was in flight: the
+    // record is no longer ours and nothing may start.
+    if (round.abandoned || this.detectionRound !== round) return sent;
+    if (!sent || generation !== this.lifecycleOriginConnectionGeneration || !this.connection.connected) {
+      this.detectionRound = null;
+      return sent;
+    }
+    this.startDetectionRound(round);
+    return true;
+  }
+
+  private startDetectionRound(round: DetectionRoundRecord): void {
+    const run = this.options.runtimeDetectionRound ?? runRuntimeDetectionRound;
+    const handle = run({
+      knownRuntimeIds: RUNTIMES.map((runtime) => runtime.id),
+      ...(this.options.runtimeDetectionDeadlineMs !== undefined ? { deadlineMs: this.options.runtimeDetectionDeadlineMs } : {}),
+    });
+    round.handle = handle;
+    this.recordDaemonEvent("daemon.runtime.detect.round_started", { round_id: round.roundId, connection_generation: round.generation });
+    void handle.result.then(
+      (result) => this.onDetectionRoundSettled(round, result),
+      (error) => this.onDetectionRoundSettled(round, {
+        status: "incomplete",
+        reason: "child_failed",
+        detection: { ids: [], versions: {} },
+        unfinishedRuntimes: RUNTIMES.map((runtime) => runtime.id),
+        durationMs: 0,
+        detail: error instanceof Error ? error.message.slice(0, 200) : "runner rejected",
+      }),
+    );
+  }
+
+  private async onDetectionRoundSettled(round: DetectionRoundRecord, result: RuntimeDetectionRoundResult): Promise<void> {
+    const { generation, roundId } = round;
+    if (round.abandoned || this.detectionRound !== round) {
+      // Abandoned (disconnect, stop, synchronous supersede) or not the current
+      // round: the result lands nowhere. Its child was already killed; report
+      // whether that kill was confirmed so a leftover probe is visible.
+      if (result.status === "incomplete" && result.cleanup && !result.cleanup.childExited) {
+        logger.warn(`[Daemon] Abandoned runtime detection round ${roundId}: child exit not confirmed within ${result.cleanup.waitedMs} ms`);
+      }
+      return;
+    }
+    this.detectionRound = null;
+    // Claim the publication before any await below: a synchronous ready that
+    // starts while this frame is being prepared must win over it.
+    const ticket = ++this.readyPublicationSeq;
+    if (result.status === "incomplete" && result.cleanup && !result.cleanup.childExited) {
+      logger.warn(`[Daemon] Runtime detection round ${roundId}: child exit not confirmed within ${result.cleanup.waitedMs} ms after the kill; a probe may still be running`);
+    }
+    this.recordDaemonEvent("daemon.runtime.detect.round_settled", {
+      round_id: roundId,
+      status: result.status,
+      duration_ms: result.durationMs,
+      detected_runtime_count: result.detection.ids.length,
+      ...(result.status === "incomplete"
+        ? {
+            reason: result.reason,
+            unfinished_count: result.unfinishedRuntimes.length,
+            ...(result.exitCode !== undefined ? { exit_code: result.exitCode ?? -1 } : {}),
+            ...(result.detail ? { detail: result.detail } : {}),
+            ...(result.cleanup ? { cleanup_child_exited: result.cleanup.childExited, cleanup_waited_ms: result.cleanup.waitedMs } : {}),
+          }
+        : {}),
+    }, result.status === "complete" ? "ok" : "error");
+    if (generation !== this.lifecycleOriginConnectionGeneration || !this.connection.connected) {
+      logger.info(`[Daemon] Runtime detection round ${roundId} finished after its connection ended; result discarded`);
+      return;
+    }
+    const inventory = this.applyDetectionInventory(result.detection);
+    const report: RuntimeDetectionReport = result.status === "complete"
+      ? { status: "complete", durationMs: result.durationMs }
+      : { status: "incomplete", reason: result.reason, unfinishedRuntimes: result.unfinishedRuntimes, durationMs: result.durationMs };
+    if (result.status === "incomplete") {
+      logger.warn(`[Daemon] Runtime detection incomplete (${result.reason}${result.detail ? `: ${result.detail}` : ""}); not probed: ${result.unfinishedRuntimes.join(", ") || "none"}. Rescan from the Computer page to retry.`);
+    }
+    const sent = await this.sendReadyFrame({ inventory, runtimeDetection: report }, generation, ticket);
+    if (!sent) return;
+    this.requestRuntimeModelCatalogPublish(round.publishCatalogForce);
+    if (this.detectionRescanRequested) {
+      this.detectionRescanRequested = false;
+      void this.emitReady(generation, { publishCatalogForce: true });
+    }
+  }
+
+  private async sendReadyFrame(
+    frame: { inventory: { runtimes: string[]; runtimeVersions: Record<string, string> } | null; runtimeDetection?: RuntimeDetectionReport },
+    expectedLifecycleGeneration: number | undefined,
+    publicationTicket: number,
+  ): Promise<boolean> {
     const runningAgentIds = this.agentManager.getRunningAgentIds();
     const idleAgentSessions = this.agentManager.getIdleAgentSessionIds();
     const runtimeProfileReports = this.agentManager.getAgentRuntimeProfileReports();
@@ -5044,6 +5475,22 @@ export class DaemonCore {
         || !this.connection.connected)) {
       return false;
     }
+    if (publicationTicket !== this.readyPublicationSeq) {
+      // A newer ready publication started while this frame waited on the
+      // awaits above; sending it now would put an older inventory (or a
+      // pending with no round behind it) after the newer one.
+      this.recordDaemonEvent("daemon.ready.superseded", {
+        runtime_detection_status: frame.runtimeDetection?.status ?? "complete",
+        ticket: publicationTicket,
+        newest_ticket: this.readyPublicationSeq,
+      }, "cancelled");
+      return false;
+    }
+    const osVariant = hostOsVariant();
+    // Started in start(); a ready sent before it finishes (macOS runs
+    // system_profiler, ~0.3 s) omits it, and the inventory-carrying ready that
+    // follows runtime detection, the one the Server persists, has it.
+    const deviceClass = knownHostDeviceClass();
     this.connection.send({
       type: "ready",
       capabilities: [
@@ -5065,11 +5512,14 @@ export class DaemonCore {
       ...(this.runtimeOutcomeOutbox.unreliableAgents().length > 0
         ? { runtimeOutcomeUnreliableAgents: this.runtimeOutcomeOutbox.unreliableAgents() }
         : {}),
-      runtimes,
-      runtimeVersions,
+      // task #1268: a pending ready carries NO inventory fields at all.
+      ...(frame.inventory ? { runtimes: frame.inventory.runtimes, runtimeVersions: frame.inventory.runtimeVersions } : {}),
+      ...(frame.runtimeDetection ? { runtimeDetection: frame.runtimeDetection } : {}),
       runningAgents: runningAgentIds,
       hostname: this.options.hostname ?? os.hostname(),
       os: this.options.osDescription ?? `${os.platform()} ${os.arch()}`,
+      ...(osVariant ? { osVariant } : {}),
+      ...(deviceClass ? { deviceClass } : {}),
       daemonVersion: this.daemonVersion,
       ...(this.computerVersion ? { computerVersion: this.computerVersion } : {}),
       migrationTransport: this.getMigrationTransportReady(),
@@ -5082,7 +5532,8 @@ export class DaemonCore {
     // Fresh disk report shortly after every (re)connect, then hourly.
     this.scheduleDiskStatusReport(DISK_STATUS_FIRST_REPORT_DELAY_MS);
     this.recordDaemonEvent("daemon.ready.sent", {
-      runtimes_count: runtimes.length,
+      runtimes_count: frame.inventory ? frame.inventory.runtimes.length : -1,
+      runtime_detection_status: frame.runtimeDetection?.status ?? "complete",
       running_agents_count: runningAgentIds.length,
       idle_agents_count: idleAgentSessions.length,
       runtime_profile_reports_count: runtimeProfileReports.length,
@@ -5176,6 +5627,9 @@ export class DaemonCore {
 
   private handleConnect() {
     const lifecycleOriginConnectionGeneration = this.invalidateLifecycleOriginReconcile();
+    // task #1268: capabilities and detection rounds are per connection.
+    this.serverContextCapabilities = null;
+    this.abandonDetectionRound("reconnect");
     // Computer readiness tracks the live websocket handshake, not runtime
     // inventory. Publish that lifecycle edge before any synchronous probe can
     // delay the event loop (notably PowerShell Get-Command on fresh Windows
@@ -5308,6 +5762,8 @@ export class DaemonCore {
 
   private handleDisconnect() {
     this.serverAcksRuntimeOutcomes = false;
+    this.serverContextCapabilities = null;
+    this.abandonDetectionRound("disconnect");
     this.runtimeOutcomeOutbox.onDisconnected();
     this.invalidateLifecycleOriginReconcile();
     logger.warn("[Daemon] Lost connection — agents continue running locally");

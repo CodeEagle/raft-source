@@ -1,6 +1,14 @@
-import type { TaskStatusId } from "raft-ui";
+import type { TaskStatusId } from "@botiverse/raft-ui";
 import {
   Button,
+  Card,
+  PickerTriggerButton,
+  PanelHeaderContent,
+  PanelMeta,
+  PanelSectionHeader,
+  PanelTitle,
+  Popover,
+  PopoverTrigger,
   SegmentedControl,
   SegmentedControlItem,
   SegmentedControlLabel,
@@ -25,7 +33,7 @@ import {
   TasksPanelRoot,
   TasksPanelToolbar,
   TasksPanelViewport,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useIntl } from "react-intl";
 import { CheckSquare, ChevronDown, Columns3, Hash, LayoutList, Plus, User as UserIcon, UserCircle2 } from "lucide-react";
@@ -132,6 +140,20 @@ function writeStoredTaskViewMode(nextView: ViewMode): void {
 
 const SKELETON_LINE_WIDTHS = ["w-1/2", "w-3/4"];
 
+/** A loading placeholder shaped like the task card it stands in for
+ *  (Raft DS TaskCard: raft-ui Card's surface, hairline and container radius). */
+function TaskCardSkeleton() {
+  return (
+    <Card
+      render={<SkeletonRow lineWidths={SKELETON_LINE_WIDTHS} />}
+      className="flex-row items-center gap-2 p-3"
+    />
+  );
+}
+
+/** The applied-filter count (Raft DS `rf-filter__count`): Space Mono 12, bold. */
+const FILTER_COUNT_CLASS_NAME = "font-mono text-mono-meta font-bold";
+
 function getTaskKey(task: Task): string {
   return task.id;
 }
@@ -190,16 +212,16 @@ function TaskSection({
           { id: collapsed ? "task.status.showGroup" : "task.status.hideGroup" },
           { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
         )}
-        className={`flex w-full items-center justify-between gap-3 text-left ${onToggleCollapsed ? "" : "cursor-default"}`}
+        className={onToggleCollapsed ? undefined : "cursor-default"}
       >
-        <TaskSectionHeading className="flex items-center gap-2">
+        <TaskSectionHeading>
           <TaskSectionBadge status={ruiStatus}>
             {formatMessage({ id: TASK_STATUS_UI[status].labelId })}
           </TaskSectionBadge>
-          <TaskSectionCount className="text-xs font-mono text-foreground-muted">{tasks.length}</TaskSectionCount>
+          <TaskSectionCount>{tasks.length}</TaskSectionCount>
         </TaskSectionHeading>
         {onToggleCollapsed ? (
-          <TaskSectionChevron className="inline-flex items-center text-foreground-muted hover:text-foreground-strong" />
+          <TaskSectionChevron />
         ) : (
           <span />
         )}
@@ -207,12 +229,9 @@ function TaskSection({
       <TaskSectionPanel>
         {tasks.length === 0 ? (
           loadingPage ? (
-            <SkeletonRow
-              className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
-              lineWidths={SKELETON_LINE_WIDTHS}
-            />
+            <TaskCardSkeleton />
           ) : (
-            <TaskSectionEmpty className="border-2 border-dashed border-line-muted px-3 py-5 text-sm text-foreground-muted">
+            <TaskSectionEmpty>
               {formatMessage(
                 { id: "task.status.emptyGroup" },
                 { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
@@ -238,7 +257,7 @@ function TaskSection({
             variant="outline"
             disabled={loadingPage}
             onClick={onLoadMore}
-            className="box-border h-8 min-h-8 w-full gap-1 py-0 text-xs"
+            className="w-full"
             data-testid={`task-load-more-${status}`}
           >
             {loadingPage ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "task.panel.loadMore" })}
@@ -338,37 +357,31 @@ function DroppableColumn({
       ref={setNodeRef}
       open={!collapsed}
       onOpenChange={handleOpenChange}
-      className={`flex w-[320px] shrink-0 self-start flex-col border theme-brutal:border-2 ${
-        isOver ? "border-line-strong bg-primary-soft shadow-raft-sm theme-brutal:border-black theme-brutal:bg-soft-signal/20 theme-brutal:shadow-brutal-sm" : "border-line-muted bg-fill-muted/30 theme-brutal:border-black/20 theme-brutal:bg-white/30"
-      } p-3 transition-colors`}
+      // The drop target is a hover-like hint: the pressed overlay, no colour
+      // (Raft DS: hints have no colour). The column's own chrome is the recipe's.
+      className={`rounded-container transition-colors ${isOver ? "bg-fill-pressed" : ""}`}
     >
       <TaskBoardColumnTrigger
         aria-label={formatMessage(
           { id: collapsed ? "task.status.showGroup" : "task.status.hideGroup" },
           { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
         )}
-        className={`flex w-full items-center justify-between gap-3 text-left ${collapsed ? "" : "mb-3"}`}
       >
-        <TaskBoardColumnHeading className="flex items-center gap-2">
+        <TaskBoardColumnHeading>
           <TaskBoardColumnBadge status={ruiStatus}>
             {formatMessage({ id: TASK_STATUS_UI[status].labelId })}
           </TaskBoardColumnBadge>
-          <TaskBoardColumnCount className="text-xs font-mono text-foreground-muted">{statusTasks.length}</TaskBoardColumnCount>
+          <TaskBoardColumnCount>{statusTasks.length}</TaskBoardColumnCount>
         </TaskBoardColumnHeading>
-        <TaskBoardColumnChevron className="inline-flex items-center text-foreground-muted hover:text-foreground-strong" />
+        <TaskBoardColumnChevron />
       </TaskBoardColumnTrigger>
       <TaskBoardColumnPanel>
-        <TaskBoardColumnItems className="space-y-2.5">
+        <TaskBoardColumnItems>
           {statusTasks.length === 0 ? (
             loadingPage ? (
-              <SkeletonRow
-                className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
-                lineWidths={SKELETON_LINE_WIDTHS}
-              />
+              <TaskCardSkeleton />
             ) : (
-              <TaskBoardColumnEmpty className={`border border-dashed px-3 py-5 text-sm theme-brutal:border-2 ${
-                isOver ? "border-line-strong text-foreground-strong theme-brutal:border-black" : "border-line-muted text-foreground-muted theme-brutal:border-black/20"
-              }`}>
+              <TaskBoardColumnEmpty>
                 {formatMessage(
                   { id: isOver ? "task.status.dropToSet" : "task.status.emptyGroup" },
                   { status: formatMessage({ id: TASK_STATUS_UI[status].labelId }) },
@@ -392,7 +405,7 @@ function DroppableColumn({
               variant="outline"
               disabled={loadingPage}
               onClick={onLoadMore}
-              className="box-border h-8 min-h-8 w-full gap-1 py-0 text-xs"
+              className="w-full"
               data-testid={`task-load-more-${status}`}
             >
               {loadingPage ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "task.panel.loadMore" })}
@@ -430,7 +443,7 @@ function IdentityFilterChip({
   includeUnassigned = false,
   selfOption = null,
   isOpen,
-  onToggleOpen,
+  onOpenChange,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -447,26 +460,16 @@ function IdentityFilterChip({
    */
   selfOption?: { key: IdentityFilterValue; label: string } | null;
   isOpen: boolean;
-  onToggleOpen: () => void;
+  /** The popover's trigger, outside presses and Escape all report here. */
+  onOpenChange: (open: boolean) => void;
 }) {
   const { formatMessage } = useIntl();
-  const containerRef = useRef<HTMLDivElement>(null);
   const [search, setSearch] = useState("");
-
-  useEffect(() => {
-    if (!isOpen) return;
-    // Reset search input when dropdown opens. Intentional reset-on-open, not
-    // prop-derived state.
-    // oxlint-disable-next-line react-doctor/no-adjust-state-on-prop-change
-    setSearch("");
-    const handleClickOutside = (event: MouseEvent) => {
-      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
-        onToggleOpen();
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [isOpen, onToggleOpen]);
+  // Each opening starts from an empty search.
+  const handleOpenChange = useCallback((open: boolean) => {
+    if (open) setSearch("");
+    onOpenChange(open);
+  }, [onOpenChange]);
 
   // Inject the synthetic "Unassigned" row at the top of the option list. It
   // scrolls with the list (not sticky) but always sorts first so it stays
@@ -556,35 +559,32 @@ function IdentityFilterChip({
     ),
   })), [filteredOptions, selected, toggleValue]);
 
+  // raft-ui Popover: the list is placed in a portal against the chip and kept
+  // on screen; the popover owns the toggle, outside presses and Escape.
   return (
-    <div ref={containerRef} className="relative">
-      <Button size="sm" variant={selected.length > 0 ? "primary" : "outline"}
-        type="button"
-        onClick={onToggleOpen}
-        className="box-border h-8 min-h-8 gap-2 py-0"
+    <Popover open={isOpen} onOpenChange={handleOpenChange}>
+      <PopoverTrigger
+        render={<PickerTriggerButton type="button" data-has-value={selected.length > 0 ? "" : undefined} />}
       >
         {icon}
         {label}
         {selected.length > 0 && (
-          <span className="border border-line-muted px-1 py-0.5 font-mono text-[10px] leading-none theme-brutal:border-black">
-            {selected.length}
-          </span>
+          <span className={FILTER_COUNT_CLASS_NAME}>{selected.length}</span>
         )}
-        <ChevronDown size={12} />
-      </Button>
-
-      {isOpen && (
-        <SelectionPopover
-          title={label}
-          searchable
-          search={search}
-          onSearchChange={setSearch}
-          options={popoverOptions}
-          showClear={selected.length > 0}
-          onClear={clearSelection}
-        />
-      )}
-    </div>
+        <span data-picker-trigger-indicator="" aria-hidden="true">
+          <ChevronDown />
+        </span>
+      </PopoverTrigger>
+      <SelectionPopover
+        title={label}
+        searchable
+        search={search}
+        onSearchChange={setSearch}
+        options={popoverOptions}
+        showClear={selected.length > 0}
+        onClear={clearSelection}
+      />
+    </Popover>
   );
 }
 
@@ -666,7 +666,6 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
     done: true,
     closed: true,
   });
-  const channelFilterRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const previousContainerWidthRef = useRef<number | null>(null);
   const rightPanelOpenRef = useRef(false);
@@ -709,17 +708,6 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
     return () => unregisterServerTasksConsumer();
   }, [isChannelMode, registerServerTasksConsumer, unregisterServerTasksConsumer]);
 
-  useEffect(() => {
-    if (openFilter !== "channel") return;
-    setChannelSearch("");
-    const handleClickOutside = (event: MouseEvent) => {
-      if (channelFilterRef.current && !channelFilterRef.current.contains(event.target as Node)) {
-        setOpenFilter((prev) => (prev === "channel" ? null : prev));
-      }
-    };
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, [openFilter]);
 
   useEffect(() => {
     rightPanelOpenRef.current = threadPanelOpen || legacyTaskPanelOpen;
@@ -957,14 +945,18 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
     label: `#${channel.name}`,
   })), [filteredChannelOptions, selectedChannelIds, toggleChannelFilter]);
 
-  const toggleChannelPopover = useCallback(() => {
-    setOpenFilter((prev) => (prev === "channel" ? null : "channel"));
+  // One filter popover at a time: opening one replaces the other; a close
+  // only clears the one that closed.
+  const handleChannelPopoverOpenChange = useCallback((open: boolean) => {
+    // Each opening starts from an empty search.
+    if (open) setChannelSearch("");
+    setOpenFilter((prev) => (open ? "channel" : prev === "channel" ? null : prev));
   }, []);
-  const toggleCreatorPopover = useCallback(() => {
-    setOpenFilter((prev) => (prev === "creator" ? null : "creator"));
+  const handleCreatorPopoverOpenChange = useCallback((open: boolean) => {
+    setOpenFilter((prev) => (open ? "creator" : prev === "creator" ? null : prev));
   }, []);
-  const toggleAssigneePopover = useCallback(() => {
-    setOpenFilter((prev) => (prev === "assignee" ? null : "assignee"));
+  const handleAssigneePopoverOpenChange = useCallback((open: boolean) => {
+    setOpenFilter((prev) => (open ? "assignee" : prev === "assignee" ? null : prev));
   }, []);
 
   const creatorSelfOption = useMemo(
@@ -978,13 +970,6 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
 
   const openCreateDialog = useCallback(() => setShowCreateDialog(true), []);
   const closeCreateDialog = useCallback(() => setShowCreateDialog(false), []);
-
-  const renderBoardViewButton = useCallback((props: React.ComponentProps<"button">) => (
-    <Button {...props} size="sm" variant={viewMode === "board" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
-  ), [viewMode]);
-  const renderListViewButton = useCallback((props: React.ComponentProps<"button">) => (
-    <Button {...props} size="sm" variant={viewMode === "list" ? "primary" : "outline"} className="box-border h-8 min-h-8 gap-1.5 py-0" />
-  ), [viewMode]);
 
   const toggleStatusCollapsed = useCallback((status: TaskStatus) => {
     // Expanding a never-loaded lane (done/closed start collapsed + unloaded in
@@ -1046,25 +1031,23 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
     >
       {/* Server-mode page header. Channel mode is mounted inside ChatPanel
           which already shows the channel header, so a second "Tasks" title
-          would be redundant — drop straight into the toolbar. */}
+          would be redundant — drop straight into the toolbar.
+          Raft DS › Panel / NavBar: the head names the page and carries no icon
+          tile (the yellow location block belongs to a channel). On the phone
+          this is the Tasks tab root, so it sits in the frame like the other
+          tab roots: raft-ui's section head, white on desktop and the frame on
+          a phone. The Board/List toggle lives in the filter row, not here. */}
       {!isChannelMode && (
-        <div data-slot="panel-header" className="flex h-panel-header items-center gap-3 border-b border-line-muted bg-layer-panel px-5 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:md:bg-white">
-          <div className="hidden md:flex size-icon-header items-center justify-center border border-line-muted bg-primary-soft text-primary-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
-            <CheckSquare size={18} />
-          </div>
-          <div className="min-w-0 flex-1">
-            <h2 className="font-bold text-base leading-tight">{formatMessage({ id: "task.panel.heading" })}</h2>
-            <p className="text-xs text-foreground-muted font-mono">
-              {sortedTasks.length}
+        <PanelSectionHeader>
+          <PanelHeaderContent>
+            <PanelTitle render={<h2>{formatMessage({ id: "task.panel.heading" })}</h2>} />
+            <PanelMeta render={<p />}>
+              <span className="font-mono">{sortedTasks.length}</span>
               {hasAnyFilter ? formatMessage({ id: "task.panel.ofTotal" }, { total: tasks.length }) : ""}
               {" "}{formatMessage({ id: "task.panel.channelTasks" })}
-            </p>
-          </div>
-          {/* Board/List toggle lives in the filter row below on both
-              desktop and mobile, per @stdrc msg efec44d1 2026-05-01
-              `#proj-uiux:c8711d2a`: "Board 和 List 的选择，无论在桌面端
-              还是在移动端，都可以都放到 Filter 那一栏，然后放到右边。" */}
-        </div>
+            </PanelMeta>
+          </PanelHeaderContent>
+        </PanelSectionHeader>
       )}
 
       <TasksPanelToolbar>
@@ -1072,34 +1055,29 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
           {/* Channel filter only makes sense in server mode — channel mode
               is already scoped to one channel. */}
           {!isChannelMode && (
-            <div ref={channelFilterRef} className="relative">
-              <Button size="sm" variant={selectedChannelIds.length > 0 ? "primary" : "outline"}
-                type="button"
-                onClick={toggleChannelPopover}
-                className="box-border h-8 min-h-8 gap-2 py-0"
+            <Popover open={openFilter === "channel"} onOpenChange={handleChannelPopoverOpenChange}>
+              <PopoverTrigger
+                render={<PickerTriggerButton type="button" data-has-value={selectedChannelIds.length > 0 ? "" : undefined} />}
               >
                 <Hash size={14} />
                 {formatMessage({ id: "task.panel.channelColumn" })}
                 {selectedChannelIds.length > 0 && (
-                  <span className="border border-line-muted px-1 py-0.5 font-mono text-[10px] leading-none theme-brutal:border-black">
-                    {selectedChannelIds.length}
-                  </span>
+                  <span className={FILTER_COUNT_CLASS_NAME}>{selectedChannelIds.length}</span>
                 )}
-                <ChevronDown size={12} />
-              </Button>
-
-              {openFilter === "channel" && (
-                <SelectionPopover
-                  title={formatMessage({ id: "task.filter.channels" })}
-                  searchable
-                  search={channelSearch}
-                  onSearchChange={setChannelSearch}
-                  options={channelPopoverOptions}
-                  showClear={selectedChannelIds.length > 0}
-                  onClear={clearChannelFilters}
-                />
-              )}
-            </div>
+                <span data-picker-trigger-indicator="" aria-hidden="true">
+                  <ChevronDown />
+                </span>
+              </PopoverTrigger>
+              <SelectionPopover
+                title={formatMessage({ id: "task.filter.channels" })}
+                searchable
+                search={channelSearch}
+                onSearchChange={setChannelSearch}
+                options={channelPopoverOptions}
+                showClear={selectedChannelIds.length > 0}
+                onClear={clearChannelFilters}
+              />
+            </Popover>
           )}
 
           {/* Creator + Assignee chips: available in both server- and
@@ -1113,7 +1091,7 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
             onChange={setSelectedCreators}
             selfOption={creatorSelfOption}
             isOpen={openFilter === "creator"}
-            onToggleOpen={toggleCreatorPopover}
+            onOpenChange={handleCreatorPopoverOpenChange}
           />
           <IdentityFilterChip
             icon={<UserIcon size={14} />}
@@ -1124,7 +1102,7 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
             includeUnassigned
             selfOption={assigneeSelfOption}
             isOpen={openFilter === "assignee"}
-            onToggleOpen={toggleAssigneePopover}
+            onOpenChange={handleAssigneePopoverOpenChange}
           />
 
           {/* "Created by me" / "Assigned to me" are no longer standalone
@@ -1133,10 +1111,9 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
               #proj-task:572c5ba6 msg=58495043. */}
 
           {hasAnyFilter && (
-            <Button size="sm" variant="outline"
+            <Button size="sm" variant="ghost"
               type="button"
               onClick={clearAllFilters}
-              className="box-border h-8 min-h-8 gap-2 py-0"
             >
               {formatMessage({ id: "task.panel.clearAll" })}
             </Button>
@@ -1152,9 +1129,8 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
               size="sm"
               variant="outline"
               onClick={openCreateDialog}
-              className="box-border inline-flex h-8 min-h-8 items-center gap-1 py-0 text-xs font-bold"
             >
-              <Plus size={12} />
+              <Plus size={16} />
               {formatMessage({ id: "task.board.newTask" })}
             </Button>
           )}
@@ -1165,21 +1141,20 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
             aria-label={formatMessage({ id: "task.viewAria" })}
             className="sm:ml-auto"
           >
+            {/* Phone: icons only; the label stays as the accessible name. */}
             <SegmentedControlItem
               value="board"
               data-testid="channel-task-view-board"
-              render={renderBoardViewButton}
             >
-              <Columns3 size={12} />
-              <SegmentedControlLabel>{formatMessage({ id: "task.view.board" })}</SegmentedControlLabel>
+              <Columns3 size={16} aria-hidden="true" />
+              <SegmentedControlLabel className="max-sm:sr-only">{formatMessage({ id: "task.view.board" })}</SegmentedControlLabel>
             </SegmentedControlItem>
             <SegmentedControlItem
               value="list"
               data-testid="channel-task-view-list"
-              render={renderListViewButton}
             >
-              <LayoutList size={12} />
-              <SegmentedControlLabel>{formatMessage({ id: "task.view.list" })}</SegmentedControlLabel>
+              <LayoutList size={16} aria-hidden="true" />
+              <SegmentedControlLabel className="max-sm:sr-only">{formatMessage({ id: "task.view.list" })}</SegmentedControlLabel>
             </SegmentedControlItem>
           </SegmentedControl>
         </div>
@@ -1190,16 +1165,12 @@ export default function TasksPanel({ channelId }: TasksPanelProps = {}) {
         data-task-virtual-scroll
         // The floating-tab-bar clearance belongs to the Tasks tab root only —
         // channel-detail panes have no capsule above them (task #678).
-        className={`flex-1 overflow-auto bg-layer-canvas-muted p-4 safe-bottom theme-brutal:bg-white${isChannelMode ? "" : " mobile-nav-clearance"}`}
+        className={`flex-1 overflow-auto py-4 safe-bottom${isChannelMode ? "" : " mobile-nav-clearance"}`}
       >
         {loading ? (
           <div className="flex flex-col gap-2" aria-hidden="true">
             {Array.from({ length: 5 }, (_, i) => (
-              <SkeletonRow
-                key={i}
-                className="gap-2 rounded border border-line-muted bg-layer-card p-3 theme-brutal:border-2 theme-brutal:border-black/30 theme-brutal:bg-white"
-                lineWidths={SKELETON_LINE_WIDTHS}
-              />
+              <TaskCardSkeleton key={i} />
             ))}
           </div>
         ) : sortedTasks.length === 0 && (isChannelMode || allServerLanesLoaded) ? (

@@ -255,10 +255,16 @@ test("mentions filter hides the redundant mention-you badge", () => {
   assert.equal(screen.queryByTestId("inbox-mention-badge"), null);
 });
 
-// Independent of raft-ui Badge recipes in product source. Brutal
-// outline+muted currently renders these tokens; shrinking or swapping the
-// production pairing must still fail this expected set.
-const EXPECTED_DRAFT_BADGE_TOKENS = ["bg-transparent", "text-secondary-900"] as const;
+// Independent of raft-ui Badge recipes in product source. Raft
+// outline+muted renders these tokens (transparent fill, muted text, hairline
+// inset edge); shrinking or swapping the production pairing must still fail
+// this expected set.
+const EXPECTED_DRAFT_BADGE_TOKENS = [
+  "bg-transparent",
+  "text-foreground-muted",
+  "inset-ring",
+  "inset-ring-line-hairline",
+] as const;
 
 test("thread inbox row surfaces a local thread draft as a muted outline badge", () => {
   const threadItem = makeThreadItem({ unreadCount: 0, hasMention: false });
@@ -1166,7 +1172,9 @@ test("thread read canonical reconcile cannot publish a parked server A response 
   }>();
   let inboxLoads = 0;
   api.post = (() => persisted.promise) as typeof api.post;
-  api.get = (() => {
+  api.get = ((url: string) => {
+    // Server reset also refreshes announcements; only inbox reads own this counter.
+    if (url.startsWith("/announcements")) return Promise.resolve({ data: { announcements: [] } });
     inboxLoads += 1;
     return inboxResponse.promise;
   }) as typeof api.get;

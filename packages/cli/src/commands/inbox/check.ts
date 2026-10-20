@@ -6,7 +6,8 @@
 // carries its `open:` command; the output ends with exactly one `Next:` line.
 
 import type { Command } from "commander";
-import { AGENT_API_INBOX_VIEWS, currentTimeMs, type AgentApiInboxView, type AgentInboxSourceSeal } from "@botiverse/raft-shared";
+import type { AgentApiInboxView, AgentInboxSourceSeal } from "@botiverse/raft-shared";
+import { AGENT_API_INBOX_VIEWS, currentTimeMs } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

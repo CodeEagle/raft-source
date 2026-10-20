@@ -4,7 +4,7 @@ import { formatIntegrationErrorV1, formatIntegrationReceiptV1 } from "./_format"
 export { formatIntegrationErrorV1, formatIntegrationReceiptV1 } from "./_format";
 import { randomUUID } from "node:crypto";
 
-import { currentDate } from "@botiverse/raft-shared";
+import { currentDate } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import type { AgentContext } from "../../auth/env";
 import { CliError, type CliErrorCode } from "../../core/errors";

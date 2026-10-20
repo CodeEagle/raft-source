@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
 import {
   Button,
+  Card,
   Checkbox,
   Select,
   SelectContent,
@@ -12,7 +13,8 @@ import {
   SelectList,
   SelectTrigger,
   SelectValue,
-} from "raft-ui";
+  Separator,
+} from "@botiverse/raft-ui";
 import type {
   AgentConnectionConnectorView,
   AgentConnectionProvider,
@@ -94,22 +96,25 @@ export function AgentConnections({ agentId }: { agentId: string }) {
 
   if (state.kind === "hidden" || state.kind === "loading") return null;
   return (
-    <div className="border-t border-line-muted theme-brutal:border-black/10 px-5 py-4" data-testid="agent-connections">
+    <>
+    <Separator />
+    <div className="px-5 py-4" data-testid="agent-connections">
       <SectionEyebrow as="div" className="mb-2">
         {formatMessage({ id: "agent.detail.connections.title" })}
       </SectionEyebrow>
       {state.kind === "error" ? (
-        <p className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">
+        <p className="text-footnote font-semibold text-warning-strong">
           {formatMessage({ id: "agent.detail.connections.loadFailed" })}
         </p>
       ) : state.kind === "agent_missing" ? (
-        <p className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange" data-testid="agent-connections-agent-missing">
+        <p className="text-footnote font-semibold text-warning-strong" data-testid="agent-connections-agent-missing">
           {formatMessage({ id: "agent.detail.connections.agentMissingAtProvider" })}
         </p>
       ) : (
         <GithubConnectionRow agentId={agentId} status={state.status} onChanged={load} onAgentMissing={handleAgentMissing} />
       )}
     </div>
+    </>
   );
 }
 
@@ -270,11 +275,11 @@ function GithubConnectionRow({
   }, [disconnectConnector, current]);
 
   return (
-    <div className="space-y-2 border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white p-3" data-testid="agent-connection-github" data-connected={status.connected ? "true" : "false"}>
+    <Card className="space-y-3 p-3" data-testid="agent-connection-github" data-connected={status.connected ? "true" : "false"}>
       <div className="min-w-0">
-        <p className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "agent.detail.connections.github" })}</p>
+        <p className="text-subhead font-semibold text-foreground">{formatMessage({ id: "agent.detail.connections.github" })}</p>
         {status.connected ? (
-          <p className="flex flex-wrap gap-x-2 text-xs text-foreground-muted theme-brutal:text-black/60" data-testid="agent-connection-github-status">
+          <p className="flex flex-wrap items-baseline gap-x-2 text-callout text-foreground-muted" data-testid="agent-connection-github-status">
             {currentCreator ? (
               <span>{formatMessage({ id: "agent.detail.connections.usesConnector" }, { creator: currentCreator, account: status.account ?? current?.account ?? "?" })}</span>
             ) : (
@@ -285,22 +290,22 @@ function GithubConnectionRow({
                 ) : null}
               </>
             )}
-            {status.connectedAt ? <span className="font-mono">{formatShortDateTime(status.connectedAt)}</span> : null}
+            {status.connectedAt ? <span className="font-mono text-mono-meta text-foreground-hint">{formatShortDateTime(status.connectedAt)}</span> : null}
           </p>
         ) : (
-          <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
+          <p className="text-callout text-foreground-muted">
             {formatMessage({ id: "agent.detail.connections.notConnected" })}
           </p>
         )}
         {status.connected && status.scopes.length > 0 && (
-          <p className="text-xs font-mono text-foreground-muted theme-brutal:text-black/50">
+          <p className="mt-0.5 break-words font-mono text-mono-meta text-foreground-hint">
             {formatMessage({ id: "agent.detail.connections.scopes" }, { scopes: status.scopes.join(", ") })}
           </p>
         )}
       </div>
       {connectors.length > 0 && (
         <div className="space-y-1" data-testid="agent-connection-github-connectors">
-          <p className="text-xs font-bold text-foreground-muted theme-brutal:text-black/70">
+          <p className="text-footnote font-semibold text-foreground-muted">
             {formatMessage({ id: "agent.detail.connections.useConnection" })}
           </p>
           <Select
@@ -322,7 +327,7 @@ function GithubConnectionRow({
                       <SelectItemText>
                         <span className="flex flex-col">
                           <span>{connectorLabel(connector)}</span>
-                          {reason ? <span className="text-xs font-normal text-foreground-muted">{reason}</span> : null}
+                          {reason ? <span className="text-caption font-normal text-foreground-hint">{reason}</span> : null}
                         </span>
                       </SelectItemText>
                       <SelectItemIndicator />
@@ -359,7 +364,7 @@ function GithubConnectionRow({
         </div>
       )}
       {!pending && (
-        <label className="flex items-center gap-2 text-xs text-foreground-muted theme-brutal:text-black/70">
+        <label className="flex min-h-8 items-center gap-2 text-callout font-semibold text-foreground">
           <Checkbox
             checked={includePrivate}
             onCheckedChange={handleIncludePrivateChange}
@@ -370,21 +375,21 @@ function GithubConnectionRow({
       )}
       {pending && (
         <div className="space-y-2" data-testid="agent-connection-github-pending">
-          <p className="text-xs text-foreground-muted theme-brutal:text-black/70">
+          <p className="text-callout text-foreground-muted">
             {formatMessage({ id: "agent.detail.connections.reviewScopes" }, { scopes: pending.scopes.join(", ") || requestedScope })}
           </p>
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="primary" size="sm" type="button" onClick={handlePendingContinue}>
               {formatMessage({ id: "agent.detail.connections.continue" })}
             </Button>
-            <Button variant="outline" size="sm" type="button" onClick={handlePendingCancel}>
+            <Button variant="ghost" size="sm" type="button" onClick={handlePendingCancel}>
               {formatMessage({ id: "agent.detail.connections.cancel" })}
             </Button>
           </div>
         </div>
       )}
       {error && (
-        <p className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange" data-testid="agent-connection-github-error">
+        <p className="text-footnote font-semibold text-warning-strong" data-testid="agent-connection-github-error">
           {error.reason
             ? formatMessage({ id: "agent.detail.connections.providerRefused" }, { reason: error.reason })
             : formatMessage({
@@ -398,7 +403,7 @@ function GithubConnectionRow({
       )}
       {partialDisconnect && (
         <div className="flex flex-wrap items-center gap-2" data-testid="agent-connection-disconnect-partial">
-          <p className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">
+          <p className="text-footnote font-semibold text-warning-strong">
             {formatMessage({ id: "agent.detail.connections.disconnectPartial" })}
           </p>
           <Button variant="outline" size="sm" type="button" disabled={retrying} onClick={handleRetryPartial}>
@@ -411,6 +416,7 @@ function GithubConnectionRow({
           title={formatMessage({ id: "agent.detail.connections.detachTitle" })}
           message={formatMessage({ id: "agent.detail.connections.detachMessage" }, { account: status.account ?? "GitHub" })}
           confirmLabel={formatMessage({ id: "agent.detail.connections.detach" })}
+          confirmVariant="warning"
           onConfirm={detach}
           onClose={handleConfirmClose}
         />
@@ -420,11 +426,12 @@ function GithubConnectionRow({
           title={formatMessage({ id: "agent.detail.connections.disconnectConnectorTitle" })}
           message={formatMessage({ id: "agent.detail.connections.disconnectConnectorMessage" }, { account: current.account ?? "GitHub" })}
           confirmLabel={formatMessage({ id: "agent.detail.connections.disconnectConnector" })}
+          confirmVariant="danger"
           confirmTestId="agent-connection-disconnect-connector-confirm"
           onConfirm={handleDisconnectConfirm}
           onClose={handleConfirmClose}
         />
       )}
-    </div>
+    </Card>
   );
 }

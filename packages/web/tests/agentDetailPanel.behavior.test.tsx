@@ -981,3 +981,26 @@ test("live catalog shrink preserves the persisted edit model as unverified", asy
   openCombobox(modelSelect);
   assert.ok(await screen.findByRole("option", { name: /Kimi for Coding.*not in this computer's config/ }));
 });
+
+test("agent detail panel does not render created agents section (task #761)", async () => {
+  const agent = seedPanelState("server-no-created-agents", makeAgent({
+    serverId: "server-no-created-agents",
+    createdAgents: [
+      {
+        id: "created-1",
+        name: "sub-agent",
+        displayName: "Sub Agent",
+        avatarUrl: null,
+        runtime: "codex",
+        status: "inactive",
+      },
+    ],
+  }));
+  stubAgentDetailApi();
+  stubMigrationFeatureFlag("server-no-created-agents");
+
+  renderPanel(agent);
+
+  assert.ok(screen.queryByText("Created Agents") === null);
+  assert.ok(screen.queryByText("Sub Agent") === null);
+});

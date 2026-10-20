@@ -1,9 +1,10 @@
 import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
 import AvatarSlot from "../ui/AvatarSlot";
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import { acknowledgeSetupHandoff } from "./serverSetupProjection";
 import SetupSessionFooter from "./SetupSessionFooter";
+import SetupStepFrame from "./SetupStepFrame";
 
 /**
  * The last thing the setup gate shows: Cindy is created, and she — not this
@@ -49,29 +50,47 @@ export default function ServerSetupHandoffStep({
     void handleDone();
   }, [handleDone]);
   return (
-    <section
-      className="flex w-full max-w-[560px] flex-col overflow-hidden border border-line-muted bg-layer-panel shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
-      data-testid="server-setup-handoff"
+    <SetupStepFrame
+      testId="server-setup-handoff"
+      bodyClassName="flex flex-col items-center justify-center"
+      footer={
+        <>
+          <SetupSessionFooter disabled={handingOff} />
+          <Button
+            type="button"
+            onClick={handleDoneClick}
+            disabled={handingOff}
+            size="lg"
+            variant="accent"
+            className="w-full sm:w-auto"
+            data-testid="server-setup-handoff-done"
+          >
+            {handingOff
+              ? formatMessage({ id: "layout.onboarding.starting" })
+              : formatMessage({ id: "layout.onboarding.letsGo" })}
+          </Button>
+        </>
+      }
     >
-      <div className="flex flex-col items-center px-8 pb-7 pt-9 text-center">
+      <div className="flex flex-col items-center text-center">
         <div className="relative mb-6">
           <span
-            className="onboarding-cindy-pop-mark absolute -right-5 top-1 size-3 rotate-12 border-2 border-black bg-brutal-lime"
+            className="onboarding-cindy-pop-mark absolute -right-5 top-1 size-3 rotate-12 rounded-[2px] border-[1.5px] border-sticker-ink bg-success"
             aria-hidden="true"
           />
           <span
-            className="onboarding-cindy-pop-mark absolute -left-5 top-8 size-2.5 -rotate-12 border-2 border-black bg-soft-signal [animation-delay:70ms]"
+            className="onboarding-cindy-pop-mark absolute -left-5 top-8 size-2.5 -rotate-12 rounded-[2px] border-[1.5px] border-sticker-ink bg-brand [animation-delay:70ms]"
             aria-hidden="true"
           />
           <AvatarSlot
-            context="profile-tile"
+            context="profile-hero"
             type="agent"
             agentAvatarUrl="pixel:mug"
-            className="onboarding-cindy-entrance relative z-10 !size-[104px] theme-brutal:shadow-brutal-lg"
+            className="onboarding-cindy-entrance z-10"
           />
         </div>
 
-        <h1 className="text-2xl font-black tracking-normal text-foreground-strong theme-brutal:text-black">
+        <h1 className="text-title text-foreground sm:text-display">
           {formatMessage({ id: "layout.onboarding.handoffTitle" }, { agentName })}
         </h1>
         {/* text-balance so the last line can never be left holding a single orphan word
@@ -79,28 +98,11 @@ export default function ServerSetupHandoffStep({
             filling greedily and dumping the remainder. Fixed here and not in the copy: the
             sentence was never wrong, and a container that only fits THIS wording would strand
             the next one (@Cat owns the copy contract; @Josh called the same fix). */}
-        <p className="mt-3 max-w-[42ch] text-balance text-base leading-relaxed text-foreground-muted theme-brutal:text-black/70">
+        <p className="mt-3 max-w-[42ch] text-balance text-subhead text-foreground-muted">
           {formatMessage({ id: "layout.onboarding.handoffBody" }, { agentName })}
         </p>
 
       </div>
-
-      <div className="flex flex-col-reverse gap-3 border-t border-line-muted px-8 py-4 sm:flex-row sm:items-center sm:justify-between theme-brutal:border-t-2 theme-brutal:border-black">
-        <SetupSessionFooter disabled={handingOff} />
-        <Button
-          type="button"
-          onClick={handleDoneClick}
-          disabled={handingOff}
-          size="lg"
-          variant="accent"
-          className="w-full sm:w-auto"
-          data-testid="server-setup-handoff-done"
-        >
-          {handingOff
-            ? formatMessage({ id: "layout.onboarding.starting" })
-            : formatMessage({ id: "layout.onboarding.letsGo" })}
-        </Button>
-      </div>
-    </section>
+    </SetupStepFrame>
   );
 }

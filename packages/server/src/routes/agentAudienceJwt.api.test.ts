@@ -13,11 +13,9 @@ import { fixturePasswordHash } from "../test/integration/credentials";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
-test("Agent JWT issuance binds the authenticated actor, requires live local authorization, and never creates a raw code", async () => {
-  const previousPolicy = process.env.RAFT_AGENT_JWT_AUDIENCES;
+test("Agent JWT issuance is built in, binds the authenticated actor, requires live local authorization, and never creates a raw code", async () => {
   const previousUrl = process.env.SERVER_URL;
   process.env.SERVER_URL = "https://raft.example.test";
-  delete process.env.RAFT_AGENT_JWT_AUDIENCES;
   const app = await openTestApp("pglite://", 0, { humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
   try {
     const suffix = randomUUID();
@@ -27,22 +25,12 @@ test("Agent JWT issuance binds the authenticated actor, requires live local auth
     const agent = await createAgent(server.id, "JwtAgent", { runtime: "external", model: "external" });
     const credential = await mintAgentCredential({ agentId: agent.id, scopes: ["read"], name: "jwt-test", createdByUserId: null });
     const { client } = await createOAuthClient({ serverId: server.id, createdByUserId: owner.id, clientId: `jwt-${suffix.slice(0, 8)}`, name: "JWT RP", allowedScopes: ["openid", "profile"], returnUrl: "https://rp.example.test/callback" });
-    // This fixture represents a client present before the policy migration.
-    await getDb().update(oauthClients).set({ agentJwtEnabled: null }).where(eq(oauthClients.id, client.id));
     const { client: foreignClient } = await createOAuthClient({ serverId: foreign.id, createdByUserId: owner.id, clientId: `other-${suffix.slice(0, 8)}`, name: "Foreign RP", allowedScopes: ["openid", "profile"] });
     const post = (body: Record<string, unknown> = { service: client.clientId }, token = credential.apiKey) => fetch(`${app.baseUrl}/internal/agent-api/integrations/token`, {
       method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify(body),
     });
     assert.equal((await post(undefined, "invalid-agent-key")).status, 401);
-    assert.equal((await post()).status, 403, "default disabled");
-    process.env.RAFT_AGENT_JWT_AUDIENCES = "not-json";
-    assert.equal((await post()).status, 503, "invalid configuration fails closed");
-    process.env.RAFT_AGENT_JWT_AUDIENCES = JSON.stringify([{ serverId: foreign.id, clientId: client.clientId }]);
-    assert.equal((await post()).status, 403, "cross-Server opt-in cannot authorize this caller");
-    process.env.RAFT_AGENT_JWT_AUDIENCES = JSON.stringify([{ serverId: server.id, clientId: client.clientId }]);
-    process.env.RAFT_AGENT_JWT_AUDIENCES = JSON.stringify([{ serverId: server.id, clientId: foreignClient.clientId }]);
-    assert.equal((await post({ service: foreignClient.clientId })).status, 403, "operator opt-in cannot move a foreign registration into this Server");
-    process.env.RAFT_AGENT_JWT_AUDIENCES = JSON.stringify([{ serverId: server.id, clientId: client.clientId }]);
+    assert.equal((await post({ service: foreignClient.clientId })).status, 403, "another Server's private App is not available here");
     for (const field of ["agentId", "serverId", "audience", "issuer", "expires_in", "scopes", "claims"]) {
       assert.equal((await post({ service: client.clientId, [field]: "override" })).status, 400, field);
     }
@@ -93,7 +81,7 @@ test("Agent JWT issuance binds the authenticated actor, requires live local auth
     await getDb().update(oauthClients).set({ enabled: true, allowedScopes: ["openid"] }).where(eq(oauthClients.id, client.id));
     assert.equal((await post()).status, 403);
     await getDb().update(oauthClients).set({ allowedScopes: ["openid", "profile"], appType: "third_party_global" }).where(eq(oauthClients.id, client.id));
-    assert.equal((await post()).status, 403, "Marketplace not admitted by v1");
+    assert.equal((await post()).status, 403, "a published App needs an active installation on this Server");
     await getDb().update(oauthClients).set({ appType: "server_local" }).where(eq(oauthClients.id, client.id));
     await getDb().delete(serverAgentMembers).where(eq(serverAgentMembers.agentId, agent.id));
     assert.equal((await post()).status, 403);
@@ -110,7 +98,6 @@ test("Agent JWT issuance binds the authenticated actor, requires live local auth
     await getDb().update(agentCredentials).set({ revokedAt: new Date() }).where(eq(agentCredentials.id, credential.credentialId));
     assert.equal((await post()).status, 401);
   } finally {
-    if (previousPolicy === undefined) delete process.env.RAFT_AGENT_JWT_AUDIENCES; else process.env.RAFT_AGENT_JWT_AUDIENCES = previousPolicy;
     if (previousUrl === undefined) delete process.env.SERVER_URL; else process.env.SERVER_URL = previousUrl;
     await app.close();
   }

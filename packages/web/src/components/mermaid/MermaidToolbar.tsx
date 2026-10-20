@@ -21,7 +21,7 @@ import {
   SegmentedControlItem,
   SegmentedControlLabel,
   TooltipProvider,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import type { ImageZoomController } from "../ImageZoom";
 import { useBlobDownload } from "../../hooks/useBlobDownload";
 import { useCopyText } from "../../hooks/useCopyText";
@@ -139,7 +139,7 @@ export function MermaidToolbar({
       contentProps={tooltipContentProps}
     >
       <Button
-        variant="outline"
+        variant="ghost"
         size="icon-sm"
         className={MERMAID_MOBILE_TOUCH_TARGET_CLASS}
         disabled={!result}
@@ -158,7 +158,7 @@ export function MermaidToolbar({
       >
         <DropdownMenuTrigger render={(
           <Button
-        variant="outline"
+            variant="ghost"
             size="icon-sm"
             className={MERMAID_MOBILE_TOUCH_TARGET_CLASS}
             aria-label={formatMessage({ id: "message.mermaid.downloadMenu" })}
@@ -175,13 +175,13 @@ export function MermaidToolbar({
         className="r-mermaid-download-menu"
       >
         <DropdownMenuItem className="r-mermaid-download-menu__item" onClick={saveSource}>
-          <Code2 size={13} /> {formatMessage({ id: "message.mermaid.downloadSource" })}
+          <Code2 size={16} /> {formatMessage({ id: "message.mermaid.downloadSource" })}
         </DropdownMenuItem>
         <DropdownMenuItem className="r-mermaid-download-menu__item" disabled={!result} onClick={savePng}>
-          <Download size={13} /> {formatMessage({ id: "message.mermaid.downloadPng" })}
+          <Download size={16} /> {formatMessage({ id: "message.mermaid.downloadPng" })}
         </DropdownMenuItem>
         <DropdownMenuItem className="r-mermaid-download-menu__item" disabled={!result} onClick={saveSvg}>
-          <Download size={13} /> {formatMessage({ id: "message.mermaid.downloadSvg" })}
+          <Download size={16} /> {formatMessage({ id: "message.mermaid.downloadSvg" })}
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -204,7 +204,7 @@ export function MermaidToolbar({
             className={`${MERMAID_MOBILE_TOUCH_TARGET_CLASS} r-mermaid-toolbar__tab`}
             aria-label={formatMessage({ id: "message.mermaid.diagram" })}
           >
-            <ImageIcon size={13} />
+            <ImageIcon size={16} />
             <SegmentedControlLabel>
               <span className="r-mermaid-toolbar__tab-label">{formatMessage({ id: "message.mermaid.diagram" })}</span>
             </SegmentedControlLabel>
@@ -214,7 +214,7 @@ export function MermaidToolbar({
             className={`${MERMAID_MOBILE_TOUCH_TARGET_CLASS} r-mermaid-toolbar__tab`}
             aria-label={formatMessage({ id: "message.mermaid.code" })}
           >
-            <Code2 size={13} />
+            <Code2 size={16} />
             <SegmentedControlLabel>
               <span className="r-mermaid-toolbar__tab-label">{formatMessage({ id: "message.mermaid.code" })}</span>
             </SegmentedControlLabel>
@@ -232,7 +232,7 @@ export function MermaidToolbar({
               contentProps={tooltipContentProps}
             >
               <Button
-        variant="outline"
+                variant="ghost"
                 size="icon-sm"
                 disabled={!result}
                 onMouseDown={preventFocusSteal}
@@ -247,7 +247,7 @@ export function MermaidToolbar({
               contentProps={tooltipContentProps}
             >
               <Button
-        variant="outline"
+                variant="ghost"
                 size="icon-sm"
                 disabled={!result}
                 onMouseDown={preventFocusSteal}
@@ -262,7 +262,7 @@ export function MermaidToolbar({
 
         <Tooltip content={copyFeedbackLabel} contentProps={tooltipContentProps}>
           <Button
-        variant="outline"
+            variant="ghost"
             size="icon-sm"
             onMouseDown={preventFocusSteal}
             onClick={copySource}

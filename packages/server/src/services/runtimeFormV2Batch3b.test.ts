@@ -223,10 +223,17 @@ test("model options carry efforts exactly like the legacy picker where the runti
       }
     }
   }
-  // Claude declares no efforts for its models: the BASE set, no default (task #496: never max/ultra).
+  // Claude models declare low..max (Claude Code's `--effort`), never ultra; Haiku 4.5
+  // and the `haiku` alias (which may resolve to it) declare nothing and keep the BASE
+  // set. No default either way (task #496).
   const claude = await resolvedSource("claude", async () => ({ kind: "unsupported" }));
-  for (const option of claude.options as Array<{ supportedReasoningEfforts: string[]; defaultReasoningEffort?: string }>) {
-    assert.deepEqual(option.supportedReasoningEfforts, [...BASE_REASONING_EFFORTS]);
+  for (const option of claude.options as Array<{ value: string; supportedReasoningEfforts: string[]; defaultReasoningEffort?: string }>) {
+    assert.deepEqual(
+      option.supportedReasoningEfforts,
+      option.value === "claude-haiku-4-5" || option.value === "haiku" ? [...BASE_REASONING_EFFORTS] : [...BASE_REASONING_EFFORTS, "max"],
+      option.value,
+    );
+    assert.equal(option.supportedReasoningEfforts.includes("ultra"), false);
     assert.equal("defaultReasoningEffort" in option, false);
   }
 });

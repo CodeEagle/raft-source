@@ -27,7 +27,7 @@ import type { CommandRuntimeOptions } from "../../core/context";
 import { CliError, type CliErrorCode } from "../../core/errors";
 import { writeText, adoptCliReplyText } from "../../core/renderer";
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
-import { formatAgentKnowledgeStdout } from "@botiverse/raft-shared";
+import { formatAgentKnowledgeStdout } from "@botiverse/raft-shared/src/agentCliSurface";
 import { formatManualIndexCommand, requireKnowledgeContexts } from "./context";
 
 export interface KnowledgeGetOptions {

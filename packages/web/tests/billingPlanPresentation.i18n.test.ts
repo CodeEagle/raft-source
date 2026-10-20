@@ -162,3 +162,28 @@ test("Free and Pro render their distinct Joint Channel allowances in both locale
   assert.equal(render("en", "billing.unlimitedJointChannels"), "Use Joint Channels");
   assert.equal(render("zh-cn", "billing.unlimitedJointChannels"), "使用联合频道");
 });
+
+test("Agent migration is presented as a Pro benefit in both locales", () => {
+  const free = getBillingPlanPresentation({
+    plan: "free",
+    displayName: null,
+    currentHumanSeats: 0,
+    currentAgentSeats: 0,
+    currentSeatQuantity: 0,
+    proAgentSeatFractionLabel: "1/3",
+  });
+  const pro = getBillingPlanPresentation({
+    plan: "pro",
+    displayName: null,
+    currentHumanSeats: 0,
+    currentAgentSeats: 0,
+    currentSeatQuantity: 0,
+    proAgentSeatFractionLabel: "1/3",
+  });
+
+  assert.ok(free.notIncludedFeatures.includes("billing.agentMigration"));
+  assert.ok(!free.includedFeatures.includes("billing.agentMigration"));
+  assert.ok(pro.includedFeatures.includes("billing.agentMigration"));
+  assert.equal(render("en", "billing.agentMigration"), "Agent migration");
+  assert.equal(render("zh-cn", "billing.agentMigration"), "Agent 迁移");
+});

@@ -18,8 +18,9 @@
 // child's memory (loaded from `servers/<serverId>/runner.state.json`);
 // it is never read by the service, never logged, never printed.
 import { readChannel } from "./lib/channelState";
+import { startServiceMemorySampler } from "./serviceMemory";
 import type { UpgradeStartParams, UpgradeStartResult } from "./lib/types";
-import { installerArgs, launchInstallerDetached, readLastRemoteUpgradeReceipt, recordRemoteUpgradeLaunch, recordRemoteUpgradeRefusal } from "./externalInstaller";
+import { installerArgs, launchInstallerDetached, readLastRemoteUpgradeReceipt, recordRemoteUpgradeLaunch, recordRemoteUpgradeRefusal, waitForRemoteUpgradeFailureReceipt } from "./externalInstaller";
 import {
   SUPERVISED_RELAUNCH_EXIT_CODE,
   UPGRADE_SAFE_KILL_MODES,
@@ -48,6 +49,9 @@ import {
   serverRunnerLogPath,
   assertValidServerId,
   serverConnectedMarkerPath,
+  serverRunnerMemoryPath,
+  serviceMemoryPath,
+  serverRunnerStopIntentPath,
 } from "./paths";
 import {
   listManagedServerIds,
@@ -95,6 +99,7 @@ export { executableFileIdentity, liveSeaExecutablePath } from "./liveExecutable"
 import type { DaemonCoreOptions } from "@botiverse/raft-daemon/core";
 import { enqueueLifecycleOperation } from "./lifecycleOperations";
 import { shutdownService } from "./lib/serviceShutdown";
+import { takeResidentStopIntent, writeResidentStopIntent, type ResidentStopSource } from "./residentStopIntent";
 import { createReplacementHandoff, type ReplacementHandoffRequest } from "./lib/replacementHandoff";
 import {
   clearPendingRestartMarker,
@@ -113,6 +118,7 @@ import {
 } from "./lib/serviceIdentity";
 import { retireCliLoginCarrier } from "./macosLoginCarrier";
 import { OS_SUPERVISOR_KIND_ENV_VAR } from "./osSupervisorLifecycle";
+import { SHELL_ENV_STATE_ENV_VAR } from "./shellEnvCapture";
 import { buildRunnerChildEnv, PARENT_LOCK_HELD_ENV_VAR, pinRaftHomeEnv, SOURCE_SERVICE_PID_ENV_VAR } from "./runnerChildEnv";
 import { handleRunnerLockConflict } from "./runnerLockConflict";
 import {
@@ -226,6 +232,11 @@ export function buildDetachedServiceEnv(
   // Deprecated marker (see OS_SUPERVISOR_KIND_ENV_VAR): scrub any stale value
   // so a detached replacement never carries it forward.
   delete env[OS_SUPERVISOR_KIND_ENV_VAR];
+  // The shell-env outcome describes the boot that captured it. Replacements
+  // that skip the import (Windows, RAFT_COMPUTER_SHELL_ENV_IMPORT=0) must not
+  // report the incumbent's result as their own; replacements that import
+  // overwrite it anyway.
+  delete env[SHELL_ENV_STATE_ENV_VAR];
   return env;
 }
 
@@ -321,7 +332,10 @@ export const requestServiceSelfRestartAfterUpgrade = requestServiceSelfRestart;
 
 export interface ResidentCore {
   start: () => void | Promise<void>;
-  stop: () => void | Promise<void>;
+  stop: (options?: {
+    source?: ResidentStopSource | "external_signal";
+    signal?: NodeJS.Signals;
+  }) => void | Promise<void>;
 }
 export type ResidentCoreFactory = (creds: {
   serverId: string;
@@ -429,6 +443,8 @@ const defaultCoreFactory: ResidentCoreFactory = async (creds) => {
   return new coreMod.DaemonCore({
     ...residentCoreIdentity(creds),
     localTrace: true,
+    processMemorySamplePath: serverRunnerMemoryPath(slockHome, creds.serverId),
+    serviceMemorySamplePath: serviceMemoryPath(slockHome),
     lifecycleHooks: {
       onConnect: () => { writeResidentConnectedMarker(markerPath); },
       onDisconnect: () => { try { clearResidentConnectedMarker(markerPath); } catch {} },
@@ -492,12 +508,19 @@ const defaultCoreFactory: ResidentCoreFactory = async (creds) => {
         return;
       }
       if (ctx.requestId) {
-        // v2: launch and return; the successor's reconnect is the readback.
+        // v2: launch; the successor's reconnect is the readback. An
+        // installer that gives up without stopping this service leaves no
+        // reconnect, so its receipt is relayed from here: the throw reaches
+        // the daemon, which reports `computer:upgrade:done ok:false`.
         await requestServiceUpgradeStartViaIpc(resolveRaftHome(), {
           requestId: ctx.requestId,
           originServerId: creds.serverId,
           ...(ctx.targetVersion ? { targetVersion: ctx.targetVersion } : {}),
         });
+        const failure = await waitForRemoteUpgradeFailureReceipt(resolveRaftHome(), ctx.requestId, {
+          ...(ctx.targetVersion ? { targetVersion: ctx.targetVersion } : {}),
+        });
+        if (failure) throw new Error(`UPGRADE_INSTALLER_FAILED: ${failure.reason ?? `installer_${failure.outcome}`}`);
         return;
       }
       console.warn(
@@ -735,17 +758,18 @@ export async function runResident(
     serverUrl: a.serverUrl,
   });
   let stopping = false;
-  const shutdown = async () => {
+  const stopIntentPath = serverRunnerStopIntentPath(slockHome, serverId);
+  const shutdown = async (signal: NodeJS.Signals) => {
     if (stopping) return;
     stopping = true;
     try {
-      await core.stop();
+      await core.stop({ source: takeResidentStopIntent(stopIntentPath) ?? "external_signal", signal });
     } finally {
       process.exit(0);
     }
   };
-  process.on("SIGTERM", () => void shutdown());
-  process.on("SIGINT", () => void shutdown());
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
   await core.start();
   // A contender that loses the core.start() machine lock cannot overwrite the owner's evidence.
   await writeRunnerVersionEvidence(slockHome, serverId);
@@ -922,6 +946,7 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
     ...(beforeCommitExit ? { beforeCommitExit } : {}),
   })));
   const replacementHandoff = createReplacementHandoff(requestSelfRestart);
+  startServiceMemorySampler(serviceMemoryPath(slockHome));
 
   // Strip the parent-mutation-lock marker before spawning per-server
   // `__run` daemons so the control flag never leaks into daemon /
@@ -1048,6 +1073,10 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
 
   const killChild = (rec: RunnerRecord): void => {
     rec.stopping = true;
+    const pid = rec.child?.pid ?? rec.externalPid;
+    if (pid !== undefined) {
+      writeResidentStopIntent(serverRunnerStopIntentPath(slockHome, rec.serverId), { pid, source: "service_unmanaged" });
+    }
     try {
       rec.child?.kill("SIGTERM");
     } catch {
@@ -1213,6 +1242,8 @@ export async function runService(deps: RunServiceDeps = {}): Promise<void> {
     shuttingDown = true;
     await (deps.shutdownServiceFn ?? shutdownService)({
       runners,
+      beforeSignal: (rec, pid) =>
+        writeResidentStopIntent(serverRunnerStopIntentPath(slockHome, rec.serverId), { pid, source: "service_shutdown" }),
       closeIpc: () => ipc?.close(),
       isProcessAlive,
       clearServicePidfile: () => clearPidfileAt(servicePidPath(slockHome)),

@@ -17,12 +17,13 @@ test("channel descriptions render complete HTTP URLs as quiet safe inline links"
   assert.equal(view.container.textContent, description);
   assert.equal(screen.queryByRole("link", { name: "www.example.com" }), null);
 
+  // Quiet inline link (DS link): an ink-3 underline that turns pink on hover,
+  // and the shared keyboard focus ring.
   for (const className of [
     "underline",
-    "decoration-black/30",
-    "hover:text-black/80",
-    "focus-visible:bg-primary-soft",
-    "focus-visible:outline-2",
+    "decoration-foreground-hint",
+    "hover:decoration-attention",
+    "focus-visible:shadow-focus",
   ]) {
     assert.ok(link.classList.contains(className), `link must retain ${className}`);
   }

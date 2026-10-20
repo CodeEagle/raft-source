@@ -9,8 +9,8 @@ import {
   ComboboxItem,
   ComboboxItemIndicator,
   ComboboxList,
-} from "raft-ui";
-import type { ComboboxProps } from "raft-ui";
+} from "@botiverse/raft-ui";
+import type { ComboboxProps } from "@botiverse/raft-ui";
 import { ChevronDown } from "lucide-react";
 import { useCallback, useMemo, useRef, useState } from "react";
 import type { ReactNode, RefObject } from "react";
@@ -159,8 +159,10 @@ export function RuntimeChoiceCombobox({
         // Typing shows the query; otherwise the field reads as the selected choice.
         inputValue={open ? query : selectedLabel}
       >
-        {/* Field metrics like the select fields beside it (RuntimeSelectControl's chrome="field"). */}
-        <ComboboxControl ref={controlRef} className="w-full px-3 py-2">
+        {/* The raft-ui control draws the DS field (44px, 1.5px ink line) like the
+            select fields beside it (RuntimeSelectControl's chrome="field"); only
+            the width is the page's. */}
+        <ComboboxControl ref={controlRef} className="w-full">
           <ComboboxInput
             className="text-field font-field"
             placeholder={open && selectedLabel ? selectedLabel : placeholder}
@@ -190,7 +192,7 @@ export function RuntimeChoiceCombobox({
         </ComboboxContent>
       </Combobox>
       {unlisted && !customValue && (
-        <p className="mt-1 text-xs text-foreground-muted" data-testid={`${testId}-unlisted`}>
+        <p className="mt-1 text-caption text-foreground-hint" data-testid={`${testId}-unlisted`}>
           {formatMessage({ id: "agent.runtimeFormV2.savedValueNotInList" }, { value })}
         </p>
       )}
@@ -207,8 +209,8 @@ function renderOption(option: RuntimeOption) {
         {/* A description (e.g. "Not in the current list") is part of the
             option's name; the id line is visual help only. */}
         {option.description
-          ? <span className="truncate text-xs text-foreground-muted">{option.description}</span>
-          : id && <span aria-hidden className="truncate text-xs text-foreground-muted">{id}</span>}
+          ? <span className="truncate text-caption font-normal text-foreground-hint">{option.description}</span>
+          : id && <span aria-hidden className="truncate font-mono text-mono-meta font-normal text-foreground-hint">{id}</span>}
       </span>
       <ComboboxItemIndicator />
     </ComboboxItem>

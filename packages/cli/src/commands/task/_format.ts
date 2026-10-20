@@ -1,5 +1,13 @@
 import { T, UUID_A, UUID_B, sampleTask } from "../_axExampleFixtures";
 import { axSurface } from "../../core/renderer";
+import type {
+  AgentClaimTasksData,
+  AgentCreatedTask,
+  AgentCreateTasksData,
+  AgentTaskAmendData,
+  AgentTaskHistoryData,
+  AgentTaskListData,
+} from "@botiverse/raft-shared";
 import {
   formatAgentClaimResults,
   formatAgentMyTaskList,
@@ -12,13 +20,7 @@ import {
   formatAgentTaskStatusUpdated,
   formatAgentTaskUnclaimed,
   formatAgentTasksCreated,
-  type AgentClaimTasksData,
-  type AgentCreatedTask,
-  type AgentCreateTasksData,
-  type AgentTaskAmendData,
-  type AgentTaskHistoryData,
-  type AgentTaskListData,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 // Canonical task formatting for agent-facing output. The text lives in
 // `@botiverse/raft-shared` (`agentText/tasks.ts`) so the SDK renders the same

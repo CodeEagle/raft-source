@@ -1,4 +1,4 @@
-import { Checkbox } from "raft-ui";
+import { Checkbox } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
@@ -22,11 +22,10 @@ export function DeclaredScopeToggle({
     <Tooltip content={formatMessage({ id: OAUTH_SCOPE_PRESENTATION[scope].copyId })}>
     <label className={className}>
       <Checkbox
-        size="sm"
         checked={checked}
         onCheckedChange={handleCheckedChange}
       />
-      <span>{scope}</span>
+      <span className="font-mono text-mono-meta">{scope}</span>
     </label>
     </Tooltip>
   );

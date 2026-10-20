@@ -3,8 +3,9 @@ import "./helpers/domSetup";
 import assert from "node:assert/strict";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { act } from "react";
+import { vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
-import AddMachineDialog from "../src/components/machine/AddMachineDialog";
+import AddMachineDialog, { WAITING_HINT_DELAY_MS } from "../src/components/machine/AddMachineDialog";
 import { useMachineStore } from "../src/store/machineStore";
 import type { Machine } from "../src/store/machineStore";
 import { useServerStore } from "../src/store/serverStore";
@@ -147,5 +148,41 @@ test("the waiting indicator is a direct rui Status child of the banner, so the g
       (slot !== null && placeable.has(slot)) || child.tagName.toLowerCase() === "svg",
       `unplaceable banner child <${child.tagName.toLowerCase()} data-slot=${slot}> would auto-flow to a new row`,
     );
+  }
+});
+
+// bug-triage task #22 (julie): the browser cannot see the terminal, so a failed
+// install looked like endless waiting. After a while the dialog says so.
+test("after a while with no connection, the dialog points at the terminal and the connect-only option", async () => {
+  seedWaitingDialog();
+  render(
+    <MemoryRouter initialEntries={["/s/design"]}>
+      <TestIntlProvider>
+        <AddMachineDialog onClose={() => {}} />
+      </TestIntlProvider>
+    </MemoryRouter>,
+  );
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    });
+    assert.ok(screen.getByText("Waiting for computer to connect..."));
+    assert.ok(screen.queryByTestId("add-machine-still-waiting") === null, "no hint right away");
+
+    await act(async () => {
+      vi.advanceTimersByTime(WAITING_HINT_DELAY_MS - 1);
+    });
+    assert.ok(screen.queryByTestId("add-machine-still-waiting") === null);
+
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+    const hint = screen.getByTestId("add-machine-still-waiting");
+    assert.match(hint.textContent ?? "", /Check the terminal/);
+    assert.match(hint.textContent ?? "", /Already have Raft Computer on this machine\?/);
+    assert.ok(screen.getByTestId("computer-command-already-installed"), "the option the hint names is on screen");
+  } finally {
+    vi.useRealTimers();
   }
 });

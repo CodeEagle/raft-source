@@ -498,6 +498,7 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   let audienceCalls = 0;
   let privacyCalls = 0;
   let mentionCalls = 0;
+  const humanUsergroupMarkers: string[] = [];
   let rateLimitNextPrivacyCall = false;
   let runtimeNow = NOW;
   let periodic: () => void = () => assert.fail("periodic callback was not scheduled");
@@ -588,6 +589,15 @@ test("managed server lifecycle consumes the database human resolver on start, ev
           headers: { "content-type": "application/json" },
         });
       }
+      if (String(url).startsWith("https://slack.com/api/usergroups.create")) {
+        // Bound-channel humans get managed usergroups alongside Agents.
+        const request = JSON.parse(String(init?.body)) as Record<string, string>;
+        humanUsergroupMarkers.push(String(request.description));
+        return new Response(JSON.stringify({
+          ok: true,
+          usergroup: { id: "SMANAGEDHUMAN", ...request, date_delete: 0 },
+        }), { status: 200, headers: { "content-type": "application/json" } });
+      }
       audienceCalls += 1;
       const requestUrl = new URL(String(url));
       assert.equal(
@@ -618,6 +628,10 @@ test("managed server lifecycle consumes the database human resolver on start, ev
   assert.equal(audienceCalls, 1, "server start performs one live audience refresh");
   assert.equal(privacyCalls, 1, "server start verifies provider privacy separately");
   assert.equal(mentionCalls, 1, "server start reconciles Agent mention handles");
+  assert.ok(
+    humanUsergroupMarkers.some((marker) => marker.startsWith(`raft-user:${seeded.server.id}:`)),
+    "server start reconciles paired-channel human mention handles",
+  );
   const startSnapshot = await getDb().select().from(externalBindingAudienceSnapshots);
   assert.equal(startSnapshot.at(-1)?.bindingId, seeded.binding.id);
   assert.equal(startSnapshot.at(-1)?.status, "matched");

@@ -1,5 +1,5 @@
 import { useState, useEffect, useEffectEvent, useCallback } from "react";
-import { Input, Button } from "raft-ui";
+import { Input, Button } from "@botiverse/raft-ui";
 import type { ChangeEvent, FormEvent } from "react";
 import { useIntl } from "react-intl";
 import { useAuthStore } from "../../store/authStore";
@@ -101,7 +101,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
           />
           <Button
             onClick={reloadPage}
-            size="lg"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -116,26 +116,26 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
     <CenteredCardFrame>
       <div className="w-full">
         <AuthPageIntro title={formatMessage({ id: "pages.emailVerification.checkEmailTitle" })}>
-          <p className="mt-2 text-sm text-foreground-muted">
+          <p className="mt-2 text-callout text-foreground-muted">
             {formatMessage({ id: "pages.emailVerification.sentLinkTo" })}
           </p>
-          <p className="mt-1 font-mono text-sm font-bold">{user?.email}</p>
+          <p className="mt-1 font-mono text-mono-code font-bold text-foreground">{user?.email}</p>
         </AuthPageIntro>
 
         {error && (
-          <Banner intent="warning" className="mb-4 font-bold">
+          <Banner intent="warning" className="mb-4">
             {error}
           </Banner>
         )}
 
         {resendSuccess && (
-          <Banner intent="success" className="mb-4 font-bold">
+          <Banner intent="success" className="mb-4">
             {formatMessage({ id: "pages.emailVerification.resent" })}
           </Banner>
         )}
 
         {verifying && (
-          <div className="mb-4 text-center text-sm text-foreground-muted">
+          <div className="mb-4 text-center text-callout text-foreground-muted">
             {formatMessage({ id: "pages.emailVerification.verifying" })}
           </div>
         )}
@@ -144,7 +144,7 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
           <Button
             onClick={handleResend}
             disabled={resending}
-            size="lg"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -159,9 +159,9 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
             <button
               type="button"
               onClick={() => setShowManualInput(!showManualInput)}
-              className="text-sm text-foreground-muted underline hover:text-foreground-strong"
+              className="inline-flex items-center gap-1 rounded-control text-footnote font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus"
             >
-              <KeyRound size={12} className="inline mr-1" />
+              <KeyRound size={14} className="shrink-0 text-foreground-muted" />
               {showManualInput
                 ? formatMessage({ id: "pages.emailVerification.hideManualEntry" })
                 : formatMessage({ id: "pages.emailVerification.enterCodeManually" })}
@@ -177,9 +177,9 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
                 onChange={handleManualTokenChange}
                 placeholder={formatMessage({ id: "pages.emailVerification.tokenPlaceholder" })}
               />
-              <Button size="sm"
+              <Button size="lg"
                 type="submit"
-                variant="success"
+                variant="outline"
                 disabled={verifying || !manualToken.trim()}
               >
                 {verifying ? "…" : formatMessage({ id: "pages.emailVerification.verifyAction" })}
@@ -188,12 +188,12 @@ export default function EmailVerificationPage({ initialToken }: EmailVerificatio
           )}
 
           <Button
-            variant="outline"
+            variant="ghost"
             size="lg"
             className="w-full"
             onClick={handleLogout}
           >
-            <LogOut size={14} />
+            <LogOut size={18} />
             {formatMessage({ id: "pages.emailVerification.logOut" })}
           </Button>
         </div>

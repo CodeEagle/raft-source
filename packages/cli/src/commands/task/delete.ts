@@ -2,7 +2,7 @@
 // → POST /internal/agent-api/tasks/delete
 
 import type { Command } from "commander";
-import { type AgentApiTaskDeleteBody } from "@botiverse/raft-shared";
+import type { AgentApiTaskDeleteBody } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

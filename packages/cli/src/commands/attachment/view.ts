@@ -8,7 +8,7 @@ import { writeFileSync } from "node:fs";
 import {
   AGENT_API_ATTACHMENT_DOWNLOAD_UNAVAILABLE_MESSAGE,
   AGENT_API_ATTACHMENT_DOWNLOAD_UNAVAILABLE_NEXT_ACTION,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 import type { Command } from "commander";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";

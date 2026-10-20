@@ -1,6 +1,6 @@
 {
   "schema": "raft-agent-api-description.v1",
-  "manifestVersion": "1f425c1bf59cd214",
+  "manifestVersion": "6cddd50f870f2c51",
   "basePath": "/internal/agent-api",
   "capabilities": [
     "read",
@@ -11,9 +11,427 @@
     "knowledge",
     "mentions",
     "reactions",
-    "mcp"
+    "mcp",
+    "raftbench"
   ],
   "routes": [
+    {
+      "key": "raftbenchContext",
+      "method": "GET",
+      "path": "/raftbench/context",
+      "fullPath": "/internal/agent-api/raftbench/context",
+      "client": {
+        "resource": "raftbench",
+        "method": "context"
+      },
+      "capability": "raftbench",
+      "description": "Read a bounded source page for the current staging RaftBench run, with server-owned coverage.",
+      "sideEffect": "read",
+      "idempotency": "natural",
+      "destructive": false,
+      "audience": "external",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": null,
+        "query": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "cursor": {
+              "type": "string",
+              "maxLength": 512
+            }
+          },
+          "additionalProperties": false
+        },
+        "body": null
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "sourceText": {
+              "type": "string"
+            },
+            "sources": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "target": {
+                    "type": "string"
+                  },
+                  "messageId": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "target",
+                  "messageId"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "coverage": {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "to": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "fetchedMessages": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "exhausted": {
+                  "type": "boolean"
+                },
+                "skippedChunks": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "stopReason": {
+                  "type": "string",
+                  "enum": [
+                    "more_pages",
+                    "message_limit",
+                    "char_limit",
+                    "window_end"
+                  ]
+                },
+                "notRead": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "from",
+                "to",
+                "fetchedMessages",
+                "exhausted",
+                "stopReason",
+                "notRead"
+              ],
+              "additionalProperties": false
+            },
+            "nextCursor": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "runId",
+            "revision",
+            "sourceText",
+            "sources",
+            "coverage",
+            "nextCursor"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
+    {
+      "key": "raftbenchSubmit",
+      "method": "POST",
+      "path": "/raftbench/submit",
+      "fullPath": "/internal/agent-api/raftbench/submit",
+      "client": {
+        "resource": "raftbench",
+        "method": "submit"
+      },
+      "capability": "raftbench",
+      "description": "Submit one complete or incomplete result for a bound run and revision; identical replays return the same receipt.",
+      "sideEffect": "write",
+      "idempotency": "natural",
+      "destructive": false,
+      "audience": "external",
+      "retryPolicy": "retry",
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true
+      },
+      "request": {
+        "params": null,
+        "query": null,
+        "body": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "complete",
+                "incomplete"
+              ]
+            },
+            "reason": {
+              "type": "string",
+              "maxLength": 1000
+            },
+            "patterns": {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "repeated_clarification",
+                      "repeated_attempt",
+                      "unsupported_completion",
+                      "successful_practice"
+                    ]
+                  },
+                  "explanation": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1000
+                  },
+                  "evidence": {
+                    "minItems": 1,
+                    "maxItems": 12,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "target": {
+                          "type": "string",
+                          "pattern": "^#[^\\s:#]+(?::[0-9a-f]{8})?$"
+                        },
+                        "messageId": {
+                          "type": "string",
+                          "pattern": "^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+                        }
+                      },
+                      "required": [
+                        "target",
+                        "messageId"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "counterevidence": {
+                    "maxItems": 12,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "target": {
+                          "type": "string",
+                          "pattern": "^#[^\\s:#]+(?::[0-9a-f]{8})?$"
+                        },
+                        "messageId": {
+                          "type": "string",
+                          "pattern": "^(?:[0-9a-f]{8}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$"
+                        }
+                      },
+                      "required": [
+                        "target",
+                        "messageId"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "evidenceLevel": {
+                    "type": "string",
+                    "enum": [
+                      "conversation_only",
+                      "insufficient"
+                    ]
+                  },
+                  "intent": {
+                    "type": "string",
+                    "enum": [
+                      "active",
+                      "deliberately_paused",
+                      "unknown"
+                    ]
+                  },
+                  "suggestion": {
+                    "type": "string",
+                    "maxLength": 1000
+                  }
+                },
+                "required": [
+                  "kind",
+                  "explanation",
+                  "evidence",
+                  "counterevidence",
+                  "evidenceLevel",
+                  "intent",
+                  "suggestion"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "gaps": {
+              "maxItems": 5,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "budget",
+                  "history_limit",
+                  "missing_tool_outcomes",
+                  "inaccessible_source",
+                  "partial_scan"
+                ]
+              }
+            },
+            "failure": {
+              "type": "boolean",
+              "const": true
+            }
+          },
+          "required": [
+            "runId",
+            "revision",
+            "status",
+            "patterns",
+            "gaps"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "response": {
+        "kind": "json",
+        "body": {
+          "type": "object",
+          "properties": {
+            "runId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "status": {
+              "type": "string",
+              "enum": [
+                "complete",
+                "incomplete"
+              ]
+            },
+            "receiptId": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+            },
+            "coverage": {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "to": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "fetchedMessages": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "exhausted": {
+                  "type": "boolean"
+                },
+                "skippedChunks": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "stopReason": {
+                  "type": "string",
+                  "enum": [
+                    "more_pages",
+                    "message_limit",
+                    "char_limit",
+                    "window_end"
+                  ]
+                },
+                "notRead": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "from",
+                "to",
+                "fetchedMessages",
+                "exhausted",
+                "stopReason",
+                "notRead"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "runId",
+            "revision",
+            "status",
+            "receiptId",
+            "coverage"
+          ],
+          "additionalProperties": false
+        }
+      }
+    },
     {
       "key": "feedbackLocatorIngest",
       "method": "POST",
@@ -1624,6 +2042,86 @@
                   "type": "null"
                 }
               ]
+            },
+            "channel_card": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "name": {
+                  "type": "string"
+                },
+                "type": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "description": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "archived": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ],
+              "additionalProperties": {}
+            },
+            "peer_card": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "human",
+                    "agent"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "description": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "timezone": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "name"
+              ],
+              "additionalProperties": {}
             }
           },
           "required": [
@@ -1974,6 +2472,32 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "unavailable": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "mcpServerId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$"
+                  },
+                  "serverName": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "type": "string",
+                    "const": "reconnect_required"
+                  }
+                },
+                "required": [
+                  "mcpServerId",
+                  "serverName",
+                  "status"
+                ],
+                "additionalProperties": false
+              }
             }
           },
           "required": [
@@ -2187,6 +2711,33 @@
                 "type": "integer",
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
+              }
+            },
+            "seenCards": {
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "peer": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
               }
             },
             "freshnessContextMode": {
@@ -3296,6 +3847,89 @@
                       "additionalProperties": {}
                     }
                   },
+                  "additionalProperties": {}
+                },
+                "channelCard": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                },
+                "channelCardChanged": {
+                  "type": "boolean"
+                },
+                "peerCard": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timezone": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
                   "additionalProperties": {}
                 }
               },
@@ -4436,6 +5070,95 @@
                       "type": "null"
                     }
                   ]
+                },
+                "holdReasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "channelCard": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                },
+                "channelCardChanged": {
+                  "type": "boolean"
+                },
+                "peerCard": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timezone": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": {}
                 }
               },
               "required": [
@@ -4576,6 +5299,33 @@
                 "type": "integer",
                 "exclusiveMinimum": 0,
                 "maximum": 9007199254740991
+              }
+            },
+            "seenCards": {
+              "type": "object",
+              "properties": {
+                "channel": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "peer": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
               }
             },
             "freshnessContextMode": {
@@ -5716,6 +6466,89 @@
                     }
                   },
                   "additionalProperties": {}
+                },
+                "channelCard": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                },
+                "channelCardChanged": {
+                  "type": "boolean"
+                },
+                "peerCard": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timezone": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": {}
                 }
               },
               "required": [
@@ -6855,6 +7688,95 @@
                       "type": "null"
                     }
                   ]
+                },
+                "holdReasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "channelCard": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                },
+                "channelCardChanged": {
+                  "type": "boolean"
+                },
+                "peerCard": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timezone": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": {}
                 }
               },
               "required": [
@@ -7551,6 +8473,9 @@
             },
             "offset": {
               "type": "string"
+            },
+            "cursor": {
+              "type": "string"
             }
           },
           "additionalProperties": {}
@@ -7824,6 +8749,20 @@
             },
             "hasMore": {
               "type": "boolean"
+            },
+            "incomplete": {
+              "type": "boolean"
+            },
+            "nextCursor": {
+              "type": "string"
+            },
+            "searchedThrough": {
+              "type": "string"
+            },
+            "searchedMessages": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
             }
           },
           "required": [
@@ -11569,6 +12508,22 @@
                   "type": "null"
                 }
               ]
+            },
+            "features": {
+              "type": "object",
+              "properties": {
+                "reminderApp": {
+                  "type": "boolean"
+                },
+                "vaultApp": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "reminderApp",
+                "vaultApp"
+              ],
+              "additionalProperties": {}
             }
           },
           "required": [
@@ -12998,6 +13953,18 @@
                 "minLength": 1
               }
             },
+            "seenUpToSeq": {
+              "type": "number"
+            },
+            "seenExactSeqs": {
+              "maxItems": 2500,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
             "freshnessContextMode": {
               "type": "string",
               "enum": [
@@ -14276,6 +15243,95 @@
                       "type": "null"
                     }
                   ]
+                },
+                "holdReasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "channelCard": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                },
+                "channelCardChanged": {
+                  "type": "boolean"
+                },
+                "peerCard": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timezone": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": {}
                 }
               },
               "required": [
@@ -14998,6 +16054,18 @@
                 "done",
                 "closed"
               ]
+            },
+            "seenUpToSeq": {
+              "type": "number"
+            },
+            "seenExactSeqs": {
+              "maxItems": 2500,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
             },
             "freshnessContextMode": {
               "type": "string",
@@ -16162,6 +17230,95 @@
                       "type": "null"
                     }
                   ]
+                },
+                "holdReasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "channelCard": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                },
+                "channelCardChanged": {
+                  "type": "boolean"
+                },
+                "peerCard": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timezone": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": {}
                 }
               },
               "required": [
@@ -16632,6 +17789,18 @@
                   "type": "null"
                 }
               ]
+            },
+            "seenUpToSeq": {
+              "type": "number"
+            },
+            "seenExactSeqs": {
+              "maxItems": 2500,
+              "type": "array",
+              "items": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
             },
             "freshnessContextMode": {
               "type": "string",
@@ -17886,6 +19055,95 @@
                       "type": "null"
                     }
                   ]
+                },
+                "holdReasons": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "channelCard": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "type": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "archived": {
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name"
+                  ],
+                  "additionalProperties": {}
+                },
+                "channelCardChanged": {
+                  "type": "boolean"
+                },
+                "peerCard": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "human",
+                        "agent"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "description": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "timezone": {
+                      "anyOf": [
+                        {
+                          "type": "string"
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "name"
+                  ],
+                  "additionalProperties": {}
                 }
               },
               "required": [
@@ -21211,6 +22469,89 @@
                   "name": {
                     "type": "string"
                   },
+                  "setupUrl": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "setupDescription": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "setup": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "not_required",
+                              "pending",
+                              "complete"
+                            ]
+                          },
+                          "url": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "completedAt": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "url",
+                          "description",
+                          "revision",
+                          "completedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "description": {
                     "anyOf": [
                       {
@@ -21499,6 +22840,89 @@
                   "name": {
                     "type": "string"
                   },
+                  "setupUrl": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "setupDescription": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "setup": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "not_required",
+                              "pending",
+                              "complete"
+                            ]
+                          },
+                          "url": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "completedAt": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "url",
+                          "description",
+                          "revision",
+                          "completedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "description": {
                     "anyOf": [
                       {
@@ -21779,6 +23203,89 @@
                 "name": {
                   "type": "string"
                 },
+                "setupUrl": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "setupDescription": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "setup": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "not_required",
+                            "pending",
+                            "complete"
+                          ]
+                        },
+                        "url": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "completedAt": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "url",
+                        "description",
+                        "revision",
+                        "completedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
                 "description": {
                   "anyOf": [
                     {
@@ -22056,6 +23563,12 @@
                 "agentManifestUrl": {
                   "type": "string"
                 },
+                "setupUrl": {
+                  "type": "string"
+                },
+                "setupDescription": {
+                  "type": "string"
+                },
                 "scopes": {
                   "type": "array",
                   "items": {
@@ -22107,6 +23620,12 @@
                   "type": "string"
                 },
                 "agentManifestUrl": {
+                  "type": "string"
+                },
+                "setupUrl": {
+                  "type": "string"
+                },
+                "setupDescription": {
                   "type": "string"
                 },
                 "scopes": {
@@ -22191,6 +23710,14 @@
                       "type": "string",
                       "maxLength": 2000
                     },
+                    "setupUrl": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "setupDescription": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
                     "type": {
                       "type": "string",
                       "const": "integration:register_app"
@@ -22255,6 +23782,14 @@
                     "agentManifestUrl": {
                       "type": "string",
                       "maxLength": 2000
+                    },
+                    "setupUrl": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "setupDescription": {
+                      "type": "string",
+                      "maxLength": 500
                     },
                     "type": {
                       "type": "string",
@@ -22509,6 +24044,12 @@
               "type": "string"
             },
             "agentManifestUrl": {
+              "type": "string"
+            },
+            "setupUrl": {
+              "type": "string"
+            },
+            "setupDescription": {
               "type": "string"
             },
             "scopes": {
@@ -22864,6 +24405,89 @@
                   "name": {
                     "type": "string"
                   },
+                  "setupUrl": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "setupDescription": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "setup": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "status": {
+                            "type": "string",
+                            "enum": [
+                              "not_required",
+                              "pending",
+                              "complete"
+                            ]
+                          },
+                          "url": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "description": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "revision": {
+                            "type": "integer",
+                            "exclusiveMinimum": 0,
+                            "maximum": 9007199254740991
+                          },
+                          "completedAt": {
+                            "anyOf": [
+                              {
+                                "type": "string"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          }
+                        },
+                        "required": [
+                          "status",
+                          "url",
+                          "description",
+                          "revision",
+                          "completedAt"
+                        ],
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "clientKey": {
                     "anyOf": [
                       {
@@ -23116,6 +24740,89 @@
                 },
                 "name": {
                   "type": "string"
+                },
+                "setupUrl": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "setupDescription": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "setup": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": {
+                          "type": "string",
+                          "enum": [
+                            "not_required",
+                            "pending",
+                            "complete"
+                          ]
+                        },
+                        "url": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "description": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "revision": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "completedAt": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "status",
+                        "url",
+                        "description",
+                        "revision",
+                        "completedAt"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
                 },
                 "clientKey": {
                   "anyOf": [
@@ -23404,6 +25111,20 @@
                       "minLength": 1,
                       "maxLength": 120
                     },
+                    "hosting": {
+                      "description": "Where the new agent runs: \"antiproton\" proposes a cloud agent (one that runs in Raft's cloud, not on a Computer); omit it or use \"computer\" for a Computer the human picks. The human can change it.",
+                      "type": "string",
+                      "enum": [
+                        "computer",
+                        "antiproton"
+                      ]
+                    },
+                    "model": {
+                      "description": "Cloud agent model id, only with hosting: \"antiproton\"; omit for the default. An id the cloud runtime does not offer is refused, and the refusal lists the offered ids.",
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 200
+                    },
                     "draftHint": {
                       "description": "Why the agent prepared this for you. Shows below the form on the card; not the action itself.",
                       "type": "string",
@@ -23536,6 +25257,19 @@
                       "minLength": 1,
                       "maxLength": 120
                     },
+                    "setupUrl": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "setupDescription": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "setupRevision": {
+                      "type": "integer",
+                      "exclusiveMinimum": 0,
+                      "maximum": 9007199254740991
+                    },
                     "clientName": {
                       "type": "string",
                       "minLength": 1,
@@ -23611,6 +25345,14 @@
                       "type": "string",
                       "maxLength": 2000
                     },
+                    "setupUrl": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "setupDescription": {
+                      "type": "string",
+                      "maxLength": 500
+                    },
                     "type": {
                       "type": "string",
                       "const": "integration:register_app"
@@ -23673,6 +25415,14 @@
                     "agentManifestUrl": {
                       "type": "string",
                       "maxLength": 2000
+                    },
+                    "setupUrl": {
+                      "type": "string",
+                      "maxLength": 2000
+                    },
+                    "setupDescription": {
+                      "type": "string",
+                      "maxLength": 500
                     },
                     "type": {
                       "type": "string",

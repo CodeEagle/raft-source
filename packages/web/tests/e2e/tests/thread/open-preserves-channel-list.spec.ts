@@ -174,12 +174,9 @@ test.describe("thread open preserves channel list", () => {
       await expect(page.getByText(parentContent)).toBeVisible();
 
       const staleAnchorCard = channelScroller.locator(`#message-${staleAnchorMessage.id}`);
-      // RUI migration (#7347): the highlight is no longer a bare
-      // `bg-brutal-cyan/25` class on the row — the row's class string now
-      // permanently carries the conditional variant
-      // `has-data-[slot=message-item-search-match]:bg-brutal-cyan/25`, so a
-      // class regex matches whether or not the highlight is active. The
-      // state oracle is `data-highlighted="true"` on the row (MessageItem.tsx).
+      // The jumped-to message wears the cyan-soft highlight (Raft DS: the item
+      // you were taken to); the state oracle is `data-highlighted="true"` on
+      // the row (MessageItem.tsx), not a colour class.
       await expect(staleAnchorCard).toHaveAttribute("data-highlighted", "true");
       const parentMessageCard = channelScroller.locator(`#message-${parentMessage.id}`);
       await parentMessageCard.scrollIntoViewIfNeeded();
@@ -194,8 +191,8 @@ test.describe("thread open preserves channel list", () => {
       await expect(page.getByTestId("thread-message-scroller")).toBeVisible();
       await expect(page.getByTestId("thread-message-scroller").getByText(replyContent)).toBeVisible();
       await expect(staleAnchorCard).not.toHaveAttribute("data-highlighted", "true");
-      // Selected-as-thread-parent chrome is now the `data-selected="true"`
-      // attribute on the row (was `border-2 border-black bg-white` classes).
+      // Selected-as-thread-parent chrome is the `data-selected="true"`
+      // attribute on the row.
       await expect(parentMessageCard).toHaveAttribute("data-selected", "true");
       await expect(parentMessageCard).not.toHaveAttribute("data-highlighted", "true");
       await page.waitForTimeout(4_000);

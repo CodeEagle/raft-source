@@ -19,10 +19,10 @@ test("message font size preference reads from and persists to the local device",
   assert.equal(useAppearanceStore.getState().messageBodyFontSize, "sm");
 });
 
-test("message font size style is terminal against the RUI theme body recipe", () => {
-  assert.deepEqual(getMessageBodyFontSizeStyle("sm"), { fontSize: "0.75rem" });
-  assert.deepEqual(getMessageBodyFontSizeStyle("md"), { fontSize: "0.875rem" });
-  assert.deepEqual(getMessageBodyFontSizeStyle("lg"), { fontSize: "1rem" });
+test("message font size style is terminal against the RUI theme body recipe; medium is the DS body size", () => {
+  assert.deepEqual(getMessageBodyFontSizeStyle("sm"), { fontSize: "0.875rem" });
+  assert.deepEqual(getMessageBodyFontSizeStyle("md"), { fontSize: "1rem" });
+  assert.deepEqual(getMessageBodyFontSizeStyle("lg"), { fontSize: "1.125rem" });
 });
 
 test("invalid local message font size writes normalize back to medium", () => {

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { MemoryRouter } from "react-router-dom";
 import { cleanup, render as rtlRender } from "@testing-library/react";
 import { TestIntlProvider } from "./helpers/intl";
-import { ThemeProvider } from "raft-ui";
+import { ThemeProvider } from "@botiverse/raft-ui";
 
 window.matchMedia = ((media: string) => ({
   matches: false,
@@ -127,7 +127,7 @@ function makeAgentMessage(): Message {
 }
 
 async function renderMessage(
-  options: { followedBy?: "compact" | "group"; followsSystem?: boolean; agentMessage?: boolean; theme?: "elegant" | "brutal" } = {},
+  options: { followedBy?: "compact" | "group"; followsSystem?: boolean; agentMessage?: boolean } = {},
 ) {
   const { default: MessageItem } = await import("../src/components/message/MessageItem");
   const { useAgentStore } = await import("../src/store/agentStore");
@@ -163,7 +163,7 @@ async function renderMessage(
     </MemoryRouter>
   );
   const view = render(
-    <ThemeProvider theme={options.theme ?? "elegant"} mode="light" syncDom={false}>{ui}</ThemeProvider>,
+    <ThemeProvider mode="light" syncDom={false}>{ui}</ThemeProvider>,
   );
   const row = view.container.querySelector<HTMLElement>(`#message-${messageId}`);
   assert.ok(row);
@@ -207,7 +207,7 @@ test("the font preference scales the name and the name-line notes", async () => 
   const smallView = await renderMessage({ agentMessage: true });
   const smallName = smallView.row.querySelector<HTMLElement>('[data-testid^="message-sender-mention-"], [data-testid^="message-sender-"]');
   assert.ok(smallName);
-  assert.match(smallName.className, /(?:^| )text-\[12px\](?: |$)/, "sm name reads 12");
+  assert.match(smallName.className, /(?:^| )text-\[13px\](?: |$)/, "sm name reads 13");
   const smallModel = smallView.row.querySelector<HTMLElement>('[data-testid^="message-sender-model-"]');
   assert.ok(smallModel);
   assert.match(smallModel.className, /(?:^| )text-\[11px\](?: |$)/, "sm notes read 11");
@@ -217,10 +217,10 @@ test("the font preference scales the name and the name-line notes", async () => 
   const largeView = await renderMessage({ agentMessage: true });
   const largeName = largeView.row.querySelector<HTMLElement>('[data-testid^="message-sender-mention-"], [data-testid^="message-sender-"]');
   assert.ok(largeName);
-  assert.match(largeName.className, /(?:^| )text-\[16px\](?: |$)/, "lg name reads 16");
+  assert.match(largeName.className, /(?:^| )text-\[17px\](?: |$)/, "lg name reads 17");
   const largeModel = largeView.row.querySelector<HTMLElement>('[data-testid^="message-sender-model-"]');
   assert.ok(largeModel);
-  assert.match(largeModel.className, /(?:^| )text-\[14px\](?: |$)/, "lg notes read 14");
+  assert.match(largeModel.className, /(?:^| )text-\[13px\](?: |$)/, "lg notes read 13");
   useAppearanceStore.setState({ messageBodyFontSize: "md" });
 });
 
@@ -236,10 +236,11 @@ test("the model label keeps the recipe's tight leading (no stray text-xs)", asyn
   const { row } = await renderMessage({ agentMessage: true });
   const model = row.querySelector<HTMLElement>('[data-testid^="message-sender-model-"]');
   assert.ok(model, "model label renders for an agent message");
-  // The stray `text-xs` used to displace the recipe's `leading-none` in the
-  // merge and made agent header rows 2px taller than human ones. The tier
-  // size class has the same displacing effect, so the tight leading is now
-  // re-asserted elegant-scoped right after the size.
-  assert.match(model.className, /(?:^| )in-data-\[theme=elegant\]:leading-none(?: |$)/);
+  // The stray `text-xs` used to displace the recipe's leading in the merge
+  // and made agent header rows taller than human ones. The tier size class
+  // has the same displacing effect, so the DS meta leading (12/16) is
+  // re-asserted right after the size.
+  assert.match(model.className, /(?:^| )leading-4(?: |$)/);
+  assert.doesNotMatch(model.className, /in-data-\[theme=/);
   assert.match(model.className, /(?:^| )text-\[12px\](?: |$)/);
 });

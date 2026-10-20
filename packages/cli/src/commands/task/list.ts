@@ -1,7 +1,7 @@
 // `raft task list --target <ch> [--status <s>]` → GET /internal/agent-api/tasks
 
 import type { Command } from "commander";
-import { type AgentApiTaskListQuery } from "@botiverse/raft-shared";
+import type { AgentApiTaskListQuery } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

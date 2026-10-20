@@ -1,5 +1,5 @@
-import { Timeline, TimelineContent, TimelineItem, TimelineTime, TimelineTitle } from "raft-ui";
-import type { TaskStatusId } from "raft-ui";
+import { Timeline, TimelineContent, TimelineItem, TimelineTime, TimelineTitle } from "@botiverse/raft-ui";
+import type { TaskStatusId } from "@botiverse/raft-ui";
 import { useIntl } from "react-intl";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import type { MessageId } from "../../i18n/messages";
@@ -36,7 +36,7 @@ export function HistoryTimeline({ history, resolveName }: {
         return (
           <TimelineItem key={event.id} taskStatus={historyStatus(event)}>
             <TimelineTitle><TimelineText text={historyTitle(event, formatMessage)} bold /></TimelineTitle>
-            <TimelineTime className="text-foreground-muted theme-brutal:text-black/50">{meta}</TimelineTime>
+            <TimelineTime>{meta}</TimelineTime>
             <TimelineContent><TimelineDetail event={event} resolveName={resolveName} formatMessage={formatMessage} /></TimelineContent>
           </TimelineItem>
         );

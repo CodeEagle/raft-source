@@ -605,6 +605,8 @@ test("task store non-trace loading and create paths stay pinned for mutation gat
     taskMetadataByMessageId: { stale: { taskNumber: 99, status: "todo", claimedByName: null } },
     taskMessageIdByTaskId: { "stale-task": "stale" },
   });
+  // Server reset also loads announcements; keep this unrelated fixture off the real API.
+  vi.spyOn(api, "get").mockResolvedValueOnce({ data: { announcements: [] } });
   triggerServerReset();
   assert.deepEqual(useTaskStore.getState().tasks, []);
   assert.equal(useTaskStore.getState().loading, false);

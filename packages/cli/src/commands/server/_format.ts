@@ -1,5 +1,13 @@
 import { sampleAgentInfo, sampleChannel, sampleHumanInfo } from "../_axExampleFixtures";
 import { axSurface } from "../../core/renderer";
+import type {
+  AgentAgentInfo,
+  AgentChannelInfo,
+  AgentChannelMembersData,
+  AgentHumanInfo,
+  AgentPageInfo,
+  AgentServerData,
+} from "@botiverse/raft-shared";
 import {
   formatAgentChannelInfo,
   formatAgentChannelMembers,
@@ -9,13 +17,7 @@ import {
   formatAgentServerInfo,
   formatAgentServerSummary,
   formatAgentUserInfo,
-  type AgentAgentInfo,
-  type AgentChannelInfo,
-  type AgentChannelMembersData,
-  type AgentHumanInfo,
-  type AgentPageInfo,
-  type AgentServerData,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 // Canonical server info formatting for agent-facing output. The text lives in
 // `@botiverse/raft-shared` (`agentText/server.ts`) so the SDK renders the same

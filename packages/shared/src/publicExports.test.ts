@@ -11,6 +11,10 @@ const repoRoot = resolve(packageRoot, "../..");
 const packageName = "@botiverse/raft-shared";
 
 const expectedExports = {
+  "./announcement-audience": {
+    types: "./announcement-audience.ts",
+    default: "./announcement-audience.ts",
+  },
   "./announcement-presentation": {
     types: "./announcement-presentation.ts",
     default: "./announcement-presentation.ts",
@@ -63,9 +67,17 @@ const expectedExports = {
     types: "./src/agentApiRouteMeta.ts",
     default: "./src/agentApiRouteMeta.ts",
   },
+  "./src/agentCliSurface": {
+    types: "./src/agentCliSurface.ts",
+    default: "./src/agentCliSurface.ts",
+  },
   "./src/agentMessageText": {
     types: "./src/agentMessageText.ts",
     default: "./src/agentMessageText.ts",
+  },
+  "./src/agentMigrationBundleReader": {
+    types: "./src/agentMigrationBundleReader.ts",
+    default: "./src/agentMigrationBundleReader.ts",
   },
   "./src/agentOps/hint.testkit": {
     types: "./src/agentOps/hint.testkit.ts",

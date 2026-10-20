@@ -192,6 +192,12 @@ export async function recordGateTriggered(
     boundarySource?: string;
     boundarySeq?: number;
     latestSeq?: number;
+    /** The held write (`send`, `task_claim`, ...); older rows have none and are sends. */
+    action?: string;
+    /** The conversation's channel id: a task write's rerun finds its hold by it. */
+    channelId?: string;
+    /** Which write was held (action and task): only its own rerun is covered by the hold. */
+    writeKey?: string;
   },
 ): Promise<void> {
   await recordEvent(
@@ -205,6 +211,9 @@ export async function recordGateTriggered(
       boundary_source: metadata.boundarySource,
       boundary_seq: metadata.boundarySeq,
       latest_seq: metadata.latestSeq,
+      ...(metadata.action ? { action: metadata.action } : {}),
+      ...(metadata.channelId ? { channel_id: metadata.channelId } : {}),
+      ...(metadata.writeKey ? { write_key: metadata.writeKey } : {}),
       copy_variant: ATTESTED_SEND_HOLD_COPY_VARIANT,
       available_actions: [...ATTESTED_SEND_HOLD_AVAILABLE_ACTIONS],
     },
@@ -531,6 +540,39 @@ export async function getFormalMentionFacts(
     firstMessageId: rows[0]?.messageId ?? null,
     firstHandle: rows[0]?.handleAtSendTime ?? null,
   };
+}
+
+/** How long a task write's hold covers its rerun: one hold per catch-up (glimpse G2). */
+export const TASK_WRITE_REHOLD_WINDOW_MS = 10 * 60_000;
+
+/**
+ * This agent's newest hold of one write (`writeKey`: the action and its task)
+ * on a conversation within `withinMs`, or null. Matched by the channel id and
+ * write key recorded with the hold, so another write on the same board is
+ * never covered by it. The hold is a row, so a rerun on another replica finds
+ * it; the query reads only this agent's recent rows (agent_id, created_at).
+ */
+export async function getRecentGateTriggered(
+  agentId: string,
+  channelId: string,
+  writeKey: string,
+  withinMs: number,
+): Promise<{ latestSeq: number } | null> {
+  const db = getDb();
+  const [row] = await db
+    .select({ metadata: attestedSendEvents.metadata })
+    .from(attestedSendEvents)
+    .where(and(
+      eq(attestedSendEvents.agentId, agentId),
+      eq(attestedSendEvents.eventType, "gate_triggered"),
+      gt(attestedSendEvents.createdAt, new Date(Date.now() - withinMs)),
+      sql`${attestedSendEvents.metadata}->>'channel_id' = ${channelId}`,
+      sql`${attestedSendEvents.metadata}->>'write_key' = ${writeKey}`,
+    ))
+    .orderBy(desc(attestedSendEvents.createdAt))
+    .limit(1);
+  const latestSeq = Number((row?.metadata as { latest_seq?: unknown } | undefined)?.latest_seq);
+  return row && Number.isFinite(latestSeq) ? { latestSeq } : null;
 }
 
 export function __resetAttestedSendStateForTest(): void {

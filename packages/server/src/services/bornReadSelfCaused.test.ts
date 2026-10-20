@@ -321,6 +321,7 @@ test("addChannelMemberForAgent born-reads the acting agent's own membership noti
 const CHANNEL_BORN_READ_PRODUCERS: readonly RequiresCausalActorProducer[] = [
   "agent.join_channel",
   "agent.server_role_changed",
+  "agent.runtime_action_required",
   "channel.agent_membership",
   "channel.human_membership",
   "channel.rename",
@@ -329,6 +330,8 @@ const CHANNEL_BORN_READ_PRODUCERS: readonly RequiresCausalActorProducer[] = [
   "task.created_summary",
   "task.assignment_receipt",
   "task.converted_summary",
+  // A hosted Cindy's Day-2 recap wake: born-read for the owner (causal actor), unread for the rest.
+  "onboarding.hosted_recap_wake",
 ];
 
 for (const producer of CHANNEL_BORN_READ_PRODUCERS) {

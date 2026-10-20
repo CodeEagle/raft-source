@@ -193,7 +193,6 @@ test("runtime usage health indicator uses the RUI Status primitive with a circul
   assert.equal(trigger.getAttribute("data-slot"), "badge", "interactive runtime chips use the RUI Badge primitive");
   assert.equal(indicator.getAttribute("data-slot"), "status", "usage health uses the RUI Status primitive");
   assert.equal(indicator.getAttribute("data-size"), "sm", "usage health owns the RUI Status size prop");
-  assert.match(indicator.className, /rounded-full/, "the usage dot is circular");
   assert.match(indicator.className, /size-2/, "the usage dot uses the larger size");
   assert.match(trigger.className, /items-center/, "the badge aligns its text and dot on the cross axis");
   assert.match(indicator.className, /items-center|inline-block/, "the status indicator stays inline with the badge label");

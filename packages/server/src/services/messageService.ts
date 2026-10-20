@@ -10,7 +10,8 @@ import { alias } from "drizzle-orm/pg-core";
 import { getDb, isDatabaseInitialized, registerDatabaseCloseHookForTests, withDbTraceAttributes, type DatabaseExecutor } from "../db/index";
 import { mapBounded } from "../lib/boundedConcurrency";
 import { createConcurrencyLimiter } from "../lib/mapWithConcurrency";
-import { withTransientTransactionRetry } from "../db/transientTransactionRetry";
+import { transientTransactionSqlState, withTransientTransactionRetry } from "../db/transientTransactionRetry";
+import { isInTransaction } from "../db/ambientTransaction";
 import { actionCards, messages, messageReactions, agents, users, channels, threadFollows, servers, serverMembers, serverMembershipDepartures, userChannelInboxStates, channelHumans, channelAgents, messageMentions, mentionDeliveryOccurrences, jointChannels, jointChannelServers, agentChannelReadCursors, attachmentCommentRefs, attachments, inboxNotificationFacts, inboxTargetMuteStates, tasks, externalReactionStates, externalActorProjections, externalAddressabilityProjections, externalAppInstalls, externalBindingAudienceSnapshots, externalChannelBindings, externalMentionFacts } from "../db/schema";
 import type { Server as SocketServer } from "socket.io";
 import type {
@@ -21,6 +22,7 @@ import type {
 import {
   SERVER_GUEST_FEATURE_FLAG_KEY,
   isAgentApiExternalMessageForbiddenAuthorityField,
+  isSlackBridgedExternalProvider,
   MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER,
   currentDate,
   currentTimeMs,
@@ -812,6 +814,18 @@ async function resolveThreadAgentDeliveryCandidates(opts: {
   };
 }
 
+/**
+ * Runs a failable read so its failure cannot poison an open transaction: inside
+ * an ambient transaction (where a failed statement aborts the whole transaction
+ * in Postgres, and continuing only fails later with 25P02) it runs in a
+ * SAVEPOINT, which a failure rolls back; outside one it just runs. Use it where
+ * a caller catches the read's error and continues.
+ */
+async function readInSavepoint<T>(work: () => Promise<T>): Promise<T> {
+  if (!isInTransaction()) return await work();
+  return await getDb().transaction(() => work()) as T;
+}
+
 async function runPostPersistThreadRead<T>(opts: {
   purpose: "inbox_notification_facts" | "agent_delivery";
   queryName: string;
@@ -820,15 +834,30 @@ async function runPostPersistThreadRead<T>(opts: {
   work: () => Promise<T>;
 }): Promise<T> {
   const phase = `message_pipeline.post_persist.${opts.purpose}`;
+  // Inside the (ambient) send transaction, any database error aborts it in
+  // Postgres, so a plain catch-and-continue only moves the failure to the next
+  // statement as 25P02 (10-15 02:57Z: a 40P01 here became a 500 that the send's
+  // withTransientTransactionRetry could not retry). So the read runs in a
+  // SAVEPOINT: a failure rolls back just the read and the send continues with
+  // the fallback. A transient conflict (40P01/40001) is rethrown instead, so
+  // the send's retry re-runs the whole transaction and gets the full audience.
+  const withinTransaction = opts.persistenceState === "transaction_pending" && isInTransaction();
+  const read = () => traceMessageDbPhase({
+    phase,
+    queryName: opts.queryName,
+    dbOperation: "select",
+  }, opts.work);
   try {
-    return await traceMessageDbPhase({
-      phase,
-      queryName: opts.queryName,
-      dbOperation: "select",
-    }, opts.work);
+    return withinTransaction ? await getDb().transaction(read) : await read();
   } catch (error) {
     if (!isMessageDatabaseFailure(error)) throw error;
     const durableMessagePresent = opts.persistenceState === "committed";
+    const transient = transientTransactionSqlState(error);
+    const failurePolicy = durableMessagePresent
+      ? "continue_after_persist"
+      : transient
+        ? "rethrow_for_transaction_retry"
+        : withinTransaction ? "rollback_savepoint_and_continue" : "rethrow_within_transaction";
     addTraceEvent("message_pipeline.post_persist_side_effect.degraded", {
       phase,
       query_name: opts.queryName,
@@ -836,9 +865,10 @@ async function runPostPersistThreadRead<T>(opts: {
       peer_service: "postgresql",
       persistence_state: opts.persistenceState,
       durable_message_present: durableMessagePresent,
-      failure_policy: durableMessagePresent ? "continue_after_persist" : "continue_within_transaction",
+      failure_policy: failurePolicy,
       ...getMessageDbErrorTraceAttrs(error),
     });
+    if (failurePolicy === "rethrow_for_transaction_retry" || failurePolicy === "rethrow_within_transaction") throw error;
     return opts.fallback;
   }
 }
@@ -1293,6 +1323,7 @@ function isMessageRouteDomainError(error: unknown): boolean {
 export type SystemMessageInboxFactProducer =
   | "agent.join_channel"
   | "agent.server_role_changed"
+  | "agent.runtime_action_required"
   | "agent.migration_completed_receipt"
   | "agent.migration_canceled_receipt"
   | "agent.migration_failed_receipt"
@@ -1311,6 +1342,7 @@ export type SystemMessageInboxFactProducer =
   | "onboarding.member_instruction"
   | "onboarding.all_channel_unlock"
   | "onboarding.cross_channel_hint"
+  | "onboarding.hosted_recap_wake"
   | "task.body"
   | "task.created_summary"
   | "task.assignment_receipt"
@@ -2040,11 +2072,49 @@ export function toAgentVisibleExternalMessage(message: {
   };
 }
 
+/**
+ * Product decision (Slack bridge owner): a message bridged from a paired Slack
+ * channel reaches agents exactly like an ordinary Raft message — ordinary
+ * content rendering and `mentioned` from the server-minted notifiable
+ * message_mentions row. Binding the workspace is the humans' acceptance of
+ * that. Every other third-party payload (non-Slack external projections,
+ * third_party_event content) stays inert. Provenance (`external_message`) and
+ * the stripped authority fields are unchanged for Slack too.
+ *
+ * Slack-ness is read from the immutable author fact frozen with the canonical
+ * external message (`external_message_author_facts.provider`); a row without
+ * that fact is never treated as Slack-bridged (fails closed to inert).
+ */
+export function isSlackBridgedExternalMessage(message: {
+  senderType: StoredMessageSenderType;
+  externalAuthor?: { provider: string } | null;
+}): boolean {
+  return message.senderType === "external_projection"
+    && isSlackBridgedExternalProvider(message.externalAuthor?.provider);
+}
+
+/**
+ * Whether `agentId` holds a resolved personal mention fact on the message.
+ * Enriched rows load `mentions` from notifiable (or later notified)
+ * message_mentions rows — the same rule resume catch-up applies.
+ */
+export function isAgentPersonallyMentioned(
+  mentions: readonly ResolvedMentionFact[] | null | undefined,
+  agentId: string | null | undefined,
+): boolean {
+  if (!agentId) return false;
+  return (mentions ?? []).some((mention) => mention.type === "agent" && mention.id === agentId);
+}
+
 export function renderAgentVisibleMessageContent(
-  message: { senderType: StoredMessageSenderType; content: string },
+  message: {
+    senderType: StoredMessageSenderType;
+    content: string;
+    externalAuthor?: { provider: string } | null;
+  },
   ordinaryRenderedContent: string,
 ): string {
-  return message.senderType === "external_projection"
+  return message.senderType === "external_projection" && !isSlackBridgedExternalMessage(message)
     ? renderThirdPartyInertText({ field: "tool_result", value: message.content })
     : ordinaryRenderedContent;
 }
@@ -2058,15 +2128,20 @@ export function renderAgentVisibleMessageContent(
  */
 export function projectAgentVisibleHttpMessageResponse(
   message: EnrichedMessageRow,
-  ordinaryRenderedContent: string = message.content,
+  ordinaryRenderedContent: string,
+  viewerAgentId: string | null,
 ): Record<string, unknown> {
   const external = message.senderType === "external_projection";
+  // Slack-bridged messages carry the viewer's personal mention fact like an
+  // ordinary message would; any other external payload stays non-mentioned.
+  const mentioned = isSlackBridgedExternalMessage(message)
+    && isAgentPersonallyMentioned(message.mentions, viewerAgentId);
   const envelope: Record<string, unknown> = {
     ...message,
     senderType: toAgentVisibleSenderType(message.senderType, message.messageType),
     content: renderAgentVisibleMessageContent(message, ordinaryRenderedContent),
     ...(external ? toAgentVisibleExternalMessage(message) : {}),
-    ...(external ? { mentioned: false } : {}),
+    ...(external ? { mentioned } : {}),
   };
   if (external) {
     for (const field of Object.keys(envelope)) {
@@ -2100,6 +2175,29 @@ function getAgentVisibleTaskAssigneeName(message: {
   claimedByName?: string | null;
 }): string | null {
   return message.taskAssigneeName ?? message.claimedByName ?? null;
+}
+
+/**
+ * The zone the sender's latest message in `channelIds` carried (a human's
+ * zone travels with each message), or null.
+ */
+export async function getLatestSenderTimezone(
+  channelIds: string[],
+  senderType: "user" | "agent",
+  senderId: string,
+): Promise<string | null> {
+  if (channelIds.length === 0) return null;
+  const [latest] = await getDb()
+    .select({ senderTimezone: messages.senderTimezone })
+    .from(messages)
+    .where(and(
+      inArray(messages.channelId, channelIds),
+      eq(messages.senderType, senderType),
+      eq(messages.senderId, senderId),
+    ))
+    .orderBy(desc(messages.createdAt))
+    .limit(1);
+  return latest?.senderTimezone ?? null;
 }
 
 async function getSenderIdentity(senderType: "user" | "agent", senderId: string, fallbackName: string): Promise<{ uniqueName: string; description: string | null }> {
@@ -2460,11 +2558,11 @@ async function finalizeNewChatMessageInTransaction(opts: {
   if (externalMentions.length > 0 && channel) {
     // Bindings live on the authority channel — a thread resolves through its
     // parent, a Joint projection through the local binding row.
-    const surface = await resolveSlackOutboundMessageSurface({
+    const surface = await readInSavepoint(() => resolveSlackOutboundMessageSurface({
       executor,
       requestedChannelId,
       messageChannelId: message.channelId,
-    }).catch((error: unknown) => {
+    })).catch((error: unknown) => {
       console.warn(
         "messageService external mention surface resolution failed",
         { messageId: message.id, error: error instanceof Error ? error.name : "unknown" },
@@ -2809,6 +2907,49 @@ async function emitFrontendSocketBestEffort(input: {
   }
 }
 
+/**
+ * The `message:new` body (and HTTP send response) for a freshly persisted
+ * row. It must carry every key the canonical manifest declares present on
+ * `message:new` (CANONICAL_MESSAGE_FIELD_DESCRIPTORS presence.messageNew) —
+ * mobile accepts a realtime frame as a full canonical fact only when every
+ * such key is present. Values match what REST enrichment
+ * (enrichWithSenderNames) returns for the same brand-new row:
+ * - senderDescription: the sender's user/agent description, `null` when unset
+ *   (callers resolve it via getSenderIdentity, the same `description || null`).
+ * - reactions: a just-created message has none → `[]`.
+ * - externalAuthor: only external_projection senders have one; ordinary
+ *   user/agent/system sends → `null`.
+ * - commentRef: viewer-scoped; shared broadcasts carry `null`
+ *   (shared-null-preserve), the actor response attaches the real ref.
+ */
+export function buildPersistedMessageFrontendPayload<
+  M extends typeof messages.$inferSelect,
+  A extends { id: string; filename: string; mimeType: string; sizeBytes: number; width: number | null; height: number | null; thumbnailUrl: string | null },
+>(
+  message: M,
+  fields: {
+    channelId: string;
+    senderName: string;
+    senderDescription: string | null;
+    senderMembershipStatus: "active" | null;
+    attachments: A[];
+    mentions: ResolvedMentionFact[];
+  },
+) {
+  return {
+    ...omitSenderTimezone(message),
+    channelId: fields.channelId,
+    senderName: fields.senderName,
+    senderDescription: fields.senderDescription,
+    senderMembershipStatus: fields.senderMembershipStatus,
+    attachments: fields.attachments,
+    mentions: fields.mentions,
+    reactions: [] as MessageReactionSummary[],
+    commentRef: null as EnrichedMessageRow["commentRef"],
+    externalAuthor: null as EnrichedMessageRow["externalAuthor"],
+  };
+}
+
 async function emitPersistedMessageToFrontend(
   io: SocketServer,
   opts: {
@@ -2818,7 +2959,11 @@ async function emitPersistedMessageToFrontend(
     message: typeof messages.$inferSelect;
     enriched: typeof messages.$inferSelect & {
       senderName: string;
+      senderDescription: string | null;
       senderMembershipStatus?: "active" | "left" | "removed" | null;
+      reactions: MessageReactionSummary[];
+      commentRef: EnrichedMessageRow["commentRef"];
+      externalAuthor: EnrichedMessageRow["externalAuthor"];
       attachments: {
         id: string;
         filename: string;
@@ -3393,10 +3538,19 @@ export async function broadcastSystemMessage(
       systemSubtype: opts.inboxFactPolicy.producer,
     });
   const personalAttentionTargets = opts.personalAttentionTargets ?? [];
+  // Same manifest-complete `message:new` key set as an ordinary send
+  // (buildPersistedMessageFrontendPayload), with REST's values for a system
+  // row: no sender description/membership, no attachments or reactions yet.
   const enriched = {
     ...message,
     senderName: "System",
-    ...(personalAttentionTargets.length > 0 && { mentions: personalAttentionTargets }),
+    senderDescription: null as string | null,
+    senderMembershipStatus: null,
+    attachments: [] as Array<{ id: string; filename: string; mimeType: string; sizeBytes: number; width: number | null; height: number | null; thumbnailUrl: string | null }>,
+    mentions: personalAttentionTargets,
+    reactions: [] as MessageReactionSummary[],
+    commentRef: null as EnrichedMessageRow["commentRef"],
+    externalAuthor: null as EnrichedMessageRow["externalAuthor"],
   };
 
   const channel = await deps.getChannel(channelId);
@@ -4500,6 +4654,9 @@ export async function getAgentResumeCatchupMessages(
     obligation?: CatchupObligation | null;
   },
 ): Promise<AgentResumeCatchupResult> {
+  if (await agentService.isRaftBenchServiceAgent(agentId)) {
+    return { messages: [], sources: [], conversations: [], candidateChannelCount: 0, maxSeq: null };
+  }
   const deps = resolveMessageServiceDeps();
   const db = getDb();
 
@@ -4848,7 +5005,7 @@ async function buildResumeCatchupBatch(
         sender_type: toAgentVisibleSenderType(row.senderType, row.messageType),
         ...toAgentVisibleExternalMessage(row),
         ...(row.senderType === "external_projection"
-          ? { mentioned: false }
+          ? { mentioned: isSlackBridgedExternalMessage(row) && mentionedMessageIds.has(row.id) }
           : (mentionedMessageIds.has(row.id) || piercedAgentIds.has(agentId)) && { mentioned: true }),
         content: renderAgentVisibleMessageContent(row, renderedContent),
         timestamp: row.createdAt.toISOString(),
@@ -8170,6 +8327,7 @@ async function handleJointThreadPostBroadcastSideEffects(input: {
         },
       });
     }
+    await attachMentionDeliveryOccurrences(message.id, threadDeliveries, targetVisibleMentionedAgentIds, "joint_thread");
     deliveryPromises.push(settleDeliveries(
       agentOrchestrator.deliverMessagesOnChannel(projection.localThreadChannelId, threadDeliveries),
       threadDeliveries.map((delivery) => delivery.agentId),
@@ -8277,6 +8435,42 @@ type InsertedMentionRow = {
 };
 
 /**
+ * Joint deliveries are built per projection, outside the ordinary send loop. The
+ * occurrence rows for their mentions were written with the message (as everywhere),
+ * so they need their payload here too; otherwise they stay `recorded` with no payload,
+ * which recovery never picks up and nothing ever terminates. Mutates each mentioned
+ * delivery's options with its occurrence id. Never fails the delivery.
+ */
+async function attachMentionDeliveryOccurrences(
+  messageId: string,
+  deliveries: Array<{ agentId: string; message: AgentMessage; options?: DeliverMessageOptions }>,
+  targetVisibleMentionedAgentIds: ReadonlySet<string>,
+  path: "joint_thread" | "joint_channel",
+): Promise<void> {
+  const candidates = deliveries.filter((delivery) => targetVisibleMentionedAgentIds.has(delivery.agentId));
+  if (candidates.length === 0) return;
+  try {
+    const occurrenceIds = await ensureAgentMentionDeliveryOccurrencesForAgents(
+      messageId,
+      candidates.map((delivery) => ({ agentId: delivery.agentId, deliveryPayload: delivery.message })),
+    );
+    for (const delivery of candidates) {
+      const mentionDeliveryOccurrenceId = occurrenceIds.get(delivery.agentId);
+      if (mentionDeliveryOccurrenceId) delivery.options = { ...delivery.options, mentionDeliveryOccurrenceId };
+    }
+  } catch (err) {
+    addTraceEvent("message_pipeline.mention_occurrence.persist_degraded", {
+      message_id: messageId,
+      intended_occurrence_count: candidates.length,
+      delivered_without_occurrence: true,
+      recoverable: false,
+      delivery_path: path,
+    });
+    console.error(`[MessageService] mention delivery occurrences unavailable for ${path} message ${messageId}:`, err);
+  }
+}
+
+/**
  * Batched form: resolve the notifiable mention rows for many agents in ONE query and persist all
  * their occurrences in ONE insert. Used on the send path so the product path pays two round-trips
  * instead of two per mentioned agent, and so the occurrences are durable before any delivery is
@@ -8372,20 +8566,24 @@ async function pendingMentionAvailableActions(
   }
 
   try {
-    const authorityChannelId = await deps.getChannelMembershipAuthorityChannelId(
-      channelId,
-      executor,
-    );
-    const canAdd = authorityChannelId
-      ? await deps.actorHasChannelCapability(
-          serverId,
-          authorityChannelId,
-          "user",
-          senderId,
-          "addChannelMembers",
-          executor,
-        )
-      : false;
+    // In a savepoint: this runs inside the send transaction, and the catch
+    // below continues the send.
+    const canAdd = await readInSavepoint(async () => {
+      const authorityChannelId = await deps.getChannelMembershipAuthorityChannelId(
+        channelId,
+        executor,
+      );
+      return authorityChannelId
+        ? await deps.actorHasChannelCapability(
+            serverId,
+            authorityChannelId,
+            "user",
+            senderId,
+            "addChannelMembers",
+            executor,
+          )
+        : false;
+    });
     return canAdd
       ? (["notify", "add"] as const)
       : (["notify"] as const);
@@ -8717,13 +8915,27 @@ async function insertMentionRowsWithOccurrenceRecords(
     targetId: messageMentions.targetId,
     notifiableAtSend: messageMentions.notifiableAtSend,
   });
-  const occurrences = inserted
-    .filter((row) => row.targetType === "agent" && row.notifiableAtSend)
+  const notifiableAgentRows = inserted.filter((row) => row.targetType === "agent" && row.notifiableAtSend);
+  // An agent that mentions itself is never delivered its own message (every delivery
+  // loop skips the sender), so an occurrence for it would stay `recorded` with no
+  // payload forever: unrecoverable, never terminal. Do not record one.
+  const selfMentionKeys = new Set<string>();
+  if (notifiableAgentRows.length > 0) {
+    const messageIds = [...new Set(rows.map((row) => row.messageId))];
+    const senders = await executor
+      .select({ id: messages.id, senderType: messages.senderType, senderId: messages.senderId })
+      .from(messages)
+      .where(inArray(messages.id, messageIds));
+    for (const sender of senders) {
+      if (sender.senderType === "agent" && sender.senderId) selfMentionKeys.add(`${sender.id}:${sender.senderId}`);
+    }
+  }
+  const occurrences = notifiableAgentRows
     .flatMap((row) => {
       const source = rows.find((candidate) =>
         candidate.targetType === row.targetType && candidate.targetId === row.targetId
       );
-      return source
+      return source && !selfMentionKeys.has(`${source.messageId}:${row.targetId}`)
         ? [{
             occurrenceId: row.id,
             messageId: source.messageId,
@@ -9758,18 +9970,22 @@ export async function broadcastAndDeliver(
   };
   await recordInboxFactsForSend();
 
+  // One sender lookup per send: feeds the frontend payload's
+  // senderDescription (REST parity) and the agent-visible sender metadata below.
+  const { uniqueName: senderUniqueName, description: senderDescription } = await deps.getSenderIdentity(senderType, senderId, senderName);
+
   // The sender response and frontend broadcast are human-facing: keep the
   // agent-only sender zone off them (agent payloads read it from `message`).
-  const enriched = {
-    ...omitSenderTimezone(message),
+  const enriched = buildPersistedMessageFrontendPayload(message, {
     channelId: jointThreadProjection?.localThreadChannelId
       ?? jointProjection?.localChannelId
       ?? message.channelId,
     senderName,
-    senderMembershipStatus: senderType === "user" && message.messageType !== "system" ? "active" as const : null,
+    senderDescription,
+    senderMembershipStatus: senderType === "user" && message.messageType !== "system" ? "active" : null,
     attachments: msgAttachments,
     mentions: targetVisibleMentions,
-  };
+  });
   const targetVisibleMentionedAgentIds = new Set(targetVisibleMentions.filter((mention) => mention.type === "agent").map((mention) => mention.id));
   // Sender-side only (mention-AX M-4/N-6): outsider mentions that produced no
   // target-side notification on this send. Keep this off enumerable message
@@ -9789,7 +10005,6 @@ export async function broadcastAndDeliver(
 
   if (channel?.type === "thread" && jointThreadProjection && channel.parentMessageId && !replayed) {
     const jointThreadSideEffectsStart = currentTimeMs();
-    const { uniqueName: senderUniqueName, description: senderDescription } = await deps.getSenderIdentity(senderType, senderId, senderName);
     await handleJointThreadPostBroadcastSideEffects({
       io,
       agentOrchestrator,
@@ -9895,7 +10110,6 @@ export async function broadcastAndDeliver(
   }
   if (jointProjection && jointProjections.length > 0) {
     const jointDeliveryScheduleStart = currentTimeMs();
-    const { uniqueName: senderUniqueName, description: senderDescription } = await deps.getSenderIdentity(senderType, senderId, senderName);
     const senderAuthorityServerId = jointProjection?.serverId ?? channel.serverId;
     const agentDeliveryOptions = await getAgentDeliveryOptionsForSender(deps, senderAuthorityServerId, senderType, senderId);
     const db = getDb();
@@ -9950,6 +10164,7 @@ export async function broadcastAndDeliver(
           options: agentDeliveryOptions,
         });
       }
+      await attachMentionDeliveryOccurrences(message.id, projectionDeliveries, targetVisibleMentionedAgentIds, "joint_channel");
       await settleDeliveries(
         agentOrchestrator.deliverMessagesOnChannel(projection.localChannelId, projectionDeliveries),
         projectionDeliveries.map((delivery) => delivery.agentId),
@@ -10057,9 +10272,8 @@ export async function broadcastAndDeliver(
     ? threadAgentDeliveryResolution.candidates
     : await deps.getChannelAgents(channelId);
 
-  // Resolve the unique sender name (for @mentions) and description for agent-visible metadata.
-  const { uniqueName: senderUniqueName, description: senderDescription } = await deps.getSenderIdentity(senderType, senderId, senderName);
-
+  // senderUniqueName (for @mentions) / senderDescription (agent-visible
+  // metadata) were resolved once above, before the frontend payload.
   // For threads, resolve parent channel info and auto-join @mentioned agents
   let parentChannelName: string | undefined;
   let parentChannelId: string | undefined;

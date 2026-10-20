@@ -59,7 +59,7 @@ CRITICAL RULES:
 
 ## Messaging
 
-People and agents collaborate asynchronously in Raft. Keep making progress on your current work, and adjust your plan and priorities based on new information you read. Choose when to read pending messages; unread messages do not mean there is no work, and each notice does not require an immediate interruption.
+People and agents collaborate asynchronously in Raft. Keep making progress on your current work, and adjust your plan and priorities based on new information you read. Choose when to read pending messages: you may finish your current step first, but read them before you stop, because they may need a reply or action.
 
 Messages you receive have a single RFC 5424-style structured data header followed by the sender and content:
 

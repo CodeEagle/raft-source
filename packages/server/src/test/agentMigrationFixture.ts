@@ -25,6 +25,8 @@ import {
   type AgentMigrationProvisioningResult,
   type AgentMigrationRow,
   type BeginAgentMigrationInput,
+  migrationTargetControlIdentity,
+  requireComputerTarget,
 } from "../services/agentMigrationService";
 
 async function getAgentMigrationRow(migrationId: string): Promise<AgentMigrationRow | null> {
@@ -44,7 +46,7 @@ const DEFAULT_TRANSFER_SUMMARY: AgentMigrationTransferSummary = {
 };
 
 export async function beginTestAgentMigration(
-  input: BeginAgentMigrationInput,
+  input: BeginAgentMigrationInput & { targetMachineId: string },
   executor?: DatabaseExecutor,
 ): Promise<AgentMigrationProvisioningResult> {
   return await beginAgentMigrationProvisioning({
@@ -55,7 +57,7 @@ export async function beginTestAgentMigration(
 
 /** The source daemon's half: quiesce, register control, upload the one chunk, commit (`ready`). */
 export async function markTestAgentMigrationReady(
-  provisioning: AgentMigrationProvisioningResult,
+  provisioning: Pick<AgentMigrationProvisioningResult, "migration" | "source">,
   options: { now?: Date; transferSummary?: AgentMigrationTransferSummary } = {},
 ): Promise<AgentMigrationRow> {
   const { migration, source } = provisioning;
@@ -97,7 +99,7 @@ export async function markTestAgentMigrationReady(
         leaseId,
         agentId: migration.agentId,
         sourceMachineId: migration.sourceMachineId,
-        targetMachineId: migration.targetMachineId,
+        targetMachineId: migrationTargetControlIdentity(migration),
       },
       capability: { required: [AGENT_MIGRATION_CAPABILITY] },
       bundle: {
@@ -151,7 +153,7 @@ async function targetStep(
     migrationId: row.id,
     migrationGeneration: agentMigrationGeneration(row),
     serverId: row.serverId,
-    targetMachineId: row.targetMachineId,
+    targetMachineId: requireComputerTarget(row).targetMachineId,
     now,
   });
   return (await getAgentMigrationRow(migrationId))!;
@@ -169,7 +171,7 @@ export async function flipTestAgentMigration(migrationId: string, now?: Date): P
 
 /** Begin, upload, start the transfer and flip: the migration waits for the target's `arrived` report. */
 export async function beginArrivingTestAgentMigration(
-  input: BeginAgentMigrationInput,
+  input: BeginAgentMigrationInput & { targetMachineId: string },
   options: { transferSummary?: AgentMigrationTransferSummary } = {},
 ): Promise<AgentMigrationRow> {
   const provisioning = await beginTestAgentMigration(input);

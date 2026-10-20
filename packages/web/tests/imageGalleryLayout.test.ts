@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildMessageImageGalleryRows } from "raft-ui";
+import { buildMessageImageGalleryRows } from "@botiverse/raft-ui";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import {
@@ -83,7 +83,8 @@ test("single-image reserve space comes from the shared layout contract", () => {
   assert.doesNotMatch(galleryItemSource, /getSingleImageReserveStyle|style=\{imageReserveStyle\}/);
   assert.match(galleryItemSource, /width=\{att\.width \?\? undefined\}/);
   assert.match(galleryItemSource, /height=\{att\.height \?\? undefined\}/);
-  assert.match(galleryItemSource, /bg-brutal-cream\/60/);
+  // The tile surface (DS media frame: hairline + sunken fill) is the recipe's.
+  assert.doesNotMatch(galleryItemSource, /bg-palette-cream/);
   assert.doesNotMatch(source, /border-2 border-black bg-transparent/);
   assert.doesNotMatch(galleryItemSource, /border-2 border-black bg-transparent/);
 });

@@ -3,8 +3,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger, Button, DirectMessageIcon
-} from "raft-ui";
+  DropdownMenuTrigger,
+  DirectMessageIcon,
+  PanelAction,
+} from "@botiverse/raft-ui";
 import { useIntl } from "react-intl";
 import Tooltip from "../ui/Tooltip";
 
@@ -16,6 +18,8 @@ interface AgentProfileOverflowMenuProps {
   onMessage: () => void;
   onStartStop: () => void;
   onRestartReset: () => void;
+  /** A hosted agent: its only runtime command, stop the running turn. */
+  onStopHostedTurn?: () => void;
   /**
    * Keep the high-frequency commands visible while the containing panel has
    * room, and collapse them into the overflow menu as that panel narrows.
@@ -45,6 +49,7 @@ export default function AgentProfileOverflowMenu({
   onMessage,
   onStartStop,
   onRestartReset,
+  onStopHostedTurn,
   responsive = false,
 }: AgentProfileOverflowMenuProps) {
   const { formatMessage } = useIntl();
@@ -53,52 +58,60 @@ export default function AgentProfileOverflowMenu({
     id: isOnline ? "agent.detail.stopAgent" : "agent.detail.startAgent",
   });
   const restartResetLabel = formatMessage({ id: "agent.detail.restartReset" });
+  const stopHostedTurnLabel = formatMessage({ id: "agent.detail.stopHostedTurn" });
 
-  if (!canMessageAgent && !canControlAgentRuntime) return null;
+  if (!canMessageAgent && !canControlAgentRuntime && !onStopHostedTurn) return null;
 
+  // Header icon buttons are raft-ui PanelAction (44 on a phone, the DS small
+  // 32 on desktop); the group keeps the panel head's action gap.
   const inlineActions = (
     <div
-      className="agent-profile-inline-actions hidden items-center gap-1.5"
+      className="agent-profile-inline-actions hidden items-center gap-0.5 md:gap-1"
       data-testid="agent-profile-inline-actions"
     >
       {canMessageAgent && (
         <Tooltip content={messageLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
-          <Button
-            size="icon-sm"
-            variant="outline"
-                        aria-label={messageLabel}
+          <PanelAction
+            aria-label={messageLabel}
             onClick={onMessage}
             data-testid="agent-profile-inline-message"
           >
-            <DirectMessageIcon width={14} height={14} />
-          </Button>
+            <DirectMessageIcon />
+          </PanelAction>
         </Tooltip>
       )}
       {canControlAgentRuntime && (
         <>
           <Tooltip content={startStopLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
-            <Button
-              size="icon-sm"
-              variant="outline"
-                            aria-label={startStopLabel}
+            <PanelAction
+              aria-label={startStopLabel}
               onClick={onStartStop}
               data-testid="agent-profile-inline-start-stop"
             >
-              {isOnline ? <Square size={14} /> : <Play size={14} />}
-            </Button>
+              {isOnline ? <Square /> : <Play />}
+            </PanelAction>
           </Tooltip>
           <Tooltip content={restartResetLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
-            <Button
-              size="icon-sm"
-              variant="outline"
-                            aria-label={restartResetLabel}
+            <PanelAction
+              aria-label={restartResetLabel}
               onClick={onRestartReset}
               data-testid="agent-profile-inline-restart-reset"
             >
-              <RotateCcw size={14} />
-            </Button>
+              <RotateCcw />
+            </PanelAction>
           </Tooltip>
         </>
+      )}
+      {onStopHostedTurn && (
+        <Tooltip content={stopHostedTurnLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
+          <PanelAction
+            aria-label={stopHostedTurnLabel}
+            onClick={onStopHostedTurn}
+            data-testid="agent-profile-inline-stop-hosted-turn"
+          >
+            <Square />
+          </PanelAction>
+        </Tooltip>
       )}
     </div>
   );
@@ -109,14 +122,12 @@ export default function AgentProfileOverflowMenu({
         <Tooltip content={menuLabel} contentProps={PROFILE_TOOLTIP_CONTENT_PROPS}>
           <DropdownMenuTrigger
             render={(
-              <Button
-                size="icon-sm"
-                variant="outline"
-                                aria-label={menuLabel}
+              <PanelAction
+                aria-label={menuLabel}
                 data-testid="agent-profile-overflow-trigger"
               >
-                <EllipsisVertical size={14} />
-              </Button>
+                <EllipsisVertical />
+              </PanelAction>
             )}
           />
         </Tooltip>
@@ -124,7 +135,7 @@ export default function AgentProfileOverflowMenu({
           side="bottom"
           align="end"
           sideOffset={4}
-          aria-label={menuLabel}
+              aria-label={menuLabel}
           data-testid="agent-profile-overflow-menu"
         >
           {canMessageAgent && (
@@ -154,6 +165,15 @@ export default function AgentProfileOverflowMenu({
             >
               <RotateCcw />
               {formatMessage({ id: "agent.detail.restartReset" })}
+            </DropdownMenuItem>
+          )}
+          {onStopHostedTurn && (
+            <DropdownMenuItem
+              onClick={onStopHostedTurn}
+              data-testid="agent-profile-overflow-stop-hosted-turn"
+            >
+              <Square />
+              {stopHostedTurnLabel}
             </DropdownMenuItem>
           )}
         </DropdownMenuContent>

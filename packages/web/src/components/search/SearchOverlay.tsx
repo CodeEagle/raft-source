@@ -1,8 +1,11 @@
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
+import type { RefObject } from "react";
 import { useIntl } from "react-intl";
-import { Kbd, PopoverPopup } from "raft-ui";
+import { DialogSurface, Kbd } from "@botiverse/raft-ui";
 import MessageSearchPage from "./MessageSearchPage";
-import { searchOverlayCardStyle } from "./searchOverlayAnchor";
+import { searchOverlayCardStyle, searchOverlayColumnFromRect } from "./searchOverlayAnchor";
+import type { SearchOverlayColumn } from "./searchOverlayAnchor";
+import { isElectronDesktopShell } from "../../utils/desktopShell";
 import Modal from "../Modal";
 
 /**
@@ -13,18 +16,11 @@ import Modal from "../Modal";
  * URL-as-source-of-truth for the query works unchanged, and this is the SAME search,
  * just presented as a floating panel over the current channel (Slack ⌘K behaviour).
  *
- * The backdrop is transparent (no dim, no blur): like Slack's search panel the
- * app stays fully visible behind the palette; the card's own border/shadow does
- * the layering (WAWQAQ 2026-09-24, #kabi-desktop 7b0b9ca1). Click-outside still
- * dismisses.
- *
- * The card's surface is raft-ui's popover surface (`PopoverPopup`, the same
- * element ServerSwitcherMenu floats): the theme family decides corners, border,
- * shadow and background in one place — Elegant rounded + soft shadow on
- * `bg-layer-popover`, Brutal 2px black + hard shadow. The legacy `card-brutal`
- * utility it replaced had no radius in any theme and forced `bg-white`, which is
- * why the palette was square (and white in Elegant Dark) — WAWQAQ 2026-09-24.
- * Header and footer stay transparent so the surface reads as one piece.
+ * It is a centred modal like every other one (the Raft DS has one rule for
+ * centred modals): the page dims behind it (the shared Modal scrim) and the
+ * card is raft-ui's DialogSurface — the dialog frame, which does not animate.
+ * Click-outside dismisses. Header and footer stay transparent so the surface reads as one
+ * piece; seams separate the field, the results and the key hints.
  *
  * Result activation runs in `activateResultsInChat` mode: a single click / Enter jumps
  * to the hit in chat, which navigates away (clearing backgroundLocation) and so
@@ -43,8 +39,40 @@ function stopMouseDownPropagation(e: React.MouseEvent) {
   e.stopPropagation();
 }
 
-export default function SearchOverlay({ onClose }: { onClose: () => void }) {
+// A web surface without the top bar (the host-shell embed): track the content
+// column (everything right of the sidebar) so the panel sits at its top, centred
+// on the window (searchOverlayAnchor.ts). MainLayout owns that element and
+// passes it in, or passes null when the top bar is shown. With a top bar (web
+// or desktop shell) the panel anchors to the bar's field instead, so nothing is
+// measured here.
+function useWebContentColumn(columnRef: RefObject<HTMLElement | null> | null): SearchOverlayColumn | null {
+  const [column, setColumn] = useState<SearchOverlayColumn | null>(null);
+  useLayoutEffect(() => {
+    if (isElectronDesktopShell()) return;
+    const el = columnRef?.current;
+    if (!el) return;
+    const measure = () => {
+      const next = searchOverlayColumnFromRect(el.getBoundingClientRect());
+      setColumn((prev) => (prev && prev.top === next.top ? prev : next));
+    };
+    measure();
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    ro?.observe(el);
+    window.addEventListener("resize", measure);
+    return () => { ro?.disconnect(); window.removeEventListener("resize", measure); };
+  }, [columnRef]);
+  return column;
+}
+
+export default function SearchOverlay({ onClose, contentColumnRef }: {
+  onClose: () => void;
+  /** Web: the content column the panel sits at the top of (MainLayout's).
+   *  Required so a missing wire fails to compile instead of silently falling
+   *  back to the centred placement; pass null only where there is no column. */
+  contentColumnRef: RefObject<HTMLElement | null> | null;
+}) {
   const { formatMessage } = useIntl();
+  const column = useWebContentColumn(contentColumnRef);
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -58,22 +86,24 @@ export default function SearchOverlay({ onClose }: { onClose: () => void }) {
   }, [onClose]);
 
   return (
-    <Modal onClose={onClose} closeOnBackdrop closeOnEscape={false} layer={1} backdrop="transparent">
+    // A centred modal like every other: the page dims behind it and the
+    // panel is the dialog frame, with no open animation.
+    <Modal onClose={onClose} closeOnBackdrop closeOnEscape={false} layer={1}>
       {/*
         Fixed size + position (Slack command-palette pattern): a constant height
         so the frame never grows/shrinks or re-centers as the query and result
         count change — MessageSearchPage fills it (flex-1) and its result list
         scrolls internally. Placement is ANCHORED to the desktop top-bar search
         field via CSS variables (see searchOverlayAnchor.ts): top edge on the
-        field, centred on it, so the panel reads as the field expanding — with a
+        field, centred on the window, so the panel reads as the field expanding — with a
         centred 8vh fallback wherever the shell publishes no anchor.
       */}
-      <PopoverPopup
+      <DialogSurface
         role="dialog"
         aria-modal="true"
         data-testid="desktop-search-overlay"
-        className="flex min-h-0 min-w-0 flex-col"
-        style={searchOverlayCardStyle()}
+        className="min-h-0"
+        style={searchOverlayCardStyle(column)}
         onMouseDown={stopMouseDownPropagation}
       >
         <MessageSearchPage activateResultsInChat overlayChrome />
@@ -81,7 +111,7 @@ export default function SearchOverlay({ onClose }: { onClose: () => void }) {
             in one quiet line; Esc already sits in the field. */}
         <div
           data-testid="desktop-search-overlay-footer"
-          className="flex shrink-0 items-center gap-4 border-t border-line-muted px-3 py-1.5 text-[11px] text-foreground-muted theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:text-black/60"
+          className="flex shrink-0 items-center gap-4 border-t border-line-seam px-3 py-2 text-caption text-foreground-hint"
         >
           <span className="flex items-center gap-1">
             <Kbd aria-hidden="true">{ARROW_UP_GLYPH}</Kbd>
@@ -93,7 +123,7 @@ export default function SearchOverlay({ onClose }: { onClose: () => void }) {
             <span>{formatMessage({ id: "search.overlay.footerOpen" })}</span>
           </span>
         </div>
-      </PopoverPopup>
+      </DialogSurface>
     </Modal>
   );
 }

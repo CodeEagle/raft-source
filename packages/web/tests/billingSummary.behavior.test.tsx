@@ -254,7 +254,8 @@ test("checkout-mode pricing defaults to annual with the strike-through original,
   assert.ok(annual.textContent?.includes("Yearly"));
   assert.ok(annual.textContent?.includes("Save 12%"), "annual option carries the discount badge");
   const annualBadge = within(annual).getByText("Save 12%");
-  assert.ok(annualBadge.classList.contains("uppercase"));
+  // Raft DS: no ALL CAPS; the badge keeps the catalog's own casing.
+  assert.ok(!annualBadge.classList.contains("uppercase"));
 
   // Seat input is a numeric text field, not a spinner.
   const seatInput = screen.getByRole("textbox", { name: "Seats to buy" });
@@ -364,11 +365,14 @@ test("pro plan renders seat usage, manage-seats copy, and the subscription summa
   );
   assert.ok(usageValue);
   const seatProgress = screen.getByRole("progressbar", { name: "Seat" });
-  const humansSwatch = seatProgress.querySelector(".bg-primary-strong");
+  // DS usage meter: cyan below the near-limit threshold (75% used here),
+  // humans full cyan, agents the lighter cyan.
+  assert.equal(seatProgress.closest('[data-slot="progress"]')?.getAttribute("data-variant") ?? seatProgress.getAttribute("data-variant"), "information");
+  const humansSwatch = seatProgress.querySelector(".bg-info");
   assert.ok(humansSwatch, "human seat segment renders inside the stacked bar");
   assert.equal(humansSwatch.getAttribute("title"), null);
   assert.ok(humansSwatch.hasAttribute("data-base-ui-tooltip-trigger"), "seat breakdown hint now rides the RUI tooltip trigger");
-  const agentsSwatch = seatProgress.querySelector(".bg-accent-strong");
+  const agentsSwatch = seatProgress.querySelector(".bg-info-muted");
   assert.ok(agentsSwatch, "agent seat segment renders inside the stacked bar");
   assert.equal(agentsSwatch.getAttribute("title"), null);
   assert.ok(agentsSwatch.hasAttribute("data-base-ui-tooltip-trigger"), "seat breakdown hint now rides the RUI tooltip trigger");

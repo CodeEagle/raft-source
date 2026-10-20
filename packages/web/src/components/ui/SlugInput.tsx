@@ -1,4 +1,4 @@
-import { InputGroup, InputGroupAddon, InputGroupInput } from "raft-ui";
+import { InputGroup, InputGroupAddon, InputGroupInput } from "@botiverse/raft-ui";
 import type { InputHTMLAttributes } from "react";
 
 type SlugInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, "className"> & {

@@ -1,13 +1,25 @@
 import { useCallback } from "react";
 import type { MouseEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { Badge, Button } from "raft-ui";
+import { Badge, Button, Card } from "@botiverse/raft-ui";
 import type { AgentActivity, ServerRole } from "@botiverse/raft-shared";
 import { UserMinus, X } from "lucide-react";
 import AvatarSlot from "../ui/AvatarSlot";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import Tooltip from "../ui/Tooltip";
 import AgentActivityDot from "../agent/AgentActivityDot";
+
+// DS ListRow for a member: 35px identity, the name 15/20 600, the role or
+// handle 12/16 ink-3; rows press like content rows and are separated by a
+// hairline that starts where the text starts (16 + 35 + 12 = 63px).
+const MEMBER_ROW_CLASS = [
+  "group relative flex min-h-16 items-center gap-3 px-4 py-2.5 transition-colors md:min-h-14",
+  "hover:bg-fill-pressed [@media(max-height:600px)]:min-h-0 [@media(max-height:600px)]:py-1.5",
+  "[[data-member-row]+&]:before:pointer-events-none [[data-member-row]+&]:before:absolute [[data-member-row]+&]:before:top-0 [[data-member-row]+&]:before:right-0 [[data-member-row]+&]:before:left-[63px] [[data-member-row]+&]:before:border-t [[data-member-row]+&]:before:border-line-hairline",
+  "[li+li>&]:before:pointer-events-none [li+li>&]:before:absolute [li+li>&]:before:top-0 [li+li>&]:before:right-0 [li+li>&]:before:left-[63px] [li+li>&]:before:border-t [li+li>&]:before:border-line-hairline",
+].join(" ");
+const MEMBER_ROW_TITLE_CLASS = "truncate text-subhead font-semibold text-foreground";
+const MEMBER_ROW_SUB_CLASS = "truncate text-caption text-foreground-hint";
 
 export function ChannelMemberListShell({
   children,
@@ -22,23 +34,22 @@ export function ChannelMemberListShell({
   framed?: boolean;
   "data-testid"?: string;
 }) {
-  return (
-    <div
-      className={
-        framed
-          ? `max-h-72 overflow-y-auto border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm ${className}`
-          : className
-      }
-      data-testid={dataTestId}
-    >
+  return framed ? (
+    <Card className={`max-h-72 overflow-y-auto ${className}`} data-testid={dataTestId}>
+      {children}
+    </Card>
+  ) : (
+    <div className={className} data-testid={dataTestId}>
       {children}
     </div>
   );
 }
 
+/** DS list section title (`rf-section`): 13/18 700 ink-3 above its rows,
+ *  no band behind it. */
 export function ChannelMemberSectionHeader({ children }: { children: ReactNode }) {
   return (
-    <SectionEyebrow as="div" uppercase={false} className="bg-fill-muted px-3 py-1.5 text-foreground-muted theme-brutal:bg-white/50 theme-brutal:text-black">
+    <SectionEyebrow as="div" className="px-4 pt-4 pb-1.5">
       {children}
     </SectionEyebrow>
   );
@@ -68,13 +79,14 @@ export function MemberRoleTag({ role }: { role: ServerRole }) {
   const { formatMessage } = useIntl();
   if (role === "member") return null;
   const isGuest = role === "guest";
+  // Admin is a neutral label (DS `rf-tag`); a guest comes from outside the
+  // workspace, so it reads as the cyan-soft external chip.
   return (
     <Badge
       data-testid={isGuest ? "member-page-role-channel-guest" : "member-page-role-channel-admin"}
-      appearance="soft"
-      variant={isGuest ? "information" : "muted"}
-      uppercase={false}
-      className="shrink-0 font-mono"
+      appearance={isGuest ? "soft" : "outline"}
+      variant={isGuest ? "information" : undefined}
+      className="shrink-0"
     >
       {formatMessage({ id: isGuest
         ? "channel.membersPage.role.channelGuest"
@@ -139,7 +151,7 @@ export function ChannelMemberRow({
 }) {
   const avatar = (
     <AvatarSlot
-      context="members-row"
+      context="list-row"
       type={type}
       agentAvatarUrl={agentAvatarUrl}
       humanAvatarUrl={humanAvatarUrl}
@@ -147,22 +159,25 @@ export function ChannelMemberRow({
       badge={type === "agent" && agentId ? (
         <ChannelMemberActivityBadge agentId={agentId} fallbackActivity={agentFallbackActivity} />
       ) : undefined}
-      className={onAvatarClick || onRowClick ? "transition-colors hover:brightness-90" : undefined}
     />
+  );
+
+  const text = (
+    <div className="min-w-0 flex-1">
+      <div className={MEMBER_ROW_TITLE_CLASS}>
+        {name}
+      </div>
+      {secondary ? (
+        <div className={MEMBER_ROW_SUB_CLASS}>
+          {secondary}
+        </div>
+      ) : null}
+    </div>
   );
 
   const body = (
     <>
-      <div className="min-w-0 flex-1">
-        <div className={`truncate text-sm text-foreground-strong ${type === "human" ? "font-bold" : "font-medium"}`}>
-          {name}
-        </div>
-        {secondary ? (
-          <div className="truncate text-xs text-foreground-muted">
-            {secondary}
-          </div>
-        ) : null}
-      </div>
+      {text}
       {trailing}
     </>
   );
@@ -172,23 +187,14 @@ export function ChannelMemberRow({
     // trailing slot (role tag, remove button) renders as a sibling so
     // interactive controls never nest inside a button.
     return (
-      <div className="group flex items-start gap-2 px-3 py-2 transition-colors [@media(max-height:600px)]:py-1 hover:bg-fill-muted">
+      <div className={MEMBER_ROW_CLASS} data-member-row="">
         <button
           type="button"
           onClick={onRowClick}
-          className="flex min-w-0 flex-1 items-start gap-2 text-left"
+          className="flex min-w-0 flex-1 items-center gap-3 rounded-control text-left outline-none focus-visible:shadow-focus"
         >
-          <span className="relative mt-1 shrink-0">{avatar}</span>
-          <div className="min-w-0 flex-1">
-            <div className={`truncate text-sm text-foreground-strong ${type === "human" ? "font-bold" : "font-medium"}`}>
-              {name}
-            </div>
-            {secondary ? (
-              <div className="truncate text-xs text-foreground-muted">
-                {secondary}
-              </div>
-            ) : null}
-          </div>
+          <span className="relative shrink-0">{avatar}</span>
+          {text}
         </button>
         {trailing}
       </div>
@@ -196,17 +202,17 @@ export function ChannelMemberRow({
   }
 
   return (
-    <div className="group flex items-start gap-2 px-3 py-2 transition-colors [@media(max-height:600px)]:py-1 hover:bg-fill-muted">
+    <div className={MEMBER_ROW_CLASS} data-member-row="">
       {onAvatarClick ? (
         <button
           type="button"
           onClick={onAvatarClick}
-          className="relative mt-1 shrink-0"
+          className="relative shrink-0 rounded-sticker outline-none focus-visible:shadow-focus"
         >
           {avatar}
         </button>
       ) : (
-        <span className="relative mt-1 shrink-0">{avatar}</span>
+        <span className="relative shrink-0">{avatar}</span>
       )}
       {body}
     </div>
@@ -237,10 +243,10 @@ export function ChannelMemberRemoveButton({
       <button
         type="button"
         onClick={onClick}
-        className={`${revealOnRowHover ? "flex md:invisible md:group-hover:visible md:group-focus-within:visible" : "flex"} ${visibleLabel ? "h-7 px-2 text-xs" : icon ? "h-7 w-7" : "size-6 mt-1"} shrink-0 items-center justify-center rounded-sm border border-line-muted bg-danger-soft text-danger-strong transition-colors hover:bg-danger/30 theme-brutal:rounded-none theme-brutal:border-black theme-brutal:bg-brutal-red/20 theme-brutal:text-black theme-brutal:hover:bg-brutal-red/60`}
+        className={`${revealOnRowHover ? "flex md:invisible md:group-hover:visible md:group-focus-within:visible" : "flex"} ${visibleLabel ? "h-8 px-2.5 text-footnote font-bold" : "size-8"} shrink-0 items-center justify-center rounded-control text-foreground-muted outline-none transition-colors hover:bg-fill-pressed hover:text-foreground active:bg-fill-pressed focus-visible:shadow-focus`}
         aria-label={label}
       >
-        {visibleLabel ?? icon ?? <X size={12} />}
+        {visibleLabel ?? icon ?? <X size={16} aria-hidden="true" />}
       </button>
     </Tooltip>
   );
@@ -278,7 +284,7 @@ export function ChannelMemberHoverActions({
           disabled={roleAction.disabled}
           size="sm"
           variant="outline"
-          className="h-7 whitespace-nowrap px-2 text-xs"
+          className="whitespace-nowrap"
           data-testid="channel-member-role-action"
           aria-label={roleAction.ariaLabel}
         >
@@ -290,7 +296,7 @@ export function ChannelMemberHoverActions({
           label={removeAction.label}
           onClick={removeAction.onClick}
           revealOnRowHover={false}
-          icon={<UserMinus size={14} aria-hidden />}
+          icon={<UserMinus size={16} aria-hidden />}
         />
       )}
     </span>

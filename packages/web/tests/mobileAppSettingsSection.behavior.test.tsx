@@ -165,15 +165,16 @@ test("the two download buttons stay peers, neither styled as the recommended one
     renderAbout();
     const android = screen.getByTestId("mobile-download-android");
     const ios = screen.getByTestId("mobile-download-ios");
+    assert.equal(android.className, ios.className, "both buttons share one look");
     for (const el of [android, ios]) {
       assert.ok(
-        el.className.includes("bg-layer-panel"),
-        `both buttons must share the neutral surface: ${el.className}`,
+        el.className.split(/\s+/).includes("bg-layer-card"),
+        `both buttons sit on the neutral outline surface: ${el.className}`,
       );
-      assert.equal(el.getAttribute("data-slot"), "button", "downloads use the shared theme-aware button primitive");
+      assert.equal(el.getAttribute("data-slot"), "button", "downloads use the shared raft-ui button");
       assert.ok(
-        !el.className.includes("bg-brutal-pink"),
-        `neither button may take the CTA fill: ${el.className}`,
+        !el.className.split(/\s+/).includes("bg-attention-400"),
+        `neither button may take the pink CTA fill: ${el.className}`,
       );
     }
   } finally {

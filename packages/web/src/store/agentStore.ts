@@ -2,7 +2,7 @@ import { useSyncExternalStore } from "react";
 import { create } from "zustand";
 import api from "../api/client";
 import { currentTimeMs, EXTERNAL_AGENT_ONLINE_WINDOW_MS, isExternalAgentRuntime, normalizeActivity, normalizeActivityDetailKind } from "@botiverse/raft-shared";
-import type { AgentActivity, AgentActivityDetailKind, AgentHostedRuntimeSummary, ExternalAgentDiagnosticsView, AgentRuntimeErrorState, AgentRuntimeProviderKind, AgentStatus, DeliveryConsumptionActivityDiagnostic, ReasoningEffort, RuntimeConfig, RuntimeFormDefinitionRef, ServerRole, SpawnFailureActivityDiagnostic, TrajectoryEntry, WakeCrashLoopActivityDiagnostic } from "@botiverse/raft-shared";
+import type { AgentActivity, AgentArchiveWorkspaceChoice, AgentActivityDetailKind, AgentHostedRuntimeSummary, ExternalAgentDiagnosticsView, AgentRuntimeErrorState, AgentRuntimeProviderKind, AgentStatus, DeliveryConsumptionActivityDiagnostic, ReasoningEffort, RuntimeConfig, RuntimeFormDefinitionRef, ServerRole, SpawnFailureActivityDiagnostic, TrajectoryEntry, WakeCrashLoopActivityDiagnostic } from "@botiverse/raft-shared";
 import type { RuntimeFormV2SubmitRef } from "@botiverse/raft-runtime-form";
 import { useServerStore } from "./serverStore";
 import { registerServerReset } from "./serverResetRegistry";
@@ -41,6 +41,8 @@ export interface Agent {
   displayName: string | null;
   avatarUrl: string | null;
   description: string | null;
+  /** Server-derived identity: dedicated RaftBench analysis agent, not a chat recipient. */
+  raftbenchService?: boolean;
   status: AgentStatus;
   model: string;
   runtime: string;
@@ -338,11 +340,12 @@ interface AgentState {
   resetActivitySeq: () => void;
   createAgent: (
     name: string,
-    opts?: { description?: string; model?: string; runtime?: string; runtimeConfig?: RuntimeConfig; formDefinitionRef?: RuntimeFormDefinitionRef | RuntimeFormV2SubmitRef; formValues?: Record<string, unknown>; reasoningEffort?: ReasoningEffort; machineId?: string; envVars?: Record<string, string>; avatarUrl?: string; onboarding?: boolean; external?: boolean; provider?: AgentRuntimeProviderKind; actionCardMessageId?: string; actionCardConfirmationVersion?: number }
+    opts?: { description?: string; model?: string; runtime?: string; runtimeConfig?: RuntimeConfig; formDefinitionRef?: RuntimeFormDefinitionRef | RuntimeFormV2SubmitRef; formValues?: Record<string, unknown>; reasoningEffort?: ReasoningEffort; machineId?: string; envVars?: Record<string, string>; avatarUrl?: string; onboarding?: boolean; external?: boolean; provider?: AgentRuntimeProviderKind; hostedModel?: string | null; actionCardMessageId?: string; actionCardConfirmationVersion?: number }
   ) => Promise<Agent>;
   fetchExternalAgentStatus: (agentId: string) => Promise<ExternalAgentStatus>;
   fetchExternalAgentDiagnostics: (agentId: string) => Promise<ExternalAgentDiagnosticsView>;
-  retryHostedRuntimeProvisioning: (agentId: string) => Promise<AgentHostedRuntimeSummary | null>;
+  /** `model` re-picks after the provider refused the model (`hostedRuntime.retryNeedsModel`); `null` = its default. */
+  retryHostedRuntimeProvisioning: (agentId: string, options?: { model?: string | null }) => Promise<AgentHostedRuntimeSummary | null>;
   fetchOnboardingIdentityAdoption: (agentId: string) => Promise<OnboardingIdentityAdoptionPreview>;
   adoptOnboardingIdentity: (agentId: string) => Promise<OnboardingIdentityAdoptionResult>;
   updateAgent: (
@@ -352,7 +355,10 @@ interface AgentState {
   ) => Promise<Agent>;
   startAgent: (agentId: string) => Promise<void>;
   stopAgent: (agentId: string) => Promise<void>;
-  deleteAgent: (agentId: string) => Promise<void>;
+  /** A hosted agent: interrupt its running turn (the agent stays). Throws when the stop failed. */
+  stopHostedAgentTurn: (agentId: string) => Promise<"interrupted" | "not_running">;
+  /** Archive the agent (the former delete); `workspace` decides what happens to its workspace. */
+  deleteAgent: (agentId: string, workspace?: AgentArchiveWorkspaceChoice) => Promise<void>;
   resetAgent: (agentId: string, mode: "restart" | "session" | "full") => Promise<void>;
   updateAgentSession: (agentId: string, sessionId: string | null) => void;
   /** `agent:seen` push: advance an external agent's `lastSeenAt` (never backwards). */
@@ -548,6 +554,7 @@ const AGENT_COMPARED_KEYS: Record<AgentComparedKey, true> = {
   displayName: true,
   avatarUrl: true,
   description: true,
+  raftbenchService: true,
   status: true,
   model: true,
   runtime: true,
@@ -904,13 +911,17 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       onboarding: opts.onboarding,
       external: opts.external,
       ...(opts.provider ? { provider: opts.provider } : {}),
+      ...(opts.provider && opts.hostedModel ? { hostedModel: opts.hostedModel } : {}),
       ...(opts.actionCardMessageId ? { actionCardMessageId: opts.actionCardMessageId } : {}),
       ...(opts.actionCardConfirmationVersion !== undefined ? { actionCardConfirmationVersion: opts.actionCardConfirmationVersion } : {}),
     });
     const { activity: rawActivity, activityKind: rawActivityKind, activityDetail: rawDetail, activityDetailKind: rawDetailKind, deliveryConsumption: rawDeliveryConsumption, wakeCrashLoop: rawWakeCrashLoop, spawnFailure: rawSpawnFailure, ...rest } = data as ApiAgent;
     const agent: Agent = rest;
     set((state) => ({
-      agents: [...state.agents, agent],
+      // Upsert: a failed hosted Cindy converted to a computer Cindy comes back with her existing id.
+      agents: state.agents.some((existing) => existing.id === agent.id)
+        ? state.agents.map((existing) => existing.id === agent.id ? agent : existing)
+        : [...state.agents, agent],
       agentActivities: {
         ...state.agentActivities,
         [agent.id]: withTypedCarriers({
@@ -943,8 +954,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     return data as ExternalAgentDiagnosticsView;
   },
 
-  retryHostedRuntimeProvisioning: async (agentId) => {
-    const { data } = await api.post(`/agents/${agentId}/hosted-runtime/retry`);
+  retryHostedRuntimeProvisioning: async (agentId, options = {}) => {
+    const { data } = await api.post(
+      `/agents/${agentId}/hosted-runtime/retry`,
+      options.model !== undefined ? { model: options.model } : undefined,
+    );
     const hostedRuntime = (data as { hostedRuntime?: AgentHostedRuntimeSummary | null }).hostedRuntime ?? null;
     set((state) => ({
       agents: state.agents.map((agent) => agent.id === agentId ? { ...agent, hostedRuntime } : agent),
@@ -1023,6 +1037,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     notifyAllChannelMembersChanged();
   },
 
+  stopHostedAgentTurn: async (agentId) => {
+    const { data } = await api.post(`/agents/${agentId}/stop`);
+    return (data as { result?: string }).result === "interrupted" ? "interrupted" : "not_running";
+  },
+
   stopAgent: async (agentId) => {
     await api.post(`/agents/${agentId}/stop`);
     set((state) => ({
@@ -1045,8 +1064,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     }));
   },
 
-  deleteAgent: async (agentId) => {
-    await api.delete(`/agents/${agentId}`);
+  deleteAgent: async (agentId, workspace = "keep") => {
+    await api.delete(`/agents/${agentId}`, { data: { workspace } });
     set((state) => {
       const { [agentId]: _, ...restActivities } = state.agentActivities;
       const { [agentId]: _traceJoin, ...restTraceJoins } = state.agentActivityTraceJoins;

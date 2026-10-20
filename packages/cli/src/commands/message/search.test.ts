@@ -466,3 +466,53 @@ test("message search command preserves SEARCH_TIMEOUT after an admitted query re
     },
   );
 });
+
+test("message search command says an incomplete recent search is not all the matches and prints the continue command", async () => {
+  const { io, stdout } = memoryIo();
+  const paths: string[] = [];
+  const cursor = "eyJ0IjoiMjAyNi0xMC0wMVQwMDowMDowMC4xMjM0NTZaIiwiaSI6IjAwMDAwMDAwLTAwMDAtNDAwMC04MDAwLTAwMDAwMDAwMDAwMCJ9";
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (_method: string, path: string): Promise<ApiResponse<unknown>> => {
+        paths.push(path);
+        return {
+          ok: true,
+          status: 200,
+          error: null,
+          data: { results: [], hasMore: false, incomplete: true, nextCursor: cursor, searchedThrough: "2026-10-01T00:00:00.123Z", searchedMessages: 10_000 },
+        };
+      },
+    }) as any,
+  });
+
+  await messageSearchCommand.handler(ctx, { query: "invoice", sort: "recent", after: "2026-09-16T00:00:00Z" });
+
+  const output = stdout.join("");
+  const lines = output.trimEnd().split("\n");
+  assert.match(lines[0] ?? "", /^Search incomplete: no matches in the messages searched so far \(stopped after reading 10,000 messages, back to [^)]+\)\. Older messages were not searched, so this does NOT mean no message matches\. \(incomplete=true\)$/);
+  assert.equal((output.match(/NOT/g) ?? []).length, 1, "one capitalised NOT");
+  assert.match(lines[1] ?? "", new RegExp(`^Next \\(search older messages\\): raft message search --query 'invoice' --after '[^']+' --sort recent --cursor '${cursor}'$`));
+  assert.equal(lines[2], "Or narrow the search: add --target '#<channel>' or --sender <handle>.");
+  assert.equal(output.split(cursor).length - 1, 1, "the cursor is printed once, in the command");
+
+  // The printed command continues from the cursor.
+  await messageSearchCommand.handler(ctx, { query: "invoice", sort: "recent", cursor });
+  assert.match(paths.at(-1) ?? "", new RegExp(`[?&]cursor=${cursor}(&|$)`));
+});
+
+test("message search command rejects --cursor outside a recent text search and with --offset", async () => {
+  const { io } = memoryIo();
+  const ctx = createCommandContext({ io, loadAgentContext: () => agentContext, createApiClient: () => ({}) as any });
+  for (const opts of [
+    { query: "invoice", cursor: "c" },
+    { sender: "@alice", sort: "recent" as const, cursor: "c" },
+    { query: "invoice", sort: "recent" as const, cursor: "c", offset: "20" },
+  ]) {
+    await assert.rejects(
+      async () => { await messageSearchCommand.handler(ctx, opts); },
+      (err: unknown) => err instanceof CliError && err.code === "INVALID_ARG",
+    );
+  }
+});

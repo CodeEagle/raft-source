@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
+import { once } from 'node:events';
 import { ensureActiveRelease, transportCauseSuffix } from './publish-hands-release.mjs';
 
 export async function uploadAsset({ api, apiBase = 'https://hands.build', appId, buildId, asset, fetchImpl = fetch, recovery = {} }) {
@@ -39,7 +40,12 @@ export async function uploadAsset({ api, apiBase = 'https://hands.build', appId,
     }
     if (!uploaded.ok) throw new Error(`Hands direct upload failed: HTTP ${uploaded.status}`);
     await uploaded.body?.cancel();
-  } finally { body.destroy(); }
+  } finally {
+    // destroy() defers to a pending open; wait so the file is released (and a
+    // late open error is observed) before the caller can remove it.
+    body.destroy();
+    if (!body.closed) await once(body, 'close').catch(() => {});
+  }
   await completeUpload({ ...completion, status: {} });
   // Completion's server-side streamed SHA/size check, and a subsequent fresh
   // asset listing, are the proof. A successful PUT alone is never publication.

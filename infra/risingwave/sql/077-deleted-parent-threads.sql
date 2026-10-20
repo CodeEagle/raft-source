@@ -1,18 +1,32 @@
--- Threads below a deleted parent leave the human Activity. Deleting an agent soft-deletes its DM but leaves
--- the DM's threads live (channels.inbox.api.test.ts pins that). The canonical
--- Postgres read (getInboxItems: parent_ch.deleted_at IS NULL on the followed
--- and the mention arms) and rw_agent_inbox_v6 (065's parent join) drop those
--- threads; this chain did not: rw_subs_v2 and rw_inbox_mention_v6 check only the
--- thread row, so a followed thread or a leftover unread mention under a deleted
--- DM stayed in Activity, and Done (a residue no-op for an unavailable target)
--- could not remove it.
+-- Threads below a deleted, archived or invisible parent leave the human
+-- Activity.
+-- Deleting an agent soft-deletes its DM but leaves the DM's threads live
+-- (channels.inbox.api.test.ts pins that), and removing someone from a private,
+-- DM or joint channel leaves their thread follows in place.
 --
--- One filter at the items layer (over rw_inbox_items_v11) covers both arms: a thread row is kept only
--- while its parent (rw_thread_parent_v3, the same join rw_agent_inbox_v6 uses)
--- exists and is not deleted. The watermark's thread arm takes the same
--- condition, so those threads no longer occupy any of the 500 ranked slots.
--- Serving and totals are 076's definitions with the upstream names advanced.
--- Output columns are unchanged, so the server switch is a rename.
+-- The canonical Postgres read (getInboxItems) serves a followed thread only
+-- under a parent that is neither deleted nor archived and that is public or
+-- has the receiver as a member (the joint projection's local parent for a
+-- joint channel); its mention-only thread arm admits public parents only.
+-- rw_conversation_unread_v3 (076) applies the same parent condition to the
+-- sidebar. This chain did not: rw_subs_v2 and rw_inbox_mention_v6 check only
+-- the thread row, so a followed thread or a leftover unread mention stayed in
+-- Activity (latest reply, parent preview, reply count, unread) after the
+-- parent was deleted or archived or the receiver lost access to it, and Done
+-- (a residue no-op for an unavailable target) could not remove it.
+--
+-- One filter at the items layer (over rw_inbox_items_v11) covers both arms: a
+-- thread row is kept only while its parent (rw_thread_parent_v3, which already
+-- maps a joint thread to the receiving server's local parent) exists, is not
+-- deleted or archived, and is public or has the receiver as a member -- the
+-- condition rw_conversation_unread_v3 uses. One deliberate difference from
+-- Postgres: a mention-only thread under a private, DM or joint parent the
+-- receiver belongs to is kept here (as in the sidebar), while the Postgres
+-- read admits mention-only threads under public parents only. That row is
+-- visible to its receiver, so it is not a leak. The watermark's thread arm takes
+-- the same condition, so those threads no longer occupy any of the 500 ranked
+-- slots. Serving and totals are 076's definitions with the upstream names
+-- advanced. Output columns are unchanged, so the server switch is a rename.
 --
 -- New names: items_v12, serving_v8, totals_v6, watermark_v6.
 -- Apply after 076 (whose rw_inbox_items_v11 is the base), 067 and 063-chain-v5. Build order and names: README.
@@ -31,8 +45,13 @@ WITH structural AS (
   FROM rw_thread_follows AS tf
   JOIN rw_channels AS c ON tf.thread_channel_id = c.id AND c.deleted_at IS NULL AND c.archived_at IS NULL
   JOIN rw_thread_parent_v3 AS tp ON tp.thread_channel_id = c.id
-  JOIN rw_channels AS pc ON pc.id = tp.parent_channel_id AND pc.deleted_at IS NULL
+  JOIN rw_channels AS pc ON pc.id = tp.parent_channel_id AND pc.deleted_at IS NULL AND pc.archived_at IS NULL
+  LEFT JOIN rw_channel_humans AS pch
+    ON tf.follower_type = 'user' AND pch.channel_id = tp.parent_channel_id AND pch.user_id = tf.follower_id
+  LEFT JOIN rw_channel_agents AS pca
+    ON tf.follower_type = 'agent' AND pca.channel_id = tp.parent_channel_id AND pca.agent_id = tf.follower_id
   WHERE tf.unfollowed_at IS NULL
+    AND (pc.type = 'channel' OR pch.user_id IS NOT NULL OR pca.agent_id IS NOT NULL)
 ), ranked AS (
   SELECT s.receiver_type, s.receiver_id, s.server_id, tl.latest_seq,
          ROW_NUMBER() OVER (PARTITION BY s.receiver_type, s.receiver_id, s.server_id ORDER BY tl.latest_seq DESC) AS rk
@@ -57,7 +76,15 @@ CREATE MATERIALIZED VIEW rw_inbox_items_v12 AS
 SELECT b.* FROM rw_inbox_items_v11 AS b
 LEFT JOIN rw_thread_parent_v3 AS tp ON tp.thread_channel_id = b.target_id AND b.kind = 'thread'
 LEFT JOIN rw_channels AS pc ON pc.id = tp.parent_channel_id
-WHERE b.kind <> 'thread' OR (pc.id IS NOT NULL AND pc.deleted_at IS NULL);
+LEFT JOIN rw_channel_humans AS pch
+  ON b.receiver_type = 'user' AND pch.channel_id = tp.parent_channel_id AND CAST(pch.user_id AS VARCHAR) = b.receiver_id
+LEFT JOIN rw_channel_agents AS pca
+  ON b.receiver_type = 'agent' AND pca.channel_id = tp.parent_channel_id AND CAST(pca.agent_id AS VARCHAR) = b.receiver_id
+-- rw_conversation_unread_v3's parent condition (076): a live, unarchived parent
+-- the receiver can see (public, or a member of a private/DM/joint parent).
+WHERE b.kind <> 'thread'
+   OR (pc.id IS NOT NULL AND pc.deleted_at IS NULL AND pc.archived_at IS NULL
+       AND (pc.type = 'channel' OR pch.user_id IS NOT NULL OR pca.agent_id IS NOT NULL));
 
 CREATE MATERIALIZED VIEW rw_inbox_serving_v8 AS SELECT p.server_id, p.receiver_type, p.receiver_id, p.kind, CASE WHEN p.kind = 'thread' THEN NULL ELSE p.target_id END AS channel_id, CASE WHEN p.kind = 'thread' THEN NULL ELSE c.name END AS channel_name, CASE WHEN p.kind = 'thread' THEN NULL ELSE c.type END AS channel_type, lm.id AS last_message_id, fu.id AS first_unread_message_id, CASE WHEN p.kind = 'thread' THEN NULL ELSE p.latest_at END AS last_message_at, CASE WHEN p.kind = 'thread' THEN NULL ELSE lm.preview END AS last_message_preview, CASE WHEN p.kind = 'thread' THEN NULL ELSE lm.sender_type END AS last_message_sender_type, CASE WHEN p.kind = 'thread' THEN NULL ELSE lm.sender_id END AS last_message_sender_id, CAST(COALESCE(p.unread_count, 0) AS INT) AS unread_count, CASE WHEN p.kind = 'thread' THEN p.target_id ELSE NULL END AS thread_channel_id, tp.parent_message_id, tp.parent_channel_id, tp.parent_channel_name, tp.parent_channel_type, pm.preview AS parent_message_preview, pm.sender_type AS parent_message_sender_type, pm.sender_id AS parent_message_sender_id, COALESCE(lm.preview, ma.preview) AS latest_activity_preview, COALESCE(lm.sender_type, ma.sender_type) AS latest_activity_sender_type, COALESCE(lm.sender_id, ma.sender_id) AS latest_activity_sender_id, COALESCE(lm.id, ma.id) AS latest_activity_message_id, COALESCE(lm.seq, ma.seq) AS latest_activity_seq, p.latest_at AS last_activity_at, CASE WHEN p.kind = 'thread' THEN p.latest_at ELSE NULL END AS last_reply_at, CASE WHEN p.kind = 'thread' THEN CAST(tl.msg_count AS INT) ELSE NULL END AS reply_count, pm.task_number, pm.task_status, pm.task_assignee_type AS task_claimed_by_type, pm.task_assignee_id AS task_claimed_by_id, (p.mention_unread > 0) AS has_mention, (p.mention_unread > 0 AND p.unread_count IS NULL) AS mention_only, CAST(p.last_read_seq AS BIGINT) AS last_read_seq, COALESCE(p.latest_at, ma.created_at) AS activity_at, (p.total_mentions > 0) AS has_any_mention FROM rw_inbox_items_v12 AS p LEFT JOIN rw_activity_watermark_v6 AS w ON w.receiver_type = p.receiver_type AND w.receiver_id = p.receiver_id AND w.server_id = p.server_id LEFT JOIN rw_channels AS c ON c.id = p.target_id LEFT JOIN rw_message_preview_v1 AS lm ON lm.seq = p.latest_seq LEFT JOIN rw_message_preview_v1 AS fu ON fu.seq = p.first_unread_seq LEFT JOIN rw_thread_parent_v3 AS tp ON tp.thread_channel_id = p.target_id AND p.kind = 'thread' LEFT JOIN rw_message_preview_v1 AS pm ON pm.id = tp.parent_message_id LEFT JOIN rw_target_latest_v4 AS tl ON tl.target_id = p.target_id LEFT JOIN rw_message_preview_v1 AS ma ON ma.seq = p.max_mention_seq WHERE p.present AND GREATEST(COALESCE(tl.latest_seq, 0), COALESCE(p.latest_seq, 0), COALESCE(p.max_mention_seq, 0)) >= COALESCE(w.watermark_seq, 0);
 

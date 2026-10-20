@@ -1,33 +1,61 @@
 import { useLayoutEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
-import { Button, Step, Steps } from "raft-ui";
-import type { StepStatus } from "raft-ui";
+import { Button, Step, Steps } from "@botiverse/raft-ui";
+import type { StepStatus } from "@botiverse/raft-ui";
 import Banner from "../ui/Banner";
 import { useMediaQuery } from "../../hooks/effectPrimitives";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import type { Machine } from "../../store/machineStore";
-import { migrationNoticePresentation, migrationTargetLabel } from "./presentation";
+import { hostedArrivalAttentionReason, migrationNoticePresentation, migrationNoticeTargetLabel, migrationTargetLabel } from "./presentation";
 import type { AgentMigrationNotice } from "./realtime";
 import {
+  HOSTED_MIGRATION_PROGRESS_STEPS,
   MIGRATION_PROGRESS_STEPS,
   canCancelMigration,
+  hostedMigrationProgressStep,
   isActiveMigrationState,
   isCanceledMigrationState,
   isCompletedMigrationState,
   isFailedMigrationState,
+  isHostedMigration,
+  isHostedReviewPending,
   migrationProgressStep,
 } from "./state";
+import { HostedMigrationReview } from "./HostedMigrationReview";
 import { MigrationErrorContent } from "./MigrationErrorContent";
 import { MigrationReference } from "./MigrationReference";
+
+// A move to the cloud names its target in the copy itself ("the cloud" reads
+// differently from a computer name in both locales), so it has its own headers.
+const COMPUTER_HEADER_IDS = {
+  completed: "agent.detail.movedToTarget",
+  canceled: "agent.detail.migrationToTargetCanceled",
+  needsAttention: "agent.detail.migrationToTargetNeedsAttention",
+  canceling: "agent.detail.cancelingMigrationToTarget",
+  active: "agent.detail.movingToTarget",
+  idle: "agent.detail.migrationToTarget",
+  progress: "agent.detail.migrationProgressToTarget",
+} as const;
+const HOSTED_HEADER_IDS = {
+  completed: "agent.migration.hosted.headerCompleted",
+  canceled: "agent.migration.hosted.headerCanceled",
+  needsAttention: "agent.migration.hosted.headerNeedsAttention",
+  canceling: "agent.migration.hosted.headerCanceling",
+  active: "agent.migration.hosted.headerActive",
+  idle: "agent.migration.hosted.headerIdle",
+  progress: "agent.migration.hosted.progressLabel",
+} as const;
 
 export function MigrationProgressPanel({
   notice,
   machines,
   onShowCancel,
+  onRefresh,
 }: {
   notice: AgentMigrationNotice;
   machines: Machine[];
   onShowCancel: () => void;
+  onRefresh: () => Promise<void>;
 }) {
   const { formatMessage } = useIntl();
   const { formatShortDateTime } = useTimeFormatter();
@@ -37,14 +65,21 @@ export function MigrationProgressPanel({
   const stepsRef = useRef<HTMLOListElement>(null);
   const rowFits = useStepsRowFits(stepsRef);
   const narrow = phone || !rowFits;
-  const target = migrationTargetLabel(formatMessage, machines, notice.targetMachineId);
+  const hosted = isHostedMigration(notice);
+  const headerIds = hosted ? HOSTED_HEADER_IDS : COMPUTER_HEADER_IDS;
+  const steps = hosted ? HOSTED_MIGRATION_PROGRESS_STEPS : MIGRATION_PROGRESS_STEPS;
+  const target = migrationNoticeTargetLabel(formatMessage, machines, notice);
+  const source = migrationTargetLabel(formatMessage, machines, notice.sourceMachineId);
+  const reviewSummary = isHostedReviewPending(notice) ? notice.hosted?.importSummary ?? null : null;
   const presentation = migrationNoticePresentation(formatMessage, notice, machines, formatShortDateTime);
   const completed = isCompletedMigrationState(notice.state);
+  // A switched move to the cloud that stalled is not over, but it needs attention like a failure.
   const failed = isFailedMigrationState(notice.state)
-    || (notice.state === "starting" && notice.failureReason === "auto_start_failed");
+    || (notice.state === "starting" && notice.failureReason === "auto_start_failed")
+    || hostedArrivalAttentionReason(notice) !== null;
   const canceled = isCanceledMigrationState(notice.state);
   const active = isActiveMigrationState(notice.state);
-  const currentStep = migrationProgressStep(notice);
+  const currentStep = hosted ? hostedMigrationProgressStep(notice) : migrationProgressStep(notice);
   const cancelRequested = notice.state.startsWith("cancel_requested_");
   const stepStatus: StepStatus = completed
     ? "finish"
@@ -54,37 +89,36 @@ export function MigrationProgressPanel({
         ? "wait"
         : "process";
   const headerMessageId = completed
-    ? "agent.detail.movedToTarget"
+    ? headerIds.completed
     : canceled
-      ? "agent.detail.migrationToTargetCanceled"
+      ? headerIds.canceled
       : failed || notice.cancelNeedsAttention
-        ? "agent.detail.migrationToTargetNeedsAttention"
+        ? headerIds.needsAttention
         : cancelRequested
-          ? "agent.detail.cancelingMigrationToTarget"
+          ? headerIds.canceling
           : active
-            ? "agent.detail.movingToTarget"
-            : "agent.detail.migrationToTarget";
+            ? headerIds.active
+            : headerIds.idle;
 
   return (
-    <section aria-label={formatMessage({ id: "agent.detail.migrationToTarget" }, { target })}>
+    <section aria-label={formatMessage({ id: headerIds.idle }, { target })}>
       <div className="flex flex-col gap-3">
       <div className="flex min-w-0 items-start justify-between gap-3">
-        <h3 className="min-w-0 break-words text-sm font-bold leading-tight text-foreground-strong">
+        <h3 className="min-w-0 break-words text-subhead font-semibold text-foreground">
           {formatMessage({ id: headerMessageId }, { target })}
         </h3>
       </div>
 
       <Steps
         ref={stepsRef}
-        size="sm"
         vertical={narrow}
-        current={completed ? MIGRATION_PROGRESS_STEPS.length : currentStep + 1}
+        current={completed ? steps.length : currentStep + 1}
         status={stepStatus}
         finishLabel={formatMessage({ id: "agent.migration.stepDone" })}
         errorLabel={formatMessage({ id: "agent.migration.stepFailed" })}
-        aria-label={formatMessage({ id: "agent.detail.migrationProgressToTarget" }, { target })}
+        aria-label={formatMessage({ id: headerIds.progress }, { target })}
       >
-        {MIGRATION_PROGRESS_STEPS.map((labelId) => (
+        {steps.map((labelId) => (
           <Step key={labelId} title={formatMessage({ id: labelId })} />
         ))}
       </Steps>
@@ -100,14 +134,25 @@ export function MigrationProgressPanel({
           <MigrationErrorContent presentation={presentation} />
         </Banner>
       ) : (
-        <div aria-live="polite" className="text-sm text-foreground-muted">
-          {cancelRequested && presentation.title ? <p className="font-bold">{presentation.title}</p> : null}
+        <div aria-live="polite" className="text-callout text-foreground-muted">
+          {cancelRequested && presentation.title ? <p className="font-semibold text-foreground">{presentation.title}</p> : null}
           <p>{presentation.message}</p>
         </div>
       )}
       {/* The reference is for support, so it only appears when something needs attention. */}
       {failed || notice.cancelNeedsAttention ? <MigrationReference notice={notice} /> : null}
-      {active && canCancelMigration(notice) ? (
+      {reviewSummary ? (
+        <HostedMigrationReview
+          notice={notice}
+          summary={reviewSummary}
+          source={source}
+          deadline={notice.transferDeadlineAt ? formatShortDateTime(notice.transferDeadlineAt) : null}
+          onShowCancel={onShowCancel}
+          onRefresh={onRefresh}
+        />
+      ) : null}
+      {/* While the review waits, its own Cancel sits beside Confirm. */}
+      {active && !reviewSummary && canCancelMigration(notice) ? (
         <div className="flex justify-end">
           <Button variant="outline" size="sm" type="button" onClick={onShowCancel}>
             {formatMessage({ id: "agent.detail.cancel" })}

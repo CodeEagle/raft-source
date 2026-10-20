@@ -62,6 +62,10 @@ export const SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION = {
   "agent.join_channel": "born-read",
   // The human who changed the role reads it; the agent gets it unread.
   "agent.server_role_changed": "born-read",
+  // The owner must fix the agent's credential or model. Born-read for the
+  // agent (the causal actor): it is not for the agent, and an unread fact
+  // would be carried into its next start as a message to act on.
+  "agent.runtime_action_required": "born-read",
   // The migrated agent is the intended reader; keep the completed receipt unread.
   "agent.migration_completed_receipt": "notify-exclude",
   "agent.migration_canceled_receipt": "notify-exclude",
@@ -82,6 +86,9 @@ export const SYSTEM_MESSAGE_BORN_READ_CLASSIFICATION = {
   // recorded for the thread audience, born-read for the actor who moved the task.
   // Product ruling #9 (Tenny): born-read, not skip.
   "task.lifecycle_thread": "born-read",
+  // A hosted Cindy's Day-2 recap wake (the server fires it, no Computer):
+  // unread for her, born-read for the owner whose thread it lands in.
+  "onboarding.hosted_recap_wake": "born-read",
   // Action-card result reply in the card thread: @mentions the preparing
   // agent (unread for it); born-read for the human who executed the card.
   "action_card.result_reply": "born-read",

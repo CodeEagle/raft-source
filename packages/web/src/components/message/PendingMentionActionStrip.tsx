@@ -2,7 +2,7 @@ import { UserPlus } from "lucide-react";
 import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import type { PendingMentionAction } from "../../store/messageStore";
-import { Button } from "raft-ui";
+import { Button, Card, Separator } from "@botiverse/raft-ui";
 import { PendingMentionActionStripRow, pendingMentionCanAdd } from "./PendingMentionActionStripRow";
 
 export type PendingMentionActionLocalState = "notified" | "added";
@@ -48,8 +48,8 @@ export function PendingMentionActionStrip({
   }, [onAddAllActions, addableResolutionIds]);
 
   return (
-    <div
-      className="mb-2 w-full rounded-lg border border-line-muted bg-layer-panel px-3 py-2 shadow-raft-xs theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:shadow-brutal-sm"
+    <Card
+      className="mb-2 w-full px-3 py-2.5"
       data-testid="pending-mention-action-strip"
     >
       <div className="flex flex-col gap-2" data-testid="pending-mention-action-rows">
@@ -67,13 +67,15 @@ export function PendingMentionActionStrip({
         ))}
       </div>
       {showAddAll && (
+        <>
+        <Separator className="mt-2" />
         <div
-          className="mt-2 flex justify-end border-t border-line-hairline pt-2"
+          className="flex justify-end pt-2"
           data-testid="pending-mention-action-footer"
         >
           <Button
             type="button"
-            variant="accent"
+            variant="outline"
             size="sm"
             disabled={isAddingAll}
             onClick={handleAddAllActions}
@@ -82,7 +84,8 @@ export function PendingMentionActionStrip({
             {formatMessage({ id: "message.pendingMention.addAll" })}
           </Button>
         </div>
+        </>
       )}
-    </div>
+    </Card>
   );
 }

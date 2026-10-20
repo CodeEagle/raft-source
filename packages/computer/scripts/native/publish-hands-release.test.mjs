@@ -530,7 +530,9 @@ test("direct upload transport failures name the asset and host/path, never the s
       upload: { method: "PUT", url: "https://r2.example.com/bucket/key?X-Amz-Signature=must-not-leak", headers: {} },
       complete_url: "/api/apps/a1/builds/b1/assets/as1/upload/complete",
     });
-    const fetchImpl = async () => {
+    let body;
+    const fetchImpl = async (_url, init) => {
+      body = init.body;
       throw new TypeError("fetch failed", { cause: Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" }) });
     };
     await assert.rejects(
@@ -544,6 +546,9 @@ test("direct upload transport failures name the asset and host/path, never the s
         return true;
       },
     );
+    // The file stream's open must settle before the caller can remove the file;
+    // a still-pending open fails later as an uncaught ENOENT.
+    assert.equal(body.closed, true);
   } finally {
     await rm(workDir, { recursive: true, force: true });
   }

@@ -15,15 +15,19 @@ export const MESSAGE_BODY_FONT_SIZE_OPTIONS: Array<{
   sizeLabel: string;
   className: string;
 }> = [
-  { value: "sm", sizeLabel: "12px", className: "text-xs" },
-  { value: "md", sizeLabel: "14px", className: "text-sm" },
-  { value: "lg", sizeLabel: "16px", className: "text-base" },
+  { value: "sm", sizeLabel: "14px", className: "text-sm" },
+  { value: "md", sizeLabel: "16px", className: "text-base" },
+  { value: "lg", sizeLabel: "18px", className: "text-lg" },
 ];
 
+/**
+ * Raft Design System › Message: body text is 16/24. The middle tier is that
+ * size; Small and Large sit one step either side of it.
+ */
 const MESSAGE_BODY_FONT_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
-  sm: "text-xs",
-  md: "text-sm",
-  lg: "text-base",
+  sm: "text-sm",
+  md: "text-base",
+  lg: "text-lg",
 };
 
 /**
@@ -33,9 +37,9 @@ const MESSAGE_BODY_FONT_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
  * class whose cascade position can be changed by a theme recipe.
  */
 const MESSAGE_BODY_FONT_SIZE_VALUES: Record<MessageBodyFontSize, string> = {
-  sm: "0.75rem",
-  md: "0.875rem",
-  lg: "1rem",
+  sm: "0.875rem",
+  md: "1rem",
+  lg: "1.125rem",
 };
 
 function isMessageBodyFontSize(value: unknown): value is MessageBodyFontSize {
@@ -111,32 +115,33 @@ export function getMessageBodyFontSizeClass(size: MessageBodyFontSize): string {
 /**
  * Font-preference companions — 2026-10-11 (cindyz: the name, the name-line
  * notes, and the reply preview scale with the reader's message size). The
- * middle tier equals today's fixed sizes, so the default view is unchanged.
+ * middle tier is the Raft Design System's: name 15, notes 12, reply preview
+ * 13 with its time at 12.
  * Sizes are arbitrary values so the utilities never touch line-heights (the
  * named text-* scale utilities carry their own leading and would displace
  * the recipes' leading-none).
  */
 const MESSAGE_NAME_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
-  sm: "text-[12px]",
-  md: "text-[14px]",
-  lg: "text-[16px]",
+  sm: "text-[13px]",
+  md: "text-[15px]",
+  lg: "text-[17px]",
 };
 
 const MESSAGE_META_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
   sm: "text-[11px]",
   md: "text-[12px]",
-  lg: "text-[14px]",
+  lg: "text-[13px]",
 };
 
 const MESSAGE_PREVIEW_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
-  sm: "text-[11px]",
-  md: "text-[12.5px]",
+  sm: "text-[12px]",
+  md: "text-[13px]",
   lg: "text-[14px]",
 };
 
 const MESSAGE_PREVIEW_TIME_SIZE_CLASSES: Record<MessageBodyFontSize, string> = {
   sm: "text-[11px]",
-  md: "text-[11.5px]",
+  md: "text-[12px]",
   lg: "text-[13px]",
 };
 

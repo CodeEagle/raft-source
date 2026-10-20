@@ -1,4 +1,4 @@
-import { currentDate } from "@botiverse/raft-shared";
+import { currentDate } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import {
   CanonicalFetchTransportError,

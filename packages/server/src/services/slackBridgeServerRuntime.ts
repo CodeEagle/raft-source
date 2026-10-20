@@ -62,6 +62,7 @@ import { installExternalReactionCommandHandler } from "./externalReactionCommand
 import { enqueueSlackReactionAggregateTransition } from "./externalReactionSyncService";
 import { createExternalReactionWorkerRuntime } from "./externalReactionWorkerService";
 import { refreshSlackChannelBindingsPrivacy } from "./slackBindingPrivacyFreshnessService";
+import type { SlackMentionReconcileClaim } from "./slackMentionReconcileClaim";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -85,6 +86,10 @@ export interface SlackBridgeServerRuntimeDependencies {
   now?: () => Date;
   lifecycleClock?: SlackBridgePersistentWorkerClock;
   lifecycleIntervalMs?: number;
+  claimAgentMentionReconcile?(
+    serverId: string,
+    installId: string,
+  ): Promise<SlackMentionReconcileClaim | null>;
   inboundWorkerLeaseOwner?: string;
   inboundWorkerIntervalMs?: number;
   inboundAttachmentWorkerLeaseOwner?: string;
@@ -343,6 +348,9 @@ export async function createSlackBridgeServerRuntimeFromEnv(
     ...(dependencies.now ? { now: dependencies.now } : {}),
     ...(dependencies.lifecycleClock ? { clock: dependencies.lifecycleClock } : {}),
     ...(dependencies.lifecycleIntervalMs ? { intervalMs: dependencies.lifecycleIntervalMs } : {}),
+    ...(dependencies.claimAgentMentionReconcile
+      ? { claimAgentMentionReconcile: dependencies.claimAgentMentionReconcile }
+      : {}),
     ...(dependencies.onLifecycleReceipt ? { onReceipt: dependencies.onLifecycleReceipt } : {}),
     onError: dependencies.onLifecycleError,
     tracer: dependencies.tracer,
@@ -474,7 +482,9 @@ export async function createSlackBridgeServerRuntimeFromEnv(
         serverId: binding.serverId,
         providerUsergroupIds: input.providerUsergroupIds,
       });
-      return resolved.kind === "fact" ? resolved.fact.handles : null;
+      return resolved.kind === "fact"
+        ? [...resolved.fact.handles, ...(resolved.fact.humanHandles ?? [])]
+        : null;
     },
     ...(dependencies.onInboundMessageCommitted
       ? { onMessageCommitted: dependencies.onInboundMessageCommitted }

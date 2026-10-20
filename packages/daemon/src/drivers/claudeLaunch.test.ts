@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { execFileSync } from "node:child_process";
 import path from "node:path";
 import { mkdtempSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
@@ -309,9 +310,15 @@ test("probeClaude recovers on the next Windows detection after a command lookup 
     windowsEnvironmentReaderFn: () => null,
   };
 
-  // A timed-out lookup is undecided, not "not installed".
-  assert.deepEqual(probeClaude(deps), { available: false, unavailableReason: "probe_timeout" });
-  assert.deepEqual(probeClaude(deps), {
+  // A timed-out lookup is undecided, not "not installed". (task #1240: the
+  // lookup timing rides along as `diagnostic`; it is asserted separately.)
+  const { diagnostic: timedOutDiagnostic, lookupTiming: timedOutTiming, ...timedOut } = probeClaude(deps);
+  assert.deepEqual(timedOut, { available: false, unavailableReason: "probe_timeout" });
+  assert.match(timedOutDiagnostic ?? "", /^lookup: /);
+  assert.ok(timedOutTiming);
+  const { lookupTiming: recoveredTiming, ...recovered } = probeClaude(deps);
+  assert.ok(recoveredTiming);
+  assert.deepEqual(recovered, {
     available: true,
     version: "2.1.210 (Claude Code)",
   });
@@ -330,4 +337,28 @@ test("claude system prompt file is written owner-only (task #302)", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("task #1240: probeClaude carries the Windows lookup timing as a bounded diagnostic, available or not", () => {
+  const execFileSyncFn = ((_command: string, args?: readonly string[]) => {
+    if (args?.includes("--version")) return Buffer.from("2.1.0\r\n");
+    if (args?.some((arg) => typeof arg === "string" && arg.includes("Get-Command"))) return Buffer.from("C:\\Users\\secret-user\\AppData\\Roaming\\npm\\claude.cmd\r\n");
+    throw Object.assign(new Error("unexpected"), { status: 1 });
+  }) as unknown as typeof execFileSync;
+  const available = probeClaude({ platform: "win32", env: { PATH: "C:\\Windows\\System32" }, execFileSyncFn, windowsEnvironmentReaderFn: () => null, existsSyncFn: () => true });
+  assert.equal(available.available, true);
+  assert.equal(available.diagnostic, undefined, "a healthy runtime carries no diagnostic (ready-time diagnostics warn)");
+  assert.match(available.lookupTiming ?? "", /^environment \d+ ms spawn_error \(budget 5000 ms\), get-command \d+ ms ok \(budget 5000 ms\)$/);
+  assert.doesNotMatch(available.lookupTiming ?? "", /secret-user|AppData/);
+
+  const timedOut = probeClaude({
+    platform: "win32",
+    env: { PATH: "C:\\Windows\\System32" },
+    execFileSyncFn: (() => { throw Object.assign(new Error("ETIMEDOUT"), { code: "ETIMEDOUT" }); }) as unknown as typeof execFileSync,
+    windowsEnvironmentReaderFn: () => null,
+  });
+  assert.equal(timedOut.available, false);
+  assert.equal(timedOut.unavailableReason, "probe_timeout");
+  assert.match(timedOut.diagnostic ?? "", /^lookup: .*get-command \d+ ms timeout \(truncated\) \(budget 5000 ms\)/);
+  assert.equal(timedOut.lookupTiming, timedOut.diagnostic?.replace(/^lookup: /, ""));
 });

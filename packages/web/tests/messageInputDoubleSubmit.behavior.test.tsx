@@ -700,10 +700,11 @@ test("successful mention Add refreshes the sibling channel member count and list
     {},
     { apiGet, renderChannelMembers: true },
   );
-  const participantsButton = screen.getByRole("button", { name: "View participants" });
+  const participantsButton = screen.getByRole("button", { name: "Members" });
   await waitFor(() => assert.equal(participantsButton.textContent?.trim(), "1"));
   assert.equal(participantsButton.tagName, "BUTTON");
-  assert.match(participantsButton.className, /\bh-7\b/);
+  // Raft's smallest button step (sm, 32px) with the compact count padding.
+  assert.match(participantsButton.className, /(?:^| )h-8(?: |$)/);
   assert.match(participantsButton.className, /\bmin-w-7\b/);
   assert.match(participantsButton.className, /\bgap-1\b/);
   assert.match(participantsButton.className, /\bpx-1\.5\b/);
@@ -760,10 +761,11 @@ test("ChannelMembers compact trigger renders the real participant count and caps
   );
 
   const three = mountCount(3);
-  const threeButton = screen.getByRole("button", { name: "View participants" });
+  const threeButton = screen.getByRole("button", { name: "Members" });
   await waitFor(() => assert.equal(threeButton.textContent?.trim(), "3"));
-  assert.match(threeButton.className, /\bh-7\b/);
-  assert.doesNotMatch(threeButton.className, /\bh-8\b/);
+  // The compact trigger is raft's 32px sm step, never the 44px form size.
+  assert.match(threeButton.className, /(?:^| )h-8(?: |$)/);
+  assert.doesNotMatch(threeButton.className, /(?:^| )h-11(?: |$)/);
   assert.match(threeButton.className, /\bmin-w-7\b/);
   assert.match(threeButton.className, /\bgap-1\b/);
   assert.match(threeButton.className, /\bpx-1\.5\b/);
@@ -774,7 +776,7 @@ test("ChannelMembers compact trigger renders the real participant count and caps
   three.unmount();
 
   mountCount(100);
-  const hundredButton = screen.getByRole("button", { name: "View participants" });
+  const hundredButton = screen.getByRole("button", { name: "Members" });
   await waitFor(() => assert.equal(hundredButton.textContent?.trim(), "99+"));
 });
 

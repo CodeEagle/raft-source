@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 
 const webRoot = resolve(import.meta.dirname, "..");
 const repoRoot = resolve(webRoot, "../..");
-const feedbackSdkVersion = "0.4.1";
+const feedbackSdkVersion = "0.4.3";
 
 function read(root: string, path: string): string {
   return readFileSync(resolve(root, path), "utf8");
@@ -20,7 +20,7 @@ test("feedback visual cases render the Hands SDK workspace", () => {
   assert.match(source, /initialTicketId: TRIAL_TICKET_ID/);
   assert.match(source, /<FeedbackProvider[\s\S]*?<FeedbackWorkspace/);
   assert.doesNotMatch(source, /function (?:InboxTrial|DetailTrial|CommentCard)/);
-  assert.doesNotMatch(source, /from "raft-ui(?:\/wip)?"/);
+  assert.doesNotMatch(source, /from "(?:@botiverse\/)?raft-ui(?:\/wip)?"/);
 
   const cases = read(webRoot, "visual-testing/VisualTestingCases.tsx");
   for (const id of [
@@ -114,7 +114,7 @@ test("feedback list follows Raft task status and card interaction colors", () =>
   }
   // Status colors come from the raft-ui Badge variants in every theme; the
   // SDK no longer pins brutal colors inline.
-  assert.doesNotMatch(components, /backgroundColor: "var\(--color-brutal-/);
+  assert.doesNotMatch(components, /backgroundColor: "var\(--(?:color-brutal|color-palette|palette)-/);
   assert.match(
     styles,
     /\.hands-feedback-ticket-open\s*\{[^}]*position:\s*absolute[^}]*width:\s*100%/,

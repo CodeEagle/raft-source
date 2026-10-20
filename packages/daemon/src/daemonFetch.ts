@@ -1,6 +1,7 @@
 import { fetch as undiciFetch, type Dispatcher } from "undici";
 import { providerRequestFetch, type ProviderRequestObserver } from "./providerRequestFetch";
 import {
+  buildDirectFetchDispatcher,
   buildFetchDispatcher,
   buildIsolatedFetchDispatcher,
   evictFetchDispatcher,
@@ -140,8 +141,8 @@ export function withDaemonFetchProxy(
   init: DaemonRequestInit = {},
   env: NodeJS.ProcessEnv = process.env,
 ): ProxyAwareRequestInit {
-  const dispatcher = buildFetchDispatcher(daemonFetchTargetUrl(input), env);
-  return dispatcher ? { ...init, dispatcher } : init;
+  const dispatcher = buildFetchDispatcher(daemonFetchTargetUrl(input), env) ?? buildDirectFetchDispatcher();
+  return { ...init, dispatcher };
 }
 
 export async function daemonFetch(

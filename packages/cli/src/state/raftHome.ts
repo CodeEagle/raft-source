@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { configuredRaftHome, defaultRaftHomeDirname } from "@botiverse/raft-shared";
+import { configuredRaftHome, defaultRaftHomeDirname } from "@botiverse/raft-shared/src/agentCliSurface";
 
 export function resolveRaftHome(env: NodeJS.ProcessEnv = process.env, homeDir?: string): string {
   const configured = configuredRaftHome(env);

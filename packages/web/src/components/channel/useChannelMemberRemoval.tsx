@@ -55,7 +55,6 @@ export function useChannelMemberRemoval({
       confirmLabel={formatMessage({ id: "agent.channelMembers.removeAction" })}
       loadingLabel={formatMessage({ id: "agent.channelMembers.removing" })}
       layer={1}
-      actionSize="xs"
       chromeLocale="active"
       onConfirm={runRemove}
       onClose={closeConfirm}

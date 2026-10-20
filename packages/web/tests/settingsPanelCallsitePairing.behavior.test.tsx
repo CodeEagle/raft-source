@@ -208,7 +208,9 @@ test("a failed marketplace unpublish request surfaces the marketplace fallback, 
   const myAppsTab = await screen.findByTestId("connected-apps-my-apps-tab");
   fireEvent.click(within(myAppsTab).getByRole("button", { name: "Edit" }));
   fireEvent.click(await screen.findByRole("button", { name: en["settings.connectedApps.editor.requestOffline"] }));
-  fireEvent.click(within(await screen.findByRole("dialog")).getByRole("button", { name: en["settings.connectedApps.editor.requestOffline"] }));
+  // The editor sheet is itself a dialog; the confirm is the one opened over it.
+  const offlineDialogs = await screen.findAllByRole("dialog");
+  fireEvent.click(within(offlineDialogs[offlineDialogs.length - 1]).getByRole("button", { name: en["settings.connectedApps.editor.requestOffline"] }));
   assert.ok(await screen.findByText(en["settings.connectedApps.marketplaceReviewFailed"]));
   assert.equal(screen.queryByText(en["settings.connectedApps.regenerateSecretFailed"]), null);
 });

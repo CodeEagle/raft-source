@@ -182,7 +182,7 @@ function findSenderName(row: HTMLElement, displayName = "Current User") {
   );
 }
 
-test("header reserves a variable-driven right-side gutter so floating affordances never overlap text", async () => {
+test("header keeps its full width; the hover toolbar takes the time's place", async () => {
   const { row } = await renderMessage();
   const name = findSenderName(row);
   assert.ok(name, "sender name renders");
@@ -190,16 +190,21 @@ test("header reserves a variable-driven right-side gutter so floating affordance
   assert.ok(cluster, "sender sits inside the left cluster");
   const header = cluster.parentElement;
   assert.ok(header);
-  // The header keeps a right-side reserve — `--mi-hdr-pr`, 6rem by default,
-  // lowered by narrow hosts (the Thread panel) — and clips overflow inside
-  // the left cluster so the floating hover toolbar sits in reserved space.
-  assert.match(header.className, /pr-\(--mi-hdr-pr,6rem\)/);
+  // The header clips overflow inside the left cluster.
   assert.match(header.className, /(?:^| )overflow-hidden(?: |$)/);
   assert.match(cluster.className, /(?:^| )min-w-0(?: |$)/);
   assert.match(cluster.className, /(?:^| )overflow-hidden(?: |$)/);
   // The cluster shrinks but never grows: the time keeps following the
   // description in wide rows and is only pushed right when the row overflows.
   assert.doesNotMatch(cluster.className, /(?:^| )flex-1(?: |$)/);
+  // No reserved gutter: the toolbar rides the message's top edge over the
+  // time, and the time fades out while the toolbar shows.
+  assert.doesNotMatch(header.className, /(?:^| )pr-/);
+  const time = Array.from(header.querySelectorAll<HTMLElement>("span")).find((el) =>
+    /(?:^| )font-mono(?: |$)/.test(el.className) && /(?:^| )whitespace-nowrap(?: |$)/.test(el.className),
+  );
+  assert.ok(time, "the time renders in the header");
+  assert.match(time.className, /opacity-\[calc\(1-var\(--mi-toolbar-opacity,0\)\)\]/);
 });
 
 test("header gives up the subtitle first, then the model, then the name; time sits outside the cluster", async () => {
@@ -262,11 +267,11 @@ test("model label yields after the subtitle and before the name", async () => {
   assert.ok(tail.parentElement === name.parentElement, "model sits in the tail beside the name");
 });
 
-test("deleted sender badge stays on one line in compact localized headers", async () => {
+test("archived sender badge stays on one line in compact localized headers", async () => {
   const { row } = await renderMessage({ agents: [makeDeletedAgent()], message: makeAgentMessage(), locale: "zh-cn" });
 
-  const deletedBadge = Array.from(row.querySelectorAll<HTMLElement>("span")).find((el) => el.textContent === "已删除");
-  assert.ok(deletedBadge, "localized deleted sender badge renders");
-  assert.match(deletedBadge.className, /(?:^| )shrink-0(?: |$)/);
-  assert.match(deletedBadge.className, /(?:^| )whitespace-nowrap(?: |$)/);
+  const archivedBadge = Array.from(row.querySelectorAll<HTMLElement>("span")).find((el) => el.textContent === "已归档");
+  assert.ok(archivedBadge, "localized archived sender badge renders");
+  assert.match(archivedBadge.className, /(?:^| )shrink-0(?: |$)/);
+  assert.match(archivedBadge.className, /(?:^| )whitespace-nowrap(?: |$)/);
 });

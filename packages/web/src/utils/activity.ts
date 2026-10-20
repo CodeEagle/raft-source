@@ -1,5 +1,6 @@
 import type { AgentActivity, AgentActivityDetailKind, SpawnFailureActivityDiagnostic } from "@botiverse/raft-shared";
 import { createIntl, createIntlCache } from "react-intl";
+import type { Presence } from "@botiverse/raft-ui";
 import type { IntlShape } from "react-intl";
 import type { MessageId } from "../i18n/messages";
 import { en } from "../i18n/messages/en";
@@ -22,27 +23,27 @@ const enActivityIntl = createIntl(
 );
 
 /**
- * Maps agent activity state → Tailwind CSS classes for the status dot.
+ * The Raft Design System presence light an agent activity shows (raft-ui
+ * `Presence`, drawn by raft-ui `Status presence`): thinking and working are
+ * busy yellow, error orange, online lime, offline stone.
+ *
+ * Static: an ambient state never loops (task #136). An infinite pulse kept
+ * the compositor producing frames at display refresh rate for as long as any
+ * agent worked — measured 144 fps / 80% GPU with a modal open vs 2 fps / 3%
+ * with the dots paused. Busy yellow alone distinguishes it.
  */
-export function getActivityDotClass(activity: AgentActivity): string {
+export function activityPresence(activity: AgentActivity): Presence {
   switch (activity) {
     case "online":
-      return "bg-brutal-lime";
-    // Status lights are fixed semantic colors — bg-status-busy, not the
-    // skinnable soft-signal accent (see index.css token comment).
-    // Static: an ambient state never loops (task #136). An infinite pulse kept
-    // the compositor producing frames at display refresh rate for as long as
-    // any agent worked — measured 144 fps / 80% GPU with a modal open vs 2 fps
-    // / 3% with the dots paused. Busy yellow alone distinguishes it.
+      return "online";
     case "thinking":
-      return "bg-status-busy";
     case "working":
-      return "bg-status-busy";
+      return "busy";
     case "error":
-      return "bg-brutal-orange";
+      return "error";
     case "offline":
     default:
-      return "bg-gray-400";
+      return "offline";
   }
 }
 
@@ -229,5 +230,10 @@ export function formatSpawnFailureDetail(
     ? String(formatMessage({ id: "activity.status.modelNotFound" }, { model: spawnFailure.model ?? "?" }))
     : daemonDetail;
   if (!spawnFailure.autoRestartPaused) return spawnFailure.reason === "model_not_found" ? detail : null;
+  // The computer does not have the runtime: changing the model or restarting
+  // will not help, getting the runtime there or switching runtime will.
+  if (spawnFailure.reason === "runtime_not_found") {
+    return String(formatMessage({ id: "activity.status.runtimeUnavailablePaused" }, { detail }));
+  }
   return String(formatMessage({ id: "activity.status.autoRestartPaused" }, { detail }));
 }

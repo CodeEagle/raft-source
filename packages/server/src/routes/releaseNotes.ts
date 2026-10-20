@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Router, type Router as ExpressRouter } from 'express';
-import { and, desc, eq, isNotNull, lt, or } from 'drizzle-orm';
+import { and, asc, desc, eq, isNotNull, lt, or } from 'drizzle-orm';
 import { getDb } from '../db/index';
 import { releaseNotes, releaseNoteRevisions, releaseNoteRevisionItems } from '../db/schema';
 
@@ -32,15 +32,26 @@ releaseNotesRouter.get('/', async (req, res, next) => {
       lt(releaseNotes.date, after.date), and(eq(releaseNotes.date, after.date), lt(releaseNotes.id, after.id)),
     ) : undefined)).orderBy(desc(releaseNotes.date), desc(releaseNotes.id)).limit(limit + 1);
     const page = rows.slice(0, limit);
-    const items = await Promise.all(page.map(async row => {
+    // One query for the whole page, current revisions only. A query per release
+    // fanned out up to `limit` parallel connection acquisitions on every cache miss.
+    const liveRevision = new Map(page.filter(row => !row.retractedAt).map(row => [row.releaseId, row.revision]));
+    const itemRows = liveRevision.size === 0 ? [] : await db.select({releaseId: releaseNoteRevisionItems.releaseId,
+      revision: releaseNoteRevisionItems.revision, entryId: releaseNoteRevisionItems.entryId,
+      type: releaseNoteRevisionItems.type, text: releaseNoteRevisionItems.text,
+      emphasis: releaseNoteRevisionItems.emphasis, ordinal: releaseNoteRevisionItems.ordinal,
+    }).from(releaseNoteRevisionItems).where(or(...[...liveRevision].map(([releaseId, revision]) => and(
+      eq(releaseNoteRevisionItems.releaseId, releaseId), eq(releaseNoteRevisionItems.revision, revision)))))
+      .orderBy(asc(releaseNoteRevisionItems.releaseId), asc(releaseNoteRevisionItems.ordinal));
+    const entriesByRelease = new Map<string, Array<{entryId: string; type: typeof itemRows[number]['type']; text: string; emphasis: boolean; ordinal: number}>>();
+    for (const {releaseId, revision, ...entry} of itemRows) {
+      if (liveRevision.get(releaseId) !== revision) continue;
+      const list = entriesByRelease.get(releaseId);
+      if (list) list.push(entry); else entriesByRelease.set(releaseId, [entry]);
+    }
+    const items = page.map(row => {
       const {retractedAt, ...publicRow} = row;
-      const entries = retractedAt ? [] : await db.select({entryId: releaseNoteRevisionItems.entryId,
-        type: releaseNoteRevisionItems.type, text: releaseNoteRevisionItems.text,
-        emphasis: releaseNoteRevisionItems.emphasis, ordinal: releaseNoteRevisionItems.ordinal,
-      }).from(releaseNoteRevisionItems).where(and(eq(releaseNoteRevisionItems.releaseId, row.releaseId),
-        eq(releaseNoteRevisionItems.revision, row.revision))).orderBy(releaseNoteRevisionItems.ordinal);
-      return {...publicRow, state: retractedAt ? 'retracted' : 'published', entries};
-    }));
+      return {...publicRow, state: retractedAt ? 'retracted' : 'published', entries: retractedAt ? [] : entriesByRelease.get(row.releaseId) ?? []};
+    });
     const last = page.at(-1);
     const body = {items, nextCursor: rows.length > limit && last ? Buffer.from(JSON.stringify({date:last.date,id:last.releaseId})).toString('base64url') : null};
     const etag = '"' + createHash('sha256').update(JSON.stringify(body)).digest('hex') + '"';

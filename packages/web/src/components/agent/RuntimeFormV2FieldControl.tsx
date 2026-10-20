@@ -1,11 +1,12 @@
-import { Button, Card, CardDescription, CardHeader, CardLeading, CardTitle, Checkbox, Input } from "raft-ui";
-import { Pencil } from "lucide-react";
+import { Button, Card, CardDescription, CardHeader, CardLeading, CardTitle, Checkbox, Input } from "@botiverse/raft-ui";
+import { Pencil, RefreshCw } from "lucide-react";
 import { useCallback, useMemo } from "react";
 import type { ChangeEvent, RefObject } from "react";
 import { runtimeFormV2Choices, runtimeFormV2SelectedConnection, runtimeFormV2SourceStatus } from "@botiverse/raft-runtime-form";
 import type { RuntimeFormV2ChoiceOption, RuntimeFormV2Field, RuntimeFormV2Sources, RuntimeFormV2Value, RuntimeFormV2Values } from "@botiverse/raft-runtime-form";
 import { useIntl } from "react-intl";
-import { Field, RuntimeFormV2StringMapField, RuntimeSelectControl } from "./RuntimeConfigFields";
+import { Field, FieldAction, RuntimeFormV2StringMapField, RuntimeSelectControl } from "./RuntimeConfigFields";
+import Tooltip from "../ui/Tooltip";
 import { RuntimeFormV2ChoiceCombobox } from "./RuntimeChoiceCombobox";
 import type { RuntimeOption } from "./RuntimeConfigFields";
 import { RuntimeFormV2SourceStatusLine } from "./RuntimeFormV2SourceStatusLine";
@@ -78,6 +79,22 @@ export function RuntimeFormV2FieldControl({
     if (connectionId && savedConnections) savedConnections.onEdit(connectionId);
   }, [connectionId, savedConnections]);
   const pencilLabel = formatMessage({ id: "agent.runtimeConfig.editSavedProvider" });
+  // Every field bound to an option source (the Computer's models, the
+  // server's saved provider connections) gets a refresh action: it
+  // re-requests the source with `?refresh=1`; for a Computer-reported list
+  // that also bypasses the Computer's model-list cache. The copy names no
+  // origin, since the list may come from either. A
+  // non-live source with a retryable status already shows "Retry" below the
+  // control, so the header action would only repeat it.
+  const sourceId = field.kind !== "derived_select" ? field.optionSourceId : undefined;
+  const sourceStatus = runtimeFormV2SourceStatus(field, sources);
+  const refreshing = sourceId !== undefined && retryingSourceIds.includes(sourceId);
+  const showRefresh = sourceId !== undefined && onRetrySource !== undefined && !(sourceStatus?.retryable === true);
+  const handleRefreshSource = useCallback(() => {
+    if (sourceId) onRetrySource?.(sourceId);
+  }, [onRetrySource, sourceId]);
+  const refreshTitle = formatMessage({ id: "agent.runtimeFormV2.refreshSourceTitle" });
+  const refreshLabel = formatMessage({ id: "agent.runtimeFormV2.refreshSourceAria" });
   const hint = connectionOwnedNow
     ? managedPlaceholder
     : secretKept ? formatMessage({ id: "agent.runtimeFormV2.secretKept" }) : field.hint;
@@ -88,27 +105,46 @@ export function RuntimeFormV2FieldControl({
       hint,
       required,
       error,
-      ...(connectionId && savedConnections
+      ...((connectionId && savedConnections) || showRefresh
         ? {
-            // The pencil action for the selected saved connection (authorized
-            // operators only); built inside the memo so its identity is stable.
+            // The refresh action for a source-bound list, and the pencil action
+            // for the selected saved connection (authorized operators only);
+            // built inside the memo so their identity is stable.
             labelAccessory: (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-xs"
-                onClick={handleEditConnection}
-                aria-label={pencilLabel}
-                title={pencilLabel}
-                data-testid={`runtime-form-v2-edit-provider-connection-${fieldKey}`}
-              >
-                <Pencil size={14} aria-hidden="true" />
-              </Button>
+              <>
+                {showRefresh ? (
+                  <Tooltip content={refreshTitle}>
+                    <FieldAction
+                      tone="icon"
+                      type="button"
+                      onClick={handleRefreshSource}
+                      disabled={refreshing}
+                      aria-label={refreshLabel}
+                      data-testid={`runtime-form-v2-refresh-source-${fieldKey}`}
+                    >
+                      <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} aria-hidden="true" />
+                    </FieldAction>
+                  </Tooltip>
+                ) : null}
+                {connectionId && savedConnections ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    onClick={handleEditConnection}
+                    aria-label={pencilLabel}
+                    title={pencilLabel}
+                    data-testid={`runtime-form-v2-edit-provider-connection-${fieldKey}`}
+                  >
+                    <Pencil size={14} aria-hidden="true" />
+                  </Button>
+                ) : null}
+              </>
             ),
           }
         : {}),
     }),
-    [connectionId, savedConnections, handleEditConnection, pencilLabel, fieldKey, field.label, hint, required, error],
+    [connectionId, savedConnections, handleEditConnection, pencilLabel, showRefresh, refreshTitle, handleRefreshSource, refreshing, refreshLabel, fieldKey, field.label, hint, required, error],
   );
   const listedOptions = useMemo(
     () => (choices?.kind === "select" ? choices.options.map(toRuntimeOptionV2) : NO_RUNTIME_OPTIONS),
@@ -146,7 +182,7 @@ export function RuntimeFormV2FieldControl({
     case "unsupported":
       return field.required ? (
         <Field {...common} adopt={false}>
-          <p className="text-sm text-foreground-muted" data-testid={testId}>
+          <p className="text-callout text-foreground-muted" data-testid={testId}>
             {formatMessage({ id: "agent.runtimeFormV2.updateToEdit" })}
           </p>
         </Field>
@@ -157,7 +193,7 @@ export function RuntimeFormV2FieldControl({
           <Card variant="option" render={<label />}>
             <CardHeader>
               <CardLeading>
-                <Checkbox size="md" checked={value === true} disabled={connectionOwnedNow} onCheckedChange={handleCheckedChange} data-testid={testId} />
+                <Checkbox checked={value === true} disabled={connectionOwnedNow} onCheckedChange={handleCheckedChange} data-testid={testId} />
               </CardLeading>
               <CardTitle>{field.label}</CardTitle>
               {field.hint && <CardDescription>{field.hint}</CardDescription>}
@@ -174,7 +210,7 @@ export function RuntimeFormV2FieldControl({
         />
       );
     default: {
-      const status = runtimeFormV2SourceStatus(field, sources);
+      const status = sourceStatus;
       const statusLine = status && field.optionSourceId ? (
         <RuntimeFormV2SourceStatusLine
           status={status}

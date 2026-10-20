@@ -12,33 +12,18 @@ import {
   MessageAttachmentSummary,
   MessageAttachmentTitle,
   Spinner,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { AttachmentTypeBadge } from "./AttachmentTypeBadge";
 
 type MessageAttachment = NonNullable<Message["attachments"]>[number];
 
-// `variant` is retained for callsite compatibility but the visual layout is
-// now unified across types. stdrc 2026-05-20 #proj-theme:441c8b2b: "包括整个
-// 不同的 attachment chip 内容物的 layout 和字体大小也全都要统一" — both compact
-// and wide now render the same canonical chip (filename / meta / optional
-// summary stacked vertically). The exception is the inline image gallery
-// (separate surface, the message gallery's raft-ui row builder) which keeps
-// its preview-image-in-top-left layout per stdrc's exception.
-//
-// 2026-09-23 (task #640 follow-up, Artea): the shell migrated from the
-// hand-rolled PreviewShell card to RUI's MessageAttachment recipe family —
-// the RUI card carries no brutal hard shadow (`border-black/15 bg-white
-// hover:border-black/30 hover:bg-ink-2`), which is the visual this chip was
-// always supposed to have. Actions now live in the RUI meta row
-// (MetaEnd) instead of an absolutely-positioned corner box. QuotedMessageCard
-// keeps using PreviewShell — its hover alignment contract is untouched.
-type AttachmentChipVariant = "compact" | "wide";
+// Every non-gallery attachment is one chip: filename, meta and an optional
+// summary stacked in RUI's MessageAttachment card, with its actions in the
+// card's meta row end. Image attachments are the exception: they render in the
+// message gallery (raft-ui's row builder), not as chips.
 
 interface AttachmentChipProps {
   attachment: MessageAttachment;
-  /** Retained for callsite compatibility. Layout is unified across variants;
-   *  only the message-flow grouping differs. */
-  variant: AttachmentChipVariant;
   isOptimistic: boolean;
   loading?: boolean;
   loadingLabel?: string;
@@ -52,19 +37,15 @@ interface AttachmentChipProps {
     label: string;
     affordanceName?: string;
   };
-  /** Unused under the unified layout; retained for callsite compatibility. */
-  icon?: ReactNode;
   /** Overrides the accessible name; defaults to the filename. */
   ariaLabel?: string;
 }
 
-// Layout-only token (border / bg / hover / active come from the RUI
+// Layout-only token (border / bg / padding / hover / active come from the RUI
 // MessageAttachmentCard recipe). messageAttachmentChip width-contract guards
 // (w-44 / min-w-44 / max-w-44 / shrink-0 / overflow-hidden) still live here and
 // are passed to the card as className; the contract test pins this literal.
-const COMPACT_CHIP_LAYOUT = "group/img relative inline-flex h-20 w-44 min-w-44 max-w-44 shrink-0 flex-col justify-between overflow-hidden px-2.5 py-2 text-left transition-colors";
-// Wide-variant alias preserved for downstream width-contract callers.
-const WIDE_CHIP_LAYOUT = COMPACT_CHIP_LAYOUT;
+const COMPACT_CHIP_LAYOUT = "group/img relative inline-flex h-20 w-44 min-w-44 max-w-44 shrink-0 flex-col justify-between overflow-hidden text-left";
 
 function TruncatedAttachmentTooltip({
   content,
@@ -111,7 +92,6 @@ function TruncatedAttachmentTooltip({
 
 export function AttachmentChip({
   attachment,
-  variant: _variant,
   isOptimistic,
   loading = false,
   loadingLabel,
@@ -121,26 +101,23 @@ export function AttachmentChip({
   meta,
   summary,
   secondaryDownload,
-  icon: _icon,
   ariaLabel,
 }: AttachmentChipProps) {
   const { formatMessage } = useIntl();
   const resolvedLoadingLabel = loadingLabel ?? formatMessage({ id: "message.attachment.openingPreview" });
   const disabled = isOptimistic || loading || !onClick;
-  // Per-state overrides on top of the RUI card recipe. Loading uses a solid
-  // tint via Tailwind's important modifier without any opacity modifier so it
-  // sidesteps the Chromium `color-mix(in oklab, …, transparent)` ×
-  // element-opacity cyan-rendering edge case; the loading bar + spinner remain
-  // the dominant busy signal regardless.
+  // Per-state overrides on top of the RUI card recipe. Loading is a passive
+  // indicator (DS Loading: never the action pink), so the card keeps its
+  // surface and the in-card loading row + spinner carry the busy signal.
   const stateClassName = isOptimistic
     ? "opacity-70"
     : loading
-      ? "!bg-accent-soft/30 cursor-wait"
+      ? "cursor-wait"
       : "";
   const loadingBar = (
     <div
       data-message-affordance="attachment-preview-loading"
-      className="absolute inset-x-0 bottom-0 flex h-6 items-center gap-1.5 border-t border-line-muted bg-primary-soft px-2 text-[10px] font-bold uppercase tracking-wide text-primary-strong theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black"
+      className="absolute inset-x-0 bottom-0 flex h-7 items-center gap-1.5 border-t border-line-hairline bg-layer-card px-2.5 text-caption text-foreground-muted"
     >
       <Spinner size="xs" aria-label={formatMessage({ id: "common.loadingLabel" })} />
       <span className="truncate">{resolvedLoadingLabel}</span>
@@ -157,7 +134,7 @@ export function AttachmentChip({
       aria-hidden="true"
       data-message-affordance={affordanceName ?? "file-download"}
     >
-      <Download size={12} />
+      <Download size={16} />
     </MessageAttachmentAction>
   ) : affordance === "preview" ? (
     <MessageAttachmentAction
@@ -165,7 +142,7 @@ export function AttachmentChip({
       aria-hidden="true"
       data-message-affordance={affordanceName ?? "file-preview"}
     >
-      <Eye size={12} />
+      <Eye size={16} />
     </MessageAttachmentAction>
   ) : null;
 
@@ -195,7 +172,7 @@ export function AttachmentChip({
           <TruncatedAttachmentTooltip
             content={attachment.filename}
             affordance="attachment-filename"
-            className="block min-w-0 max-w-full flex-1 truncate text-xs font-bold text-foreground-strong theme-brutal:text-black"
+            className="block min-w-0 max-w-full flex-1 truncate"
           >
             {attachment.filename}
           </TruncatedAttachmentTooltip>
@@ -225,8 +202,8 @@ export function AttachmentChip({
           && !attachment.mimeType?.startsWith("image/")
           && attachment.mimeType?.split(";")[0]?.trim().toLowerCase() !== "application/pdf" ? (
           <span data-message-affordance="attachment-comment-count" className="inline-flex items-center gap-1 pl-1">
-            {meta ? <span className="text-foreground-muted theme-brutal:text-black/35">·</span> : null}
-            <MessageSquare size={9} className="shrink-0" />
+            {meta ? <span>·</span> : null}
+            <MessageSquare size={12} className="shrink-0" />
             {attachment.commentCount}
           </span>
         ) : null}
@@ -241,7 +218,7 @@ export function AttachmentChip({
                   aria-label={secondaryDownload.label}
                   onClick={handleSecondaryDownload}
                 >
-                  <Download size={12} />
+                  <Download size={16} />
                 </MessageAttachmentAction>
               ) : null}
               {affordanceIcon}
@@ -253,8 +230,3 @@ export function AttachmentChip({
       </MessageAttachmentCard>
   );
 }
-
-export const ATTACHMENT_CHIP_CLASS_CONTRACT = {
-  compact: COMPACT_CHIP_LAYOUT,
-  wide: WIDE_CHIP_LAYOUT,
-};

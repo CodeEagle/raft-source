@@ -6,7 +6,7 @@ import {
   SystemMessageGroupHeader,
   SystemMessageGroupPanel,
   SystemMessageGroupSummary,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 
 type SystemMessageGroupDisclosureWrapperProps = {
@@ -28,8 +28,8 @@ export default function ConnectedSystemMessageGroupDisclosure({
       onOpenChange={onToggle}
       // The group layer carries no margins of its own (Josh's table): the
       // note rhythm owns both seams, and the inner rows re-assert their own
-      // leads (elegant 4, brutal 6) against the per-theme single-note values.
-      className="[&_[data-slot=system-message-item]]:pt-1 theme-brutal:[&_[data-slot=system-message-item]]:pt-1.5"
+      // 4px lead against the single-note value.
+      className="[&_[data-slot=system-message-item]]:pt-1"
     >
       <SystemMessageGroupHeader>
         <Tooltip content={summary}>

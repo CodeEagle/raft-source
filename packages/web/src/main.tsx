@@ -3,7 +3,7 @@ import type { ErrorInfo, ReactNode } from "react";
 import ReactDOM from "react-dom/client";
 import { currentTimeMs } from "@botiverse/raft-shared";
 import { installGlobalClientErrorReporters, reportClientError } from "./utils/clientErrorTrace";
-import { ThemeProvider } from "raft-ui";
+import { ThemeProvider } from "@botiverse/raft-ui";
 import { LocaleProvider } from "./i18n/LocaleProvider";
 import { IntlProviderWrapper } from "./i18n/IntlProviderWrapper";
 import { AppProviders } from "./AppProviders";
@@ -36,6 +36,7 @@ import { installDesktopServerWindowBinding } from "./desktopServerWindow";
 import { installDesktopServerTitleBinding } from "./desktopServerTitle";
 import "./testHooks"; // attaches window.__SLOCK_E2E__ only when built with VITE_E2E=true
 import { trackVisualViewport } from "./utils/visualViewport";
+import { captureLandingPage } from "./analytics/publicVisits";
 
 const desktopHandshake = bootstrapDesktopHandshake();
 installDesktopServerWindowBinding(desktopHandshake);
@@ -63,6 +64,8 @@ if (supportsPushNotifications()) {
 // reintroduce always-on JS height pinning that left the PWA bottom gap.
 trackVisualViewport();
 installExternalTranslationGuard();
+// Before the first render moves the URL: where a Public Server visit came from.
+captureLandingPage();
 
 const APP_REFRESH_REQUIRED_EVENT = "raft:app-refresh-required";
 let appRefreshRequired = false;
@@ -224,15 +227,14 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, RootErrorBoun
   }
   render() {
     const root = typeof document !== "undefined" ? document.documentElement : null;
-    const theme = root?.dataset.theme === "elegant" ? "elegant" : "brutal";
     const mode = root?.classList.contains("dark") ? "dark" : "light";
 
     // RootErrorBoundary sits above AppThemeProvider and LocaleProvider; wrap intl-backed
     // and RUI fallbacks so formatMessage resolves the user's persisted display locale
-    // and RUI components resolve the active theme/mode from DOM without touching app stores.
+    // and RUI components resolve the active mode from DOM without touching app stores.
     if (this.state.refreshRequired) {
       return (
-        <ThemeProvider theme={theme} mode={mode} syncDom={false}>
+        <ThemeProvider mode={mode} syncDom={false}>
           <LocaleProvider>
             <IntlProviderWrapper>
               <AppRefreshRequiredScreen
@@ -247,7 +249,7 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, RootErrorBoun
 
     if (this.state.error) {
       return (
-        <ThemeProvider theme={theme} mode={mode} syncDom={false}>
+        <ThemeProvider mode={mode} syncDom={false}>
           <LocaleProvider>
             <IntlProviderWrapper>
               <RootErrorFallback
@@ -262,7 +264,7 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, RootErrorBoun
     return (
       <>
         {this.state.refreshWarningVisible ? (
-          <ThemeProvider theme={theme} mode={mode} syncDom={false}>
+          <ThemeProvider mode={mode} syncDom={false}>
             <LocaleProvider>
               <IntlProviderWrapper>
                 <AppRefreshWarningBanner onRefresh={this.handleRecoverAndRefresh} />

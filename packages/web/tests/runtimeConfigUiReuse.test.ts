@@ -68,7 +68,8 @@ test("runtime config fields keep the create-agent model rescan layout", () => {
   // `<Field>` is the local indirection that picks StableField (reserved message
   // row) or plain FormField, per the page's opt-in — see StableField.tsx.
   assert.match(runtimeConfigFieldsSource, /<Field\s+label=\{formatMessage\(\{ id: "agent\.runtimeConfig\.model" \}\)\}/);
-  assert.match(runtimeConfigFieldsSource, /className="ml-auto text-foreground-muted hover:text-foreground-strong transition-colors disabled:opacity-50 disabled:cursor-not-allowed"/);
+  assert.match(runtimeConfigFieldsSource, /<FieldAction\s+tone="icon"[\s\S]{0,200}?aria-label=\{intl\.formatMessage\(\{ id: "agent\.runtimeModels\.rescan" \}\)\}/);
+  assert.doesNotMatch(runtimeConfigFieldsSource, /theme-brutal:|text-foreground-strong/);
   assert.doesNotMatch(runtimeConfigFieldsSource, /<FormField label="Model">/);
 });
 

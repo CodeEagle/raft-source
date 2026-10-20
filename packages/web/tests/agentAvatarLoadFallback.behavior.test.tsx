@@ -9,13 +9,13 @@ afterEach(cleanup);
 test("a failed custom agent avatar falls back to the canonical pixel avatar", () => {
   const { container, rerender } = render(
     <TestIntlProvider>
-      <AgentAvatar avatarUrl="https://cdn.example.com/broken-agent.png" size={32} />
+      <AgentAvatar avatarUrl="https://cdn.example.com/broken-agent.png" />
     </TestIntlProvider>,
   );
 
   const customAvatar = container.querySelector<HTMLImageElement>('img[src="https://cdn.example.com/broken-agent.png"]');
   assert.ok(customAvatar);
-  assert.equal(container.querySelector("[data-cell-size]"), null);
+  assert.equal(container.querySelector("[data-agent-pixel-avatar]"), null);
 
   fireEvent.error(customAvatar);
   // The pixel fallback is itself one <img> (task #137), so assert on the
@@ -27,9 +27,9 @@ test("a failed custom agent avatar falls back to the canonical pixel avatar", ()
 
   rerender(
     <TestIntlProvider>
-      <AgentAvatar avatarUrl="https://cdn.example.com/replacement-agent.png" size={32} />
+      <AgentAvatar avatarUrl="https://cdn.example.com/replacement-agent.png" />
     </TestIntlProvider>,
   );
   assert.ok(container.querySelector('img[src="https://cdn.example.com/replacement-agent.png"]'));
-  assert.equal(container.querySelector("[data-cell-size]"), null);
+  assert.equal(container.querySelector("[data-agent-pixel-avatar]"), null);
 });

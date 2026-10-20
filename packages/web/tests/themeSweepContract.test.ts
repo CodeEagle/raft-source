@@ -15,23 +15,34 @@ test("theme sweep keeps confirmation and drawer copy on semantic tokens", () => 
   assert.match(confirm, /data-slot="confirm-dialog-content"/);
   assert.match(confirm, /text-foreground-muted/);
   assert.doesNotMatch(confirm, /text-black\/75/);
+  // Raft DS Sheet: the channel-settings drawer leaves its surface to raft-ui's
+  // drawer recipe and writes its copy in ink tokens — no theme-scoped brutal
+  // chrome, no yellow header wash.
   for (const drawer of [channel]) {
-    assert.match(drawer, /className="[^"]*border-0 theme-brutal:[^"]*border-l-2/);
-    assert.match(drawer, /text-foreground-strong/);
-    assert.match(drawer, /text-foreground-muted/);
-    assert.match(drawer, /bg-soft-signal[^\"]*text-black/);
+    assert.doesNotMatch(drawer, /theme-brutal:/);
+    assert.doesNotMatch(drawer, /bg-palette-yellow|text-black/);
+    assert.match(drawer, /<DrawerTitle id="channel-settings-title"/);
+    // Its sections are raft-ui FormSections (the DS sheet section heading).
+    assert.match(drawer, /<FormSection\b/);
+    assert.doesNotMatch(drawer, /SECTION_HEADING_CLASS/);
+    assert.match(drawer, /text-foreground-hint/);
   }
-  assert.match(overflow, /className="[^"]*border-0[^\"]*theme-brutal:border-l-2/);
-  assert.match(overflow, /text-foreground-strong/);
-  assert.match(overflow, /text-foreground-muted/);
-  assert.match(overflow, /bg-soft-signal[^\"]*text-black/);
-  assert.match(overflow, /DrawerTitle\s+className="[^"]*text-black/);
+  // The shared overflow drawer shell is the same DS drawer: raft-ui owns the
+  // surface, the head is white paper with a seam (yellow stays on the frame),
+  // and the copy is ink tokens.
+  assert.doesNotMatch(overflow, /theme-brutal:/);
+  assert.doesNotMatch(overflow, /bg-palette-yellow|text-black/);
+  assert.match(overflow, /<DrawerHeader\b/);
+  assert.match(overflow, /text-foreground-hint/);
   assert.match(channelOverflow, /<Badge[\s\S]{0,240}?data-testid="channel-overflow-visibility-badge"/);
-  assert.doesNotMatch(channelOverflow, /bg-brutal-lime/);
-  assert.match(channelOverflow, /channel-overflow-members-heading[\s\S]*text-foreground-strong/);
-  assert.match(channelOverflow, /text-foreground-muted[^<]*[\s\S]*?membersSummary/);
-  assert.match(channelOverflow, /<AvatarSlot context="panel-header" type="human" className="border-dashed text-lg">\+<\/AvatarSlot>/);
-  assert.match(markdown, /border-line-muted pl-3 italic text-foreground-muted/);
+  assert.doesNotMatch(channelOverflow, /bg-palette-lime/);
+  // DS drawer section heading (13/18 700 ink-2) with its count line in ink-3.
+  assert.match(channelOverflow, /<SectionEyebrow\s+tone="muted"[^>]*data-testid="channel-overflow-members-heading"/);
+  assert.match(channelOverflow, /text-foreground-hint[^<]*[\s\S]*?membersSummary/);
+  // The add tile is the DS empty identity: a dashed square with a plus.
+  assert.match(channelOverflow, /border-dashed[^\n]*\n\s+data-testid="channel-overflow-members-add-tile"[\s\S]*?<Plus /);
+  // DS quote: a 2px seam bar and ink-2 text, no italic.
+  assert.match(markdown, /"border-l-2 border-line-seam pl-2\.5 text-foreground-muted"/);
   assert.doesNotMatch(markdown, /border-black\/40 pl-3 italic text-black\/70"/);
 });
 
@@ -39,15 +50,17 @@ test("theme sweep keeps account, notification and billing actions semantic", () 
   const settings = source("src/components/settings/SettingsPanel.tsx");
   // The plan/billing body moved to its own file (task #709 one-component-per-file).
   const planSection = source("src/components/settings/PlanSectionContent.tsx");
-  assert.match(settings, /variant="outline"[\s\S]*settings\.account\.saveProfile/);
-  assert.match(settings, /settings\.account\.saveProfile/);
+  // Raft DS: the profile form's Save is the pink primary (disabled until the
+  // form is dirty); status labels are soft chips with a fixed meaning, never
+  // ALL CAPS; the seat meter is the raft-ui Progress, cyan, orange near the cap.
+  assert.match(settings, /disabled=\{!profileDirty \|\| saving\}\s*size="sm"\s*variant="accent"[\s\S]*?settings\.account\.saveProfile/);
   assert.match(settings, /<Badge variant="success" appearance="soft"/);
-  assert.match(settings, /<Badge variant="muted" uppercase>/);
+  assert.match(settings, /<Badge appearance="soft" variant=\{statusTone\}>\s*\{statusLabel\}/);
+  assert.doesNotMatch(settings, /<Badge[^>]*\buppercase\b/);
   assert.doesNotMatch(settings, /inline-flex shrink-0 border-2 border-line-strong bg-fill-muted/);
   assert.match(settings, /variant="outline"[\s\S]*settings\.notifications\.enabling/);
   assert.match(planSection, /variant="outline"[\s\S]*billing\.seeAllFeaturesAndComparePlans/);
-  assert.match(planSection, /h-full bg-primary-strong/);
-  assert.match(planSection, /h-full bg-accent-strong/);
+  assert.match(planSection, /variant=\{seatUsageNearLimit \? "warning" : "information"\}/);
 });
 
 test("theme sweep keeps mobile links, billing summary, and search entity badges on RUI recipes", () => {
@@ -64,7 +77,8 @@ test("theme sweep keeps mobile links, billing summary, and search entity badges 
 
   assert.match(settings, /render=\{\([\s\S]*mobileDownloadUrl\("android"\)[\s\S]*data-testid="mobile-download-android"/);
   assert.match(settings, /render=\{\([\s\S]*mobileDownloadUrl\("ios"\)[\s\S]*data-testid="mobile-download-ios"/);
-  assert.match(planSection, /<Card[\s\S]*variant="option"[\s\S]*data-testid="billing-summary-card"/);
+  // The summary is a plain DS card (surface + hairline), not a form option.
+  assert.match(planSection, /<Card\s+data-testid="billing-summary-card"/);
   assert.doesNotMatch(settings, /data-testid="mobile-download-(?:android|ios)"[\s\S]*btn-brutal-sm/);
   for (const searchSource of [search, ...searchRows]) {
     assert.doesNotMatch(searchSource, /ARCHIVED_CHANNEL_BADGE_CLASS/);
@@ -82,11 +96,13 @@ test("theme sweep keeps task status and profile resize readable", () => {
   // rui's TaskStatusBadge, and slock's taskStatusUi no longer holds any colour
   // (the old per-theme classes moved into raft-ui's task-status tokens).
   assert.match(status, /TaskStatusBadge/);
-  assert.doesNotMatch(statusUi, /bg-brutal-|dark:bg-.*-soft/);
+  assert.doesNotMatch(statusUi, /bg-(?:palette|brutal)-|dark:bg-.*-soft/);
   assert.match(tasks, /<TaskSectionBadge status=\{ruiStatus\}/);
   assert.match(tasks, /variant="outline"[\s\S]*task\.board\.newTask/);
   assert.match(profile, /flex: "0 0 auto"/);
-  assert.match(agent, /variant="outline"[\s\S]*text-foreground-strong/);
+  // Raft DS: the profile's secondary actions are ink-outline buttons, ink text.
+  assert.match(agent, /variant="outline"[\s\S]*text-foreground\b/);
+  assert.doesNotMatch(agent, /theme-brutal:|text-foreground-strong/);
 });
 
 test("theme sweep keeps feedback, agent channel rows, and dark sidebar active readable", () => {
@@ -95,8 +111,17 @@ test("theme sweep keeps feedback, agent channel rows, and dark sidebar active re
   const feedback = source("src/components/settings/AboutFeedbackDialog.tsx");
   const agent = source("src/components/agent/AgentDetailPanel.tsx");
 
-  assert.match(feedback, /theme=\{themeFamily === "brutal" \? "brutal" : "elegant"\}/);
-  assert.match(agent, /min-h-\[66px\][\s\S]*?theme-brutal:min-h-\[72px\]/);
+  // The feedback SDK still takes a style prop; every feedback host passes the
+  // one shared constant, and no family constant survives on the app side.
+  const feedbackSdkTheme = source("src/feedback/feedbackSdkTheme.ts");
+  assert.match(feedbackSdkTheme, /export const FEEDBACK_SDK_THEME = "raft" as string as FeedbackTheme;/);
+  assert.doesNotMatch(feedbackSdkTheme, /FEEDBACK_THEME_FAMILY/);
+  assert.match(feedback, /import \{ FEEDBACK_SDK_THEME \} from "\.\.\/\.\.\/feedback\/feedbackSdkTheme";/);
+  assert.match(feedback, /theme=\{FEEDBACK_SDK_THEME\}/);
+  assert.match(source("src/feedback/standalone/main.tsx"), /theme=\{FEEDBACK_SDK_THEME\}/);
+  assert.doesNotMatch(feedback, /useThemeFamily/);
+  // One family (raft): the profile hero needs no per-theme min-height.
+  assert.doesNotMatch(agent, /theme-brutal:min-h-/);
   assert.match(sidebar, /SidebarRoot/);
   assert.match(sidebar, /active=\{selected\}/);
   assert.doesNotMatch(indexCss, /Legacy composition bridge/);
@@ -113,28 +138,33 @@ test("theme sweep closes the remaining dialog and fallback contrast leaks", () =
   const create = source("src/components/agent/CreateAgentDialog.tsx");
   const formField = source("src/components/ui/FormField.tsx");
 
+  // The member search field is raft-ui's InputGroup (DS Search: the card
+  // surface inside the ink line, on semantic tokens), so dark mode follows.
   for (const memberSource of [members]) {
-    assert.match(memberSource, /input-member-search/);
+    assert.match(memberSource, /<InputGroup>\s*<InputGroupAddon align="inline-start">\s*<Search aria-hidden="true" \/>/);
   }
-  assert.match(source("src/index.css"), /\.input-member-search[\s\S]*?background: var\(--layer-panel\)/);
-  // Confirm-add reads dark-on-pink in Brutal and dark-on-yellow in Elegant
-  // through the Button variant (accent / primary), not a className override.
-  assert.match(members, /const confirmAddVariant = themeFamily === "brutal" \? "accent" : "primary";/);
-  assert.match(members, /variant=\{confirmAddVariant\}[\s\S]*?data-testid="add-member-confirm"/);
-  assert.match(members, /appearance=\{failedNow \? "soft" : "solid"\}[\s\S]*?variant=\{failedNow \? "warning" : kind === "agent" \? "information" : "accent"\}[\s\S]*?theme-brutal:bg-brutal-orange\/25 theme-brutal:text-black/);
+  assert.doesNotMatch(source("src/index.css"), /\.input-member-search/);
+  // Raft DS: Confirm-add is the screen's one pink primary, through the Button
+  // variant, not a className override.
+  assert.match(members, /variant="primary"\s*className="w-full"\s*data-testid="add-member-confirm"/);
+  // Selected chips are neutral; a failed one turns orange-soft (a problem).
+  assert.match(members, /appearance="soft"\s*variant=\{failedNow \? "warning" : "default"\}/);
   assert.match(members, /data-member-failure="true"/);
   assert.match(members, /aria-describedby=\{failedKeys\.has\(key\) \?/);
   // Add Member is rendered as a full-height page inside the overflow drawer.
-  // Its ED surface must stay on RUI semantic layers; only the Brutal scope may
-  // opt back into the legacy white/yellow/black recipe. This prevents a future
-  // staging reconciliation from reintroducing the white-on-yellow/black-on-
-  // dark leakage that the browser sweep caught.
-  assert.match(members, /border border-line-muted bg-layer-panel[\s\S]*?theme-brutal:bg-white/);
-  assert.match(members, /border-b border-line-muted bg-layer-inset[\s\S]*?theme-brutal:bg-soft-signal/);
-  assert.match(members, /bg-layer-panel text-foreground-strong theme-brutal:bg-white theme-brutal:text-black/);
-  assert.match(source("src/index.css"), /\.input-member-search[\s\S]*?background: var\(--layer-panel\)[\s\S]*?color: var\(--foreground-strong\)/);
-  assert.match(avatar, /theme-brutal:bg-soft-signal theme-brutal:text-black/);
-  assert.match(stableField, /LabelAsterisk className="ml-1 text-danger-strong theme-brutal:text-black"/);
+  // Its surfaces stay on Raft DS semantic layers (card list, paper header with a
+  // seam, paper page), so no white/yellow/black leaks into dark mode.
+  assert.match(members, /<Card\s+\/\/ Column: the candidates scroll/);
+  assert.doesNotMatch(members, /rounded-container border border-line-hairline bg-layer-card/);
+  // The page head is raft-ui's PanelHeader (paper with a seam under it).
+  assert.match(members, /<PanelHeader>/);
+  assert.match(members, /flex-col bg-layer-canvas text-foreground`/);
+  assert.doesNotMatch(members, /theme-brutal:|bg-palette-yellow|text-foreground-strong/);
+  // A workspace tile is the DS ink square with yellow initials, in both modes.
+  assert.match(avatar, /bg-sticker-ink text-brand/);
+  assert.doesNotMatch(avatar, /theme-brutal:/);
+  assert.match(stableField, /LabelAsterisk className="ml-1" \/>/);
+  assert.doesNotMatch(stableField, /theme-brutal:/);
   // `bg-info-soft` used to be pinned here because the reset mode picker tinted
   // its SELECTED option, and that tint had to be a semantic token rather than a
   // brutal colour. Task #660 (@Artea) replaced the three hand-rolled <button>s
@@ -144,16 +174,14 @@ test("theme sweep closes the remaining dialog and fallback contrast leaks", () =
   assert.match(reset, /<RadioGroup\b/);
   assert.doesNotMatch(reset, /bg-(?:info|warning|danger)-soft/);
   assert.doesNotMatch(reset, /border-2 p-4/);
-  // Restart confirms with `primary`, NOT `information`: rui's elegant
-  // `information` pairs white on light cyan (1.91:1 in Elegant light), which this
-  // dialog used to patch with `!text-black`. @Artea (task #660) asked for a
-  // variant that is correct by itself instead of an override; measured in all
-  // three themes, `primary` is >=12.75:1 and `warning` >=4.89:1 unassisted.
-  assert.match(reset, /mode === "session" \? "warning" : "primary"/);
+  // Raft DS Dialog: restart and session reset interrupt but recover (orange
+  // `warning`); a full reset loses the workspace (red `danger`). Each variant is
+  // correct by itself — no per-call colour override (@Artea, task #660).
+  assert.match(reset, /const confirmVariant = mode === "full" \? "danger" : "warning";/);
   assert.doesNotMatch(reset, /confirmClassName=/, "no per-call colour override on the confirm button");
   assert.match(create, /max-w-\[calc\(100vw-1rem\)\][\s\S]*?md:max-w-\[960px\]/);
   assert.match(formField, /LabelAsterisk/);
-  assert.doesNotMatch(formField, /text-brutal-pink/);
+  assert.doesNotMatch(formField, /text-palette-pink/);
 });
 
 test("dark elegant sidebar selector is bound to real product rows", () => {
@@ -174,15 +202,22 @@ test("profile and member surfaces preserve layout while using theme-aware chrome
     source("src/components/agent/MemberRoleActions.tsx"),
   ].join("\n");
 
-  assert.match(profile, /overflow-x-auto overflow-y-hidden scrollbar-none/);
-  assert.match(profile, /className="group relative size-16 shrink-0 !p-0"/);
+  // The agent tab row's overflow (scroll, wheel, edge fade, selected tab in
+  // view) is raft-ui's TabsList now; the panel adds no scroll classes.
+  assert.doesNotMatch(profile, /overflow-x-auto overflow-y-hidden scrollbar-none/);
+  // The hero avatar is its own trigger: no control frame around the sticker
+  // (the named group scopes its AvatarEditVeil).
+  assert.match(profile, /const PROFILE_AVATAR_BUTTON_CLASS = "group\/avatar-edit relative shrink-0 rounded-sticker outline-none focus-visible:shadow-focus";/);
   // The divider moved off the resize handle onto the pane box (task #683); its
   // theme-aware colours are pinned in panelSplitDividerTheme.contract.test.ts.
   assert.match(resize, /const RESIZE_HANDLE_CLASS_NAME = "[^"]*cursor-col-resize[^"]*"/);
   assert.doesNotMatch(resize, /cursor-col-resize[^"]*border-l/);
-  assert.match(members, /text-foreground-strong/);
-  assert.match(members, /bg-fill-muted/);
-  assert.match(members, /theme-brutal:border-black/);
+  // DS ListRow member rows: ink title, ink-3 role line, pressed-overlay hover,
+  // and no theme-scoped brutal chrome left behind.
+  assert.match(members, /text-foreground\b/);
+  assert.match(members, /text-foreground-hint/);
+  assert.match(members, /hover:bg-fill-pressed/);
+  assert.doesNotMatch(members, /theme-brutal:/);
   assert.match(nestedMembers, /AvatarSlot[\s\S]*badge=\{/);
 });
 
@@ -216,8 +251,10 @@ test("dark elegant popovers and accent submits keep readable foregrounds", () =>
   const createAgent = source("src/components/agent/CreateAgentDialog.tsx");
   const createTask = source("src/components/task/CreateTaskDialog.tsx");
 
-  assert.match(switcher, /text-foreground-strong theme-brutal:text-black/);
-  assert.match(switcher, /text-foreground-muted theme-brutal:text-black\/40/);
+  // The workspace list reads in ink tokens on the popover in both modes.
+  assert.match(switcher, /text-callout font-medium text-foreground/);
+  assert.match(switcher, /font-mono text-mono-meta font-normal text-foreground-hint/);
+  assert.doesNotMatch(switcher, /theme-brutal:|text-black/);
   assert.match(composer, /ComposerSuggestionList[\s\S]*?data-testid="mention-autocomplete-popover"[\s\S]*?AutocompleteOptionRow/);
   // The option rows are extracted (task #709 react-perf): the row component owns
   // the ComposerSuggestionOption element and the per-item select closure, and
@@ -231,7 +268,8 @@ test("dark elegant popovers and accent submits keep readable foregrounds", () =>
   assert.match(composer, /ComposerSuggestionMeta variant="code" className="max-w-\[7rem\] truncate"/);
   assert.match(composer, /ComposerSuggestionList[\s\S]*?data-testid="channel-autocomplete-popover"[\s\S]*?ComposerSuggestionTitle/);
   assert.match(composer, /data-testid="channel-autocomplete-popover"[\s\S]*?ComposerSuggestionMeta>{ch\.description}/);
-  assert.match(createAgent, /dark:bg-warning-soft dark:text-warning-strong/);
+  // The raft Banner draws its own warning wash in both modes; no dark: overrides.
+  assert.doesNotMatch(createAgent, /dark:(?:bg-warning-soft|!?text-warning-strong)/);
   // rui accent buttons own their text colour; a dark-mode override here put
   // near-black text on the soft pink Elegant Dark fill (task #733).
   assert.doesNotMatch(createAgent, /text-foreground-inverse/);
@@ -253,7 +291,7 @@ test("page-level consumers expose the RUI semantic ladder in every major surface
     source("src/components/settings/SettingsPanel.tsx"),
   ];
 
-  assert.match(indexCss, /@import "raft-ui\/styles\.css"/);
+  assert.match(indexCss, /@import "@botiverse\/raft-ui\/styles\.css"/);
   assert.doesNotMatch(indexCss, /Legacy composition bridge/);
 
   assert.match(roots[1], /AppRailRoot/);
@@ -268,24 +306,21 @@ test("page-level consumers expose the RUI semantic ladder in every major surface
   assert.match(roots[0], /AppShellRoot/);
 });
 
-test("Activity shell keeps structural brutal dividers at one pixel", () => {
+test("Activity shell draws its dividers as DS seams, with no per-route override", () => {
   const mainLayout = source("src/components/layout/MainLayout.tsx");
   const leftRail = source("src/components/layout/LeftRail.tsx");
   const threadsInbox = source("src/components/thread/ThreadsInbox.tsx");
 
-  assert.match(leftRail, /const brutalRailDividerClassName = thinDivider \? "theme-brutal:!border-r" : "";/);
-  assert.match(mainLayout, /<LeftRail[\s\S]{0,120}thinDivider=\{isActivityRoute\}/);
-  assert.match(threadsInbox, /<ActivityInboxPanel edge="attached" className="theme-brutal:!border-l">/);
-  assert.match(
-    mainLayout,
-    /isInboxRoute \? "theme-brutal:border-black" : "theme-brutal:border-r-2 theme-brutal:border-black"/,
-    "Activity's master/detail divider should stay 1px while Search keeps its existing 2px divider",
-  );
-  assert.doesNotMatch(
-    threadsInbox,
-    /data-testid="activity-current-sidebar"[\s\S]{0,260}theme-brutal:border-r-2/,
-    "Activity's own filter sidebar divider should not become a 2px brutal frame",
-  );
+  // One family: the rail's edge and the master/detail divider are the same
+  // 1px seam on every route, so the old brutal thin-divider switch is gone.
+  assert.doesNotMatch(leftRail, /thinDivider|theme-brutal:/);
+  assert.doesNotMatch(mainLayout, /thinDivider=/);
+  // Raft DS: one seam between two regions. The Activity column sits beside
+  // the rail (or the sidebar), whose own seam is the line, so its panel is
+  // inset and draws no seam of its own (two 1px seams side by side read as
+  // 2px).
+  assert.match(threadsInbox, /<ActivityInboxPanel edge="inset">/);
+  assert.match(mainLayout, /const masterDetailShellClassName = searchMasterDetail\s*\?\s*"flex flex-col border-r border-line-seam"/);
 });
 
 test("tooltips preserve the shared content and arrow palette", () => {
@@ -308,7 +343,7 @@ test("tooltips preserve the shared content and arrow palette", () => {
     "agent/AgentMcpTab", "agent/McpServerListItem",
   ]) {
     const caller = source(`src/components/${path}.tsx`);
-    assert.doesNotMatch(caller, /contentProps=\{\{[^}]*className: "[^"]*(?:bg-white|bg-layer-panel)/,
+    assert.doesNotMatch(caller, /contentProps=\{\{[^}]*className: "[^"]*(?:bg-white|bg-layer-canvas)/,
       `${path} must not replace only the content background while leaving the arrow on another recipe`);
   }
   assert.doesNotMatch(source("src/components/mermaid/mermaid.css"), /\.r-mermaid-tooltip\s*\{[^}]*background:/);
@@ -322,14 +357,16 @@ test("thread footer reserves the available row width for its composer", () => {
 
 test("Saved navigation delegates inactive and active chrome to the same SidebarItem as channels", () => {
   const sidebar = source("src/components/layout/Sidebar.tsx");
-  assert.match(sidebar, /\{\/\* Saved \*\/\}[\s\S]*?<SidebarItem[\s\S]*?active=\{location\.pathname\.endsWith\("\/saved"\)\}[\s\S]*?sidebarItemClass[\s\S]*?data-testid="sidebar-saved-entry"/);
+  // Desktop: the yellow "you are here" row while /saved is open. Phone: a
+  // ListRow entry that is never yellow (the phone has no "you are here" in lists).
+  assert.match(sidebar, /\{\/\* Saved[\s\S]*?<SidebarItem[\s\S]*?active=\{!mobileInline && location\.pathname\.endsWith\("\/saved"\)\}[\s\S]*?sidebarItemClass[\s\S]*?data-testid="sidebar-saved-entry"/);
 });
 
 test("Members Graph navigation keeps its icon and label in the shared row primitive", () => {
   const sidebar = source("src/components/layout/Sidebar.tsx");
   assert.match(
     sidebar,
-    /<SidebarItem[\s\S]*?active=\{location\.pathname === `\$\{pathBase\}\/members\/graph`\}[\s\S]*?<GitBranch size=\{14\} className="shrink-0" \/>[\s\S]*?layout\.sidebar\.graph[\s\S]*?<\/SidebarItem>/,
+    /<SidebarItem[\s\S]*?active=\{location\.pathname === `\$\{pathBase\}\/members\/graph`\}[\s\S]*?<SidebarItemIcon><GitBranch \/><\/SidebarItemIcon>[\s\S]*?layout\.sidebar\.graph[\s\S]*?<\/SidebarItem>/,
   );
 });
 
@@ -346,7 +383,8 @@ test("auth and onboarding surfaces ride the RUI recipes instead of hardcoded bru
 
   // The shell keeps the brand bar but the surfaces themselves ride layer tokens.
   assert.match(shell, /AUTH_BRAND_SHELL_CLASS =[\s\S]*?bg-layer-canvas/);
-  assert.match(shell, /theme-brutal:bg-soft-signal/);
+  // The brand bar is the DS frame (yellow in light, neutral in dark).
+  assert.match(shell, /AUTH_BRAND_TOP_BAR_CLASS =[\s\S]*?bg-layer-frame/);
   assert.doesNotMatch(shell, /bg-white font-display/);
   assert.match(onboardingShell, /bg-layer-canvas/);
 
@@ -357,18 +395,24 @@ test("auth and onboarding surfaces ride the RUI recipes instead of hardcoded bru
   assert.doesNotMatch(login, /border-2 border-black p-2 text-base shadow-brutal-sm/);
   assert.doesNotMatch(register, /border-2 border-black p-2 text-base shadow-brutal-sm/);
 
-  // Server tiles are the RUI option card, not a hand-rolled brutal button.
-  assert.match(selector, /variant="option"[\s\S]*?server-selector-option/);
+  // Server rows are raft-ui ListRows in a ListRowGroup (DS ListRow in an inset
+  // list): the whole row is the button, and the part lays the pressed wash on
+  // hover and press; not the static form-choice `option` card, which has no
+  // hover, and no hand-rolled press wash.
+  assert.match(selector, /<ListRowGroup\b[\s\S]*?server-selector-list/);
+  assert.match(selector, /<ListRow\b[\s\S]*?server-selector-option/);
+  assert.doesNotMatch(selector, /press-overlay/);
+  assert.doesNotMatch(selector, /variant="option"/);
   assert.doesNotMatch(selector, /border-2 border-black bg-white p-3 text-left font-bold shadow-brutal-sm/);
   assert.doesNotMatch(selector, /className="input-brutal/);
 
   // The first-server intro copy rides the surface tokens; the old hardcoded
-  // `text-black*` values rendered black-on-dark in Elegant Dark (task #686),
-  // while Brutal keeps its exact look behind `theme-brutal:`.
-  assert.match(selector, /text-foreground-strong theme-brutal:text-black"/);
-  assert.match(selector, /text-foreground-muted theme-brutal:text-black\/50/);
-  assert.match(selector, /text-foreground-muted theme-brutal:text-black\/65/);
-  assert.doesNotMatch(selector, /(?<!theme-brutal:)text-black(?=["\/\s])/);
+  // `text-black*` values rendered black-on-dark in Elegant Dark (task #686).
+  // Raft DS: Space Mono step label, a display title, an ink-2 paragraph.
+  assert.match(selector, /className="font-mono text-mono-meta text-foreground-hint"/);
+  assert.match(selector, /className="mt-2 text-title text-foreground sm:text-display"/);
+  assert.match(selector, /className="mt-3 text-subhead text-foreground-muted"/);
+  assert.doesNotMatch(selector, /text-black|uppercase|tracking-\[/);
 
   // The embedded-browser guide's link keeps an accessible name even though the
   // RUI Button renders the label into its content slot.

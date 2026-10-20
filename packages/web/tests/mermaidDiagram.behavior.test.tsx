@@ -386,7 +386,7 @@ test("concurrent light/dark diagrams keep their own palette and reuse only match
   assert.equal(light.theme, "light");
   assert.equal(dark.theme, "dark");
   assert.match(light.svg, /#141111/);
-  assert.match(dark.svg, /#f0f3f6/);
+  assert.match(dark.svg, /#e5e5e2/);
   assert.match(light.svg, /background-color: rgb\(255, 255, 255\)/);
   assert.match(dark.svg, /background-color: rgb\(10, 12, 16\)/);
   assert.notEqual(light.svg, dark.svg);
@@ -418,7 +418,7 @@ test("an existing diagram follows resolved mode changes and preserves its source
   assert.equal(screen.getByRole("radio", { name: "Code", exact: true }).getAttribute("aria-checked"), "true");
   await waitFor(() => assert.ok(result.container.querySelector("[data-mermaid-status=valid]")));
   fireEvent.click(screen.getByRole("radio", { name: "Diagram", exact: true }));
-  await waitFor(() => assert.match(readSrc(), /#f0f3f6/));
+  await waitFor(() => assert.match(readSrc(), /#e5e5e2/));
   result.rerender(content("light"));
   await waitFor(() => assert.equal(readSrc(), lightSrc));
 });

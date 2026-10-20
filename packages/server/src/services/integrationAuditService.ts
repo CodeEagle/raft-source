@@ -35,6 +35,7 @@ export const INTEGRATION_AUDIT_EVENT_TYPES = [
   "installation.outbound_grant_updated",
   "installation.outbound_subscription_updated",
   "installation.token_issued",
+  "installation.setup_updated",
   "webhook.configured",
   "webhook.rotated",
   "webhook.disabled",
@@ -96,6 +97,7 @@ const EVENT_METADATA_ALLOWLIST: Record<IntegrationAuditEventType, readonly strin
   "app.outbound_permission_approved": ["clientKey", "revision", "groupCount", "eventCount"],
   "installation.outbound_grant_updated": ["clientKey", "installationId", "grantRevision", "groupCount", "eventCount"],
   "installation.outbound_subscription_updated": ["clientKey", "installationId", "subscriptionRevision", "eventCount"],
+  "installation.setup_updated": ["installationId", "setupRevision", "status"],
   "installation.token_issued": ["clientKey", "installationId", "grantRevision", "audience", "expiresAt"],
   "webhook.configured": ["clientKey", "configRevision", "endpointOrigin"],
   "webhook.rotated": ["clientKey", "configRevision", "endpointOrigin", "previousValidUntil", "emergency"],
@@ -149,6 +151,7 @@ const EVENT_CATEGORY: Record<IntegrationAuditEventType, IntegrationAuditEventCat
   "installation.outbound_grant_updated": "scope",
   "installation.outbound_subscription_updated": "scope",
   "installation.token_issued": "runtime",
+  "installation.setup_updated": "install",
   "webhook.configured": "runtime",
   "webhook.rotated": "revocation",
   "webhook.disabled": "revocation",
@@ -169,6 +172,7 @@ const EVENT_CATEGORY: Record<IntegrationAuditEventType, IntegrationAuditEventCat
 };
 
 const DIFF_ALLOWLIST = new Set([
+  "setupUrl", "setupDescription", "setupRevision",
   "name",
   "description",
   "homepageUrl",

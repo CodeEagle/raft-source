@@ -75,6 +75,7 @@ import { slackPrivacyFreshUntil } from "./slackBindingPrivacyFreshnessService";
 import { projectSlackBindingLifecycle } from "./slackBindingLifecycleService";
 import { resolveExternalInstallServerGrantAuthority } from "./externalInstallServerGrantAuthority";
 import { effectiveAgentSenderName } from "./effectiveSenderName";
+import { filterChannelIdsVisibleToHuman } from "./channelService";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -192,9 +193,48 @@ export interface SlackBridgeAgentMentionHandle {
   handle: string;
 }
 
+/**
+ * A principal that could not be reconciled this round, with Slack's error
+ * when one was observed. Agents carry `agentId`, humans `userId`.
+ */
+export type SlackBridgeAgentMentionReconcileFailure = (
+  | { agentId: string; userId?: never }
+  | { userId: string; agentId?: never }
+) & {
+  slackError: string | null;
+  // Transient failures (lease/transport/429/5xx) should not downgrade the
+  // persisted sync state or surface workspace-policy hints to the operator.
+  transient: boolean;
+};
+
+/** A Raft human in a Slack-paired channel, mentionable via a managed usergroup. */
+export interface SlackBridgeHumanMentionCandidate {
+  serverId: string;
+  userId: string;
+  name: string;
+  displayName: string;
+  serverSlug: string;
+  serverName: string;
+}
+
+export interface SlackBridgeHumanMentionHandle {
+  userId: string;
+  providerUsergroupId: string;
+  handle: string;
+}
+
+/**
+ * Agents and humans share one reconcile call (one usergroups.list, one handle
+ * namespace) and one request budget: Agents first, humans fill the rest.
+ */
+export const SLACK_BRIDGE_MENTION_HANDLE_RECONCILE_LIMIT = 200;
+
 export type SlackBridgeProvisioningProviderResult<T> =
   | { kind: "fact"; fact: T }
-  | { kind: "failed" }
+  // Slack's `error` payload field (e.g. "restricted_action", "name_taken")
+  // travels with deterministic failures so callers can persist and render
+  // actionable recovery hints instead of an opaque "failed".
+  | { kind: "failed"; slackError?: string }
   | { kind: "unverified" };
 
 export interface SlackBridgeProvisioningProvider {
@@ -218,9 +258,25 @@ export interface SlackBridgeProvisioningProvider {
     request: {
       serverId: string;
       candidates: readonly SlackBridgeAgentMentionCandidate[];
+      /**
+       * Omitted: human usergroups are left untouched (Agent-only reconcile).
+       * Present (even empty): human groups are reconciled to exactly this set.
+       */
+      humanCandidates?: readonly SlackBridgeHumanMentionCandidate[];
+      /**
+       * Cross-replica claim check, consulted before every usergroup write.
+       * Once it reports false the reconcile issues no further write and
+       * returns `unverified`. Omitted: the caller is the only writer.
+       */
+      isClaimHeld?(): Promise<boolean>;
     },
   ): Promise<SlackBridgeProvisioningProviderResult<{
     handles: readonly SlackBridgeAgentMentionHandle[];
+    humanHandles?: readonly SlackBridgeHumanMentionHandle[];
+    // Principals (Agents and humans) that could not be reconciled this round,
+    // with Slack's error when one was observed. Empty when every candidate
+    // succeeded.
+    failures: readonly SlackBridgeAgentMentionReconcileFailure[];
   }>>;
 }
 
@@ -254,6 +310,12 @@ interface ProviderObservation {
   workspaceName: string | null;
   channels: SlackBridgeProvisioningProviderChannel[];
 }
+
+// Who a read projection is for. Managers see the full setup state; members
+// see it read-only, narrowed to the Raft channels they can view.
+type SlackBridgeProvisioningViewer =
+  | { kind: "manager" }
+  | { kind: "member"; userId: string };
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -314,6 +376,117 @@ export async function listSlackBridgeAgentMentionCandidates(
   }])).values()].sort((left, right) => left.agentId.localeCompare(right.agentId));
 }
 
+export type SlackBridgeMentionSyncState = NonNullable<
+  (typeof externalAppInstalls.$inferSelect)["agentMentionSync"]
+>;
+
+/**
+ * Persisted mention-usergroup sync state for one reconcile result; counts
+ * Agents and humans together. `null` for transport-level "unverified", which
+ * must not rewrite the stored state.
+ */
+export function slackBridgeMentionSyncState(input: {
+  reconciled: SlackBridgeProvisioningProviderResult<{
+    handles: readonly SlackBridgeAgentMentionHandle[];
+    humanHandles?: readonly SlackBridgeHumanMentionHandle[];
+    failures: readonly SlackBridgeAgentMentionReconcileFailure[];
+  }>;
+  candidates: readonly SlackBridgeAgentMentionCandidate[];
+  humanCandidates: readonly SlackBridgeHumanMentionCandidate[];
+  observedAt: Date;
+}): SlackBridgeMentionSyncState | null {
+  const { reconciled } = input;
+  const expected = input.candidates.length + input.humanCandidates.length;
+  const observedAt = input.observedAt.toISOString();
+  if (reconciled.kind === "unverified") return null;
+  if (reconciled.kind === "failed") {
+    return {
+      state: "degraded",
+      slackError: reconciled.slackError ?? null,
+      expected,
+      actual: 0,
+      observedAt,
+    };
+  }
+  const agentIds = new Set(reconciled.fact.handles.map((handle) => handle.agentId));
+  const userIds = new Set((reconciled.fact.humanHandles ?? []).map((handle) => handle.userId));
+  const actual = input.candidates.filter((candidate) => agentIds.has(candidate.agentId)).length
+    + input.humanCandidates.filter((candidate) => userIds.has(candidate.userId)).length;
+  if (actual === expected && reconciled.fact.failures.length === 0) {
+    return { state: "synced", slackError: null, expected, actual, observedAt };
+  }
+  return {
+    state: "degraded",
+    slackError: reconciled.fact.failures.find(
+      (failure) => !failure.transient && failure.slackError,
+    )?.slackError ?? null,
+    expected,
+    actual,
+    observedAt,
+  };
+}
+
+/**
+ * Raft humans who are members of the server's paired channels for this
+ * install, deterministic by user id and capped at `limit` (the caller passes
+ * the budget left after Agents). Retired accounts are excluded.
+ */
+export async function listSlackBridgeHumanMentionCandidates(
+  executor: DatabaseExecutor,
+  serverId: string,
+  bindings: readonly Binding[],
+  limit: number,
+): Promise<SlackBridgeHumanMentionCandidate[]> {
+  const channelIds = [...new Set(bindings.map((binding) => binding.channelId))];
+  if (channelIds.length === 0 || limit <= 0) return [];
+  const rows = await executor.selectDistinct({
+    userId: users.id,
+    name: users.name,
+    displayName: users.displayName,
+    serverSlug: servers.slug,
+    serverName: servers.name,
+  }).from(channelHumans)
+    .innerJoin(channels, and(
+      eq(channels.id, channelHumans.channelId),
+      eq(channels.serverId, serverId),
+    ))
+    .innerJoin(users, and(
+      eq(users.id, channelHumans.userId),
+      isNull(users.retiredAt),
+    ))
+    .innerJoin(servers, eq(servers.id, channels.serverId))
+    .where(inArray(channelHumans.channelId, channelIds))
+    .orderBy(users.id)
+    .limit(limit);
+  return rows.map((row) => ({
+    serverId,
+    userId: row.userId,
+    name: row.name,
+    displayName: row.displayName?.trim() || row.name,
+    serverSlug: row.serverSlug,
+    serverName: row.serverName,
+  }));
+}
+
+/** Agent + human candidates for one server/install within the shared budget. */
+export async function listSlackBridgeMentionCandidates(
+  executor: DatabaseExecutor,
+  serverId: string,
+  bindings: readonly Binding[],
+): Promise<{
+  candidates: SlackBridgeAgentMentionCandidate[];
+  humanCandidates: SlackBridgeHumanMentionCandidate[];
+}> {
+  const candidates = await listSlackBridgeAgentMentionCandidates(executor, serverId, bindings);
+  const humanCandidates = await listSlackBridgeHumanMentionCandidates(
+    executor,
+    serverId,
+    bindings,
+    SLACK_BRIDGE_MENTION_HANDLE_RECONCILE_LIMIT - candidates.length,
+  );
+  return { candidates, humanCandidates };
+}
+
 function requireManagerInput(input: SlackBridgeProvisioningRequestAuthority): void {
   if (
     !UUID_PATTERN.test(input.serverId)
@@ -347,6 +520,31 @@ async function requireManager(
       "external_app_not_authorized",
     );
   }
+}
+
+// Reading the setup state needs server membership (Guests excluded); every
+// mutation stays behind requireManager. Members get the privacy-narrowed projection.
+async function requireReader(
+  executor: Database,
+  input: SlackBridgeProvisioningRequestAuthority,
+): Promise<SlackBridgeProvisioningViewer> {
+  requireManagerInput(input);
+  const [membership] = await executor.select({ role: serverMembers.role })
+    .from(serverMembers)
+    .where(and(
+      eq(serverMembers.serverId, input.serverId),
+      eq(serverMembers.userId, input.requestingUserId),
+    ))
+    .limit(1);
+  if (!membership || membership.role === "guest") {
+    throw new ExternalAppControlPlaneError(
+      "Slack Bridge provisioning operation is not authorized",
+      "external_app_not_authorized",
+    );
+  }
+  return membership.role === "owner" || membership.role === "admin"
+    ? { kind: "manager" }
+    : { kind: "member", userId: input.requestingUserId };
 }
 
 function assertBootstrap(bootstrap: SlackBridgeProvisioningBootstrapAuthority): void {
@@ -1311,6 +1509,7 @@ function rawHealth(input: {
     bindings,
     audiences: [...input.audiences],
     lastVerifiedAt: install?.lastVerifiedAt?.toISOString() ?? null,
+    agentMentionSync: install?.agentMentionSync ?? null,
     failingSurface,
   };
 }
@@ -1370,7 +1569,9 @@ async function responseFor(input: {
   authority: CurrentAuthority;
   providerObservation: ProviderObservation;
   request: SlackBridgeProvisioningRequestAuthority;
+  viewer?: SlackBridgeProvisioningViewer;
 }): Promise<SlackBridgeProvisioningResponse> {
+  const viewer = input.viewer ?? { kind: "manager" };
   const raft = await listSlackBridgeRaftConversationTargets(input.db, input.request.serverId);
   const audiences = await audienceStatuses(
     input.db,
@@ -1402,17 +1603,38 @@ async function responseFor(input: {
       reservedProviderConversationIds.add(binding.providerConversationId);
     }
   }
+  // Stage, preflight and the failing surface stay whole-server aggregates so a
+  // member sees the same setup progress as a manager. Channel-level facts are
+  // narrowed: a member only learns about bindings whose Raft channel they can
+  // view, and only about the Slack channels those bindings name.
+  const visibleRaftChannelIds = viewer.kind === "member"
+    ? await filterChannelIdsVisibleToHuman(
+      input.request.serverId,
+      viewer.userId,
+      [...raft.map((channel) => channel.id), ...input.authority.bindings.map((binding) => binding.channelId)],
+      input.db,
+    )
+    : null;
+  const visibleBindings = visibleRaftChannelIds
+    ? input.authority.bindings.filter((binding) => visibleRaftChannelIds.has(binding.channelId))
+    : input.authority.bindings;
   const providerChannels = projectSlackProviderChannelsForServer({
     observed: input.providerObservation.channels,
     currentBindings: input.authority.bindings,
     reservedByOtherServer: reservedProviderConversationIds,
   });
-  const pairs = input.authority.bindings.map((binding) => ({
+  const pairs = visibleBindings.map((binding) => ({
     raftChannelId: binding.channelId,
     slackChannelId: binding.providerConversationId,
     bindingEpoch: binding.bindingEpoch,
   }));
-  const visibleRaft = new Map(raft.map((channel) => [channel.id, { id: channel.id, name: channel.name }]));
+  const pairedSlackChannelIds = new Set(pairs.map((pair) => pair.slackChannelId));
+  const visibleProviderChannels = visibleRaftChannelIds
+    ? providerChannels.filter((channel) => pairedSlackChannelIds.has(channel.id))
+    : providerChannels;
+  const visibleRaft = new Map(raft
+    .filter((channel) => !visibleRaftChannelIds || visibleRaftChannelIds.has(channel.id))
+    .map((channel) => [channel.id, { id: channel.id, name: channel.name }]));
   if (pairs.some((pair) => !visibleRaft.has(pair.raftChannelId))) {
     const boundRows = await input.db.select({ id: channels.id, name: channels.name })
       .from(channels)
@@ -1425,7 +1647,13 @@ async function responseFor(input: {
     connection: input.providerObservation.status,
     preflight,
   });
+  const visibleBindingIds = new Set(visibleBindings.map((binding) => binding.id));
   const grant = currentGrant(input.authority, input.bootstrap);
+  if (viewer.kind === "manager" && stage === "oauth" && !grant) {
+    // A manager at `oauth` must be able to start it; fail closed rather than
+    // render a consent step that cannot be completed.
+    throw new Error("Slack Bridge OAuth stage requires current server-grant authority");
+  }
   return {
     protocolVersion: SLACK_BRIDGE_PROVISIONING_PROTOCOL_VERSION,
     snapshot: {
@@ -1436,7 +1664,7 @@ async function responseFor(input: {
       raftChannels: [...visibleRaft.values()].slice(0, MAX_CHANNELS),
       slackChannels: stage === "connect"
         ? []
-        : providerChannels.map(({ id, name, privacyClass, isMember }) => ({
+        : visibleProviderChannels.map(({ id, name, privacyClass, isMember }) => ({
           id,
           name,
           privacyClass,
@@ -1444,11 +1672,18 @@ async function responseFor(input: {
         })).slice(0, MAX_CHANNELS),
       channelPairs: stage === "connect" ? [] : pairs,
       preflight: stage === "connect" || stage === "oauth" || stage === "channels" ? null : preflight,
-      rawHealth: health,
+      rawHealth: visibleRaftChannelIds
+        ? {
+          ...health,
+          bindings: health.bindings.filter((binding) => visibleBindingIds.has(binding.id)),
+          audiences: health.audiences.filter((audience) => visibleBindingIds.has(audience.bindingId)),
+        }
+        : health,
     },
     // Past `connect` the same grant also authorizes an in-place
-    // re-authorization (new scopes) of the connected workspace.
-    oauthAuthority: stage !== "connect" && grant ? {
+    // re-authorization (new scopes) of the connected workspace. Only managers
+    // may start OAuth, so a member's projection never carries the authority.
+    oauthAuthority: viewer.kind === "manager" && stage !== "connect" && grant ? {
       registrationId: input.bootstrap.registrationId,
       serverGrantId: grant.id,
       grantEpoch: grant.grantEpoch,
@@ -1970,7 +2205,7 @@ export function createSlackBridgeProvisioningControlPlane(
   const load = async (
     request: SlackBridgeProvisioningRequestAuthority,
   ): Promise<SlackBridgeProvisioningResponse> => {
-    await requireManager(db, request);
+    const viewer = await requireReader(db, request);
     const registration = await assertBootstrapRows(db, bootstrap, request.now, db);
     const authority = registration
       ? await loadCurrentAuthority(db, bootstrap, request.serverId)
@@ -1982,10 +2217,13 @@ export function createSlackBridgeProvisioningControlPlane(
         installGrantReceipt: null,
         bindings: [],
       };
+    // Members read the same live workspace observation as managers: stage,
+    // preflight and paired Slack channel names all depend on it, and a stored
+    // fallback would show a healthy bridge as unverified.
     const observation = registration
       ? await observeProvider(dependencies.provider, authority, request.now)
       : { status: "unverified" as const, workspaceName: null, channels: [] };
-    return responseFor({ db, bootstrap, authority, providerObservation: observation, request });
+    return responseFor({ db, bootstrap, authority, providerObservation: observation, request, viewer });
   };
 
   const loadWithoutProvider = async (
@@ -2801,7 +3039,10 @@ export function createSlackBridgeProvisioningControlPlane(
         // which would starve core message sync. The 5-minute lifecycle tick
         // retries this reconciliation on its own schedule.
         try {
-          const mentionCandidates = await listSlackBridgeAgentMentionCandidates(
+          const {
+            candidates: mentionCandidates,
+            humanCandidates: humanMentionCandidates,
+          } = await listSlackBridgeMentionCandidates(
             db,
             request.serverId,
             authority.bindings,
@@ -2813,28 +3054,34 @@ export function createSlackBridgeProvisioningControlPlane(
           } else {
             const mentionReconciliation = await dependencies.provider.reconcileAgentMentionHandles(
               providerAuthority,
-              { serverId: request.serverId, candidates: mentionCandidates },
+              {
+                serverId: request.serverId,
+                candidates: mentionCandidates,
+                humanCandidates: humanMentionCandidates,
+              },
             );
-            if (mentionReconciliation.kind !== "fact") {
-              console.warn("[SlackBridge] Agent mention reconciliation failed", {
+            const mentionSync = slackBridgeMentionSyncState({
+              reconciled: mentionReconciliation,
+              candidates: mentionCandidates,
+              humanCandidates: humanMentionCandidates,
+              observedAt: request.now,
+            });
+            if (mentionSync?.state === "degraded") {
+              console.warn("[SlackBridge] Agent mention reconciliation degraded", {
                 serverId: request.serverId,
                 kind: mentionReconciliation.kind,
+                slackError: mentionSync.slackError,
+                expected: mentionSync.expected,
+                actual: mentionSync.actual,
+                ...(mentionReconciliation.kind === "fact"
+                  ? { failures: mentionReconciliation.fact.failures }
+                  : {}),
               });
-            } else {
-              const reconciledAgentIds = new Set(
-                mentionReconciliation.fact.handles.map((handle) => handle.agentId),
-              );
-              if (
-                mentionReconciliation.fact.handles.length !== mentionCandidates.length
-                || reconciledAgentIds.size !== mentionCandidates.length
-                || mentionCandidates.some((candidate) => !reconciledAgentIds.has(candidate.agentId))
-              ) {
-                console.warn("[SlackBridge] Agent mention reconciliation incomplete", {
-                  serverId: request.serverId,
-                  expected: mentionCandidates.length,
-                  actual: mentionReconciliation.fact.handles.length,
-                });
-              }
+            }
+            if (mentionSync) {
+              await db.update(externalAppInstalls)
+                .set({ agentMentionSync: mentionSync, updatedAt: request.now })
+                .where(eq(externalAppInstalls.id, install.id));
             }
           }
         } catch (error) {

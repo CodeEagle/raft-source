@@ -7,7 +7,7 @@ import { TestIntlProvider } from "./helpers/intl";
 import { installForwardFoldMeasurementStub } from "./helpers/forwardFoldMeasurement";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { ToastProvider, toast } from "raft-ui";
+import { ToastProvider, toast } from "@botiverse/raft-ui";
 import api from "../src/api/client";
 import { getSocket } from "../src/api/socket";
 import ChatPanel from "../src/components/message/ChatPanel";
@@ -500,7 +500,7 @@ test("destination search distinguishes a failed request from no matches and can 
   await screen.findByText("Couldn't search destinations.");
   assert.equal(screen.queryByText("No destinations match your search."), null);
 
-  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try Again" }));
   await screen.findByText("No destinations match your search.");
   assert.equal(searchCalls, 2);
 });

@@ -152,5 +152,8 @@
       "pointer": "/model",
       "dependsOn": "/providerId"
     }
-  }
+  },
+  "requiredClientCapabilities": [
+    "option_source.status"
+  ]
 }

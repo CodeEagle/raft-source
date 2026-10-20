@@ -218,7 +218,9 @@ test("attachment preview shell exposes compact edge controls through the mounted
   const download = screen.getByRole("button", { name: "Download" });
   const close = screen.getByRole("button", { name: "Close" });
   for (const control of [download, close]) {
-    assert.match(control.getAttribute("class") ?? "", /(^| )size-7( |$)/);
+    // Head actions are the DS 44 header icon button (`size="icon-lg"`, raft
+    // size-11), like the lightbox close.
+    assert.match(control.getAttribute("class") ?? "", /(^| )size-11( |$)/);
     const icon = control.querySelector("svg");
     assert.ok(icon);
     assert.equal(icon.getAttribute("width"), "14");

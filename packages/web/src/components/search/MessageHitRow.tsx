@@ -12,7 +12,7 @@ import {
   SearchMessageResultTimestamp,
   SearchThreadMessageResult,
   ThreadIcon,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { formatRelativeTimeParts } from "../../utils/relativeTime";
 import AvatarSlot from "../ui/AvatarSlot";
 import { getSearchRelativeTimeParts } from "./searchGrouping";
@@ -50,25 +50,32 @@ export function MessageHitRow({
 
   const Result = nested ? SearchThreadMessageResult : SearchMessageResult;
 
+  // DS search hit (`.rf-hit`): a 27px identity in its own column, then who /
+  // where / time on one line and a two-line excerpt under it. The DOM keeps
+  // the original reading order (where, then who, then when — so the button's
+  // accessible name is unchanged): rui's raft recipe moves the sender to the
+  // front visually, and the avatar is lifted into the left column by
+  // positioning it against the row (16px edge, 12px top), with the text
+  // column starting at 16 + 27 + 12 = 55px where the hairline starts too.
   return (
     <Result
       type="button"
       onClick={handleClick}
       selected={selected}
-      className={nested ? "border-t-2" : undefined}
+      className="pl-[55px] not-first:before:left-[55px]"
     >
     <SearchMessageResultHeader>
       <SearchMessageResultMeta>{sourceLabel}</SearchMessageResultMeta>
       {result.channelType === "thread" && (
         <SearchMessageResultThreadMeta>
-          <ThreadIcon width={10} height={10} />
+          <ThreadIcon width={12} height={12} />
           {formatMessage({ id: "search.threadInline" })}
         </SearchMessageResultThreadMeta>
       )}
       {(result.channelType === "thread"
         ? result.parentChannelArchivedAt
         : result.channelArchivedAt) && (
-        <Badge appearance="soft" variant="warning" uppercase>
+        <Badge appearance="soft" variant="warning">
           {formatMessage({ id: "search.archived" })}
         </Badge>
       )}
@@ -78,13 +85,15 @@ export function MessageHitRow({
         </Badge>
       )}
       <SearchMessageResultSender>
-        {result.senderType === "agent" ? (
-          <AvatarSlot context="preview-mini" type="agent" agentAvatarUrl={agentAvatarUrl} />
-        ) : result.senderType === "external_projection" ? (
-          <AvatarSlot context="preview-mini" type="app" appAvatarUrl={result.senderAvatarUrl} appInitials={result.senderName} />
-        ) : (
-          <AvatarSlot context="preview-mini" type="human" humanAvatarUrl={senderMember?.avatarUrl} gravatarHash={senderMember?.gravatarHash} />
-        )}
+        <span className="absolute top-3 left-4 flex">
+          {result.senderType === "agent" ? (
+            <AvatarSlot context="compact-row" type="agent" agentAvatarUrl={agentAvatarUrl} />
+          ) : result.senderType === "external_projection" ? (
+            <AvatarSlot context="compact-row" type="app" appAvatarUrl={result.senderAvatarUrl} appInitials={result.senderName} />
+          ) : (
+            <AvatarSlot context="compact-row" type="human" humanAvatarUrl={senderMember?.avatarUrl} gravatarHash={senderMember?.gravatarHash} />
+          )}
+        </span>
         <span>{result.senderName}</span>
       </SearchMessageResultSender>
       <SearchMessageResultTimestamp>{(() => {

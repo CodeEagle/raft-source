@@ -10,16 +10,20 @@ const quoted = read("src/components/ui/cards/QuotedMessageCard.tsx");
 const attachment = read("src/components/message/AttachmentChip.tsx");
 
 test("PreviewShell exports the canonical preview skin recipe (single source)", () => {
-  assert.match(shell, /export const PREVIEW_SHELL_BORDER = "border border-line-muted hover:border-line-strong theme-brutal:border-black\/15 theme-brutal:hover:border-black\/30";/);
+  // Raft Design System: a preview is content — a hairline, the card surface,
+  // never an ink line (ink = control) and never a lift.
+  assert.match(shell, /export const PREVIEW_SHELL_BORDER = "border border-line-hairline";/);
+  assert.doesNotMatch(shell, /hover:border-line-strong/);
   // Skin is hover-only: press inherits hover styling (`:hover` keeps matching
   // while `:active` is true). Pre-refactor QuotedMessageCard never had an
-  // active token, and a `color-mix(in oklab, …, transparent)` × element
-  // `opacity` combo paints cyan on Chromium — both reasons to keep the shell
-  // press-token-free. stdrc 2026-05-23 #proj-theme:441c8b2b cfd10230.
-  assert.match(shell, /export const PREVIEW_SHELL_SKIN = `\$\{PREVIEW_SHELL_BORDER\} bg-layer-panel hover:bg-fill-muted theme-brutal:bg-white theme-brutal:hover:bg-black\/5 shadow-none`;/);
-  assert.doesNotMatch(shell, /active:bg-soft-signal/);
+  // active token — keep the shell press-token-free. stdrc 2026-05-23
+  // #proj-theme:441c8b2b cfd10230. The hover is the DS pressed wash laid over
+  // the card fill.
+  assert.match(shell, /export const PREVIEW_SHELL_SKIN = `\$\{PREVIEW_SHELL_BORDER\} bg-layer-card hover:press-overlay shadow-none`;/);
+  assert.doesNotMatch(shell, /active:bg-palette-yellow/);
   assert.doesNotMatch(shell, /active:opacity-90/);
-  assert.match(shell, /export const PREVIEW_SHELL_SKIN_MUTED =\s*"border border-line-muted bg-fill-muted italic text-foreground-placeholder hover:shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black\/30 theme-brutal:bg-black\/5 theme-brutal:text-black\/40 theme-brutal:hover:shadow-brutal-sm";/);
+  assert.match(shell, /export const PREVIEW_SHELL_SKIN_MUTED =\s*"border border-line-hairline bg-fill-muted text-foreground-hint shadow-none";/);
+  assert.doesNotMatch(shell, /theme-brutal:|shadow-raft-sm|shadow-brutal/);
   // Polymorphic root (button when clickable, else div).
   assert.match(shell, /const Root = onClick \? "button" : "div";/);
   assert.match(shell, /type: "button" as const/);
@@ -44,7 +48,7 @@ test("AttachmentChip builds on RUI MessageAttachmentCard (task #640 follow-up)",
   // MessageAttachment recipe family — the RUI brutal card has no hard shadow
   // (`border-black/15 bg-white hover:border-black/30 hover:bg-ink-2`).
   // QuotedMessageCard keeps PreviewShell; only the chip moved.
-  assert.match(attachment, /from "raft-ui"/);
+  assert.match(attachment, /from "@botiverse\/raft-ui"/);
   assert.match(attachment, /MessageAttachmentCard/);
   assert.match(attachment, /<MessageAttachmentCard\b/);
   assert.match(attachment, /<MessageAttachmentTitle\b/);
@@ -68,7 +72,7 @@ test("AttachmentChip builds on RUI MessageAttachmentCard (task #640 follow-up)",
   assert.doesNotMatch(layout![1], /hover:border-black\/30/);
   assert.doesNotMatch(layout![1], /\bbg-white\b/);
   assert.doesNotMatch(layout![1], /hover:bg-black\/5/);
-  assert.doesNotMatch(layout![1], /active:bg-soft-signal/);
+  assert.doesNotMatch(layout![1], /active:bg-palette-yellow/);
   // The layout literal is passed to the RUI card, keeping the width contract
   // on the rendered root.
   assert.match(attachment, /className=\{`\$\{COMPACT_CHIP_LAYOUT\}/);

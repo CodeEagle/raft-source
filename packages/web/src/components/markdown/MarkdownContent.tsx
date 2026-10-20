@@ -16,7 +16,7 @@ import type { Components, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 import rehypeSanitize from "rehype-sanitize";
-import { InlineCode } from "raft-ui";
+import { InlineCode, Separator } from "@botiverse/raft-ui";
 import { remarkAutolinkBareUrls } from "../../utils/markdownAutolink";
 import {
   EXTERNAL_TRANSLATION_GUARD_TRANSLATE,
@@ -80,7 +80,7 @@ class MarkdownContentErrorBoundary extends Component<
           data-markdown-dom-fallback=""
           translate={EXTERNAL_TRANSLATION_GUARD_TRANSLATE}
           className={withExternalTranslationGuardClass(
-            "whitespace-pre-wrap break-words font-mono text-[0.875em] leading-relaxed text-foreground-strong",
+            "whitespace-pre-wrap break-words font-mono text-[0.875em] leading-relaxed text-foreground",
           )}
           data-immersive-translate-ignore=""
         >
@@ -92,7 +92,8 @@ class MarkdownContentErrorBoundary extends Component<
   }
 }
 
-/** Shared dark code-block wrapper — the canonical look for every fenced block
+/** Shared code-block wrapper (DS code block: the `code` layer, a hairline,
+ *  container radius, Space Mono) — the canonical look for every fenced block
  *  across chat body + attachment preview. Extracted so the mermaid-aware
  *  `pre` can reuse it verbatim for the non-mermaid path. */
 function BaseCodePre({ children }: { children?: ReactNode }) {
@@ -100,7 +101,7 @@ function BaseCodePre({ children }: { children?: ReactNode }) {
   const language = extractCodeBlockLanguage(children);
   return (
     <CodeBlock
-      className="overflow-x-auto border border-line rounded-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black bg-code-surface p-3 pr-12 text-code-foreground [font-size:inherit] font-mono [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0"
+      className="overflow-x-auto rounded-container border border-line-hairline bg-layer-code px-3 py-2 pr-12 text-code-foreground [font-size:inherit] font-mono [&>code]:border-0 [&>code]:bg-transparent [&>code]:p-0"
       code={codeText}
       language={language}
     >
@@ -146,22 +147,22 @@ export function extractCodeBlockLanguage(node: ReactNode): string | null {
  *
  * Before this consolidation, MarkdownPreviewPane (modal) and renderContent()
  * (chat body) had two diverged components maps. Notable drifts:
- *   - code blocks: chat body uses `bg-gray-900` dark; preview used `bg-brutal-cream`
- *   - inline code: chat body uses `bg-soft-signal/40`; preview used `bg-brutal-cream`
+ *   - code blocks: chat body uses `bg-gray-900` dark; preview used `bg-palette-cream`
+ *   - inline code: chat body uses `bg-palette-yellow/40`; preview used `bg-palette-cream`
  *   - lists / headings / table-th bg / blockquote: each diverged independently
  *
  * Chat body's styling is canonical (it's what users see most of the time);
  * preview adopts it.
  */
 
-/** Shared blockquote base — border / color / text / italic tokens shared
+/** Shared blockquote base (DS quote: a 2px seam bar, ink-2 text) shared
  *  across every markdown render surface (chat body, attachment preview,
  *  AgentWorkspace .md preview). Per-callsite vertical margin is appended
  *  by the caller (`my-1` for chat density, `my-2` for document density).
  *  Centralizing this keeps tuning like #proj-uiux task #299 single-source
  *  — stdrc 2026-05-24 audit follow-up. */
 export const MARKDOWN_BLOCKQUOTE_BASE_CLASS =
-  "border-l-2 border-line-muted pl-3 italic text-foreground-muted theme-brutal:border-black/40 theme-brutal:text-black/70";
+  "border-l-2 border-line-seam pl-2.5 text-foreground-muted";
 
 type ExternalTranslationGuardProps = {
   translate: typeof EXTERNAL_TRANSLATION_GUARD_TRANSLATE;
@@ -225,7 +226,7 @@ export function MarkdownLink({
       target="_blank"
       rel="noopener noreferrer"
       {...externalTranslationGuardProps(
-        "text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2 hover:text-brutal-pink select-text",
+        "text-foreground-link underline decoration-2 underline-offset-2 hover:decoration-attention select-text",
       )}
     >
       {children}
@@ -265,20 +266,20 @@ export const BASE_MARKDOWN_COMPONENTS: Components = {
   ),
   table: ({ children }) => (
     <div {...externalTranslationGuardProps("my-2 overflow-x-auto")}>
-    <table className="border-collapse border border-line-muted [font-size:inherit] theme-brutal:border-2 theme-brutal:border-black">{children}</table>
+    <table className="border-collapse border border-line-hairline [font-size:inherit]">{children}</table>
     </div>
   ),
   th: ({ children }) => (
     <th
       {...externalTranslationGuardProps(
-        "border border-line-muted bg-info-soft px-2 py-1 text-left font-bold whitespace-nowrap text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-cyan theme-brutal:text-black",
+        "border border-line-hairline bg-fill-muted px-2 py-1 text-left font-bold whitespace-nowrap text-foreground",
       )}
     >
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td {...externalTranslationGuardProps("border border-line-muted px-2 py-1")}>
+    <td {...externalTranslationGuardProps("border border-line-hairline px-2 py-1")}>
       {children}
     </td>
   ),
@@ -312,9 +313,9 @@ export const BASE_MARKDOWN_COMPONENTS: Components = {
       {children}
     </h6>
   ),
-  hr: () => <hr className="my-2 border-t border-line-muted theme-brutal:border-t-2 theme-brutal:border-black" />,
+  hr: () => <Separator className="my-2" />,
   img: ({ src, alt }) => (
-    <img src={src} alt={alt || ""} className={`my-2 max-w-full border border-line-muted theme-brutal:border-2 theme-brutal:border-black ${transparentImageBackgroundClass}`} />
+    <img src={src} alt={alt || ""} className={`my-2 max-w-full rounded-container border border-line-hairline ${transparentImageBackgroundClass}`} />
   ),
   // Default link renderer — opens ordinary links in a new tab, custom
   // protocols (obsidian://) through the confirm dialog (task #734). Chat

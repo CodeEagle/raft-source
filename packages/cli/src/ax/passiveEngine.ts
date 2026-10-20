@@ -5,16 +5,18 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type {
+  ContextGenerationRecord,
+  PassiveResourceSpec,
+  PassiveResourceType,
+  SenderClaim,
+} from "@botiverse/raft-shared";
 import {
   CONTEXT_GENERATION_FILENAME,
   CONTEXT_GENERATION_MAX_BYTES,
-  type ContextGenerationRecord,
   isLocalStateAgentId,
   PASSIVE_RESOURCES,
-  type PassiveResourceSpec,
-  type PassiveResourceType,
-  type SenderClaim,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { claimObservation, probeLedgerWritable, readObservation, recordObservation, releaseObservation } from "../state/agentLedger";
 

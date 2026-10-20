@@ -66,6 +66,44 @@ export class RuntimeSessionNeedsResetError extends Error {
 }
 
 /**
+ * task #1258 — the agent's saved session was last run by another major line
+ * of its runtime (OpenCode 1.x vs 2.x keep separate session stores, and 2.x
+ * silently creates a session for an unknown id). Resuming is refused and the
+ * session id is left as it is; a human starts a new session (Reset Session)
+ * or reinstalls the recorded major. `recordedMajor` is null when the session
+ * predates the daemon's record (made before 2.x support existed, so by 1.x).
+ */
+export class RuntimeSessionRuntimeMismatchError extends Error {
+  readonly code = "session_runtime_mismatch" as const;
+  readonly runtimeId: string;
+  readonly sessionId: string;
+  readonly reason: "major_mismatch" | "unrecorded" | "record_unreadable";
+  readonly recordedMajor: number | null;
+  readonly installedVersion: string;
+
+  constructor(input: {
+    runtimeId: string;
+    sessionId: string;
+    reason: "major_mismatch" | "unrecorded" | "record_unreadable";
+    recordedMajor: number | null;
+    installedVersion: string;
+  }) {
+    const origin = input.reason === "record_unreadable"
+      ? "an OpenCode version Raft can no longer tell (its session record is unreadable)"
+      : input.recordedMajor === null
+        ? "an earlier OpenCode line (its major version was not recorded)"
+        : `OpenCode ${input.recordedMajor}.x`;
+    super(`The ${input.runtimeId} session was created by ${origin} and cannot be resumed with the installed OpenCode ${input.installedVersion}`);
+    this.name = "RuntimeSessionRuntimeMismatchError";
+    this.runtimeId = input.runtimeId;
+    this.sessionId = input.sessionId;
+    this.reason = input.reason;
+    this.recordedMajor = input.recordedMajor;
+    this.installedVersion = input.installedVersion;
+  }
+}
+
+/**
  * The selected model has no entry in the runtime's configuration on this
  * computer (Kimi: config.toml [models."X"]). Distinct from model_not_found so
  * only this runtime-confirmed case stops automatic relaunches (task #1221).

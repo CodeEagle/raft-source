@@ -353,3 +353,71 @@ test("AgentVisibleDeliveryLedger caps exact seen seqs per target, keeping the ne
   assert.equal(seqs[0], 11);
   assert.equal(seqs.at(-1), total);
 });
+
+// glimpse G0: delivery facts outlive a compaction (they stop re-delivery), but
+// as freshness evidence they only count inside the context they were recorded in.
+const THREAD = "#general:abcd1234";
+function renderThreadPackage(ledger: AgentVisibleDeliveryLedger, contextId: string | null | undefined, seqs: number[]): void {
+  ledger.recordConsumed("agent-1", {
+    target: THREAD,
+    messages: seqs.map((seq) => ({ seq, message_id: `m-${seq}`, channel_type: "thread", channel_name: "abcd1234", parent_channel_name: "general", parent_channel_type: "channel" })),
+    source: "thread_join_context_rendered",
+    contextId,
+  });
+  ledger.recordConsumed("agent-1", {
+    messages: [{ seq: 50, message_id: "m-50", channel_type: "thread", channel_name: "abcd1234", parent_channel_name: "general", parent_channel_type: "channel" }],
+    source: "stdin_idle_delivery",
+    contextId,
+  });
+}
+
+test("freshness view with a context signal counts only facts from the current context", () => {
+  const ledger = new AgentVisibleDeliveryLedger();
+  renderThreadPackage(ledger, "ctx-1", [40, 41]);
+
+  const before = ledger.freshnessView("agent-1", { contextId: "ctx-1" });
+  assert.equal(before.getBoundary(THREAD), 41);
+  assert.deepEqual(before.getExactSeenSeqs(THREAD), [40, 41, 50]);
+  assert.equal(before.isModelSeen(THREAD, { seq: 50, message_id: "m-50" }), true);
+
+  const afterCompaction = ledger.freshnessView("agent-1", { contextId: "ctx-2" });
+  assert.equal(afterCompaction.getBoundary(THREAD), undefined, "the pre-compaction package no longer vouches for a send");
+  assert.deepEqual(afterCompaction.getExactSeenSeqs(THREAD), []);
+  assert.equal(afterCompaction.isModelSeen(THREAD, { seq: 50, message_id: "m-50" }), false);
+  assert.equal(ledger.isModelSeen("agent-1", THREAD, { seq: 50, message_id: "m-50" }), true, "delivery suppression still knows the row was delivered");
+  assert.equal(ledger.getBoundary("agent-1", THREAD), 41);
+
+  renderThreadPackage(ledger, "ctx-2", [48, 49]);
+  const fresh = ledger.freshnessView("agent-1", { contextId: "ctx-2" });
+  assert.equal(fresh.getBoundary(THREAD), 49);
+  assert.deepEqual(fresh.getExactSeenSeqs(THREAD), [48, 49, 50], "only what was rendered in this context");
+  assert.equal(ledger.freshnessView("agent-1", { contextId: "ctx-1" }).getBoundary(THREAD), undefined, "a context never comes back");
+});
+
+test("freshness view without a context signal keeps today's process-wide evidence", () => {
+  const ledger = new AgentVisibleDeliveryLedger();
+  renderThreadPackage(ledger, "ctx-1", [40, 41]);
+  assert.equal(ledger.freshnessView("agent-1", undefined).getBoundary(THREAD), 41);
+});
+
+test("freshness view with a signal but an unknown id gives no evidence", () => {
+  const ledger = new AgentVisibleDeliveryLedger();
+  renderThreadPackage(ledger, "ctx-1", [40, 41]);
+  const view = ledger.freshnessView("agent-1", { contextId: null });
+  assert.equal(view.getBoundary(THREAD), undefined, "a compaction whose id could not be published must not reuse old evidence");
+  assert.deepEqual(view.getExactSeenSeqs(THREAD), []);
+});
+
+test("facts recorded without a context id are no evidence once one is published", () => {
+  const unstamped = new AgentVisibleDeliveryLedger();
+  renderThreadPackage(unstamped, undefined, [40, 41]);
+  assert.equal(unstamped.freshnessView("agent-1", { contextId: "ctx-1" }).getBoundary(THREAD), undefined);
+  assert.equal(unstamped.getBoundary("agent-1", THREAD), 41);
+});
+
+test("clearAgent drops the context scope too", () => {
+  const ledger = new AgentVisibleDeliveryLedger();
+  renderThreadPackage(ledger, "ctx-1", [40, 41]);
+  ledger.clearAgent("agent-1");
+  assert.equal(ledger.freshnessView("agent-1", { contextId: "ctx-1" }).getBoundary(THREAD), undefined);
+});

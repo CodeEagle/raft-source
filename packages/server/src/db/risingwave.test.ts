@@ -49,6 +49,37 @@ test("a saturated RisingWave pool (acquire timeout) surfaces as RisingWaveOverlo
   assert.equal(asRisingWaveOverload(error), error);
 });
 
+test("RisingWave shedding a query (too_many_internal_resets) is an overload, traced as rw_internal_resets", async () => {
+  // The prod 2026-10-15 04:24Z message, as pg surfaces it.
+  const shed = Object.assign(
+    new Error("Failed to execute the statement\n\nCaused by these errors (recent errors listed first):\n  1: gRPC request to batch service failed: Resource has been exhausted\n  2: status: ResourceExhausted, message: \"too_many_internal_resets\""),
+    { code: "XX000" },
+  );
+  const released: number[] = [];
+  const pool = {
+    connect: async () => ({
+      query: async () => { throw shed; },
+      release: () => { released.push(1); },
+    }),
+    totalCount: 1, idleCount: 0, waitingCount: 0,
+  } as unknown as pg.Pool;
+  const error = await queryRisingWave(pool, "SELECT 1").then(() => null, (err: unknown) => err);
+  assert.ok(error instanceof RisingWaveOverloadedError);
+  assert.equal((error as RisingWaveOverloadedError).reason, "rw_internal_resets");
+  assert.equal((error as Error).cause, shed);
+  assert.equal(released.length, 1);
+  assert.equal(risingWaveInboxFailureAttrs({ route: "all", error, contractVersion: 2 }).error_kind, "rw_internal_resets");
+  // An overload, so the typed read-error wrapper leaves it alone (503, not 502).
+  assert.equal(asRisingWaveReadError(error), error);
+
+  // Exact phrase only: other "exhausted" failures stay what they were.
+  const otherExhausted = Object.assign(new Error("ERROR: memory exhausted while hashing"), { code: "53200" });
+  assert.equal(asRisingWaveOverload(otherExhausted), otherExhausted);
+  assert.equal(risingWaveInboxFailureAttrs({ route: "all", error: otherExhausted, contractVersion: 2 }).error_kind, "rw_query_error");
+  assert.equal(risingWaveInboxFailureAttrs({ route: "all", error, contractVersion: 2 }).overload_reason, "rw_internal_resets");
+  assert.equal(risingWaveInboxFailureAttrs({ route: "all", error: otherExhausted, contractVersion: 2 }).overload_reason, undefined, "not an overload");
+});
+
 async function rwStatementCount(statement: string): Promise<number> {
   const json = await dbQueryDuration.get();
   return json.values.find((value) =>
@@ -224,4 +255,41 @@ test("asRisingWaveReadError wraps only untyped RisingWave read failures", () => 
   assert.equal(asRisingWaveReadError(overloaded), overloaded);
   const causedByOverload = new Error("retry failed", { cause: overloaded });
   assert.equal(asRisingWaveReadError(causedByOverload), causedByOverload, "an overload in the cause chain stays an overload");
+});
+
+test("RisingWave briefly unreachable (restart) is an overload, so a recent stale body can serve; query errors are not", async () => {
+  // Prod 2026-10-17 19:00:21-19:01:36Z: the node restarted. New connections got
+  // the proxy's E_UPSTREAM_UNREACHABLE, in-flight ones were cut off.
+  const unreachable = Object.assign(new Error("could not reach instance [E_UPSTREAM_UNREACHABLE]. request id: ca42c269-a5c5-456"), { code: "XX000" });
+  const refused = Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:4566"), { code: "ECONNREFUSED" });
+  const cutOff = new Error("Connection terminated unexpectedly");
+  for (const [label, failure, where] of [
+    ["proxy unreachable on connect", unreachable, "connect"],
+    ["connection refused on connect", refused, "connect"],
+    ["in-flight query cut off", cutOff, "query"],
+  ] as const) {
+    const pool = (where === "connect"
+      ? { connect: async () => { throw failure; } }
+      : {
+        connect: async () => ({ query: async () => { throw failure; }, release: () => {} }),
+        totalCount: 1, idleCount: 0, waitingCount: 0,
+      }) as unknown as pg.Pool;
+    const error = await queryRisingWave(pool, "SELECT 1").then(() => null, (err: unknown) => err);
+    assert.ok(error instanceof RisingWaveOverloadedError, label);
+    assert.equal((error as RisingWaveOverloadedError).reason, "rw_unreachable", label);
+    assert.equal((error as Error).cause, failure, label);
+    assert.equal(asRisingWaveReadError(error), error, `${label}: 503 + stale, not 502`);
+    // The trace keeps saying what it was.
+    assert.equal(risingWaveInboxFailureAttrs({ route: "all", error, contractVersion: 2 }).error_kind, "rw_connect_error", label);
+    assert.equal(risingWaveInboxFailureAttrs({ route: "all", error, contractVersion: 2 }).overload_reason, "rw_unreachable", label);
+  }
+
+  // Exact signals only: a query error mentioning connections stays a query error.
+  for (const notUnreachable of [
+    Object.assign(new Error("relation \"rw_conversation_unread_v9\" does not exist"), { code: "42P01" }),
+    Object.assign(new Error("Connection terminated due to connection timeout"), {}),
+    Object.assign(new Error("permission denied for connection to instance"), { code: "42501" }),
+  ]) {
+    assert.equal(asRisingWaveOverload(notUnreachable), notUnreachable, notUnreachable.message);
+  }
 });

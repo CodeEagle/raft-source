@@ -1,8 +1,7 @@
-import { Button } from "raft-ui";
-import { Check, Plus } from "lucide-react";
+import { Button, IconTile, ListRow, ListRowBody, ListRowDescription, ListRowTitle } from "@botiverse/raft-ui";
+import { Blocks, Check, Plus } from "lucide-react";
 import type { IntlShape } from "react-intl";
 import type { ManagedMcpRecommendation } from "@botiverse/raft-shared";
-import SurfaceListItem from "../ui/SurfaceListItem";
 import { useCallback } from "react";
 
 type McpRecommendationItemProps = {
@@ -21,24 +20,26 @@ export function McpRecommendationItem({
   const handleSelect = useCallback(() => {
     beginRecommendation(recommendation);
   }, [beginRecommendation, recommendation]);
+  // Raft Design System › ListRow: raft-ui's display-only ListRow (the Add
+  // button is the target) with a neutral IconTile, the name and what it does.
   return (
-    <SurfaceListItem interactive={false}>
-  <div className="flex items-center justify-between gap-3">
-    <div className="min-w-0">
-      <p className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{recommendation.name}</p>
-      <p className="mt-1 text-sm text-foreground-muted theme-brutal:text-black/60">{recommendation.description}</p>
-    </div>
-    <Button
-      variant="outline"
-      size="sm"
-      disabled={added}
-      onClick={handleSelect}
-    >
-      {added ? <Check size={13} /> : <Plus size={13} />}
-      {formatMessage({ id: added ? "agent.mcp.added" : "agent.mcp.add" })}
-    </Button>
-  </div>
-
-    </SurfaceListItem>
+    <ListRow interactive={false}>
+      <IconTile>
+        <Blocks />
+      </IconTile>
+      <ListRowBody>
+        <ListRowTitle>{recommendation.name}</ListRowTitle>
+        <ListRowDescription wrap>{recommendation.description}</ListRowDescription>
+      </ListRowBody>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={added}
+        onClick={handleSelect}
+      >
+        {added ? <Check size={16} /> : <Plus size={16} />}
+        {formatMessage({ id: added ? "agent.mcp.added" : "agent.mcp.add" })}
+      </Button>
+    </ListRow>
   );
 }

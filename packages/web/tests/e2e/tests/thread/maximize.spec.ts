@@ -1,10 +1,35 @@
 import { expect, test } from "@playwright/test";
+import { loginViaApi } from "../../fixtures/auth";
 import { waitForSeedState } from "../../fixtures/seedState";
 
-test("Maximize folds the channel, restores its width, and retains the thread", async ({ page }) => {
+test("Maximize folds the channel, restores its width, and retains the thread", async ({ page, request }) => {
   const seed = await waitForSeedState();
+  // Other specs append and hydrate threads in the shared seed channel while
+  // this spec runs. Its exact scroll coordinates need an owned, static timeline.
+  const login = await loginViaApi(request, seed);
+  const headers = {
+    Authorization: `Bearer ${login.accessToken}`,
+    "X-Server-Id": seed.server.id,
+  };
+  const channelResponse = await request.post(`${seed.urls.api}/api/channels`, {
+    headers,
+    data: { name: `maximize-${crypto.randomUUID().slice(0, 8)}` },
+  });
+  expect(channelResponse.ok(), await channelResponse.text()).toBeTruthy();
+  const channel: { id: string } = await channelResponse.json();
+  const messages: Array<{ id: string; content: string }> = [];
+  for (let index = 0; index < 50; index += 1) {
+    const response = await request.post(`${seed.urls.api}/api/messages`, {
+      headers,
+      data: { channelId: channel.id, content: `Maximize message ${index}` },
+    });
+    expect(response.ok()).toBeTruthy();
+    messages.push(await response.json());
+  }
+  const focusMessage = messages[0];
+  const latestMessage = messages[messages.length - 1];
   await page.setViewportSize({ width: 1600, height: 1000 });
-  await page.goto(`/s/${seed.server.slug}/channel/${seed.channel.id}?thread=${seed.channel.id}:${seed.messages.focusMessageId}`, { waitUntil: "domcontentloaded" });
+  await page.goto(`/s/${seed.server.slug}/channel/${channel.id}?thread=${channel.id}:${focusMessage.id}`, { waitUntil: "domcontentloaded" });
   await page.getByTestId("thread-overflow-trigger").waitFor({ timeout: 60_000 });
   const side = page.getByTestId("thread-side-column");
   const main = page.locator(".thread-main-column");
@@ -12,6 +37,17 @@ test("Maximize folds the channel, restores its width, and retains the thread", a
   const root = await side.locator('[data-slot="thread-panel-root"]').elementHandle();
   expect(root).not.toBeNull();
   const scroller = main.getByTestId("message-scroller");
+  // The thread header can mount before the channel's initial tail layout.
+  // Wait for loaded content and room for the upward gesture before sampling.
+  await expect(scroller.getByText(latestMessage.content)).toBeVisible();
+  await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(300);
+  // Establish a real reading gesture before the fixture sets its exact position.
+  await scroller.hover();
+  const beforeWheel = await scroller.evaluate((node) => node.scrollTop);
+  await page.mouse.wheel(0, -300);
+  // mouse.wheel returns before compositor scrolling; do not stack the exact
+  // position onto a pending wheel and accidentally trigger older-page loading.
+  await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeLessThan(beforeWheel);
   await scroller.evaluate((node) => { node.scrollTop = Math.max(0, node.scrollHeight - node.clientHeight - 300); node.dispatchEvent(new Event("scroll")); });
   await page.waitForTimeout(250);
   const originalScroll = await scroller.evaluate((node) => node.scrollTop);

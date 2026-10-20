@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { summarizeHostedRuntimeUsage } from "../src/components/agent/hostedRuntimeUsage";
+import { hostedRuntimeUsageWindow, summarizeHostedRuntimeUsage } from "../src/components/agent/hostedRuntimeUsage";
 import type { HostedRuntimeUsageRow } from "../src/components/agent/hostedRuntimeUsage";
 
 const at = "2026-10-01T00:00:00.000Z";
@@ -62,4 +62,47 @@ test("no rows means no usage", () => {
   const summary = summarizeHostedRuntimeUsage([]);
   assert.equal(summary.hasUsage, false);
   assert.deepEqual(summary.topModels, []);
+});
+
+test("cost is summed by UTC day, newest first; null rows are unpriced and never added", () => {
+  const priced = (day: string, cost: number | null, quantity = 1): HostedRuntimeUsageRow =>
+    ({ at: `${day}T00:00:00.000Z`, resource: cost === null ? "tool.call" : "model.tokens", dimensions: {}, unit: "x", quantity, cost });
+  const summary = summarizeHostedRuntimeUsage([
+    priced("2026-09-30", 0.25),
+    priced("2026-10-01", 0.0078125),
+    priced("2026-10-01", 1.5),
+    priced("2026-10-01", null),
+    priced("2026-10-02", null),
+    priced("2026-10-03", null, 0),
+    { ...priced("2026-10-03", 0), cost: Number.NaN },
+    tokens("m1", "input", 5),
+  ]);
+  assert.deepEqual(summary.cost, {
+    totalUsd: 0.25 + 0.0078125 + 1.5,
+    priced: true,
+    hasUnpriced: true,
+    days: [
+      { day: "2026-10-02", usd: 0, priced: false, hasUnpriced: true },
+      { day: "2026-10-01", usd: 0.0078125 + 1.5, priced: true, hasUnpriced: true },
+      { day: "2026-09-30", usd: 0.25, priced: true, hasUnpriced: false },
+    ],
+  });
+});
+
+test("days come from the UTC instant, so an offset timestamp lands on the right day; bad timestamps are skipped", () => {
+  const row = (at: string, cost: number): HostedRuntimeUsageRow =>
+    ({ at, resource: "model.tokens", dimensions: {}, unit: "tokens", quantity: 1, cost });
+  const summary = summarizeHostedRuntimeUsage([row("2026-10-02T02:00:00+08:00", 1), row("not a time", 2)]);
+  assert.deepEqual(summary.cost?.days, [{ day: "2026-10-01", usd: 1, priced: true, hasUnpriced: false }]);
+});
+
+test("no cost when the provider prices nothing", () => {
+  assert.equal(summarizeHostedRuntimeUsage([tokens("m1", "input", 5), toolCall("bash", "succeeded", 1)]).cost, null);
+});
+
+test("the usage window starts at UTC midnight six days back, so daily buckets are whole days", () => {
+  assert.deepEqual(hostedRuntimeUsageWindow(new Date("2026-10-12T23:40:05.000Z")), {
+    from: "2026-10-06T00:00:00.000Z",
+    to: "2026-10-12T23:40:05.000Z",
+  });
 });

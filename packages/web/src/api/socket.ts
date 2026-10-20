@@ -15,6 +15,7 @@ import {
 } from "../utils/socketReconnectAuthRefresh";
 import { prefetchServerFeatureFlags } from "../store/serverFeatureFlags";
 import { assertValidDesktopRuntimeEnvironment, RUNTIME_SOCKET_ORIGIN } from "../desktopRuntimeEnvironment";
+import { isElectronDesktopShell } from "../utils/desktopShell";
 
 let socket: Socket | null = null;
 let listenersAttached = false;
@@ -24,7 +25,9 @@ function freshAuth() {
   return {
     token: localStorage.getItem("slock_access_token"),
     serverId: useServerStore.getState().current?.id ?? null,
-    clientKind: "web",
+    // Raft Desktop runs this same web code. Identifying it lets the server
+    // tell "using the desktop app" apart from a browser tab (task #725).
+    clientKind: isElectronDesktopShell() ? "desktop" : "web",
   };
 }
 

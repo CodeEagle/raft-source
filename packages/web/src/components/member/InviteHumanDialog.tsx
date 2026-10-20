@@ -17,7 +17,7 @@ import {
   SelectList,
   SelectTrigger,
   SelectValue,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import type { ServerRole } from "@botiverse/raft-shared";
 import { SERVER_GUEST_FEATURE_FLAG_KEY, formatBillingCapacityLimitMessage, getBillingCapacityLimitState, getBillingUsage, validateEmailAddress } from "@botiverse/raft-shared";
 import { useServerStore } from "../../store/serverStore";
@@ -29,7 +29,11 @@ import { shareableWebOrigin } from "../../utils/desktopShell";
 import DialogCard from "../ui/DialogCard";
 import Tooltip from "../ui/Tooltip";
 import Banner from "../ui/Banner";
+import TextLink from "../ui/TextLink";
 import { InviteeRow } from "./InviteeRow";
+
+// DS TextField label: 13/18 600 ink-2, always visible, sentence case.
+const FIELD_LABEL_CLASS = "mb-1.5 block text-footnote font-semibold text-foreground-muted";
 
 /**
  * The roles an invite can grant. Derived from the shared `ServerRole` union
@@ -76,6 +80,10 @@ export default function InviteHumanDialog({
   const billing = useServerStore((s) => s.billing);
   const loadBilling = useServerStore((s) => s.loadBilling);
   const nav = useAppNavigate();
+  const openBillingSettings = useCallback(() => {
+    onClose();
+    nav.toSettings("billing");
+  }, [nav, onClose]);
   /**
    * One row per person, each carrying its OWN role.
    *
@@ -371,39 +379,31 @@ export default function InviteHumanDialog({
     <DialogCard title={formatMessage({ id: "member.invite.title" })} onClose={onClose} maxWidthClass="max-w-lg">
         <form onSubmit={handleSubmit} className="space-y-4">
           {error && !emailInviteSeatLimitReached && (
-            <Banner intent="warning" className="font-bold">
+            <Banner intent="warning">
               {error}
               {isBillingGateError(error) && (
                 <>
                   {" "}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      onClose();
-                      nav.toSettings("billing");
-                    }}
-                    className="font-bold text-foreground-strong theme-brutal:text-black underline"
+                  <TextLink
+                    variant="primary"
+                    onClick={openBillingSettings}
                   >
                     {formatMessage({ id: "member.invite.viewBilling" })}
-                  </button>
+                  </TextLink>
                 </>
               )}
             </Banner>
           )}
 
           {emailInviteSeatLimitReached && (
-            <Banner intent="warning" className="font-bold">
+            <Banner intent="warning">
               {humanSeatLimitMessage}{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  onClose();
-                  nav.toSettings("billing");
-                }}
-                className="font-bold text-foreground-strong theme-brutal:text-black underline"
+              <TextLink
+                variant="primary"
+                onClick={openBillingSettings}
               >
                 {formatMessage({ id: "member.invite.viewBilling" })}
-              </button>
+              </TextLink>
             </Banner>
           )}
 
@@ -417,7 +417,8 @@ export default function InviteHumanDialog({
           <SegmentedControl<"email" | "link">
             value={inviteTab}
             onValueChange={handleInviteTabChange}
-            className="w-full"
+            // Full width, so the two methods share the track equally.
+            className="w-full *:flex-1"
             data-testid="invite-method-tabs"
           >
             <SegmentedControlItem value="email" data-testid="invite-tab-email">
@@ -430,7 +431,7 @@ export default function InviteHumanDialog({
 
           {inviteTab === "email" && (
           <div>
-            <label className="mb-1 block text-sm font-bold text-foreground-strong uppercase tracking-wide">
+            <label className={FIELD_LABEL_CLASS}>
               {formatMessage({ id: "member.invite.byEmail" })}
             </label>
             <div className="space-y-2">
@@ -453,7 +454,7 @@ export default function InviteHumanDialog({
                   themed treatment, and a literal here could not follow the
                   theme (@cindyz, PR #7010). */}
               <Button type="button" size="sm" variant="ghost" onClick={addInvitee}>
-                <Plus size={14} />
+                <Plus size={16} aria-hidden="true" />
                 {formatMessage({ id: "member.invite.addInvitee" })}
               </Button>
             </div>
@@ -463,15 +464,14 @@ export default function InviteHumanDialog({
 
           {inviteTab === "link" && (
           <div>
-            <label className="mb-1 block text-sm font-bold text-foreground-strong uppercase tracking-wide">
+            <label className={FIELD_LABEL_CLASS}>
               {formatMessage({ id: "member.invite.linkLabel" })}
             </label>
             <div className="flex items-center gap-2">
-              {/* readOnly Input rather than a bordered div: `border-2
-                  border-black` was a literal, so this box kept its heavy brutal
-                  edge under the elegant theme while everything around it went
-                  soft (@cindyz). The Input follows the theme and picks up the
-                  same field metrics as the rows above. */}
+              {/* readOnly Input rather than a bordered div: a literal
+                  `border-2 border-black` kept a heavy edge while everything
+                  around it went soft (@cindyz). The Input picks up the same
+                  field metrics as the rows above. */}
               <Field className="contents">
                 <Input
                   readOnly
@@ -479,7 +479,7 @@ export default function InviteHumanDialog({
                   value={linkLoading
                     ? formatMessage({ id: "member.invite.preparingLink" })
                     : joinUrl || formatMessage({ id: "member.invite.linkUnavailable" })}
-                  className="min-w-0 flex-1 truncate font-mono text-xs"
+                  className="min-w-0 flex-1 truncate font-mono text-mono-code"
                 />
               </Field>
               <Tooltip content={formatMessage({ id: "member.invite.copyLinkTitle" })}>
@@ -487,13 +487,13 @@ export default function InviteHumanDialog({
                 type="button"
                 onClick={handleCopy}
                 disabled={!joinUrl || linkLoading || regenerating}
-                size="icon-md"
-                variant="default"
+                size="icon-lg"
+                variant="outline"
                 className="shrink-0"
                 aria-label={formatMessage({ id: "member.invite.copyLinkTitle" })}
                 data-slot="button"
               >
-                {copied ? <Check size={14} /> : <Copy size={14} />}
+                {copied ? <Check size={20} aria-hidden="true" /> : <Copy size={20} aria-hidden="true" />}
               </Button>
               </Tooltip>
             </div>
@@ -506,7 +506,7 @@ export default function InviteHumanDialog({
                 Labels never wrap or clip; each label+control pair stays together. */}
             <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-2">
               <label htmlFor={`${inviteeFieldId}-max-uses`} className="flex items-center gap-1.5">
-                <span className="whitespace-nowrap text-xs font-bold text-foreground-muted">
+                <span className="whitespace-nowrap text-footnote font-semibold text-foreground-muted">
                   {formatMessage({ id: "member.invite.maxUsesLabel" })}
                 </span>
                 <Select
@@ -535,7 +535,7 @@ export default function InviteHumanDialog({
                 </Select>
               </label>
               <label htmlFor={`${inviteeFieldId}-expiry`} className="flex items-center gap-1.5">
-                <span className="whitespace-nowrap text-xs font-bold text-foreground-muted">
+                <span className="whitespace-nowrap text-footnote font-semibold text-foreground-muted">
                   {formatMessage({ id: "member.invite.expiresLabel" })}
                 </span>
                 <Select
@@ -566,7 +566,7 @@ export default function InviteHumanDialog({
               <Button
                 type="button"
                 size="sm"
-                variant="default"
+                variant="outline"
                 onClick={handleRegenerateClick}
                 disabled={regenerating || linkLoading || !server}
               >
@@ -578,19 +578,19 @@ export default function InviteHumanDialog({
                   onClick={() => void revokeLink()}
                   disabled={regenerating}
                   data-testid="invite-link-revoke"
-                  className="text-xs font-bold text-accent-strong theme-brutal:text-brutal-pink hover:underline disabled:opacity-50"
+                  className="rounded-[2px] text-footnote font-semibold text-danger-strong underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus disabled:cursor-not-allowed disabled:text-foreground-disabled disabled:no-underline"
                 >
                   {formatMessage({ id: "member.invite.revokeLink" })}
                 </button>
               )}
             </div>
             {joinLink && (
-              <p className="mt-1 text-[11px] text-foreground-muted/80">
+              <p className="mt-1.5 text-caption text-foreground-hint">
                 {formatMessage({ id: "member.invite.updateReplacesHint" })}
               </p>
             )}
             {joinLink && (joinLink.maxUses != null || joinLink.expiresAt != null) && (
-              <div className="mt-1 text-xs text-foreground-muted" data-testid="invite-link-status">
+              <div className="mt-1.5 text-caption text-foreground-hint" data-testid="invite-link-status">
                 {joinLink.maxUses != null && formatMessage(
                   { id: "member.invite.usedOf" },
                   { used: joinLink.useCount ?? 0, max: joinLink.maxUses },
@@ -602,8 +602,8 @@ export default function InviteHumanDialog({
                 )}
               </div>
             )}
-            <div className="mt-1 flex items-center gap-1 text-xs text-foreground-muted">
-              <Link2 size={12} />
+            <div className="mt-1.5 flex items-center gap-1.5 text-caption text-foreground-hint">
+              <Link2 size={14} aria-hidden="true" />
               {humanSeatLimitReached
                 ? formatMessage({ id: "member.invite.seatLimitHint" })
                 : formatMessage({ id: "member.invite.sendLinkHint" })}
@@ -611,23 +611,21 @@ export default function InviteHumanDialog({
           </div>
           )}
 
-          <div className="flex justify-end gap-3">
-            <Button size="sm"
-              variant="outline"
+          <div className="flex flex-wrap justify-end gap-2 pt-1">
+            <Button size="lg"
+              variant="ghost"
               type="button"
               onClick={onClose}
-              className="px-4 py-2 text-sm"
             >
               {formatMessage({ id: "common.confirm.cancel" })}
             </Button>
             {inviteTab === "email" && (
-              <Button size="sm"
+              <Button size="lg"
                 variant="accent"
                 type="submit"
                 disabled={sending || emailInviteSeatLimitReached}
-                className="px-4 py-2 text-sm flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <Mail size={14} />
+                <Mail size={18} aria-hidden="true" />
                 {sending
                   ? formatMessage({ id: "member.invite.sending" })
                   : formatMessage({ id: "member.invite.sendInvites" })}

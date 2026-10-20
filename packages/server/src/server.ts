@@ -1,3 +1,4 @@
+import { startRaftbenchWorker } from "./raftbench/worker";
 import { getChannelConversionAudienceCutover, applyChannelConversionAudienceRealtimeCutover } from "./services/channelConversionService";
 import { startChannelConversionWorker } from "./services/channelConversionWorker";
 import { emitChannelConversionCompletion, emitChannelConversionState, emitJointLimitStateChange } from "./routes/channels";
@@ -18,6 +19,10 @@ import { setupSocket } from "./socket/index";
 import { setupMachineWebSocket } from "./routes/daemon";
 import { AgentOrchestrator } from "./services/agentOrchestrator";
 import { startOnboardingBriefingOnActivation } from "./services/onboardingBriefingOnActivation";
+import { registerHostedCindyTriggers, startHostedCindyRecapWorker } from "./services/hostedCindyService";
+import { startHostedRuntimeDailySpendWorker } from "./services/hostedRuntimeDailySpend";
+import { startMachineFirstConnectRecorder, startOnboardingFunnelWorker } from "./services/onboardingFunnel";
+import { triggerOwnerOnboardingOnAgentActivation } from "./services/onboardingService";
 import { setIO as setBillingIO, cleanupWebhookEvents } from "./services/billingService";
 import { cleanupExpiredSessions } from "./services/sessionService";
 import { pruneExpiredAgentApiIdempotencyKeys } from "./services/agentApiIdempotencyService";
@@ -38,8 +43,9 @@ import { startAgentInboxPushWorker } from "./services/agentInboxPushService";
 import { startComputerOutageNotificationWorker } from "./services/computerOutageNotificationService";
 import { startAgentMigrationReceiptOutboxWorker } from "./services/agentMigrationReceiptService";
 import { startAgentMigrationRemediationWorker } from "./services/agentMigrationRemediationWorker";
+import { startHostedAgentMigrationImporterWorker } from "./services/hostedAgentMigrationImporter";
 import { startDurableTaskRecovery } from "./services/durableTasks";
-import { getProductEventSink } from "./services/productEventIngest";
+import { getProductEventSink, getPublicVisitorSink } from "./services/productEventIngest";
 import { durableTaskRegistry } from "./services/durableTaskRegistry";
 import { startChannelMembershipRoleOutboxWorker } from "./services/channelMembershipRoleOutbox";
 import { startAgentRuntimeProvisionWorker } from "./services/agentRuntimeProvisionService";
@@ -48,7 +54,13 @@ import { onJointLimitStateChanged, sweepJointOverLimit } from "./services/jointC
 import { initRedis, shutdownRedis } from "./redis";
 import { configureMetricsDeploymentIdentity, startMetricsServer } from "./metrics";
 import { createServerTracerFromEnv } from "./tracing/serverTracer";
+import { startProductEventIngestSummary } from "./services/productEventIngestSummary";
+import { productScopeDbStore } from "./services/productEventScopeDbWriter";
 import { startEventLoopDelaySampler } from "./tracing/eventLoopDelay";
+import { startProcessMemorySampler } from "./tracing/processMemory";
+import { startEventLoopStallDetector, trackHttpServer } from "./tracing/eventLoopStall";
+import { startDbLatencyProbe } from "./db/latencyProbe";
+import { warmupServerWorkerPool } from "./services/workerPool/serverWorkerPool";
 import { setReplicaRouterTracer } from "./replicaRouter";
 import { resolveTraceDeploymentIdentity } from "./tracing/traceDeploymentIdentity";
 import { errorClassOf, recordTraceEvent, withTraceRoot } from "./tracing/semanticTrace";
@@ -129,6 +141,7 @@ async function bootstrap() {
   setDbTracer(serverTracer.tracer);
   setStorageTracer(serverTracer.tracer);
   setReplicaRouterTracer(serverTracer.tracer);
+  startProductEventIngestSummary(serverTracer.tracer, productScopeDbStore(process.env));
   startPoolMetricsReporting();
   startMachineLivenessMetrics();
   getDbLivenessTracker().start();
@@ -277,6 +290,16 @@ async function bootstrap() {
   // daemon, which touches no HTTP route, and that was the one path the briefing retry did
   // not cover.
   startOnboardingBriefingOnActivation({ io, orchestrator: agentOrchestrator });
+  // Hosted Cindy is briefed when her workspace import lands, not on machine:online.
+  registerHostedCindyTriggers({ io, orchestrator: agentOrchestrator, trigger: triggerOwnerOnboardingOnAgentActivation, tracer: serverTracer.tracer });
+  // A hosted Cindy has no computer to fire her Day-2 recap; the server does.
+  const hostedCindyRecapWorker = startHostedCindyRecapWorker({ io, orchestrator: agentOrchestrator, tracer: serverTracer.tracer });
+  // Yesterday's hosted spend, per agent and for the onboarding budget, as trace events for the daily report.
+  const hostedRuntimeDailySpendWorker = startHostedRuntimeDailySpendWorker({ tracer: serverTracer.tracer });
+  // New-server onboarding funnel (T3): aggregates to otel.logs every 6 hours, plus the one
+  // milestone no table kept, a Computer's first connection.
+  startMachineFirstConnectRecorder({ orchestrator: agentOrchestrator });
+  const onboardingFunnelWorker = startOnboardingFunnelWorker({ tracer: serverTracer.tracer });
 
   // Hourly maintenance — downgrade enforcement + webhook event cleanup
   const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
@@ -350,6 +373,7 @@ async function bootstrap() {
   const readMutationWorker = startReadMutationWorker({ tracer: serverTracer.tracer });
   const appNotificationDeliveryWorker = startAppNotificationDeliveryWorker({ tracer: serverTracer.tracer });
   const agentInboxPushWorker = startAgentInboxPushWorker({ agentOrchestrator, tracer: serverTracer.tracer });
+  const raftbenchWorker = startRaftbenchWorker(agentOrchestrator);
   const assistantDoorbellWorker = startAssistantDoorbellWorker({ agentOrchestrator });
   const computerOutageNotificationWorker = startComputerOutageNotificationWorker();
   const agentMigrationReceiptOutboxWorker = startAgentMigrationReceiptOutboxWorker({
@@ -360,6 +384,7 @@ async function bootstrap() {
     io,
     orchestrator: agentOrchestrator,
   });
+  const hostedAgentMigrationImporterWorker = startHostedAgentMigrationImporterWorker({ io, orchestrator: agentOrchestrator });
   // RFC 073: recover durable tasks whose inline run was lost. Off unless DURABLE_TASKS_ENABLED=true.
   const durableTaskRecovery = startDurableTaskRecovery({ registry: durableTaskRegistry, tracer: serverTracer.tracer });
   const conversionWorker = startChannelConversionWorker(async job => {
@@ -368,7 +393,7 @@ async function bootstrap() {
     else await emitChannelConversionState(io, job.sourceChannelId);
   }, sourceChannelId => emitChannelConversionState(io, sourceChannelId), slackBridge?.revalidateChannelPrivacy, serverTracer.tracer);
   const channelMembershipRoleOutboxWorker = startChannelMembershipRoleOutboxWorker({ io, tracer: serverTracer.tracer });
-  const agentRuntimeProvisionWorker = startAgentRuntimeProvisionWorker();
+  const agentRuntimeProvisionWorker = startAgentRuntimeProvisionWorker({ tracer: serverTracer.tracer });
 
   // Start Prometheus metrics endpoint
   startMetricsServer();
@@ -379,11 +404,23 @@ async function bootstrap() {
   await prewarmPrimaryPool();
 
   // Start server
+  trackHttpServer(server);
   server.listen(PORT, () => {
     slackBridge?.start();
     console.log(`[Slock] Server listening on http://localhost:${PORT}`);
     serverTracer.tracer.emitEvent("slock.server.started", { surface: "server" });
     startEventLoopDelaySampler(serverTracer.tracer);
+    startProcessMemorySampler(serverTracer.tracer);
+    startEventLoopStallDetector(serverTracer.tracer);
+    startDbLatencyProbe(serverTracer.tracer);
+    // Pre-warm one preview worker so the first xlsx preview request does not
+    // pay the spawn+compile cost. Fire-and-forget: warmup failure must never
+    // take startup down.
+    try {
+      warmupServerWorkerPool();
+    } catch (err) {
+      console.warn("[Slock] Worker pool warmup failed:", err);
+    }
   });
 
   // Going-away phase (task #261): when ECS begins draining this task, close
@@ -495,14 +532,20 @@ async function bootstrap() {
     readMutationWorker.stop();
     appNotificationDeliveryWorker.stop();
     agentInboxPushWorker.stop();
+    raftbenchWorker.stop();
     assistantDoorbellWorker.stop();
     computerOutageNotificationWorker.stop();
     agentMigrationReceiptOutboxWorker.stop();
     agentMigrationRemediationWorker.stop();
+    hostedAgentMigrationImporterWorker.stop();
     durableTaskRecovery.stop();
     channelMembershipRoleOutboxWorker.stop();
-    agentRuntimeProvisionWorker.stop();
+    // Stops claiming now; shutdown below waits (bounded) for the provider call in flight.
+    const provisionWorkerStopped = agentRuntimeProvisionWorker.stop();
     conversionWorker.stop();
+    hostedCindyRecapWorker.stop();
+    hostedRuntimeDailySpendWorker.stop();
+    onboardingFunnelWorker.stop();
     shutdownServerRuntime({
       stopAcceptingHttp: () => new Promise<void>((resolve) => {
         server.close((error) => {
@@ -510,6 +553,7 @@ async function bootstrap() {
           resolve();
         });
       }),
+      settleWorkers: () => provisionWorkerStopped,
       releaseMachineOwnership: async () => {
         const [orchestratorResult, slackBridgeResult] = await Promise.allSettled([
           agentOrchestrator.shutdown(),
@@ -522,10 +566,13 @@ async function bootstrap() {
           console.warn("[Slock] Failed to stop Slack Bridge:", slackBridgeResult.reason);
         }
       },
-      // RFC-067: write queued product events before exit (best effort).
+      // RFC-067: write queued product events and public visitor ids before
+      // exit (best effort). Both, or a join's visitor row could be lost while
+      // its public_page_server_joined row is kept (Tenny, #9870).
       flushTraces: () => Promise.allSettled([
         serverTracer.shutdown(),
         getProductEventSink(app)?.flush(),
+        getPublicVisitorSink(app)?.flush(),
       ]).then(() => undefined),
       shutdownSharedState: shutdownRedis,
       warn: (message, reason) => console.warn(`[Slock] ${message}:`, reason),

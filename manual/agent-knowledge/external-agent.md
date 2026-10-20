@@ -16,6 +16,7 @@ Verified against:
 - packages/server/src/routes/internalAgentApi.ts (wake-hints/stream re-validates the credential each heartbeat and on revocation broadcast; reminder schedule/update/snooze return 409 reminders_unsupported_for_external_agents for external agents; GET /context identity bootstrap; GET /profile?target needs only read)
 - packages/web/src/store/agentStore.ts (resolveAgentDisplayState: external dot = activity state (incl. explicit offline) while seen within EXTERNAL_AGENT_ONLINE_WINDOW_MS, else offline/Last active)
 - packages/server/src/services/agentOrchestrator.ts (recordExternalAgentActivity + planActivityBroadcastArbitration: external activity always ordered by occurredAt, future times clamped to server time; raft-agent-status.v1 `status`/`detail` drive the dot directly, replayed eventIds skipped, agents.status_protocol_adopted_at stops hook-derived status once any status is accepted)
+- packages/server/src/services/externalSubagentMarker.ts + agentOrchestrator.ts mapExternalSubagentActivityEvent (the `subagent` marker: ids and enums only; marked events are logged under the subagent and never move the agent's status or turn)
 - packages/server/src/routes/internalAgentApi.ts (parseExternalAgentActivityIngest: `status` must be a raft-agent-status.v1 value or a legacy hook outcome, else 400 status_invalid; `detail` string of at most 200 characters, else 400 detail_invalid / detail_too_long)
 - packages/shared/src/agentStatusStandard.ts (RAFT_AGENT_STATUS_VALUES, RAFT_AGENT_STATUS_DETAIL_LIMIT, legacy hook-outcome values)
 - packages/shared/src/raftCliGuide.ts (buildRaftCliGuideMarkdown: one builder for the daemon prompt sections, the raft-cli-overview manual, and the /context prompt)
@@ -100,6 +101,8 @@ An event can carry a status alone: `{"eventId": "st-42", "status": "working", "d
 **Presence floor.** A reported status shows only while the agent is Online (seen in the last 2 minutes). After that the dot shows **Last active**, whatever the last report said.
 
 **Reported status replaces hook-derived status.** Before an agent reports status, Raft guesses the dot from hook events (a tool starting means working, `Stop` means online). This guessing is deprecated. Once Raft accepts any status report from an agent, hook events no longer move that agent's dot. They still go to its activity log. The switch is permanent for the agent and holds across restarts. Agents that never report status keep the old behavior.
+
+**Subagents.** If your agent runs subagents, mark each subagent's events with `"subagent": {"parentToolUseId", "subagentType", "taskId", "phase"}` (ids and short labels only, never the task or its output). Send `SubagentStart` with `phase: "started"`, the subagent's `PreToolUse` / `PostToolUse` with the marker, and `SubagentStop` with `phase: "ended"`, `outcome` (`done`, `failed`, `stopped`, or `ceiling` when a limit stopped it) and `reportChars` (the report's length in characters). Marked events go to the activity log with a Subagent badge. They never change your agent's own status or end its turn, even when they carry a `status`. The tool call that started the subagent stays an ordinary, unmarked event.
 
 ## Differences from managed agents
 

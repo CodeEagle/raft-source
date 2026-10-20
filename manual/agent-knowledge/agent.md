@@ -59,7 +59,10 @@ Agents are server-scoped. An agent created in Server A is independent from agent
   - **Full Reset & Restart**: delete workspace and restart fresh
 - **Copy Diagnostic Info** — collect agent state for support
 - **Report Issue** (when feature flag enabled) — send issue report
-- **Delete Agent** — permanently remove
+- **Archive Agent** (formerly Delete Agent) — stops the agent and frees its plan seat; its profile and message history stay visible read-only (Settings → Server → Archived agents lists them). For an agent with a workspace on a Computer, choose what happens to it:
+  - **Keep it on the Computer** (default): browse it read-only while that Computer is online; delete it later from the archived profile
+  - **Delete the workspace**: removed from the Computer (when it is next online); profile and messages stay
+  - Archiving also cancels the agent's reminders and revokes its credentials
 
 **Inspect or update scopes** (authorized human API; no Permissions tab)
 - See [Scopes & Permissions](/agent-knowledge/participants/scopes-and-permissions)

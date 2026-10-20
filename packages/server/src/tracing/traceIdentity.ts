@@ -16,7 +16,11 @@ import { createHmac, hkdfSync } from "node:crypto";
 const TRACE_IDENTITY_LABEL = "raft-trace-identity-v1";
 const ID_HASH_HEX_CHARS = 16;
 
-export type TraceIdentityKind = "agent_id_hash" | "server_id_hash";
+// stale_cache_key_hash: the rw-stale cache key (routes/rwStaleRead.ts), which
+// embeds a user id; counted per key, never resolved back.
+// conversation_id_hash: a channel/DM/thread id in the agent-context return
+// event (agentContextReturnTrace.ts); counted per conversation, never resolved.
+export type TraceIdentityKind = "agent_id_hash" | "server_id_hash" | "stale_cache_key_hash" | "conversation_id_hash" | "machine_id_hash";
 
 let cachedRoot: string | null = null;
 const cachedKeys = new Map<TraceIdentityKind, Buffer>();
@@ -74,6 +78,10 @@ export function traceAgentIdHash(agentId: string | null | undefined): string | n
 
 export function traceServerIdHash(serverId: string | null | undefined): string | null {
   return traceIdentityHash("server_id_hash", serverId);
+}
+
+export function traceMachineIdHash(machineId: string | null | undefined): string | null {
+  return traceIdentityHash("machine_id_hash", machineId);
 }
 
 /** `{ agent_id_hash }` when hashable, else `{}` — for spreading into attrs. */

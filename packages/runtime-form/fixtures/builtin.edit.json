@@ -153,6 +153,9 @@
       "dependsOn": "/providerId"
     }
   },
+  "requiredClientCapabilities": [
+    "option_source.status"
+  ],
   "writeOnlyKeepRequiresUnchanged": {
     "/apiKey": [
       "/providerId",

@@ -18,8 +18,8 @@ import {
 import path from "node:path";
 import { Readable, Transform, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
-import { createGunzip, createGzip } from "node:zlib";
-import { extract, pack, type Headers, type Pack } from "tar-stream";
+import { createGzip } from "node:zlib";
+import { pack, type Headers, type Pack } from "tar-stream";
 import {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
   AGENT_MIGRATION_COMMIT_MARKER_PATH,
@@ -37,14 +37,24 @@ import {
   type AgentMigrationControlManifest,
 } from "@botiverse/raft-shared";
 import {
+  AgentMigrationChunkDigestMismatchError,
+  AgentMigrationWholeBundleDigestMismatchError,
+  normalizeAgentMigrationArchiveRelativePath,
+  normalizeAgentMigrationSymlinkTarget,
+  readAgentMigrationBundle,
+  readVerifiedAgentMigrationChunks,
+} from "@botiverse/raft-shared/src/agentMigrationBundleReader";
+import {
   agentMigrationTopLevelPath,
   isNotesPath,
   listAgentMigrationWorkspace,
-  normalizeAgentMigrationSymlinkTarget,
   summarizeAgentMigrationTransfer,
   type AgentMigrationExportProgress,
 } from "./agentMigrationExport";
-import { assertAgentMigrationObjectStoreEntryLimit } from "./agentMigrationObjectStoreBundle";
+import {
+  assertAgentMigrationObjectStoreEntryLimit,
+  bundleTooLargeTopEntries,
+} from "./agentMigrationObjectStoreBundle";
 
 export {
   AGENT_MIGRATION_BUNDLE_CONTENT_TYPE,
@@ -134,23 +144,7 @@ export class AgentMigrationControlManifestTooLargeError extends Error {
   }
 }
 
-export class AgentMigrationChunkDigestMismatchError extends Error {
-  readonly code = "MIGRATION_CHUNK_DIGEST_MISMATCH";
-
-  constructor(readonly chunkIndex: number) {
-    super(`MIGRATION_CHUNK_DIGEST_MISMATCH:${chunkIndex}`);
-    this.name = "AgentMigrationChunkDigestMismatchError";
-  }
-}
-
-export class AgentMigrationWholeBundleDigestMismatchError extends Error {
-  readonly code = "MIGRATION_WHOLE_BUNDLE_DIGEST_MISMATCH";
-
-  constructor() {
-    super("MIGRATION_WHOLE_BUNDLE_DIGEST_MISMATCH");
-    this.name = "AgentMigrationWholeBundleDigestMismatchError";
-  }
-}
+export { AgentMigrationChunkDigestMismatchError, AgentMigrationWholeBundleDigestMismatchError };
 
 export class AgentMigrationWorkspaceConflictError extends Error {
   readonly code: "MIGRATION_WORKSPACE_ALREADY_EXISTS" | "MIGRATION_WORKSPACE_COMPLETE_OLD_COPY";
@@ -312,6 +306,15 @@ export async function streamAgentMigrationResumableBundle(
   });
   try {
     await Promise.all([archiveWrite, packing]);
+  } catch (error) {
+    if (error instanceof AgentMigrationBundleTooLargeError) {
+      // Packing stopped partway, so walk the whole tree again (stat only) to
+      // name the largest paths, not just the ones packed before the limit.
+      const bytesByTopLevelPath = await measureWorkspaceBytesByTopLevelPath(workspacePath).catch(() => null);
+      if (!bytesByTopLevelPath) throw error;
+      throw new Error(`${error.message}:topEntries=${bundleTooLargeTopEntries(bytesByTopLevelPath)}`);
+    }
+    throw error;
   } finally {
     stopped = true;
   }
@@ -350,7 +353,7 @@ async function prepareWorkspaceEntry(
   workspacePath: string,
   relativePath: string,
 ): Promise<PreparedWorkspaceEntry | null> {
-  const archiveRelativePath = normalizeArchiveRelativePath(relativePath);
+  const archiveRelativePath = normalizeAgentMigrationArchiveRelativePath(relativePath);
   const name = `${ARCHIVE_WORKSPACE_PREFIX}${archiveRelativePath}`;
   const sourcePath = path.join(workspacePath, ...archiveRelativePath.split("/"));
   let entryStat;
@@ -934,135 +937,24 @@ async function extractVerifiedArchive(input: {
   chunksDirectory: string;
   stagingWorkspacePath: string;
 }): Promise<{ entries: number; bytes: number }> {
-  const wholeHash = createHash("sha256");
-  let bundleBytes = 0;
-  const hashingBundle = new Transform({
-    transform(chunk: Buffer, _encoding, callback) {
-      bundleBytes += chunk.byteLength;
-      if (bundleBytes > input.control.bundle.totalBytes) {
-        callback(new AgentMigrationWholeBundleDigestMismatchError());
+  const chunksDirectory = path.resolve(input.chunksDirectory);
+  return await readAgentMigrationBundle({
+    control: input.control,
+    chunks: readVerifiedAgentMigrationChunks(
+      input.control,
+      (chunk) => createReadStream(path.join(chunksDirectory, `${chunk.index}.chunk`)),
+    ),
+    onEntry: async (entry) => {
+      const targetPath = path.join(input.stagingWorkspacePath, ...entry.relativePath.split("/"));
+      await mkdir(path.dirname(targetPath), { recursive: true });
+      if (entry.type === "symlink") {
+        await symlink(entry.linkTarget, targetPath);
         return;
       }
-      wholeHash.update(chunk);
-      callback(null, chunk);
+      await pipeline(entry.stream, createWriteStream(targetPath, { flags: "wx", mode: entry.mode }));
+      await chmod(targetPath, entry.mode);
     },
   });
-  const tarExtract = extract();
-  const seen = new Set<string>();
-  const symlinkPaths = new Set<string>();
-  let entries = 0;
-  let bytes = 0;
-  tarExtract.on("entry", (header, stream, next) => {
-    void extractArchiveEntry({
-      header,
-      stream,
-      control: input.control,
-      stagingWorkspacePath: input.stagingWorkspacePath,
-      seen,
-      symlinkPaths,
-      addFile(sizeBytes: number) {
-        entries += 1;
-        bytes += sizeBytes;
-        if (
-          entries > input.control.archive.entryCount
-          || bytes > input.control.archive.expandedBytes
-        ) {
-          throw new Error("MIGRATION_ARCHIVE_LIMIT_EXCEEDED");
-        }
-      },
-    }).then(() => next(), next);
-  });
-  await pipeline(
-    Readable.from(readVerifiedChunkSequence(input.control, input.chunksDirectory)),
-    hashingBundle,
-    createGunzip(),
-    tarExtract,
-  );
-  if (
-    bundleBytes !== input.control.bundle.totalBytes
-    || wholeHash.digest("hex") !== input.control.bundle.sha256
-  ) {
-    throw new AgentMigrationWholeBundleDigestMismatchError();
-  }
-  if (entries !== input.control.archive.entryCount || bytes !== input.control.archive.expandedBytes) {
-    throw new Error("MIGRATION_ARCHIVE_COMMIT_CONDITION_MISMATCH");
-  }
-  return { entries, bytes };
-}
-
-async function extractArchiveEntry(input: {
-  header: Headers;
-  stream: NodeJS.ReadableStream;
-  control: AgentMigrationControlManifest;
-  stagingWorkspacePath: string;
-  seen: Set<string>;
-  symlinkPaths: Set<string>;
-  addFile(sizeBytes: number): void;
-}): Promise<void> {
-  if (!input.header.name.startsWith(ARCHIVE_WORKSPACE_PREFIX)) {
-    throw new Error("MIGRATION_ARCHIVE_ENTRY_UNEXPECTED");
-  }
-  const relativePath = normalizeArchiveRelativePath(
-    input.header.name.slice(ARCHIVE_WORKSPACE_PREFIX.length),
-  );
-  if (relativePath === AGENT_MIGRATION_COMMIT_MARKER_PATH) {
-    throw new Error("MIGRATION_OBJECT_STORE_RESERVED_PATH");
-  }
-  if (input.seen.has(relativePath)) throw new Error("MIGRATION_ARCHIVE_ENTRY_DUPLICATE");
-  // Check each ancestor rather than each symlink: linear in path depth, not in
-  // the number of symlinks seen so far.
-  for (let slash = relativePath.indexOf("/"); slash !== -1; slash = relativePath.indexOf("/", slash + 1)) {
-    if (input.symlinkPaths.has(relativePath.slice(0, slash))) {
-      throw new Error("MIGRATION_ARCHIVE_SYMLINK_ANCESTOR");
-    }
-  }
-  input.seen.add(relativePath);
-  const targetPath = path.join(input.stagingWorkspacePath, ...relativePath.split("/"));
-  await mkdir(path.dirname(targetPath), { recursive: true });
-  if (input.header.type === "symlink") {
-    const linkTarget = assertSafeSymlink(relativePath, input.header.linkname);
-    await drainEntry(input.stream);
-    await symlink(linkTarget, targetPath);
-    input.symlinkPaths.add(relativePath);
-    input.addFile(0);
-    return;
-  }
-  if (input.header.type !== "file") throw new Error("MIGRATION_ARCHIVE_ENTRY_TYPE_UNSUPPORTED");
-  const sizeBytes = input.header.size;
-  if (
-    typeof sizeBytes !== "number"
-    || !Number.isSafeInteger(sizeBytes)
-    || sizeBytes < 0
-    || sizeBytes > input.control.archive.maxEntryBytes
-  ) {
-    throw new Error("MIGRATION_ARCHIVE_ENTRY_SIZE_INVALID");
-  }
-  input.addFile(sizeBytes);
-  await pipeline(
-    input.stream as Readable,
-    createWriteStream(targetPath, { flags: "wx", mode: archiveMode(input.header.mode) }),
-  );
-  await chmod(targetPath, archiveMode(input.header.mode));
-}
-
-async function* readVerifiedChunkSequence(
-  control: AgentMigrationControlManifest,
-  chunksDirectory: string,
-): AsyncGenerator<Buffer> {
-  for (const expected of control.bundle.chunks) {
-    const chunkPath = path.join(path.resolve(chunksDirectory), `${expected.index}.chunk`);
-    const hash = createHash("sha256");
-    let bytes = 0;
-    for await (const value of createReadStream(chunkPath)) {
-      const chunk = Buffer.from(value);
-      bytes += chunk.byteLength;
-      hash.update(chunk);
-      yield chunk;
-    }
-    if (bytes !== expected.sizeBytes || hash.digest("hex") !== expected.sha256) {
-      throw new AgentMigrationChunkDigestMismatchError(expected.index);
-    }
-  }
 }
 
 function assertIdentityFields(input: {
@@ -1102,13 +994,33 @@ function assertPositiveSafeInteger(value: number, code: string): void {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(code);
 }
 
+class AgentMigrationBundleTooLargeError extends Error {}
+
+/** Uncompressed bytes of the files a migration would move, per top-level path. */
+async function measureWorkspaceBytesByTopLevelPath(workspacePath: string): Promise<Map<string, number>> {
+  const bytesByTopLevelPath = new Map<string, number>();
+  await listAgentMigrationWorkspace({
+    workspacePath,
+    measureIgnored: false,
+    async onEntry(relativePath) {
+      if (relativePath === AGENT_MIGRATION_COMMIT_MARKER_PATH) return;
+      const entryStat = await lstat(path.join(workspacePath, relativePath)).catch(() => null);
+      if (!entryStat?.isFile()) return;
+      const topLevelPath = agentMigrationTopLevelPath(relativePath);
+      bytesByTopLevelPath.set(topLevelPath, (bytesByTopLevelPath.get(topLevelPath) ?? 0) + entryStat.size);
+    },
+  });
+  return bytesByTopLevelPath;
+}
+
+/** Packing stops here, so `actualBytes` is where it stopped, not the full size. */
 function createByteLimit(maxBytes: number): Transform {
   let bytes = 0;
   return new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       bytes += chunk.byteLength;
       if (!Number.isSafeInteger(bytes) || bytes > maxBytes) {
-        callback(new Error(`MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE:actualBytes=${bytes}:maxBytes=${maxBytes}`));
+        callback(new AgentMigrationBundleTooLargeError(`MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE:actualBytes=${bytes}:maxBytes=${maxBytes}`));
         return;
       }
       callback(null, chunk);
@@ -1168,34 +1080,6 @@ export async function readCommitMarker(finalWorkspacePath: string): Promise<Agen
   }
 }
 
-function normalizeArchiveRelativePath(value: string): string {
-  if (value.includes("\\")) throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_PATH");
-  const segments = value.split("/");
-  if (segments.some((segment) => !segment || segment === "." || segment === "..")) {
-    throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_PATH");
-  }
-  const normalized = path.posix.normalize(value);
-  if (
-    !normalized
-    || normalized === "."
-    || normalized === ".."
-    || normalized.startsWith("../")
-    || path.posix.isAbsolute(normalized)
-    || /^[a-zA-Z]:/.test(normalized)
-    || normalized.includes("\0")
-  ) {
-    throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_PATH");
-  }
-  return normalized;
-}
-
-function assertSafeSymlink(relativePath: string, linkTarget: string | null | undefined): string {
-  if (linkTarget === undefined || linkTarget === null) throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
-  const normalized = normalizeAgentMigrationSymlinkTarget(relativePath, linkTarget);
-  if (normalized !== linkTarget) throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
-  return normalized;
-}
-
 function archiveMode(mode: number | undefined): number {
   return typeof mode === "number" ? mode & 0o777 : 0o600;
 }
@@ -1208,12 +1092,6 @@ function writeBufferedEntry(tarPack: Pack, header: Headers, buffer: Buffer): Pro
   return new Promise((resolve, reject) => {
     tarPack.entry(header, buffer, (error) => error ? reject(error) : resolve());
   });
-}
-
-async function drainEntry(stream: NodeJS.ReadableStream): Promise<void> {
-  for await (const _chunk of stream as AsyncIterable<Uint8Array>) {
-    // Tar entries are sequential; every rejected payload still needs draining.
-  }
 }
 
 async function hashFile(filePath: string): Promise<{ sha256: string; sizeBytes: number }> {

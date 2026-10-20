@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import type { ChangeEvent, FormEvent } from "react";
 import { useIntl } from "react-intl";
-import { Button } from "raft-ui";
+import { Button, Input } from "@botiverse/raft-ui";
 import api from "../api/client";
 import { useAuthStore } from "../store/authStore";
 import AuthPageFrame, { AuthPageIntro } from "../components/auth/AuthPageFrame";
@@ -27,6 +27,9 @@ export default function DeviceLoginPage() {
   const [approved, setApproved] = useState(false);
   const [closeAttempted, setCloseAttempted] = useState(false);
   const [error, setError] = useState("");
+  const handleUserCodeChange = useCallback((event: ChangeEvent<HTMLInputElement>) => {
+    setUserCode(event.target.value);
+  }, []);
 
   const normalizedCode = normalizeUserCode(userCode);
 
@@ -76,14 +79,14 @@ export default function DeviceLoginPage() {
           <Button
             type="button"
             onClick={closePage}
-            size="md"
+            size="xl"
             variant="accent"
             className="w-full"
           >
             {formatMessage({ id: "pages.deviceLogin.closePage" })}
           </Button>
           {closeAttempted ? (
-            <p className="mt-3 text-center text-xs font-bold text-brutal-gray-700">
+            <p className="mt-3 text-center text-caption text-foreground-hint">
               {formatMessage({ id: "pages.deviceLogin.closeManually" })}
             </p>
           ) : null}
@@ -105,26 +108,28 @@ export default function DeviceLoginPage() {
         />
 
         {error ? (
-          <Banner intent="warning" className="mb-4 font-bold">{error}</Banner>
+          <Banner intent="warning" className="mb-4">{error}</Banner>
         ) : null}
 
         <form onSubmit={approveDeviceLogin} className="space-y-4">
-          <FormField label={formatMessage({ id: "pages.deviceLogin.deviceCodeLabel" })} labelStyle="plain">
-            <input
+          <FormField label={formatMessage({ id: "pages.deviceLogin.deviceCodeLabel" })}>
+            {/* A device code is machine text: Space Mono, centred, in the
+                standard 44px ink-line field. */}
+            <Input
               type="text"
               value={userCode}
-              onChange={(event) => setUserCode(event.target.value)}
+              onChange={handleUserCodeChange}
               placeholder={formatMessage({ id: "pages.deviceLogin.codePlaceholder" })}
               autoCapitalize="characters"
               autoComplete="one-time-code"
-              className="w-full rounded-md border border-line-field bg-layer-panel p-2 text-center font-mono text-lg font-black tracking-widest text-foreground-strong shadow-raft-xs focus:border-line-field-hover theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:shadow-brutal-sm theme-brutal:focus:shadow-brutal"
+              className="w-full text-center font-mono"
             />
           </FormField>
 
           <Button
             type="submit"
             disabled={submitting || !normalizedCode}
-            size="md"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -135,7 +140,7 @@ export default function DeviceLoginPage() {
         <Button
           type="button"
           onClick={handleUseAnotherAccount}
-          size="md"
+          size="lg"
           variant="outline"
           className="mt-3 w-full"
         >

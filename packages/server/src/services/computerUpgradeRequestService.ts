@@ -38,6 +38,37 @@ export function projectComputerUpgradeRequest(row: ComputerUpgradeRequestRow): C
   };
 }
 
+/**
+ * A reason as written to traces: the Computer's text can quote local paths
+ * (installer errors name `/Users/<name>/…`), so mask the account segment of
+ * home paths and keep only a short prefix. The row keeps the full reason.
+ */
+export function traceSafeUpgradeReason(reason: string | null | undefined): string {
+  return (reason ?? "")
+    .replace(/(\/Users\/|\/home\/)[^/\s]+/giu, "$1~")
+    // Windows account names may contain spaces; mask up to the next separator.
+    .replace(/([A-Za-z]:\\Users\\)[^\\]+/giu, "$1~")
+    .slice(0, 120);
+}
+
+/**
+ * Trace attributes for a resolved request, shared by every settle path
+ * (done/failed on reconnect, refusal, undelivered, deadline) so one query can
+ * group outcomes by reason and read the click-to-result duration.
+ */
+export function computerUpgradeRequestTraceAttrs(row: ComputerUpgradeRequestRow): Record<string, string | number> {
+  return {
+    request_id: row.id,
+    server_id: row.serverId,
+    machine_id: row.machineId,
+    target_version: row.targetVersion,
+    observed_version: row.observedVersion ?? "",
+    outcome: row.outcome ?? "",
+    reason: traceSafeUpgradeReason(row.reason),
+    ...(row.resolvedAt ? { duration_ms: Math.max(0, row.resolvedAt.getTime() - row.requestedAt.getTime()) } : {}),
+  };
+}
+
 export async function getOpenComputerUpgradeRequest(
   machineId: string,
   executor: DatabaseExecutor = getDb(),
@@ -98,7 +129,7 @@ export async function observeComputerVersionForUpgradeRequests(input: {
   // download reconnects on the old version. Only the target version or the
   // Computer's own upgrade receipt for this target settles the request; with
   // neither, it stays pending until the deadline (expireComputerUpgradeRequests).
-  // Every web-upgradable Computer (COMPUTER_REMOTE_UPGRADE_MIN_VERSION, 1.0.37+)
+  // Every web-upgradable Computer (COMPUTER_REMOTE_UPGRADE_MIN_VERSION; every release since 1.0.37)
   // sends `lastUpgradeReceipt` on ready.
   if (!done && !receipt) return null;
   const reason = done

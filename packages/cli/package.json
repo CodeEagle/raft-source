@@ -1,6 +1,6 @@
 {
   "name": "@botiverse/raft",
-  "version": "0.0.36",
+  "version": "0.0.38",
   "license": "FSL-1.1-ALv2",
   "description": "Canonical Raft agent-facing CLI. Provides raft plus the legacy slock alias over the same CLI core. Invoked by daemon-spawned agent processes via injected env vars.",
   "type": "module",
@@ -35,7 +35,7 @@
     "ajv": "^8.20.0",
     "commander": "^12.1.0",
     "safe-regex2": "5.1.1",
-    "undici": "^7.30.0"
+    "undici": "8.10.2"
   },
   "devDependencies": {
     "@botiverse/raft-shared": "workspace:*",

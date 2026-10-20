@@ -1,17 +1,17 @@
 import { randomUUID } from "node:crypto";
+import { ambientProcessEnv } from "../processEnvPatch";
 import { EventEmitter } from "node:events";
 import { mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { createRequire } from "node:module";
-import {
+import { homedir } from "node:os";
+import type {
   Session as KimiSession,
   createKimiHarness,
-  isKimiError,
-  resolveKimiHome,
   LocalKaos,
-  type Event as KimiSdkEvent,
-  type GoalToolResult,
-  type KimiHarness,
+  Event as KimiSdkEvent,
+  GoalToolResult,
+  KimiHarness,
 } from "@botiverse/kimi-code-sdk";
 
 import {
@@ -21,6 +21,47 @@ import {
 } from "../spawnFailureErrors";
 
 const requireFromHere = createRequire(import.meta.url);
+
+type KimiSdk = typeof import("@botiverse/kimi-code-sdk");
+
+// The SDK is loaded on the first Kimi launch, not at daemon startup: importing
+// it builds ~8k zod schemas (~75 MB of heap) that every runner otherwise
+// carries whether or not any agent on the machine uses Kimi. Model detection
+// stays SDK-free (see resolveKimiHome below).
+let kimiSdk: KimiSdk | null = null;
+let kimiSdkLoading: Promise<KimiSdk> | null = null;
+
+export function loadKimiSdk(): Promise<KimiSdk> {
+  kimiSdkLoading ??= import("@botiverse/kimi-code-sdk").then((sdk) => (kimiSdk = sdk));
+  return kimiSdkLoading;
+}
+
+/**
+ * Load the SDK the way a Kimi launch does and check its entry point exists.
+ * The SEA build ships it as a separate asset (computer native build), so the
+ * release smoke runs this instead of waiting for a user's first Kimi agent.
+ */
+export async function verifyBundledKimiSdk(): Promise<void> {
+  const sdk = await loadKimiSdk();
+  if (typeof sdk.createKimiHarness !== "function" || typeof sdk.LocalKaos !== "function") {
+    throw new Error("bundled kimi SDK is missing createKimiHarness/LocalKaos");
+  }
+}
+
+/** A KimiError can only exist once the SDK has been loaded. */
+function isKimiError(error: unknown): error is import("@botiverse/kimi-code-sdk").KimiError {
+  return kimiSdk?.isKimiError(error) ?? false;
+}
+
+/**
+ * The SDK's `resolveKimiHome`, without loading the SDK: an explicit home, else
+ * `KIMI_CODE_HOME`, else `~/.kimi-code`. Model detection and session launch
+ * both use this one resolver so they cannot read different homes;
+ * kimi-sdk.test.ts pins it to the SDK's.
+ */
+export function resolveKimiHome(homeDir?: string): string {
+  return homeDir ?? process.env.KIMI_CODE_HOME ?? path.join(homedir(), ".kimi-code");
+}
 
 /**
  * Canonical `kimi-code-cli` UA product — the same product string upstream
@@ -270,6 +311,19 @@ function pushSessionInitIfNeeded(state: KimiSdkEventMappingState, events: Parsed
  * The single turn-triggering source class is `turn.ended` → daemon idle ONLY
  * derives from this. Other events MUST NOT produce `kind: "turn_end"`.
  */
+/**
+ * Kimi's Bash tool reports a command that exited non-zero as an error result
+ * ("Command failed with exit code: N."): the command ran, so the tool call is
+ * ok and the exit code is recorded. `isError` is optional in the SDK; when it
+ * is absent the outcome is unknown and left out.
+ */
+export function kimiToolResultOutcome(event: { isError?: boolean; output?: unknown }): { ok?: boolean; exitCode?: number } {
+  if (event.isError !== true) return event.isError === false ? { ok: true } : {};
+  const text = typeof event.output === "string" ? event.output : JSON.stringify(event.output ?? "").slice(0, 4096);
+  const exit = /Command failed with exit code: (\d+)/.exec(text);
+  return exit ? { ok: true, exitCode: Number(exit[1]) } : { ok: false };
+}
+
 export function mapKimiSdkEventToParsedEvents(
   event: KimiSdkEvent,
   state: KimiSdkEventMappingState,
@@ -294,10 +348,16 @@ export function mapKimiSdkEventToParsedEvents(
         kind: "tool_call",
         name: event.name || "unknown_tool",
         input: event.args ?? {},
+        ...(event.toolCallId ? { callId: event.toolCallId } : {}),
       });
       return events;
     case "tool.result":
-      events.push({ kind: "tool_output", name: "" });
+      events.push({
+        kind: "tool_output",
+        name: "",
+        ...(event.toolCallId ? { callId: event.toolCallId } : {}),
+        ...kimiToolResultOutcome(event),
+      });
       return events;
     case "compaction.started":
       events.push({ kind: "compaction_started" });
@@ -445,7 +505,8 @@ export async function createKimiAgentSessionForContext(
   sessionId: string,
   deps: KimiSessionFactoryDeps = {},
 ): Promise<{ harness: KimiHarness; session: KimiSession; wrapperPath: string }> {
-  const createHarnessImpl = deps.createHarness ?? createKimiHarness;
+  const sdk = deps.createHarness && deps.createLocalKaos ? null : await loadKimiSdk();
+  const createHarnessImpl = deps.createHarness ?? sdk!.createKimiHarness;
   const prepareTransportImpl = deps.prepareTransport ?? prepareCliTransport;
   const sessionDir = buildKimiSessionDir(ctx.workingDirectory);
   mkdirSync(sessionDir, { recursive: true });
@@ -473,7 +534,7 @@ export async function createKimiAgentSessionForContext(
   // SLOCK_SERVER_URL / RAFT_CURRENT_* directly (not through the `raft`
   // wrapper) see no agent. Kaos types layers as strings; undefined values
   // pass through to Node's spawn, which omits them.
-  const localKaos = await (deps.createLocalKaos ?? LocalKaos.create)();
+  const localKaos = await (deps.createLocalKaos ?? (() => sdk!.LocalKaos.create()))();
   const toolKaos = localKaos.withEnv({
     ...(toolEnvFromSpawnEnv(spawnEnv) as Record<string, string>),
     // Same PATH as the spawned-runtime env (wrapper dir + agent-configured or
@@ -486,10 +547,10 @@ export async function createKimiAgentSessionForContext(
   });
 
   // Kimi Code keeps config, OAuth credentials, and sessions under
-  // KIMI_CODE_HOME (default: ~/.kimi-code). Use the SDK resolver so model
-  // detection and session launch cannot silently read different homes. Pass
-  // the prepared per-agent override into the SDK's canonical resolver;
-  // per-agent env is not installed into the daemon process-wide environment.
+  // KIMI_CODE_HOME (default: ~/.kimi-code). Use the same resolver as model
+  // detection so the two cannot silently read different homes. Pass the
+  // prepared per-agent override into it; per-agent env is not installed into
+  // the daemon process-wide environment.
   const homeDir = resolveKimiHome(spawnEnv.KIMI_CODE_HOME);
   mkdirSync(homeDir, { recursive: true });
 
@@ -731,7 +792,7 @@ export class KimiSdkRuntimeSession implements RuntimeSession {
     setKimiSdkEventMappingSession(this.mappingState, session.id);
     this.setCurrentSessionId(session.id);
     this.requestDiagnostics = createKimiRequestDiagnosticSession({
-      env: process.env,
+      env: ambientProcessEnv(),
       agentId: this.ctx.agentId,
       sessionId: session.id,
       emit: (record) => this.emitRequestDiagnostic(record),
@@ -1121,10 +1182,10 @@ export class KimiSdkRuntimeSession implements RuntimeSession {
  * heavier (instantiates `KimiCore`, sets up RPC, allocates logs) for what is
  * a one-shot read; the TOML shape under `[models.<id>]` is stable across
  * upstream versions and all we need is `id` + optional `display_name`. Same
- * shape as `detectKimiModels(home)` in `kimi.ts`. `resolveKimiHome()` is the
- * SDK's exported helper so we honor `KIMI_CODE_HOME` env overrides
- * (default fallback `~/.kimi-code`; see `packages/agent-core/src/config/path.ts`
- * upstream).
+ * shape as `detectKimiModels(home)` in `kimi.ts`. `resolveKimiHome()` mirrors
+ * the SDK's helper (pinned by a test) so we honor `KIMI_CODE_HOME` env
+ * overrides (default fallback `~/.kimi-code`; see
+ * `packages/agent-core/src/config/path.ts` upstream) without loading the SDK.
  *
  * Tracing: when a `RuntimeModelDetectionContext` is passed through, we
  * record exactly one terminal event `daemon.kimi_sdk.models.config` on the

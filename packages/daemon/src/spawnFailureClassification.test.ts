@@ -7,6 +7,7 @@ import {
   RuntimeExecutableNotFoundError,
   RuntimeModelNotFoundError,
   RuntimeSessionNeedsResetError,
+  RuntimeSessionRuntimeMismatchError,
 } from "./spawnFailureErrors";
 import { startFailureActivity } from "./spawnFailureClassification";
 
@@ -132,4 +133,20 @@ test("task #10: a session stuck on compaction is classified session_needs_reset,
   assert.match(classified.userMessage, /failed context compaction several times in a row/);
   assert.match(classified.userMessage, /open Restart \/ Reset and choose Reset Session & Restart/);
   assert.deepEqual(startFailureActivity(classified, "deepseek/v4").spawnFailure, { reason: "session_needs_reset" });
+});
+
+test("task #1258: a session made by another runtime major line is session_runtime_mismatch, with Reset Session or the recorded line as the way out", () => {
+  const classified = classifySpawnFailure(new RuntimeSessionRuntimeMismatchError({ runtimeId: "opencode", sessionId: "ses_a", reason: "major_mismatch", recordedMajor: 1, installedVersion: "2.0.27" }));
+  assert.equal(classified.reason, "session_runtime_mismatch");
+  assert.match(classified.userMessage, /created by OpenCode 1\.x and cannot be resumed with the installed OpenCode 2\.0\.27/);
+  assert.match(classified.userMessage, /automatic restarts are paused/);
+  assert.match(classified.userMessage, /open Restart \/ Reset and choose Reset Session & Restart/);
+  assert.match(classified.userMessage, /install the runtime version line the session was created with/);
+  assert.deepEqual(startFailureActivity(classified, "opencode/gpt-5-nano").spawnFailure, { reason: "session_runtime_mismatch" });
+
+  const unknown = classifySpawnFailure(new RuntimeSessionRuntimeMismatchError({ runtimeId: "opencode", sessionId: "ses_a", reason: "unrecorded", recordedMajor: null, installedVersion: "2.0.27" }));
+  assert.match(unknown.userMessage, /its major version was not recorded/);
+  const unreadable = classifySpawnFailure(new RuntimeSessionRuntimeMismatchError({ runtimeId: "opencode", sessionId: "ses_a", reason: "record_unreadable", recordedMajor: null, installedVersion: "1.19.0" }));
+  assert.equal(unreadable.reason, "session_runtime_mismatch");
+  assert.match(unreadable.userMessage, /session record is unreadable/);
 });

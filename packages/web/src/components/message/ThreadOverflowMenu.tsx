@@ -13,9 +13,10 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuTrigger, Button
-} from "raft-ui";
-import { useThreadStore } from "../../store/threadStore";
+  DropdownMenuTrigger,
+  PanelAction,
+} from "@botiverse/raft-ui";
+import { isThreadFollowed, useThreadStore } from "../../store/threadStore";
 import Tooltip from "../ui/Tooltip";
 
 /**
@@ -59,10 +60,7 @@ export default function ThreadOverflowMenu({
   const { formatMessage } = useIntl();
   const [splitAvailable, setSplitAvailable] = useState(true);
   const [followBusy, setFollowBusy] = useState(false);
-  const followed = useThreadStore((state) =>
-    parentMessageId
-      ? state.followedThreads.some((thread) => thread.parentMessageId === parentMessageId)
-      : false);
+  const followed = useThreadStore((state) => (parentMessageId ? isThreadFollowed(state, parentMessageId) : false));
   const followThread = useThreadStore((state) => state.followThread);
   const unfollowThread = useThreadStore((state) => state.unfollowThread);
 
@@ -86,14 +84,12 @@ export default function ThreadOverflowMenu({
       <Tooltip content={formatMessage({ id: "message.threadPanel.overflow.open" })}>
         <DropdownMenuTrigger
           render={(
-            <Button
-              size="icon-sm"
-              variant="outline"
+            <PanelAction
               aria-label={formatMessage({ id: "message.threadPanel.overflow.open" })}
               data-testid="thread-overflow-trigger"
             >
-              <EllipsisVertical size={14} />
-            </Button>
+              <EllipsisVertical />
+            </PanelAction>
           )}
         />
       </Tooltip>

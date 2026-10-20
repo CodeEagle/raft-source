@@ -15,7 +15,7 @@ import type { ServerToMachineMessage } from "@botiverse/raft-shared";
 import { getDb } from "../db/index";
 import { agents, machines, serverMembers, servers, users } from "../db/schema";
 import { AgentOrchestrator } from "./agentOrchestrator";
-import { CONSTRUCTED_WAKE_CONTEXT_FEATURE_FLAG_KEY, createFeatureFlag, PASSIVE_AX_FEATURE_FLAG_KEY, SUBAGENT_DELEGATION_FEATURE_FLAG_KEY } from "./featureFlagService";
+import { CONSTRUCTED_WAKE_CONTEXT_FEATURE_FLAG_KEY, createFeatureFlag, PASSIVE_AX_FEATURE_FLAG_KEY, REMINDER_APP_FEATURE_FLAG_KEY, SUBAGENT_DELEGATION_FEATURE_FLAG_KEY, VAULT_APP_FEATURE_FLAG_KEY } from "./featureFlagService";
 
 afterEach(async () => {
   await closeTestDatabase();
@@ -146,4 +146,33 @@ test("passive AX: a flag that evaluates on for the server turns it on, independe
   assert.equal(config.passiveAx, true);
   assert.equal(config.constructedWakeContext, undefined);
   assert.equal(config.subagentDelegation, undefined);
+});
+
+// Reminder / Vault app rollout flags ride the same per-server, default-off path.
+test("reminder and vault app flags: no flag means the start config leaves both off", async ({ db: _db }) => {
+  const config = await startConfig("apps-missing");
+  assert.equal(config.reminderApp, undefined);
+  assert.equal(config.vaultApp, undefined);
+});
+
+test("reminder and vault app flags: flags that evaluate off leave both off", async ({ db: _db }) => {
+  await createFeatureFlag({ key: REMINDER_APP_FEATURE_FLAG_KEY, randomizationUnit: "server", defaultEnabled: false });
+  await createFeatureFlag({ key: VAULT_APP_FEATURE_FLAG_KEY, randomizationUnit: "server", defaultEnabled: false });
+  const config = await startConfig("apps-off");
+  assert.equal(config.reminderApp, undefined);
+  assert.equal(config.vaultApp, undefined);
+});
+
+test("reminder app flag on turns on only its own marker", async ({ db: _db }) => {
+  await createFeatureFlag({ key: REMINDER_APP_FEATURE_FLAG_KEY, randomizationUnit: "server", defaultEnabled: true });
+  const config = await startConfig("apps-reminder");
+  assert.equal(config.reminderApp, true);
+  assert.equal(config.vaultApp, undefined);
+});
+
+test("vault app flag on turns on only its own marker", async ({ db: _db }) => {
+  await createFeatureFlag({ key: VAULT_APP_FEATURE_FLAG_KEY, randomizationUnit: "server", defaultEnabled: true });
+  const config = await startConfig("apps-vault");
+  assert.equal(config.vaultApp, true);
+  assert.equal(config.reminderApp, undefined);
 });

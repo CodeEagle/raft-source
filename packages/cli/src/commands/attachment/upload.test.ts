@@ -13,6 +13,13 @@ import {
   putFileToPresignedUrl,
   validateUploadFileSize,
 } from "./upload";
+import { globalFetchJsonTransport, setJsonTransportForTests } from "../../client";
+import { afterEach, beforeEach } from "vitest";
+// These tests stub globalThis.fetch; route the client's JSON transport (node:http
+// in production) through it.
+let previousJsonTransport: ReturnType<typeof setJsonTransportForTests>;
+beforeEach(() => { previousJsonTransport = setJsonTransportForTests(globalFetchJsonTransport); });
+afterEach(() => { setJsonTransportForTests(previousJsonTransport); });
 
 test("inferUploadMimeType detects images from magic bytes without an extension", () => {
   const pngHeader = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);

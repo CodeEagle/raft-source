@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import type { SocialAuthProviderId } from "../../hooks/useAuthProviders";
 import { AppleLogo, GitHubLogo, GoogleLogo } from "../icons/ProviderLogos";
 
@@ -10,7 +10,9 @@ export default function SocialProviderButton({
   providerId,
   label,
   onClick,
+  disabled,
 }: {
+  disabled?: boolean;
   providerId: SocialAuthProviderId;
   label: string;
   onClick: (providerId: SocialAuthProviderId) => void;
@@ -27,6 +29,7 @@ export default function SocialProviderButton({
 
   return (
     <Button
+      disabled={disabled}
       type="button"
       variant="outline"
       size="lg"

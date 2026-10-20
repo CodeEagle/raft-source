@@ -2,6 +2,7 @@ import { useCallback, useLayoutEffect, useMemo, useRef, useSyncExternalStore } f
 import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { searchEntryState } from "../components/search/searchOverlayLocation";
 import { useServerStore } from "../store/serverStore";
+import { useLiveLocation } from "./useLiveLocation";
 import { buildSidebarChannelFocusState } from "../components/layout/sidebarChannelFocus";
 import { shareableWebOrigin } from "../utils/desktopShell";
 
@@ -467,11 +468,9 @@ export function useAppNavigate() {
   const navigate = useNavigate();
   const navigateRef = useRef(navigate);
   navigateRef.current = navigate;
-  // Current router location for search entries (kept in a ref so the returned
-  // callbacks stay referentially stable across location changes).
-  const currentLocation = useLocation();
-  const currentLocationRef = useRef(currentLocation);
-  currentLocationRef.current = currentLocation;
+  // The page at event time for search entries (useLiveLocation), behind a ref
+  // like navigate so the returned callbacks depend on the server base only.
+  const liveLocationRef = useRef(useLiveLocation());
   const slug = useServerStore((s) => s.current?.slug);
   const base = slug ? `/s/${slug}` : "";
   // Memoized so the returned object has a STABLE identity across renders
@@ -522,6 +521,7 @@ export function useAppNavigate() {
         : undefined,
     ),
     toAgent: (agentId: string) => navigateRef.current(`${base}/agent/${agentId}`),
+    toAgentWorkspace: (agentId: string) => navigateRef.current(`${base}/agent/${agentId}?agentTab=workspace`),
     toComputer: (machineId: string) => navigateRef.current(`${base}/computer/${machineId}`),
     /** @deprecated use toComputer */
     toMachine: (machineId: string) => navigateRef.current(`${base}/computer/${machineId}`),
@@ -536,7 +536,7 @@ export function useAppNavigate() {
     toSearch: (query?: string, opts?: SearchNavOptions) => navigateRef.current(
       buildSearchPath(base, query, opts),
       {
-        state: searchEntryState({ pathname: currentLocationRef.current.pathname, search: currentLocationRef.current.search }),
+        state: searchEntryState(liveLocationRef.current()),
         ...(opts?.flushSync ? { flushSync: true } : {}),
       },
     ),

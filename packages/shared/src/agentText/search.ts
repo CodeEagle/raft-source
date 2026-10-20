@@ -4,7 +4,7 @@
 
 import { AGENT_API_MESSAGE_SEARCH_DEFAULT_LIMIT, AGENT_API_MESSAGE_SEARCH_MAX_LIMIT } from "../agentApiContract";
 import { formatAgentTaskCurrentProjection, type AgentMessageTaskCurrentProjectionLike } from "../agentMessageText";
-import { formatHintFlag, type RaftHintStyle } from "../agentOps/hint";
+import { formatHint, formatHintFlag, RAFT_HINTS, type RaftHintStyle } from "../agentOps/hint";
 
 export interface AgentSearchResultLike {
   id: string;
@@ -29,6 +29,22 @@ export interface AgentSearchData {
   results?: AgentSearchResultLike[];
   /** Required by the contract; optional here because an older Server can omit it (third state: unknown). */
   hasMore?: boolean;
+  /** The search stopped at its scan budget before the page filled: not all the matches. */
+  incomplete?: boolean;
+  /** Pass back as the cursor to continue (recent-sort text search). */
+  nextCursor?: string;
+  /** incomplete only: the oldest message time searched. */
+  searchedThrough?: string;
+  /** incomplete only: how many messages were read before the search stopped. */
+  searchedMessages?: number;
+}
+
+/** The caller's own filters, repeated in the continue command. */
+export interface AgentSearchContinueFilters {
+  target?: string;
+  sender?: string;
+  after?: string;
+  before?: string;
 }
 
 /** Local wall-clock rendering with offset, as the CLI prints search hit times. */
@@ -192,12 +208,38 @@ function renderSearchPreview(content: string, query: string): string {
 }
 
 /** Search results with <match>/<omit /> preview markup. */
-export function formatAgentSearchResults(query: string, data: AgentSearchData, offset?: number, sort?: string, limit?: number, style: RaftHintStyle = "cli"): string {
+export function formatAgentSearchResults(
+  query: string,
+  data: AgentSearchData,
+  offset?: number,
+  sort?: string,
+  limit?: number,
+  style: RaftHintStyle = "cli",
+  filters: AgentSearchContinueFilters = {},
+): string {
   const trimmedQuery = query.trim();
   // Flags named in this prose are the operation's argument names in the tool form.
   const flag = (name: string) => formatHintFlag(name, name, style);
   const oldestShown = data.results?.length ? data.results[data.results.length - 1]?.createdAt : undefined;
-  const nextPageHint = sort === "recent" && oldestShown
+  // The server's cursor continues this exact search; the command carries it once, at the end.
+  const continueCommand = data.nextCursor && trimmedQuery && (data.incomplete === true || data.hasMore === true)
+    ? formatHint(RAFT_HINTS.messageSearch({ query: trimmedQuery, ...filters, limit, cursor: data.nextCursor }), style)
+    : null;
+  const narrowFlags = [
+    ...(filters.target ? [] : [style === "cli" ? `${flag("target")} '#<channel>'` : flag("target")]),
+    ...(filters.sender ? [] : [style === "cli" ? `${flag("sender")} <handle>` : flag("sender")]),
+  ];
+  const continueLines = !continueCommand
+    ? []
+    : data.incomplete === true
+      ? [
+        `Next (search older messages): ${continueCommand}`,
+        ...(narrowFlags.length ? [`Or narrow the search: add ${narrowFlags.join(" or ")}.`] : []),
+      ]
+      : [`Next page: ${continueCommand}`];
+  const nextPageHint = continueCommand
+    ? "the Next page command below continues exactly after this page"
+    : sort === "recent" && oldestShown
     ? `page with ${flag("before")} ${oldestShown} (pages OLDER only; NOT a complete traversal: stored times `
       + `are microsecond but this key is millisecond, so rows inside the boundary millisecond can be `
       + `skipped, and a full page sharing one timestamp can repeat indefinitely; copy the key verbatim)`
@@ -215,15 +257,31 @@ export function formatAgentSearchResults(query: string, data: AgentSearchData, o
       + `result: a higher ${flag("limit")} is clamped back to ${effectiveLimit} and paging will not reveal it; `
       + `narrow the query (add ${flag("sender")}, ${flag("target")}, ${flag("after")} or ${flag("before")}) until fewer than `
       + `${effectiveLimit} results match`;
-  const truncation = data.hasMore === true
-    ? `truncated=true · more results exist, ${nextPageHint}`
+  const searchedBack = data.searchedThrough ? `back to ${formatLocalTimeWithOffset(data.searchedThrough)}` : "";
+  const searchedCount = typeof data.searchedMessages === "number" && data.searchedMessages > 0
+    ? `stopped after reading ${data.searchedMessages.toLocaleString("en-US")} messages`
+    : "";
+  const searchedScope = [searchedCount, searchedBack].filter(Boolean).join(", ");
+  const truncation = data.incomplete === true
+    ? `incomplete=true · ${searchedScope ? `${searchedScope}; ` : ""}`
+      + `older messages were not searched, so these are NOT all the matches`
+    : data.hasMore === true
+    ? `truncated=true · more results exist${continueCommand ? "; " : ", "}${nextPageHint}`
     : data.hasMore === false
       ? countEqualsLimit
         ? `truncated=unknown · server reported hasMore=false, but this page returned exactly `
           + `${limitSource}, which is also what a capped page returns; ${atCapRemedy}`
         : "truncated=false"
       : "truncated=unknown · server did not report hasMore";
-  if (!data.results || data.results.length === 0) return (`No search results. (${truncation})`);
+  if (!data.results || data.results.length === 0) {
+    return data.incomplete === true
+      ? [
+        `Search incomplete: no matches in the messages searched so far${searchedScope ? ` (${searchedScope})` : ""}. `
+          + "Older messages were not searched, so this does NOT mean no message matches. (incomplete=true)",
+        ...continueLines,
+      ].join("\n")
+      : `No search results. (${truncation})`;
+  }
 
   const formatted = data.results.map((result) => {
     const ref = `msg:${result.id}`;
@@ -255,5 +313,6 @@ export function formatAgentSearchResults(query: string, data: AgentSearchData, o
     formatted,
     "",
     "If a result may be relevant but its preview is not enough, read the surrounding context for that result before answering.",
+    ...continueLines,
   ].join("\n"));
 }

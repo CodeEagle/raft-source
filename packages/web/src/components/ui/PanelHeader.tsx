@@ -1,16 +1,7 @@
 import { ArrowLeft } from "lucide-react";
 import { isHostShell } from "../../embed";
 import type { HTMLAttributes, ReactNode } from "react";
-import {
-  PanelAction,
-  PanelActions,
-  PanelHeader,
-  PanelHeaderContent,
-  PanelHeaderIcon,
-  PanelHeading,
-  PanelMeta,
-  PanelTitle,
-} from "raft-ui";
+import { PanelAction, PanelActions, PanelHeader, PanelHeaderContent, PanelHeaderIcon, PanelHeading, PanelMeta, PanelStatus, PanelTitle } from "@botiverse/raft-ui";
 
 // React's `HTMLAttributes` doesn't expose `data-*` keys in TS, so widen
 // passthrough prop types with a string-key index signature so callsites
@@ -20,50 +11,39 @@ type ButtonPassthroughProps = HTMLAttributes<HTMLButtonElement> & Record<`data-$
 
 const NO_CONTAINER_PROPS: DivPassthroughProps = {};
 
-/**
- * Header chrome for profile surfaces (agent / human / external identity).
- * These headers sit directly in a route column (no panel frame), and also
- * wrap inside ProfilePanelBody in the overlay host — either way the
- * attached-panel divider never reaches them and the column background shows
- * through, so the tint + divider arrive on the header element itself via
- * containerProps (the slot merge lets a caller className replace the recipe's
- * bg-transparent / border-b-0 — pinned by header.chrome.test.ts).
- * Elegant-only: brutal headers already carry their 2px black rule from the
- * recipe, and must stay untouched. cindyz/gzj 2026-10-10, #737.
- */
-export const PROFILE_HEADER_SURFACE_CLASS =
-  "in-data-[theme=elegant]:bg-layer-canvas-muted in-data-[theme=elegant]:border-b in-data-[theme=elegant]:border-line-muted";
+// raft-ui's header icon is the yellow location sticker. Every other panel's
+// icon is the DS neutral tile (`rf-chan` / `rf-tile`: the sunken fill, an
+// ink-2 glyph, no visible edge and no die-cut ring). raft-ui has no neutral
+// PanelHeaderIcon tone yet, so the tile is drawn over the sticker here; the
+// ring has to go too, or dark mode cuts a sticker edge round a plain tile.
+const ICON_TONE_CLASS = {
+  location: "",
+  neutral: "border-transparent bg-fill-muted text-foreground-muted ring-0",
+} as const;
 
 /**
- * Profile handle size (cindyz 2026-10-10): the `@name` next to / under a
- * profile name reads at 15px in elegant — the same tier as the thread channel
- * suffix. Elegant-only; brutal keeps its own meta sizing. Used for the header
- * subtitle (via `subtitleClassName`) and the detail-block handle.
+ * A profile handle is an id, so it is machine text (Space Mono) everywhere:
+ * the header subtitle, the creator row and the detail-block handle. The size
+ * stays with the slot it sits in.
  */
-export const PROFILE_HANDLE_SIZE_CLASS =
-  // Handles are mono everywhere (cindyz 2026-10-10): the header subtitle now
-  // matches the creator row and the detail-block handle; brutal's meta was
-  // already mono. Size stays at the 15px note tier.
-  "in-data-[theme=elegant]:text-[15px] font-mono";
+export const PROFILE_HANDLE_FONT_CLASS = "font-mono";
 
 /**
- * Canonical panel-header primitive — covers every panel column header
- * in the app (12 callsites: ChatPanel / AgentDetailPanel / HumanDetailPanel
- * / MachineDetailPanel / SettingsPanel / SavedPanel / ThreadsInbox /
- * MessageSearchPage / ReleaseNotesPanel / ThreadPanel × 2 instances).
+ * The panel column head: one component for every column, with different
+ * prop combinations per surface.
  *
- * Captures the layout contract from CLAUDE.md "Layout Dimensions" —
- * h-[62px] header, 36px icon container, mobile back chevron, title +
- * optional subtitle, right-aligned actions slot.
- *
- * stdrc 2026-05-10 #wg-theme:220bdc61 ("可以开始了") and follow-up
- * 9b4579f8 ("你想想，能用同一个组件吗？") — Tier 1 audit candidate.
- * Same component, different prop combinations for each surface.
+ * Raft Design System › Panel: one head for every column — 56 tall (48 in
+ * short windows), white paper with a seam bottom, a 17/22 headline title, a
+ * 12/16 ink-3 subtitle, the location sticker or avatar on the left and ghost
+ * icon buttons on the right. raft-ui's panel-header recipe draws all of it,
+ * edges included; this adapter only arranges the slots.
  *
  * **API design**:
- * - `iconBg` accepts a className token (e.g. `"bg-primary"`),
- *   not a raw color value. Future theme upgrades can swap the token
- *   map without touching call sites (Joy 2026-05-10 design API note).
+ * - `iconTone` says what the icon tile means: `"location"` is the yellow
+ *   "you are here" sticker that only a channel (#) head carries; every other
+ *   panel (Tasks, Activity, Saved, Graph, Settings, a computer, …) gets the
+ *   default `"neutral"` tile — the sunken fill and an ink-2 glyph (DS
+ *   ChannelIcon / tile: yellow only marks where you are).
  * - `titleSlot` replaces the H2+subtitle stack entirely — for
  *   non-text titles like the search input in MessageSearchPage.
  * - `titleSuffix` renders inline next to the H2 title — for status
@@ -88,32 +68,32 @@ export interface AppPanelHeaderProps {
    *  dot, activity indicator). Lives OUTSIDE the truncate envelope so
    *  it never gets cut off. Inside the same flex row as the H2. */
   titleSuffix?: ReactNode;
-  /** Optional subtitle line below the title (font-mono, text-xs,
-   *  text-foreground-muted). Truncated to single line by default. */
+  /** Optional subtitle line below the title (12/16 ink-3; pass ids in
+   *  `font-mono`). Truncated to single line by default. */
   subtitle?: ReactNode;
   /** When true, subtitle is allowed to wrap to multiple lines instead
    *  of single-line truncation. Used for channel descriptions. */
   subtitleMultiline?: boolean;
-  /** Extra classes for the subtitle element (e.g. the profile handle size
-   *  tier — see PROFILE_HANDLE_SIZE_CLASS). */
+  /** Extra classes for the subtitle element (e.g. the profile handle's
+   *  machine type — see PROFILE_HANDLE_FONT_CLASS). */
   subtitleClassName?: string;
-  /** Optional icon node (e.g. `<Bookmark size={18} />`) — rendered
-   *  inside the size-icon-header container, desktop-only (md:flex). */
+  /** Optional icon node (e.g. `<Bookmark size={18} />`) — rendered in the
+   *  head's 27px icon tile, desktop-only unless `iconAlwaysVisible`. */
   icon?: ReactNode;
-  /** ClassName for the icon container background. Defaults to
-   *  `bg-primary`. Pass tokens like `bg-info` for
-   *  agent/DM surfaces. */
-  iconBg?: string;
-  /** Pre-wrapped icon slot — bypasses the size-icon-header /
-   *  border-2 / iconBg wrapper. Pass elements that bring their own
-   *  container (e.g. `<AvatarSlot context="panel-header" ... />`).
+  /** What the icon tile means. `"location"` = the yellow "you are here"
+   *  sticker, for a channel head only. `"neutral"` (default) = the sunken
+   *  tile with an ink-2 glyph, for every other panel. */
+  iconTone?: "location" | "neutral";
+  /** Pre-wrapped icon slot — bypasses the tile wrapper. Pass
+   *  elements that bring their own container (e.g.
+   *  `<AvatarSlot context="panel-header" ... />`).
    *  Mutually exclusive with `icon`. Honors the same visibility
    *  rules as `icon` (mobile hide unless `iconAlwaysVisible`). */
   iconSlot?: ReactNode;
   /** Marks what the icon slot holds. `"avatar"` declares an identity
-   *  avatar: the elegant chip background is dropped (recipe reads
-   *  `data-icon-kind="avatar"` → bg-transparent) so a round avatar
-   *  does not sit on a square. Glyph icons keep the chip. */
+   *  avatar: the sticker chrome is dropped (recipe reads
+   *  `data-icon-kind="avatar"` → transparent, auto size) so the avatar's
+   *  own sticker is the only frame. Glyph icons keep the sticker. */
   iconKind?: "avatar";
   /** Whether the icon is visible on every viewport. Default `false`
    *  matches "non-identity" surfaces (Saved / Release Notes / Settings)
@@ -123,7 +103,7 @@ export interface AppPanelHeaderProps {
    *  visible at every viewport. */
   iconAlwaysVisible?: boolean;
   /** Optional mobile back-chevron callback. When provided, renders a
-   *  `btn-brutal-sm` chevron-left button visible only on mobile
+   *  ghost back button visible only on mobile
    *  (`md:hidden` by default; ThreadPanel uses `lg:hidden` because
    *  it's an overlay panel with a different breakpoint contract). */
   onMobileBack?: () => void;
@@ -148,8 +128,8 @@ export interface AppPanelHeaderProps {
   /** Additional props passed to the outer header container (e.g.
    *  `data-testid`, `title` for tooltip, additional `className`). */
   containerProps?: DivPassthroughProps;
-  /** Right-aligned action slot — typically a row of `Button`s
-   *  with `gap-1.5`. */
+  /** Right-aligned action slot — typically ghost icon buttons
+   *  (`PanelAction`). */
   actions?: ReactNode;
 }
 
@@ -161,7 +141,7 @@ export default function AppPanelHeader({
   subtitleMultiline = false,
   subtitleClassName,
   icon,
-  iconBg = "bg-primary",
+  iconTone = "neutral",
   iconSlot,
   iconKind,
   iconAlwaysVisible = false,
@@ -175,7 +155,7 @@ export default function AppPanelHeader({
 }: AppPanelHeaderProps) {
   // HOST-SHELL EMBED: the native WebView already draws a title bar, so web must not
   // draw a second one. But the ACTIONS must not die with the title — Computers' "+"
-  // and Connected Apps' "Register app" live in this slot, and dropping the whole
+  // and Connected Apps' "Register App" live in this slot, and dropping the whole
   // header (which is what the pre-contract `embed=1` did) silently deletes them.
   // So: no title, no back button, no chrome — actions only, in a compact row.
   //
@@ -202,45 +182,29 @@ export default function AppPanelHeader({
       ? "lg:hidden"
       : "md:hidden";
   const iconVisibilityClass = iconAlwaysVisible
-    ? `flex ${onMobileBack ? "" : "max-md:col-start-1"}`
+    ? ""
     : mobileBreakpoint === "lg"
     ? "hidden lg:flex"
     : "hidden md:flex";
-  // RUI's mobile header has four explicit columns: Back / identity / title /
-  // actions. Hidden identity slots must not leave the title in the Back cell.
-  const mobileContentClass = (icon || iconSlot) && iconAlwaysVisible
-    ? onMobileBack ? "max-md:col-start-3" : "max-md:col-start-2 max-md:col-span-2"
-    : onMobileBack ? "max-md:col-start-2 max-md:col-span-2" : "max-md:col-span-3";
   const { className: containerExtraClass, ...containerRest } = containerProps ?? NO_CONTAINER_PROPS;
   return (
     <PanelHeader
       {...containerRest}
-      // stdrc 2026-05-14 #wg-theme:16123203 "确保同类页面用的组件都是
-      // 长得左边 (BEFORE) 那样" — flat `gap-3 px-5` everywhere, no narrow-
-      // viewport shrink. Earlier 2026-05-10 rule (`gap-2 px-3 sm:gap-3
-      // sm:px-5`) was reverted: stdrc preferred the wider padding seen on
-      // the old hand-rolled MobileComputersPanel, so every Settings sub-page
-      // (Account / Browser / Server / Computers) now reads the same width
-      // at every breakpoint.
+      // Padding, gap and the edge buttons' placement belong to the raft-ui
+      // recipe, so every column head starts and ends on the same edges.
       className={containerExtraClass}
     >
       {onMobileBack && (
         <PanelAction
           {...mobileBackProps}
           onClick={onMobileBack}
-          className={`max-md:col-start-1 max-md:row-start-1 ${mobileHiddenClass} ${mobileBackProps?.className ?? ""}`}
+          className={`${mobileHiddenClass} ${mobileBackProps?.className ?? ""}`}
         >
-          <ArrowLeft size={14} />
+          <ArrowLeft size={22} />
         </PanelAction>
       )}
       {icon && (
-        <PanelHeaderIcon
-          // Audit note (gzj 2026-10-10): the elegant override below is
-          // LOAD-BEARING — it neutralises caller `iconBg` tokens in elegant
-          // (tailwind-merge would otherwise let them win). Its value must stay
-          // in sync with panel-header.recipe's elegant headerIcon chip token.
-          className={`${iconVisibilityClass} ${iconBg} in-data-[theme=elegant]:border-0 in-data-[theme=elegant]:bg-fill-strong`}
-        >
+        <PanelHeaderIcon className={`${iconVisibilityClass} ${ICON_TONE_CLASS[iconTone]}`}>
           {icon}
         </PanelHeaderIcon>
       )}
@@ -250,12 +214,9 @@ export default function AppPanelHeader({
         </PanelHeaderIcon>
       )}
       {titleSlot ? (
-        <PanelHeaderContent className={`min-w-0 flex-1 ${mobileContentClass}`}>{titleSlot}</PanelHeaderContent>
+        <PanelHeaderContent>{titleSlot}</PanelHeaderContent>
       ) : (
-        <PanelHeaderContent
-          {...titleClickProps}
-          className={`min-w-0 flex-1 ${mobileContentClass} ${titleClickProps?.className ?? ""}`}
-        >
+        <PanelHeaderContent {...titleClickProps}>
           <PanelHeading>
             <PanelTitle
               render={(
@@ -264,7 +225,9 @@ export default function AppPanelHeader({
                 </h2>
               )}
             />
-            {titleSuffix && <PanelMeta>{titleSuffix}</PanelMeta>}
+            {/* PanelStatus, not PanelMeta: the meta line truncates
+                (overflow hidden), which would cut a badge's edge ring. */}
+            {titleSuffix && <PanelStatus>{titleSuffix}</PanelStatus>}
           </PanelHeading>
           {subtitle && (
             <PanelMeta

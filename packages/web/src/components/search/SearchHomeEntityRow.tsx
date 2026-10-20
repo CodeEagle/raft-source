@@ -9,7 +9,7 @@ import {
   SearchEntityResultIcon,
   SearchEntityResultLeading,
   SearchEntityResultTitle,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import AgentActivityDot from "../agent/AgentActivityDot";
 import AvatarSlot from "../ui/AvatarSlot";
 import { ChannelKindIcon } from "../channel/channelKindIcon";
@@ -49,14 +49,14 @@ export function SearchHomeEntityRow({
           </SearchEntityResultIcon>
         ) : result.type === "agentDm" ? (
           <AvatarSlot
-            context="surface-list"
+            context="compact-row"
             type="agent"
             agentAvatarUrl={agentAvatarUrl}
             badge={result.agentId ? <AgentActivityDot agentId={result.agentId} /> : undefined}
           />
         ) : (
           <AvatarSlot
-            context="surface-list"
+            context="compact-row"
             type="human"
             humanAvatarUrl={humanMember?.avatarUrl}
             gravatarHash={humanMember?.gravatarHash}

@@ -2,14 +2,14 @@ import { memo, useCallback, useEffect, useRef } from "react";
 import { useIntl } from "react-intl";
 import { Bookmark, Copy, Link, MessageSquare } from "lucide-react";
 import {
-  Card,
   ContextMenu,
   ContextMenuContent,
   ContextMenuItem,
   ContextMenuSeparator,
   ContextMenuTrigger,
   PanelToggleAction,
-} from "raft-ui";
+  ListRow,
+} from "@botiverse/raft-ui";
 import { useSavedStore } from "../../store/savedStore";
 import type { SavedEntry } from "../../store/savedStore";
 import { useAgentStore } from "../../store/agentStore";
@@ -27,6 +27,12 @@ import { ConversationCardSkeleton } from "../ui/Skeleton";
 function stopKeyPropagation(event: React.KeyboardEvent) {
   event.stopPropagation();
 }
+
+// Raft Design System › ListRow: a saved message is a content row on the
+// paper — no card frame. raft-ui's `plain` ListRow draws the hairline between
+// consecutive rows from the 16px edge, the pressed overlay on hover and while
+// its context menu is open, and an inset ink ring for keyboard focus. It is a
+// div with the button role, since the row holds its own remove button.
 
 const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage, serverSlug }: {
   entry: SavedEntry;
@@ -97,25 +103,28 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
     <ContextMenu>
       <ContextMenuTrigger
         render={
-          <Card
-            render={<div role="button" tabIndex={0} />}
+          <ListRow
+            variant="plain"
+            render={<div />}
+            role="button"
+            tabIndex={0}
+            data-saved-row=""
             onClick={handleOpen}
             onKeyDown={handleKeyDown}
-            className="relative flex flex-row items-center gap-3 transition-colors p-3 text-left w-full shadow-none border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-layer-panel theme-brutal:bg-white hover:bg-fill-muted data-[popup-open]:bg-fill-muted"
           />
         }
       >
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 mb-1 text-xs">
-            <span className="font-bold text-foreground-muted theme-brutal:text-black/50">{channelLabel}</span>
+          <div className="mb-1 flex min-w-0 items-center gap-2 text-caption">
+            <span className="shrink-0 text-foreground-hint">{channelLabel}</span>
             {isThread && (
-              <span className="inline-flex items-center gap-1 font-bold text-foreground-muted theme-brutal:text-black/40">
-                <MessageSquare size={10} />
+              <span className="inline-flex shrink-0 items-center gap-1 text-foreground-hint">
+                <MessageSquare size={12} />
                 {formatMessage({ id: "saved.threadLabel" })}
               </span>
             )}
             {senderName && (
-              <span className="inline-flex items-center gap-1 font-bold text-foreground-strong theme-brutal:text-black">
+              <span className="inline-flex min-w-0 items-center gap-1 font-semibold text-foreground">
                 {senderAgent ? (
                   <AvatarSlot context="preview-mini" type="agent" agentAvatarUrl={senderAgent.avatarUrl ?? null} />
                 ) : entry.senderType === "external_projection" ? (
@@ -123,26 +132,30 @@ const SavedItem = memo(function SavedItem({ entry, onOpenEntry, onRemoveMessage,
                 ) : (
                   <AvatarSlot context="preview-mini" type="human" humanAvatarUrl={senderMember?.avatarUrl} gravatarHash={senderMember?.gravatarHash} />
                 )}
-                <span>{senderName}</span>
+                <span className="truncate">{senderName}</span>
               </span>
             )}
-            <span className="text-xs text-foreground-muted font-mono theme-brutal:text-black/40">
+            <span className="shrink-0 font-mono text-mono-meta text-foreground-hint">
               {formatRelativeTime(entry.createdAt, locale) ?? ""}
             </span>
           </div>
-          <p className="text-sm line-clamp-3">
+          <p className="line-clamp-3 text-callout text-foreground">
             {entry.content}
           </p>
         </div>
         <div className="ml-auto shrink-0 self-center">
+          {/* Every row here is saved, so the filled bookmark carries the state
+              and the toggle stays a quiet icon button: a yellow sticker on each
+              row would paint the list yellow (Raft DS: yellow is for where you
+              are, and content stays on white paper). */}
           <PanelToggleAction
             pressed
             onKeyDown={stopKeyPropagation}
             onClick={handleRemoveButtonClick}
             aria-label={formatMessage({ id: "saved.remove" })}
-            className="data-pressed:text-accent-strong theme-brutal:data-pressed:text-brutal-orange data-pressed:bg-accent-soft/30"
+            className="data-pressed:border-transparent data-pressed:bg-transparent data-pressed:text-foreground data-pressed:hover:bg-fill-pressed"
           >
-            <Bookmark size={14} fill="currentColor" className="text-accent-strong theme-brutal:text-brutal-orange" aria-hidden />
+            <Bookmark size={14} fill="currentColor" aria-hidden />
           </PanelToggleAction>
         </div>
       </ContextMenuTrigger>
@@ -240,13 +253,11 @@ export default function SavedPanel({ embedded = false }: {
   }, [hasMore, loadMore, loading, saved.length]);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-layer-canvas-muted theme-brutal:bg-white">
+    <div className="flex min-h-0 flex-1 flex-col bg-layer-canvas">
       {!embedded ? (
         <PanelHeader
           title={formatMessage({ id: "saved.header.title" })}
           subtitle={formatMessage({ id: "saved.header.subtitle" }, { count: savedTotal })}
-          icon={<Bookmark size={18} />}
-          iconBg="bg-primary-soft"
           onMobileBack={onMobileBack}
         />
       ) : null}
@@ -255,7 +266,7 @@ export default function SavedPanel({ embedded = false }: {
       <div
         ref={scrollerRef}
         data-testid="saved-list-scroller"
-        className="flex-1 overflow-y-auto bg-layer-canvas-muted p-4 safe-bottom theme-brutal:bg-white"
+        className="flex-1 overflow-y-auto bg-layer-canvas py-1 safe-bottom"
       >
         {loading && saved.length === 0 ? (
           <ConversationCardSkeleton />
@@ -267,7 +278,7 @@ export default function SavedPanel({ embedded = false }: {
             description={formatMessage({ id: "saved.emptyDescription" })}
           />
         ) : (
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col">
             {saved.map((entry) => (
               <SavedItem
                 key={entry.messageId}
@@ -285,7 +296,7 @@ export default function SavedPanel({ embedded = false }: {
                 aria-live="polite"
               >
                 {loading ? (
-                  <span className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "common.loading" })}</span>
+                  <span className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "common.loading" })}</span>
                 ) : (
                   <span className="sr-only">{formatMessage({ id: "saved.loadingMore" })}</span>
                 )}

@@ -17,7 +17,7 @@ import { MemoryRouter } from "react-router-dom";
 import assert from "node:assert/strict";
 import "./helpers/domSetup";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { toast } from "raft-ui";
+import { toast } from "@botiverse/raft-ui";
 import api from "../src/api/client";
 import AnnouncementModal from "../src/components/AnnouncementModal";
 import { useAnnouncementStore } from "../src/store/announcementStore";

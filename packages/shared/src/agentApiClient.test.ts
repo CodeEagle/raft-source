@@ -14,10 +14,17 @@ import type {
   AgentApiRawTransportRequest,
 } from "./agentApiRawClient";
 
+const raftbenchRunId = "00000000-0000-4000-8000-000000000001";
+const raftbenchCoverage = { from: "2026-10-17T00:00:00Z", to: "2026-10-18T00:00:00Z", fetchedMessages: 0, exhausted: true, stopReason: "window_end", notRead: ["Tool outcomes not read"] };
+const raftbenchContext = { runId: raftbenchRunId, revision: 1, sourceText: "Coverage: no synthetic source messages", sources: [], coverage: raftbenchCoverage, nextCursor: null };
+const raftbenchReport = { runId: raftbenchRunId, revision: 1, status: "complete", patterns: [], gaps: [] };
+const raftbenchReceipt = { runId: raftbenchRunId, revision: 1, status: "complete", receiptId: "00000000-0000-4000-8000-000000000002", coverage: raftbenchCoverage };
 const sdkFixtures: Record<AgentApiRouteKey, {
   input: unknown[];
   response: unknown;
 }> = {
+  raftbenchContext: { input: [{ runId: raftbenchRunId }], response: raftbenchContext },
+  raftbenchSubmit: { input: [raftbenchReport], response: raftbenchReceipt },
   feedbackLocatorIngest: {
     input: [{
       artifact_kind: "raft-feedback-locator-v0",

@@ -1,6 +1,6 @@
 import { axSurface } from "../../core/renderer";
 import type { ProfileView } from "@botiverse/raft-shared";
-import { formatAgentProfile } from "@botiverse/raft-shared";
+import { formatAgentProfile } from "@botiverse/raft-shared/src/agentCliSurface";
 
 // The text lives in `@botiverse/raft-shared` (`agentText/threadsProfile.ts`) so
 // the SDK renders the same bytes; this file keeps the axSurface registration.

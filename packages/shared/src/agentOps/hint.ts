@@ -120,6 +120,22 @@ interface MessageReadHint {
   unread?: true;
 }
 
+/** One shell word: single quotes, as the CLI's search commands print values. */
+function shellWord(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/** A recent text search continued from the server's cursor, with the caller's own query and filters. */
+export interface MessageSearchContinueHint {
+  query: string;
+  target?: string;
+  sender?: string;
+  after?: string;
+  before?: string;
+  limit?: number;
+  cursor: string;
+}
+
 /**
  * Every hint the shared formatters and operations produce. Placeholder
  * arguments (`<name>`, `"…"`) are `fill` keys: the CLI form prints the
@@ -136,14 +152,28 @@ export const RAFT_HINTS = {
     ],
     { name: "messages.read", args: { target, after, before, around: around?.id, ...(unread ? { unread } : {}) } },
   ),
+  /** Continue a recent text search below what the previous page covered. */
+  messageSearch: ({ query, target, sender, after, before, limit, cursor }: MessageSearchContinueHint): RaftHint => hint(
+    [
+      "message", "search", "--query", shellWord(query),
+      ...(target === undefined ? [] : ["--target", shellWord(target)]),
+      ...(sender === undefined ? [] : ["--sender", shellWord(sender)]),
+      ...(after === undefined ? [] : ["--after", shellWord(after)]),
+      ...(before === undefined ? [] : ["--before", shellWord(before)]),
+      ...(limit === undefined ? [] : ["--limit", String(limit)]),
+      "--sort", "recent", "--cursor", shellWord(cursor),
+    ],
+    { name: "messages.search", args: { query, target, sender, after, before, limit, sort: "recent", cursor } },
+  ),
   /** Send into a conversation; `content` is always the caller's. Without a target the target is left too. */
-  messageSend: ({ target, attachmentId }: { target?: string; attachmentId?: string }): RaftHint => hint(
+  messageSend: ({ target, attachmentId, targetConfirmed }: { target?: string; attachmentId?: string; targetConfirmed?: true }): RaftHint => hint(
     [
       "message", "send",
       ...(target === undefined ? [] : ["--target", q(target)]),
       ...(attachmentId === undefined ? [] : ["--attachment-id", attachmentId]),
+      ...(targetConfirmed ? ["--target-confirmed"] : []),
     ],
-    { name: "messages.send", args: { target, attachmentIds: attachmentId === undefined ? undefined : [attachmentId] } },
+    { name: "messages.send", args: { target, attachmentIds: attachmentId === undefined ? undefined : [attachmentId], ...(targetConfirmed ? { targetConfirmed } : {}) } },
     target === undefined ? ["target", "content"] : ["content"],
   ),
   /** The send command's name alone (prose, never a call). */
@@ -187,7 +217,10 @@ export const RAFT_HINTS = {
     name === undefined ? ["name"] : undefined,
   ),
   /** The `<name>` placeholder form. */
-  channelInfo: (): RaftHint => hint(["channel", "info", "<name>"], { name: "channels.info", args: {} }, ["target"]),
+  /** One channel's details; without a target the name is left to fill in. */
+  channelInfo: (target?: string): RaftHint => target === undefined
+    ? hint(["channel", "info", "<name>"], { name: "channels.info", args: {} }, ["target"])
+    : hint(["channel", "info", q(target)], { name: "channels.info", args: { target } }),
   channelMembers: (target: string): RaftHint => hint(["channel", "members", q(target)], { name: "channels.members", args: { target } }),
   /** Channel attention commands by name (prose). */
   channelJoinName: (): RaftHint => hint(["channel", "join"], { name: "channels.join", args: {} }, ["target"]),

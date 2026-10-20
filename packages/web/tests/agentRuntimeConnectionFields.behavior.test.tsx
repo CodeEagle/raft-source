@@ -187,7 +187,7 @@ async function openRuntimeEditor(
     return el as HTMLElement;
   });
   fireEvent.click(opener);
-  await waitFor(() => assert.ok(document.querySelector('[class*="card-brutal"]'), "dialog did not open"));
+  await waitFor(() => assert.ok(document.querySelector('[data-testid="agent-runtime-config-dialog"]'), "dialog did not open"));
 }
 
 afterEach(() => {
@@ -812,7 +812,7 @@ async function openV2OnlyRuntimeEditor(options: { flag: boolean; requiredClientC
     return el as HTMLElement;
   });
   fireEvent.click(opener);
-  await waitFor(() => assert.ok(document.querySelector('[class*="card-brutal"]'), "dialog did not open"));
+  await waitFor(() => assert.ok(document.querySelector('[data-testid="agent-runtime-config-dialog"]'), "dialog did not open"));
   return requested;
 }
 
@@ -1149,15 +1149,19 @@ const savedConnectionFormFixture = () => {
 
 /**
  * Drives the builtin v2 EDIT form with saved-connection semantics: the agent
- * starts unbound (a bound agent keeps the v1 path), the form declares the
- * capability + revision, and the sources answer only revisioned requests.
+ * starts unbound unless `bound` (then its stored config is the connection, as
+ * the server's edit values say), the form declares the capability + revision,
+ * and the sources answer only revisioned requests. `formGate` holds the edit
+ * form response until the test resolves it.
  */
 async function openV2SavedConnectionEditor(options: {
   formValues?: Record<string, unknown>;
   boundUnavailable?: boolean;
   staleFirstForm?: boolean;
+  bound?: boolean;
+  formGate?: Promise<void>;
 } = {}) {
-  const agent = connectedAgent(false);
+  const agent = connectedAgent(options.bound === true);
   agent.status = "inactive";
   seed(agent);
   setServerFeatureFlagForTests("server-1", RUNTIME_FORM_V2_WEB_FLAG_KEY, true);
@@ -1191,12 +1195,18 @@ async function openV2SavedConnectionEditor(options: {
     }
     if (url === "/agents/agent-1/runtime-form") {
       formCalls += 1;
+      if (options.formGate) await options.formGate;
       const form = savedConnectionFormFixture();
       if (options.staleFirstForm && formCalls === 1) form.revision = "rev-old";
       return {
         data: {
           ...form,
-          values: options.formValues ?? { providerId: "deepseek", model: "deepseek-v4-pro", loadLocalPlugins: false, envVars: {} },
+          values: options.formValues ?? {
+            providerId: options.bound ? `connection:${CONNECTION_ID}` : "deepseek",
+            model: "deepseek-v4-pro",
+            loadLocalPlugins: false,
+            envVars: {},
+          },
         },
       } as never;
     }
@@ -1286,6 +1296,21 @@ test("v2 saved connection: selecting one disables the owned fields with a safe p
   assert.ok(screen.queryAllByText(/needs an API key/i).length === 0, "an owned field is not the user's to fill");
 });
 
+test("v2 saved connection: the provider field's refresh action reloads the saved connections beside the pencil", async () => {
+  const { requested } = await openV2SavedConnectionEditor();
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  fireEvent.click(await screen.findByRole("option", { name: "DeepSeek · ds official api" }));
+  await screen.findByTestId("runtime-form-v2-edit-provider-connection-providerId");
+  const refresh = screen.getByTestId("runtime-form-v2-refresh-source-providerId");
+  assert.equal(refresh.getAttribute("aria-label"), "Refresh this list", "the copy names no origin: this list is the server's");
+  const before = requested.length;
+  fireEvent.click(refresh);
+  await waitFor(() => assert.ok(
+    requested.slice(before).some((url) => url.includes("/option-sources/provider") && url.includes("refresh=1") && url.includes(`formRevision=${CONN_FORM_REVISION}`)),
+    "the saved-connection list is re-read with refresh=1 and the form revision",
+  ));
+});
+
 test("v2 saved connection: the authorized pencil opens the shared connection editor", async () => {
   await openV2SavedConnectionEditor();
   openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
@@ -1345,6 +1370,81 @@ test("v2 saved connection: an unavailable binding stays visible and blocks the s
   });
   assert.ok(await screen.findByText("This saved provider is unavailable. Select another provider."));
   assert.equal(screen.getByRole("button", { name: "Save runtime config" }).hasAttribute("disabled"), true);
+});
+
+function shownProvider(): string {
+  const el = screen.getByTestId("runtime-form-v2-providerId") as HTMLElement & { value?: string };
+  const input = el.tagName === "INPUT" ? el as HTMLInputElement : el.querySelector("input");
+  return `${input?.value ?? ""} ${el.textContent ?? ""}`;
+}
+
+// artin 2026-10-19: a connection-bound agent opened on v1; the first provider
+// change in v1 cleared the connection, flipped the dialog to v2, and v2's server
+// prefill put the saved connection back — the user's choice was silently lost.
+test("v2 saved connection: a bound agent opens straight on the v2 form, prefilled with its connection", async () => {
+  await openV2SavedConnectionEditor({ bound: true });
+  await screen.findByTestId("runtime-form-v2-providerId");
+  assert.ok(screen.queryByTestId("runtime-built-in-provider-select") === null, "no v1 provider select, not even briefly");
+  await waitFor(() => assert.match(shownProvider(), /DeepSeek · ds official api/));
+  assert.match(shownProvider(), /DeepSeek · ds official api/, "the saved connection is the prefilled provider");
+  assert.equal((await screen.findByTestId("runtime-form-v2-apiKey")).hasAttribute("disabled"), true, "the connection owns the key");
+});
+
+test("v2 saved connection: a bound agent saved with only another field changed keeps its connection", async () => {
+  const { patches } = await openV2SavedConnectionEditor({ bound: true });
+  await screen.findByTestId("runtime-form-v2-providerId");
+  fireEvent.click(screen.getByRole("button", { name: "Advanced" }));
+  fireEvent.click(await screen.findByTestId("runtime-form-v2-loadLocalPlugins"));
+  fireEvent.click(screen.getByRole("button", { name: "Save runtime config" }));
+  await waitFor(() => assert.equal(patches.length, 1));
+  const body = patches[0] as { formDefinitionRef: unknown; formValues: Record<string, unknown> };
+  assert.deepEqual(body.formDefinitionRef, { protocolVersion: 2, runtimeId: "builtin" });
+  assert.equal(body.formValues.providerId, `connection:${CONNECTION_ID}`, "the stored connection is kept");
+  assert.equal(body.formValues.model, "deepseek-v4-pro");
+  assert.equal(body.formValues.loadLocalPlugins, true);
+  assert.equal("apiKey" in body.formValues, false, "connection-owned fields stay out");
+});
+
+test("v2 saved connection: on a bound agent one switch to OpenAI compatible sticks and saves without the old connection", async () => {
+  const { patches } = await openV2SavedConnectionEditor({ bound: true });
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  fireEvent.click(await screen.findByRole("option", { name: "OpenAI compatible" }));
+  const baseUrl = await screen.findByTestId("runtime-form-v2-baseUrl") as HTMLInputElement;
+  // Let every in-flight request settle: nothing may restore the stored connection.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  assert.match(shownProvider(), /OpenAI compatible/, "the first choice holds");
+  assert.ok(screen.queryByTestId("runtime-built-in-provider-select") === null);
+  fireEvent.change(baseUrl, { target: { value: "https://llm.example.com/v1" } });
+  fireEvent.change(screen.getByTestId("runtime-form-v2-apiKey"), { target: { value: "sk-new" } });
+  const model = screen.getByTestId("runtime-form-v2-model");
+  const modelInput = (model.tagName === "INPUT" ? model : model.querySelector("input")) as HTMLInputElement;
+  fireEvent.change(modelInput, { target: { value: "my-model" } });
+  fireEvent.keyDown(modelInput, { key: "Enter" });
+  const save = screen.getByRole("button", { name: "Save runtime config" }) as HTMLButtonElement;
+  await waitFor(() => assert.equal(save.disabled, false));
+  fireEvent.click(save);
+  await waitFor(() => assert.equal(patches.length, 1));
+  const body = patches[0] as { formValues: Record<string, unknown> };
+  assert.equal(body.formValues.providerId, "openai-compatible", "the new choice is what is submitted");
+  assert.equal(body.formValues.baseUrl, "https://llm.example.com/v1");
+  assert.equal(body.formValues.apiKey, "sk-new");
+  assert.equal(body.formValues.model, "my-model");
+  assert.ok(!JSON.stringify(body).includes(CONNECTION_ID), "no trace of the old connection");
+});
+
+test("v2 saved connection: while the edit form is still loading, nothing editable is shown to be overwritten", async () => {
+  let release: () => void = () => undefined;
+  const formGate = new Promise<void>((resolve) => { release = resolve; });
+  await openV2SavedConnectionEditor({ bound: true, formGate });
+  await screen.findByTestId("schema-runtime-unavailable");
+  assert.ok(screen.queryByTestId("runtime-built-in-provider-select") === null, "no v1 field to type into while v2 loads");
+  assert.ok(screen.queryByTestId("runtime-form-v2-providerId") === null);
+  await act(async () => { release(); });
+  openCombobox(await screen.findByTestId("runtime-form-v2-providerId"));
+  fireEvent.click(await screen.findByRole("option", { name: "OpenAI compatible" }));
+  await screen.findByTestId("runtime-form-v2-baseUrl");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  assert.match(shownProvider(), /OpenAI compatible/);
 });
 
 test("v2 saved connection: a stale revision refetches the whole form once and never merges options", async () => {

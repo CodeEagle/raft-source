@@ -130,7 +130,9 @@ test("task page header keeps identity compact and exposes title through a themed
   assert.match(threadWindowRouteSource, /task\.modal\.taskWithNumber/);
   assert.match(threadWindowRouteSource, /taskChannelType === "dm" \? "dm"/);
   assert.match(threadWindowRouteSource, /h-dvh max-h-dvh min-h-0.*overflow-hidden/);
-  assert.match(threadWindowRouteSource, /sm:border sm:border-line-muted sm:shadow-raft-md theme-brutal:sm:border-2 theme-brutal:sm:border-black theme-brutal:sm:bg-white theme-brutal:sm:shadow-brutal/);
+  // The thread sits on paper inside the cream window, framed by a region seam
+  // (DS: seams between regions, no shadow on a docked surface).
+  assert.match(threadWindowRouteSource, /bg-layer-canvas sm:max-w-3xl sm:rounded-container sm:border sm:border-line-seam/);
   assert.match(threadWindowRouteSource, /data-testid="thread-window-surface"/);
   assert.match(threadWindowRouteSource, /parentSlot=\{taskPageSlot\}/);
 });

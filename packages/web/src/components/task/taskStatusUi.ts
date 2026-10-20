@@ -1,4 +1,4 @@
-import type { TaskStatusId } from "raft-ui";
+import type { TaskStatusId } from "@botiverse/raft-ui";
 import type { MessageId } from "../../i18n/messages";
 import type { ServerRole } from "@botiverse/raft-shared";
 import type { Task, TaskStatus } from "../../store/taskStore";

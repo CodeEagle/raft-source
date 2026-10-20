@@ -14,8 +14,9 @@
  *    Reserved at two lines because the inline name error already wraps to two
  *    at 390px; one line still let the error state push the dialog 16px taller.
  *
- * 2. **Keep the dialog's uppercase label convention**, which is page styling
- *    rather than anything the library should know about.
+ * 2. **Leave the label to the library.** raft-ui's FieldLabel already draws the
+ *    Raft Design System label (13/18 600 ink-2, sentence case); the page adds
+ *    only the required marker, never its own type or colour.
  *
  * `FieldControl` adopts the control passed as `children` via `render`, so id,
  * `aria-describedby` and `aria-invalid` are wired by the library instead of by
@@ -31,7 +32,7 @@
  */
 import { Children, createContext, isValidElement, useContext, useId, useMemo } from "react";
 import type { ReactElement, ReactNode } from "react";
-import { Field, FieldControl, FieldLabel, LabelAsterisk, SelectTrigger } from "raft-ui";
+import { Field, FieldControl, FieldLabel, LabelAsterisk, SelectTrigger } from "@botiverse/raft-ui";
 
 /**
  * required XOR optional, mirroring raft-ui's own `LabelMarker`. The shared
@@ -112,8 +113,6 @@ export function FieldSelectTrigger({ children, ...props }: React.ComponentProps<
     </SelectTrigger>
   );
 }
-
-const LABEL_CLS = "text-sm font-bold text-foreground-strong uppercase tracking-wide";
 
 export default function StableField({
   label, required, optional, hint, error, counter, labelAccessory, belowControl, adopt = true, layout = "stacked", htmlFor, className, children,
@@ -236,11 +235,19 @@ export default function StableField({
       <div className={layout === "row" ? "flex items-center justify-between gap-3" : "contents"}>
       {labelAccessory ? (
         <div className="flex items-center gap-2">
-          <FieldLabel {...(optional ? { optional } : {})} className={LABEL_CLS} htmlFor={htmlFor}>{label}{required ? <LabelAsterisk className="ml-1 text-danger-strong theme-brutal:text-black" /> : null}</FieldLabel>
-          {labelAccessory}
+          <FieldLabel {...(optional ? { optional } : {})} htmlFor={htmlFor}>{label}{required ? <LabelAsterisk className="ml-1" /> : null}</FieldLabel>
+          {/* A label action (refresh, edit, random name) is a 32px raft-ui icon
+              button (the DS has two icon sizes, 32 and 44) on the 18px DS label
+              line (13/18). The negative margin (7px a side) keeps the row at
+              the label's height, so a field with an action has the same
+              geometry as one without (createAgentFieldGeometry.spec.ts). The
+              slot also tells "the field's control" apart from these actions. */}
+          <span data-slot="field-label-accessory" className="-my-[7px] ml-auto flex items-center gap-1">
+            {labelAccessory}
+          </span>
         </div>
       ) : (
-        <FieldLabel {...(optional ? { optional } : {})} className={LABEL_CLS} htmlFor={htmlFor}>{label}{required ? <LabelAsterisk className="ml-1 text-danger-strong theme-brutal:text-black" /> : null}</FieldLabel>
+        <FieldLabel {...(optional ? { optional } : {})} htmlFor={htmlFor}>{label}{required ? <LabelAsterisk className="ml-1" /> : null}</FieldLabel>
       )}
 
       {control ? (
@@ -293,13 +300,13 @@ export default function StableField({
       {/* A plain element, deliberately not `FieldDescription` — see `messageId`
           above. `data-slot="field-description"` is kept so the slot still names
           what this row is for anything selecting on it. */}
-      <div id={messageId} data-slot="field-description" className="text-xs">
+      <div id={messageId} data-slot="field-description" className="text-caption">
         {/* One line reserved, not two. Per cindyz: reserve a single line and let
             the dialog grow when a message genuinely wraps, rather than paying two
             lines of empty space on every field to keep the height pinned. */}
         <span className="flex min-h-4 items-start gap-2">
           <span
-            className={`flex-1 ${message ? "" : "invisible"} ${error ? "font-bold text-danger-strong theme-brutal:text-brutal-red" : "text-foreground-muted theme-brutal:text-black/50"}`}
+            className={`min-w-0 flex-1 ${message ? "" : "invisible"} ${error ? "font-semibold text-danger-strong" : "text-foreground-hint"}`}
             role={error ? "alert" : undefined}
           >
             {/* Holds the line box open when empty, so the row keeps its height
@@ -307,7 +314,7 @@ export default function StableField({
             {message ?? " "}
           </span>
           {counter ? (
-            <span className="shrink-0 font-mono tabular-nums text-foreground-muted theme-brutal:text-black/50">{counter}</span>
+            <span className="shrink-0 font-mono text-mono-meta tabular-nums text-foreground-hint">{counter}</span>
           ) : null}
         </span>
       </div>

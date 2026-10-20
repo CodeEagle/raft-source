@@ -19,17 +19,19 @@ export interface PanelResizeHandleProps extends Omit<HTMLAttributes<HTMLDivEleme
   visibleFrom: keyof typeof VISIBLE_FROM_CLASS;
 }
 
-/** Drag handle on the divider between two panels: an 8px grab strip centred on
- *  the panel edge, with a hairline that darkens on hover. The parent must be
- *  positioned and must not clip its own edge. Pointer handlers, test ids and
- *  any extra classes pass straight through. */
+/** Drag handle on the divider between two panels: an invisible 8px grab strip
+ *  centred on the panel edge, with the resize cursor. It draws nothing: the
+ *  panel's own border is the divider, and hovering it changes only the cursor,
+ *  as in the signed-in app (its sidebar and thread resizers). A hairline here
+ *  used to sit beside the border and darken on hover, so the public page's
+ *  dividers looked and behaved differently (cindyz, #wg-rbac task #126).
+ *  The parent must be positioned and must not clip its own edge. Pointer
+ *  handlers, test ids and any extra classes pass straight through. */
 export default function PanelResizeHandle({ side, visibleFrom, className = "", ...props }: PanelResizeHandleProps) {
   return (
     <div
       {...props}
-      className={`group absolute ${SIDE_CLASS[side]} top-0 bottom-0 z-20 hidden w-2 cursor-col-resize touch-none select-none ${VISIBLE_FROM_CLASS[visibleFrom]} ${className}`.trim()}
-    >
-      <span className="pointer-events-none absolute bottom-0 left-1/2 top-0 w-px -translate-x-1/2 bg-foreground/25 group-hover:bg-foreground theme-brutal:bg-black/25 theme-brutal:group-hover:bg-black" />
-    </div>
+      className={`absolute ${SIDE_CLASS[side]} top-0 bottom-0 z-20 hidden w-2 cursor-col-resize touch-none select-none ${VISIBLE_FROM_CLASS[visibleFrom]} ${className}`.trim()}
+    />
   );
 }

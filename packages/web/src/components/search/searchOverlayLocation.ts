@@ -1,19 +1,38 @@
 import type { Location } from "react-router-dom";
 import { isElectronDesktopShell } from "../../utils/desktopShell";
 
+/** Desktop-width breakpoint shared with MainLayout's `isDesktop` (md). */
+const OVERLAY_MIN_WIDTH_QUERY = "(min-width: 768px)";
+
 /**
- * The location a desktop ⌘K search overlay floats over. The topbar / ⌘K navigate to
+ * Where search is presented as the ⌘K overlay (floating over the current view)
+ * instead of the full /search page. The overlay is for a quick lookup without
+ * leaving where you are, so it needs room to float: the Electron desktop shell
+ * always, and the web at desktop width (task #143, WAWQAQ 2026-10-12: bring the
+ * desktop's Slack-style search back to the web). Phones keep the full-screen
+ * page — a floating card there wastes the width and the keyboard covers it.
+ * Re-read on every render, so crossing the breakpoint with the overlay open
+ * falls back to the full page.
+ */
+export function isSearchOverlayEnabled(): boolean {
+  if (isElectronDesktopShell()) return true;
+  return typeof window !== "undefined" && typeof window.matchMedia === "function" && window.matchMedia(OVERLAY_MIN_WIDTH_QUERY).matches;
+}
+
+/**
+ * The location the ⌘K search overlay floats over. The topbar / ⌘K navigate to
  * /search with `state.backgroundLocation = <current Location>`; this reads it back.
  *
- * Electron desktop ONLY: gating here means every bg-aware branch in MainLayout (path
- * checks, RightPanel, the content-URL sync, the overlay render, Routes location) is
- * dead on the web, so web behaviour is provably unchanged even if a stray
- * backgroundLocation appeared. Returns null on web or for malformed/absent state.
+ * Gated by isSearchOverlayEnabled: where the overlay is off (phone-width web),
+ * every bg-aware branch in MainLayout (path checks, RightPanel, the content-URL
+ * sync, the overlay render, Routes location) is dead, so the full-page behaviour
+ * is unchanged even if a stray backgroundLocation appeared. Returns null there or
+ * for malformed/absent state.
  *
  * Kept in its own tiny module (no app import graph) so it is cheaply unit-testable.
  */
 export function getBackgroundLocation(location: Location): Location | null {
-  if (!isElectronDesktopShell()) return null;
+  if (!isSearchOverlayEnabled()) return null;
   const bg = (location.state as { backgroundLocation?: unknown } | null)?.backgroundLocation;
   if (bg && typeof bg === "object" && typeof (bg as Location).pathname === "string") {
     return bg as Location;
@@ -129,10 +148,11 @@ export function fullPageSearchHopState(overlayState: unknown): Record<string, un
  * overlay); `overlayCloseTarget` strips that state when the overlay closes so the
  * normal home behaviour resumes. Exception: a location whose URL carries the
  * explicit full-page marker (`isFullPageSearchRequested`) returns null so the full
- * results page renders (task #102). Web: always null.
+ * results page renders (task #102). Where the overlay is off (phone-width web):
+ * always null; desktop-width web with nothing to float over: null (full page).
  */
 export function resolveSearchOverlayBackground(location: Location): Location | null {
-  if (!isElectronDesktopShell()) return null;
+  if (!isSearchOverlayEnabled()) return null;
   const slug = serverSlugFromSearchPath(location.pathname);
   if (!slug) return null;
   // Task #102: an explicit full-page request (`?presentation=page`) renders the
@@ -143,6 +163,11 @@ export function resolveSearchOverlayBackground(location: Location): Location | n
     (isValidOverlayBackground(explicit, slug) ? explicit : null)
     ?? (() => { const f = parseSearchFrom(location.state); return isValidOverlayBackground(f, slug) ? f : null; })()
     ?? (isValidOverlayBackground(lastNonSearchLocation, slug) ? lastNonSearchLocation : null);
+  // Web: with nothing to float over (a shared /search link opened fresh, a
+  // reload with no history state) the overlay would hover over an empty server
+  // home; the full results page is the better landing there. The desktop keeps
+  // its "/search is always the overlay" invariant (task #96).
+  if (!candidate && !isElectronDesktopShell()) return null;
   const target: OverlayBackground = candidate
     ? { pathname: normalizeOverlayPathname(candidate.pathname), search: candidate.search }
     : { pathname: `/s/${slug}`, search: "" };
@@ -167,10 +192,11 @@ export function overlayCloseTarget(background: Location): OverlayBackground {
 /**
  * Navigation state for entering /search on the desktop: carries the current
  * location as the overlay background (and `searchFrom` for the rail/back
- * behaviour). Web gets only `searchFrom`, preserving full-page semantics.
+ * behaviour). Where the overlay is off it carries only `searchFrom`, preserving
+ * full-page semantics.
  */
 export function searchEntryState(current: OverlayBackground, extra: Record<string, unknown> = {}): Record<string, unknown> {
   const searchFrom = `${current.pathname}${current.search}`;
-  if (!isElectronDesktopShell() || isSearchPath(current.pathname)) return { ...extra, searchFrom };
+  if (!isSearchOverlayEnabled() || isSearchPath(current.pathname)) return { ...extra, searchFrom };
   return { ...extra, searchFrom, backgroundLocation: { pathname: current.pathname, search: current.search } };
 }

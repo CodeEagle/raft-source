@@ -144,7 +144,7 @@ test("web upgrade replay: upgrading through the restart on both surfaces, then t
   assert.equal(screen.getByTestId("machine-connection-status").textContent, en["machine.detail.upgradeV2.inProgress"]);
   assert.ok(screen.getByTestId("computer-upgrade-reconnecting-computer-1"), "the sidebar row says upgrading too");
   assert.equal(rowText().includes(en["machine.runLabel.computerOffline"]), false, "the sidebar row never says offline");
-  assert.match(screen.getByTestId("computer-status-dot-computer-1").className, /bg-brutal-cyan/);
+  assert.match(screen.getByTestId("computer-status-dot-computer-1").className, /\bbg-info\b/);
 
   // 02:43:15 — back online, ready reports 1.0.47.
   act(() => {

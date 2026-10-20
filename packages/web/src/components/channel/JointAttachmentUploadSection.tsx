@@ -6,6 +6,7 @@ import {
   listActiveAttachmentUploads,
 } from "../../utils/directAttachmentUpload";
 import type { RecoveryView } from "../../utils/directAttachmentUpload";
+import { FormSection } from "@botiverse/raft-ui";
 import Banner from "../ui/Banner";
 import { ActiveUploadRow } from "./ActiveUploadRow";
 import {
@@ -132,31 +133,25 @@ export default function JointAttachmentUploadSection({
   if (uploads.length === 0) return null;
 
   return (
-    <section
-      className="space-y-3 border-b border-line-muted pb-5 theme-brutal:border-black/10"
+    <FormSection
       data-testid="channel-settings-joint-uploads-section"
+      title={formatMessage({ id: "channel.edit.activeUploadsTitle" })}
+      description={formatMessage({ id: "channel.edit.activeUploadsDescription" })}
     >
-      <div>
-        <h3 className="text-base font-bold text-foreground-strong theme-brutal:text-black" data-testid="channel-settings-joint-uploads-title">
-          {formatMessage({ id: "channel.edit.activeUploadsTitle" })}
-        </h3>
-        <p className="mt-1 text-xs font-normal text-foreground-muted theme-brutal:text-black/55">
-          {formatMessage({ id: "channel.edit.activeUploadsDescription" })}
-        </p>
-      </div>
       <Banner
         intent="warning"
         density="sm"
         withIcon
-        className="min-w-0 font-normal"
+        className="min-w-0"
         data-testid="channel-settings-joint-uploads-banner"
       >
         <div className="space-y-2">
           <ul className="space-y-2" data-testid="channel-settings-joint-uploads-list">
-            {uploads.map((upload) => (
+            {uploads.map((upload, index) => (
               <ActiveUploadRow
                 key={upload.uploadId}
                 upload={upload}
+                separated={index > 0}
                 cancelBusy={cancelBusyId === upload.uploadId}
                 onOpenChannel={onOpenChannel}
                 onCancel={onCancel}
@@ -165,6 +160,6 @@ export default function JointAttachmentUploadSection({
           </ul>
         </div>
       </Banner>
-    </section>
+    </FormSection>
   );
 }

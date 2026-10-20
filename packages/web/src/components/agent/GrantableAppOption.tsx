@@ -1,6 +1,14 @@
 import { useCallback } from "react";
+import { AppWindow } from "lucide-react";
+import { IconTile, ListRow, ListRowBody, ListRowDescription, ListRowTitle } from "@botiverse/raft-ui";
 import type { GrantableApp } from "./AgentAppAccessTab";
 
+/**
+ * One app to pick in the grant form: a raft-ui ListRow (a neutral IconTile,
+ * the name, the description) in the form's inset list. The chosen app is the
+ * cyan-soft selection of a content list. The tile is the 27px step, so the
+ * hairline between options starts at its text column (16 + 27 + 12).
+ */
 export function GrantableAppOption({
   app,
   selected,
@@ -12,14 +20,19 @@ export function GrantableAppOption({
 }) {
   const handleClick = useCallback(() => onChoose(app), [onChoose, app]);
   return (
-    <button
-      type="button"
+    <ListRow
       onClick={handleClick}
+      selected={selected}
       aria-pressed={selected}
-      className={`border-2 p-2.5 text-left ${selected ? "border-accent bg-accent-soft theme-brutal:border-black theme-brutal:bg-brutal-lime/20" : "border-line-muted bg-layer-panel theme-brutal:border-black/15 theme-brutal:bg-white"}`}
+      className="[--list-row-rule-start:55px]"
     >
-      <span className="block text-xs font-black text-foreground-strong">{app.name}</span>
-      {app.description && <span className="mt-0.5 block text-[11px] text-foreground-muted">{app.description}</span>}
-    </button>
+      <IconTile size="sm">
+        <AppWindow />
+      </IconTile>
+      <ListRowBody>
+        <ListRowTitle>{app.name}</ListRowTitle>
+        {app.description && <ListRowDescription wrap>{app.description}</ListRowDescription>}
+      </ListRowBody>
+    </ListRow>
   );
 }

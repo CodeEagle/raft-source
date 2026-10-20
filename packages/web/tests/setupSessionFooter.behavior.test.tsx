@@ -1,7 +1,7 @@
 import "./helpers/domSetup";
 
 import assert from "node:assert/strict";
-import { cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
 import SetupSessionFooter from "../src/components/onboarding/SetupSessionFooter";
 import { useServerStore } from "../src/store/serverStore";
 import { TestIntlProvider } from "./helpers/intl";
@@ -10,9 +10,8 @@ const render: typeof rtlRender = (ui, options) =>
   rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 
 const originalClearCurrent = useServerStore.getState().clearCurrent;
-const originalDeleteServer = useServerStore.getState().deleteServer;
 
-function seedServer(role: "owner" | "admin") {
+function seedServer(role: "owner") {
   useServerStore.setState({
     current: { id: "server-1", name: "Acme", slug: "acme", role } as never,
     members: [],
@@ -23,7 +22,7 @@ afterEach(() => {
   cleanup();
   sessionStorage.clear();
   window.history.replaceState({}, "", "/");
-  useServerStore.setState({ clearCurrent: originalClearCurrent, deleteServer: originalDeleteServer, current: null, members: [] });
+  useServerStore.setState({ clearCurrent: originalClearCurrent, current: null, members: [] });
 });
 
 test("setup escape link navigates to the Choose server page without logging out", () => {
@@ -50,26 +49,28 @@ test("setup escape link is disabled with the owning setup action", () => {
   assert.equal(screen.queryByTestId("setup-start-over"), null);
 });
 
-// task #141: a server stuck in setup (e.g. before its first computer) could not
-// be deleted — Delete lived only in Settings, under the blocking setup modal.
-test("the owner can delete the server from setup, behind the same slug confirmation", async () => {
-  let deleteCalls = 0;
+// task #246 (replaces task #141's in-modal Delete): the footer opens the
+// server's own settings, where Delete already lives. The setup gate stays down
+// on settings routes (serverSetupSettingsEscape.behavior.test.tsx).
+test("the setup footer opens server settings instead of deleting in place", () => {
   seedServer("owner");
-  useServerStore.setState({ deleteServer: async () => { deleteCalls += 1; } });
-  render(<SetupSessionFooter />);
+  window.history.replaceState({}, "", "/s/acme");
+  render(<SetupSessionFooter showServerSettings />);
 
-  fireEvent.click(screen.getByTestId("setup-delete-server"));
-  const confirm = await screen.findByTestId("server-delete-confirm-button");
-  assert.equal((confirm as HTMLButtonElement).disabled, true, "confirm stays disabled until the slug is typed");
-  fireEvent.change(screen.getByTestId("server-delete-slug-input"), { target: { value: "acme" } });
-  assert.equal((confirm as HTMLButtonElement).disabled, false);
-  fireEvent.click(confirm);
-  await waitFor(() => assert.equal(deleteCalls, 1));
+  assert.ok(screen.queryByTestId("setup-delete-server") === null);
+  fireEvent.click(screen.getByTestId("setup-server-settings"));
+  assert.equal(window.location.pathname, "/s/acme/settings/server");
 });
 
-test("only the owner gets the delete escape (the API refuses everyone else)", () => {
-  seedServer("admin");
+test("the settings link is disabled with the owning setup action", () => {
+  seedServer("owner");
+  render(<SetupSessionFooter disabled showServerSettings />);
+  assert.equal((screen.getByTestId("setup-server-settings") as HTMLButtonElement).disabled, true);
+});
+
+test("steps after the server works (survey, handoff) offer no settings link", () => {
+  seedServer("owner");
   render(<SetupSessionFooter />);
-  assert.ok(screen.queryByTestId("setup-delete-server") === null);
   assert.ok(screen.getByTestId("setup-switch-server"));
+  assert.ok(screen.queryByTestId("setup-server-settings") === null);
 });

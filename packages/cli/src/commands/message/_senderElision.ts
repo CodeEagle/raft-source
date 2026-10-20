@@ -3,7 +3,7 @@
 // resource "sender", policy "once"): the first message from a sender in this
 // context keeps `@name — description`, later ones show `@name` only. The
 // daemon applies the same rule to live delivery through the same ledger rows.
-import { elideSeenSenderDescriptions } from "@botiverse/raft-shared";
+import { elideSeenSenderDescriptions } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { senderClaimForContext } from "../../ax/passiveEngine";
 import type { CliIo } from "../../core/io";

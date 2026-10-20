@@ -6,7 +6,7 @@ import {
   EmptyStateDescription,
   EmptyStateIcon,
   EmptyStateTitle,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 
 /**
  * Canonical empty-state primitive — used everywhere a surface needs to say

@@ -21,6 +21,12 @@ import {
   startProfileOpenE2eTimeline,
   stopProfileOpenE2eTimeline,
 } from "./utils/profileOpenE2eTimeline";
+import {
+  readSidebarDndProbe,
+  startSidebarDndProbe,
+  stopSidebarDndProbe,
+} from "./utils/sidebarDndE2eProbe";
+import type { SidebarDndProbeEntry } from "./utils/sidebarDndE2eProbe";
 import type {
   ProfileOpenDiagnosticDomTarget,
   ProfileOpenDiagnosticProfileType,
@@ -37,6 +43,14 @@ declare global {
       startProfileOpenTimeline: (receiptStartedAtEpochMs: number) => void;
       readProfileOpenTimeline: () => ProfileOpenDiagnosticTimeline;
       stopProfileOpenTimeline: () => void;
+      // Sidebar drag/drop forensics (see utils/sidebarDndE2eProbe). Recording
+      // starts only when a spec opts in via start(); read() returns the
+      // bounded buffer; stop() disables recording and clears the hook.
+      sidebarDndProbe: {
+        start: () => void;
+        read: () => SidebarDndProbeEntry[];
+        stop: () => void;
+      };
     };
   }
 }
@@ -117,5 +131,10 @@ if (import.meta.env.VITE_E2E === "true") {
     },
     readProfileOpenTimeline: readProfileOpenE2eTimeline,
     stopProfileOpenTimeline: stopProfileOpenE2eTimeline,
+    sidebarDndProbe: {
+      start: startSidebarDndProbe,
+      read: readSidebarDndProbe,
+      stop: stopSidebarDndProbe,
+    },
   };
 }

@@ -10,6 +10,7 @@
 // `raft server update`).
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import type {
@@ -33,8 +34,8 @@ export interface RaftChannelSummary {
   visibility: RaftChannelVisibility;
 }
 
-const visibilitySchema = z.enum(["public", "private"]);
-const descriptionSchema = z.string().max(500);
+const visibilitySchema = lazySchema("visibilitySchema", () => z.enum(["public", "private"]));
+const descriptionSchema = lazySchema("descriptionSchema", () => z.string().max(500));
 
 export interface CreateChannelRequest {
   name: string;
@@ -42,11 +43,11 @@ export interface CreateChannelRequest {
   visibility?: RaftChannelVisibility;
 }
 
-export const createChannelRequestSchema = requestSchema<CreateChannelRequest>()(z.object({
+export const createChannelRequestSchema = lazySchema("createChannelRequestSchema", () => requestSchema<CreateChannelRequest>()(z.object({
   name: z.string().describe("The new channel's name, with or without a leading `#`."),
   description: descriptionSchema.optional().describe("What the channel is for (at most 500 characters)."),
   visibility: visibilitySchema.optional().describe("`public` (default) or `private`."),
-}));
+})));
 
 export interface UpdateChannelRequest {
   target: string;
@@ -55,12 +56,12 @@ export interface UpdateChannelRequest {
   visibility?: RaftChannelVisibility;
 }
 
-export const updateChannelRequestSchema = requestSchema<UpdateChannelRequest>()(z.object({
+export const updateChannelRequestSchema = lazySchema("updateChannelRequestSchema", () => requestSchema<UpdateChannelRequest>()(z.object({
   target: z.string().describe("The channel, `#channel-name`."),
   name: z.string().optional().describe("New name, with or without a leading `#`."),
   description: descriptionSchema.optional().describe("New description (at most 500 characters)."),
   visibility: visibilitySchema.optional().describe("`public` or `private`. Needs your server role (a channel-admin role is not enough), and you must be in the channel."),
-}));
+})));
 
 export interface ChannelMemberRequest {
   target: string;
@@ -70,21 +71,21 @@ export interface ChannelMemberRequest {
   agent?: string;
 }
 
-export const channelMemberRequestSchema = requestSchema<ChannelMemberRequest>()(z.object({
+export const channelMemberRequestSchema = lazySchema("channelMemberRequestSchema", () => requestSchema<ChannelMemberRequest>()(z.object({
   target: z.string().describe("The channel, `#channel-name`."),
   user: z.string().optional().describe("A human, `@handle`. Pass exactly one of user and agent."),
   agent: z.string().optional().describe("An agent, `@handle`. Pass exactly one of user and agent."),
-}));
+})));
 
 export interface UpdateServerRequest {
   name?: string;
   hideHumansFromMembers?: boolean;
 }
 
-export const updateServerRequestSchema = requestSchema<UpdateServerRequest>()(z.object({
+export const updateServerRequestSchema = lazySchema("updateServerRequestSchema", () => requestSchema<UpdateServerRequest>()(z.object({
   name: z.string().optional().describe("The server's new name (at most 100 characters)."),
   hideHumansFromMembers: z.boolean().optional().describe("`true` hides the server's humans from ordinary members' member lists; `false` shows them."),
-}));
+})));
 
 /** A 403 with neither a server code nor a next action: a permission problem. */
 export const ADMIN_PERMISSION_NEXT_ACTION = "Your role does not allow this here; ask a server owner or admin to do it, or to change your role.";

@@ -174,7 +174,7 @@ test("MCP credential-header rows are each individually addressable", async () =>
     </MemoryRouter>,
   );
   const addServer = await waitFor(() => {
-    const [button] = screen.queryAllByRole("button", { name: /add server/i });
+    const [button] = screen.queryAllByRole("button", { name: /add mcp server/i });
     assert.ok(button, "the MCP editor must be reachable");
     return button;
   });

@@ -159,7 +159,7 @@ test("markdown compact density guards every text container without dropping chro
   }));
 
   assertGuardedClass(container.querySelector("p"), ["mb-1"]);
-  assertGuardedClass(container.querySelector("a"), ["text-blue-700", "select-text"]);
+  assertGuardedClass(container.querySelector("a"), ["text-foreground-link", "select-text"]);
   assertGuardedClass(container.querySelector("blockquote"), ["border-l-2", "my-1"]);
   assertGuardedClass(container.querySelector("ul"), ["mb-1", "pl-5", "list-disc"]);
   assertGuardedClass(container.querySelector("ol"), ["mb-1", "pl-5", "list-decimal"]);
@@ -167,8 +167,8 @@ test("markdown compact density guards every text container without dropping chro
     assertGuardedClass(listItem, ["mb-0.5"]);
   }
   assertGuardedClass(container.querySelector("div > table")?.parentElement ?? null, ["my-2", "overflow-x-auto"]);
-  // Table chrome now rides the semantic borders/fill (Brutal re-adds its 2px/cyan).
-  assertGuardedClass(container.querySelector("th"), ["border-line-muted", "bg-info-soft", "whitespace-nowrap"]);
+  // Table chrome rides the DS hairline and the sunken header fill.
+  assertGuardedClass(container.querySelector("th"), ["border-line-hairline", "bg-fill-muted", "whitespace-nowrap"]);
   assertGuardedClass(container.querySelector("td"), ["border", "px-2"]);
   assertGuardedClass(container.querySelector("h1"), ["text-[1.286em]", "mt-3"]);
   assertGuardedClass(container.querySelector("h2"), ["text-[1.143em]", "mt-2"]);

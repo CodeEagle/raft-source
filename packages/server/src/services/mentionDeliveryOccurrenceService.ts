@@ -402,6 +402,14 @@ export async function listRecoverableMentionDeliveriesForAgent(
   machineId: string,
   agentId: string,
 ): Promise<MentionDeliveryOccurrenceRow[]> {
+  return recoverableMentionDeliveriesForAgentQuery(machineId, agentId);
+}
+
+// Served by the partial index idx_mention_delivery_occurrences_agent_payload_open
+// (agent_id, state) WHERE acked_at IS NULL AND terminal_error_at IS NULL AND
+// delivery_payload IS NOT NULL: keep all three conditions here or the planner
+// cannot use it. Exported for the plan test.
+export function recoverableMentionDeliveriesForAgentQuery(machineId: string, agentId: string) {
   return getDb().select().from(mentionDeliveryOccurrences).where(and(
     eq(mentionDeliveryOccurrences.agentId, agentId),
     isNotNull(mentionDeliveryOccurrences.deliveryPayload),

@@ -43,7 +43,7 @@ test("create account is a standalone credential page without identity fields or 
 
   assert.ok(screen.getByRole("heading", { name: "Create your account" }));
   assert.equal(container.querySelector("aside"), null);
-  assert.equal(container.querySelectorAll("i.bg-brutal-pink, i.bg-soft-signal").length, 0);
+  assert.equal(container.querySelectorAll("i.bg-palette-pink, i.bg-palette-yellow").length, 0);
   assert.equal(container.querySelector('[class*="radial-gradient"]'), null);
   assert.equal(container.querySelector('[class*="lg:grid-cols-[minmax(320px,2fr)_minmax(0,3fr)]"]'), null);
   assert.ok(container.querySelector(".h-panel-header"));

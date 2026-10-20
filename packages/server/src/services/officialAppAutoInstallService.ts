@@ -283,7 +283,10 @@ async function autoInstallOneInTransaction(input: {
   if (!transitioned) {
     // A lost state CAS is always suppression-winning. Compensate the row made
     // in this transaction before returning so no caller can observe a
-    // half-installed default.
+    // half-installed default. Tombstone any bot binding + agent first so the
+    // cascade can't leave a managed agent orphaned.
+    const { uninstallManagedAppBot } = await import("./appBotIdentityService");
+    await uninstallManagedAppBot(tx, { installId: installation.id });
     await tx.delete(oauthClientInstalls).where(eq(oauthClientInstalls.id, installation.id));
     return { status: "suppressed", clientId: client.id };
   }

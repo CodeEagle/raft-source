@@ -5,7 +5,7 @@ import { MemoryRouter } from "react-router-dom";
 import api from "../src/api/client";
 import { LeftRail } from "../src/components/layout/LeftRail";
 import { TestIntlProvider } from "./helpers/intl";
-import { ThemeProvider } from "raft-ui";
+import { ThemeProvider } from "@botiverse/raft-ui";
 import { useServerStore } from "../src/store/serverStore";
 
 // Teeth for task #750/#751 (artin's rail chrome reports, #proj-uiux 2026-08-02):
@@ -112,27 +112,27 @@ test("#751: the rail column keeps bottom padding so the Settings button is not f
   const { container } = renderRail();
   const rail = container.querySelector<HTMLDivElement>('[data-testid="workspace-left-rail"]');
   assert.ok(rail, "left rail renders");
-  assert.match(rail.className, /pb-2/, "rail column keeps bottom padding for the trailing Settings button");
+  // raft-ui's rail footer (notifications, help, settings) owns the bottom
+  // inset, so the root no longer adds one of its own.
+  const footer = rail.querySelector<HTMLElement>('[data-slot="app-rail-footer"]');
+  assert.ok(footer, "rail footer renders");
+  assert.match(footer.className, /(?:^|\s)pb-\d/, "rail footer keeps bottom padding for the trailing Settings button");
 });
 
-// Teeth for cindyz's Elegant-adaptation pass on the public server page
-// (#proj-frontend, "public server的页面几乎没有做elegant mode适配"). The public
-// branch of LeftRail hand-rolled its rail from brutal-only utilities, so every
-// theme rendered one identical yellow strip -- measured rgb(255,212,64) / 64px
-// / 2px black border in Brutal, Elegant-light AND Elegant-dark on the
-// pre-change build. jsdom has no CSS cascade, so the tooth is the className
-// divergence itself: the rail now reads useThemeFamily() through rui's
-// AppRail* slots, so Brutal and Elegant must NOT resolve to the same chrome.
-// The old markup produced a byte-identical className under both providers,
-// which is exactly what these assertions make impossible. Pixel proof is on
-// the PR.
+// Teeth for cindyz's public-server-page pass (#proj-frontend, "public server的页面
+// 几乎没有做elegant mode适配"). The public branch of LeftRail used to hand-roll
+// its rail from brutal-only utilities, so it rendered one identical yellow
+// strip (64px, 2px black border) whatever the theme. It now runs raft-ui's
+// AppRail* slots like the signed-in rail, on semantic layers, so light and dark
+// differ only through tokens. jsdom has no CSS cascade, so the tooth is the
+// className itself. Pixel proof is on the PR.
 
-function renderPublicRail(theme: "brutal" | "elegant") {
+function renderPublicRail(mode: "light" | "dark" = "light") {
   return render(
     <MemoryRouter initialEntries={["/s/open-team"]}>
       <TestIntlProvider>
         {/* syncDom=false: an isolated island must not mutate the app root. */}
-        <ThemeProvider theme={theme} syncDom={false}>
+        <ThemeProvider mode={mode} syncDom={false}>
           <LeftRail
             side="left"
             publicProjection={{
@@ -151,44 +151,30 @@ function renderPublicRail(theme: "brutal" | "elegant") {
   );
 }
 
-function publicRail(theme: "brutal" | "elegant") {
-  const { container } = renderPublicRail(theme);
+function publicRail(mode: "light" | "dark" = "light") {
+  const { container } = renderPublicRail(mode);
   const rail = container.querySelector<HTMLDivElement>('[data-public-server-rail="true"]');
-  assert.ok(rail, `public rail renders under the ${theme} provider`);
+  assert.ok(rail, `public rail renders in ${mode} mode`);
   return rail;
 }
 
-test("the public rail resolves different chrome per theme instead of one hardcoded brutal strip", () => {
+test("the public rail takes raft-ui's AppRail chrome instead of one hardcoded brutal strip", () => {
   seedServers();
-  const brutal = publicRail("brutal").className;
+  const light = publicRail("light").className;
   cleanup();
-  const elegant = publicRail("elegant").className;
+  const dark = publicRail("dark").className;
 
-  assert.notEqual(
-    brutal,
-    elegant,
-    "Brutal and Elegant must not share one className — the pre-fix markup was theme-blind",
-  );
-
-  assert.match(brutal, /bg-primary/, "Brutal keeps the brand yellow surface (bg-primary -> brutal-yellow-400)");
-  assert.match(brutal, /border-black/, "Brutal keeps its hard black rail border");
-  assert.match(brutal, /w-16/, "Brutal keeps the 64px rail width");
-
-  assert.match(elegant, /bg-layer-canvas-muted/, "Elegant takes the themed canvas surface");
-  assert.match(elegant, /w-14/, "Elegant takes the narrower 56px rail");
-  assert.ok(
-    !/border-black/.test(elegant),
-    "Elegant must not inherit the brutal black border — this was the visible defect",
-  );
-  assert.ok(
-    !/bg-soft-signal/.test(elegant),
-    "Elegant must not paint the brand yellow — this was the visible defect",
-  );
+  assert.equal(light, dark, "one recipe in both modes: the semantic layers carry the light/dark difference");
+  assert.match(light, /(?:^|\s)bg-layer-frame(?:\s|$)/, "the rail sits on the frame layer, like the signed-in rail");
+  assert.match(light, /(?:^|\s)border-line-seam(?:\s|$)/, "the rail edge is the DS seam");
+  assert.doesNotMatch(light, /border-black/, "no hard black rail border — the old hand-built strip");
+  assert.doesNotMatch(light, /bg-palette-yellow|(?:^|\s)bg-brand(?:\s|$)/, "no hardcoded brand yellow fill");
+  assert.doesNotMatch(light, /(?:^|\s)w-16(?:\s|$)/, "the rail width comes from the shell, not a fixed 64px");
 });
 
 test("the public rail is composed from rui AppRail* slots", () => {
   seedServers();
-  const rail = publicRail("elegant");
+  const rail = publicRail();
   assert.deepEqual(
     [...rail.children].map((child) => child.getAttribute("data-slot")),
     ["app-rail-header", "app-rail-nav", "app-rail-footer"],
@@ -198,7 +184,7 @@ test("the public rail is composed from rui AppRail* slots", () => {
 
 test("the public rail header takes its height from the shell, not from an override of its own", () => {
   seedServers();
-  const { container } = renderPublicRail("elegant");
+  const { container } = renderPublicRail();
   const header = container.querySelector<HTMLDivElement>('[data-slot="app-rail-header"]');
   assert.ok(header, "public rail header renders");
   // The public page now mounts the rui AppShellRoot, which sets
@@ -213,7 +199,7 @@ test("the public rail header takes its height from the shell, not from an overri
 
 test("the public rail's logo and tabs render through AppRailItem", () => {
   seedServers();
-  const { container } = renderPublicRail("elegant");
+  const { container } = renderPublicRail();
   for (const testId of ["public-server-switcher-trigger", "left-rail-tab-chat", "left-rail-settings"]) {
     const button = container.querySelector<HTMLButtonElement>(`[data-testid="${testId}"]`);
     assert.ok(button, `${testId} renders`);
@@ -224,14 +210,14 @@ test("the public rail's logo and tabs render through AppRailItem", () => {
   }
 });
 
-test("the public rail's server avatar is the standard rail item in Brutal too", () => {
+test("the public rail's server avatar is the standard rail item", () => {
   seedServers();
-  const { container } = renderPublicRail("brutal");
+  const { container } = renderPublicRail();
   const trigger = container.querySelector<HTMLButtonElement>('[data-testid="public-server-switcher-trigger"]');
-  assert.ok(trigger, "brutal server avatar renders");
+  assert.ok(trigger, "server avatar renders");
   assert.ok(
     trigger.querySelector('[data-slot="app-rail-item-icon"]') !== null,
-    "Brutal must render the avatar through AppRailItem, like the signed-in rail",
+    "the avatar renders through AppRailItem, like the signed-in rail",
   );
   assert.doesNotMatch(trigger.className, /\bbg-black\b/, "the public-only black block is gone");
 });

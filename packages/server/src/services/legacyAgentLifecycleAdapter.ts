@@ -25,10 +25,12 @@ import {
   RUNTIME_ERROR_CLASSES,
   RUNTIME_ERROR_REASONS,
   RUNTIME_ERROR_REASON_PROVENANCES,
+  RUNTIME_ERROR_REQUIRED_ACTIONS,
   runtimeErrorReasonForClass,
   type AgentActivity,
   type MachineShutdownReason,
   type RuntimeErrorActivityDiagnostic,
+  type RuntimeErrorRequiredAction,
 } from "@botiverse/raft-shared";
 import type { ReadyReconcileLifecycleAction } from "./agentLifecycleReducer";
 
@@ -214,9 +216,27 @@ export function normalizeRuntimeErrorActivityDiagnostic(
     ...(typeof candidate.nativeReasonPresent === "boolean"
       ? { nativeReasonPresent: candidate.nativeReasonPresent }
       : {}),
+    // An unknown action from a newer daemon is dropped, not the whole carrier.
+    ...(typeof candidate.requiredAction === "string"
+      && (RUNTIME_ERROR_REQUIRED_ACTIONS as readonly string[]).includes(candidate.requiredAction)
+      ? { requiredAction: candidate.requiredAction as RuntimeErrorRequiredAction }
+      : {}),
   };
 }
 
+
+/**
+ * What the owner must do before this runtime error can clear, or null when
+ * retrying may fix it. A daemon that predates `requiredAction` still classifies
+ * a rejected credential as AuthError, which always needs the owner.
+ */
+export function runtimeErrorRequiredAction(
+  diagnostic: RuntimeErrorActivityDiagnostic | null,
+): RuntimeErrorRequiredAction | null {
+  if (!diagnostic) return null;
+  if (diagnostic.requiredAction) return diagnostic.requiredAction;
+  return diagnostic.errorClass === "AuthError" ? "user_reauth" : null;
+}
 
 function daemonActivityReason(activity: AgentActivity): AgentLifecycleReason {
   if (activity === "online") return "runtime_idle";

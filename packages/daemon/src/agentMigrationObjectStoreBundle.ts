@@ -86,6 +86,23 @@ export function largestWorkspaceEntryCounts(
     .slice(0, limit);
 }
 
+/**
+ * Wire suffix for MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE: the largest
+ * top-level workspace paths by bytes, so the agent knows what to remove.
+ */
+export function bundleTooLargeTopEntries(bytesByTopLevelPath: ReadonlyMap<string, number>): string {
+  const bytesByAccountingPath = new Map<string, number>();
+  for (const [topLevelPath, bytes] of bytesByTopLevelPath) {
+    const accountingPath = isSensitiveAccountingPath(topLevelPath) ? "other/" : topLevelPath;
+    bytesByAccountingPath.set(accountingPath, (bytesByAccountingPath.get(accountingPath) ?? 0) + bytes);
+  }
+  return [...bytesByAccountingPath]
+    .sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))
+    .slice(0, MAX_BUNDLE_TOO_LARGE_ACCOUNTING_ENTRIES)
+    .map(([accountingPath, bytes]) => `${encodeAccountingPath(accountingPath)},${bytes}`)
+    .join(";");
+}
+
 function isSensitiveAccountingPath(value: string): boolean {
   const basename = value.endsWith("/") ? value.slice(0, -1) : value;
   return /^\.env(?:\.|$)/i.test(basename)

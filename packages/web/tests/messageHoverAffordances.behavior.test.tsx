@@ -222,7 +222,9 @@ test("continuation-row hover timestamp follows the UI 12h/24h setting", async ()
     const gutter = Array.from(row.querySelectorAll("span"))
       .find((candidate) => candidate.textContent === text && candidate.hasAttribute("data-base-ui-tooltip-trigger"));
     assert.ok(gutter, `expected continuation gutter timestamp ${text} with RUI tooltip (was native title=${title})`);
-    assert.match(gutter.className, /group-hover\/message:text-black\/40/);
+    // The DS treatment (Space Mono 12, ink-3 revealed on row hover) is the
+    // recipe's; the call site paints no colour or size of its own.
+    assert.doesNotMatch(gutter.className, /theme-brutal:|group-hover\/message:/);
   };
 
   let view = await renderMessage({
@@ -426,7 +428,9 @@ test("saved thread origin bookmark renders as the active save action", async () 
   const row = saveButton.closest("#message-message-1");
 
   assert.equal(saveButton.getAttribute("data-active"), "true");
-  assert.match(saveButton.className, /(?:^| )data-active:text-accent-strong(?: |$)/);
+  // The recipe draws the active state; the call site paints no colour of its own.
+  assert.doesNotMatch(saveButton.className, /data-active:text-attention-strong|theme-brutal:/);
+  assert.equal(saveButton.querySelector("svg")?.getAttribute("fill"), "currentColor", "saved bookmark is filled");
   assert.ok(row);
   assert.equal(
     row.querySelector("[data-message-affordance='saved-indicator']"),

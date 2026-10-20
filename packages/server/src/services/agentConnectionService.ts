@@ -71,7 +71,7 @@ import {
   resolveProviderConfig,
   type ProviderCallResult,
 } from "./agentRuntimeProviderService";
-import { isAgentRuntimeProviderEnabledForServer } from "./agentRuntimeProviderFeature";
+import { isAgentRuntimeProviderKillSwitched } from "./agentRuntimeProviderFeature";
 
 export const AGENT_CONNECTION_CALLBACK_API_PATH = "/api/connections/callback";
 export const AGENT_CONNECTION_CALLBACK_WEB_PATH = "/connections/callback";
@@ -101,16 +101,17 @@ type Target = { config: { baseUrl: string; token: string }; raftOrigin: string; 
 async function resolveTarget(agent: { id: string; serverId: string }): Promise<AgentConnectionOutcome<Target>> {
   const [row] = await getDb().select({
     provider: agentRuntimeProvisions.provider,
+    providerTarget: agentRuntimeProvisions.providerTarget,
     state: agentRuntimeProvisions.state,
     serverId: agentRuntimeProvisions.serverId,
   }).from(agentRuntimeProvisions).where(eq(agentRuntimeProvisions.agentId, agent.id)).limit(1);
   if (!row || row.serverId !== agent.serverId || row.state === "deleting" || row.state === "deleted") {
     return { ok: false, failure: { kind: "not_hosted" } };
   }
-  if (!await isAgentRuntimeProviderEnabledForServer(agent.serverId, row.provider)) {
+  if (await isAgentRuntimeProviderKillSwitched(row.provider)) {
     return { ok: false, failure: { kind: "disabled", provider: row.provider } };
   }
-  const config = resolveProviderConfig(row.provider);
+  const config = resolveProviderConfig(row.provider, process.env, row.providerTarget);
   const raftOrigin = getRaftOrigin();
   if (!config || !raftOrigin) return { ok: false, failure: { kind: "not_configured" } };
   // The provider only knows the agent once provisioning succeeded.

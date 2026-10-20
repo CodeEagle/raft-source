@@ -90,8 +90,13 @@ test("keeps a Claude model selected before async runtime admission", async ({ pa
     await expect(page.getByTestId("machine-mobile-back")).toBeAttached();
     await expect(page.getByText("Connected")).toBeVisible();
 
-    await page.getByRole("button", { name: "Create" }).click();
-    await expect(page.getByRole("heading", { name: "Create Agent" })).toBeVisible();
+    // The machine's Create Agent button opens the Create Agent dialog: a
+    // button says the title of the layer it opens (Raft DS copy rule), so the
+    // trigger and the dialog's submit share a label. Scope the submit to the
+    // dialog.
+    await page.getByRole("button", { name: "Create Agent" }).click();
+    const dialog = page.getByTestId("create-agent-dialog");
+    await expect(dialog.getByRole("heading", { name: "Create Agent" })).toBeVisible();
 
     const modelBox = page.getByTestId("runtime-model-combobox");
     await expect(modelBox).toHaveValue(/Claude Opus|Claude Sonnet|Claude Haiku|Claude Fable/);
@@ -112,7 +117,7 @@ test("keeps a Claude model selected before async runtime admission", async ({ pa
     await admissionResponse;
 
     await expect(modelBox).toHaveValue("Claude Fable");
-    const createButton = page.getByRole("button", { name: "Create Agent" });
+    const createButton = dialog.getByRole("button", { name: "Create Agent" });
     await expect(createButton).toBeEnabled();
     const [agentRequest, response] = await Promise.all([
       page.waitForRequest((req) =>

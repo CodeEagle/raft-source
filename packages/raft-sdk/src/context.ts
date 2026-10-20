@@ -24,6 +24,18 @@ export interface RaftContextServer {
   name: string;
 }
 
+/**
+ * Server rollout flags that change how the agent should work. They match what
+ * a daemon-managed agent's prompt is built from. Both false on Servers that
+ * predate the field.
+ */
+export interface RaftContextFeatures {
+  /** Reminders moved to the Reminder app; `raft reminder schedule` is refused. */
+  reminderApp: boolean;
+  /** Secrets go through the Vault app. */
+  vaultApp: boolean;
+}
+
 export interface RaftContextData {
   agent: RaftContextAgent;
   server: RaftContextServer;
@@ -31,6 +43,7 @@ export interface RaftContextData {
   capabilities: string[];
   /** The rendered operating guide for External Agents; null for daemon-managed agents. */
   guide: string | null;
+  features: RaftContextFeatures;
 }
 
 export interface RaftContextError {
@@ -58,6 +71,7 @@ const projection = z.object({
   server: z.object({ id: z.string(), slug: z.string(), name: z.string() }),
   credential: z.object({ capabilities: z.array(z.string()) }),
   prompt: z.object({ text: z.string() }).nullable(),
+  features: z.object({ reminderApp: z.boolean(), vaultApp: z.boolean() }).optional(),
 });
 
 function failure(code: RaftContextError["code"], status?: number): RaftContextResult {
@@ -78,7 +92,7 @@ export async function getRaftContext(client: Pick<AgentApiClient, "agent">): Pro
   }
   const parsed = projection.safeParse(result.data);
   if (!parsed.success) return failure("INVALID_RESPONSE", result.status);
-  const { agent, server, credential, prompt } = parsed.data;
+  const { agent, server, credential, prompt, features } = parsed.data;
   return {
     ok: true,
     status: result.status,
@@ -95,6 +109,10 @@ export async function getRaftContext(client: Pick<AgentApiClient, "agent">): Pro
       server: { ...server },
       capabilities: [...credential.capabilities],
       guide: prompt?.text ?? null,
+      features: {
+        reminderApp: features?.reminderApp === true,
+        vaultApp: features?.vaultApp === true,
+      },
     },
   };
 }

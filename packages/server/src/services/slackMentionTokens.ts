@@ -3,6 +3,13 @@ const SLACK_USERGROUP_MENTION =
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 export const RAFT_AGENT_USERGROUP_MARKER_PREFIX = "raft-agent:";
+export const RAFT_HUMAN_USERGROUP_MARKER_PREFIX = "raft-user:";
+/**
+ * Reported when a principal exhausted every handle/name candidate (occupied
+ * in the workspace or refused by Slack as taken/invalid), so the settings
+ * banner shows its handle-collision hint.
+ */
+export const SLACK_USERGROUP_NAMING_EXHAUSTED_ERROR = "name_taken";
 
 export type SlackUsergroupMention = {
   providerUsergroupId: string;
@@ -34,6 +41,31 @@ export function parseSlackAgentUsergroupMarker(
   return { serverId: coordinates[0]!, agentId: coordinates[1]! };
 }
 
+export type SlackHumanUsergroupMarker = {
+  serverId: string;
+  userId: string;
+};
+
+export function slackHumanUsergroupMarker(serverId: string, userId: string): string {
+  if (!UUID_PATTERN.test(serverId) || !UUID_PATTERN.test(userId)) {
+    throw new Error("Slack human usergroup marker authority is invalid");
+  }
+  return `${RAFT_HUMAN_USERGROUP_MARKER_PREFIX}${serverId}:${userId}`;
+}
+
+export function parseSlackHumanUsergroupMarker(
+  description: string,
+): SlackHumanUsergroupMarker | null {
+  if (!description.startsWith(RAFT_HUMAN_USERGROUP_MARKER_PREFIX)) return null;
+  const coordinates = description.slice(RAFT_HUMAN_USERGROUP_MARKER_PREFIX.length).split(":");
+  if (
+    coordinates.length !== 2
+    || !UUID_PATTERN.test(coordinates[0]!)
+    || !UUID_PATTERN.test(coordinates[1]!)
+  ) return null;
+  return { serverId: coordinates[0]!, userId: coordinates[1]! };
+}
+
 export function normalizeSlackMentionHandle(value: string): string {
   return value.trim().toLocaleLowerCase("en-US");
 }
@@ -52,16 +84,29 @@ function slackHandleWithSuffix(baseValue: string, suffixValue: string): string {
   return `${base.slice(0, Math.max(1, 79 - suffix.length))}-${suffix}`;
 }
 
+function slackPrincipalHandleCandidates(name: string, serverSlug: string, id: string): string[] {
+  return [...new Set([
+    normalizeSlackCreatableHandle(name),
+    slackHandleWithSuffix(name, serverSlug),
+    slackHandleWithSuffix(name, id.slice(0, 8)),
+  ].filter(Boolean))];
+}
+
 export function slackAgentHandleCandidates(input: {
   name: string;
   serverSlug: string;
   agentId: string;
 }): string[] {
-  return [...new Set([
-    normalizeSlackCreatableHandle(input.name),
-    slackHandleWithSuffix(input.name, input.serverSlug),
-    slackHandleWithSuffix(input.name, input.agentId.slice(0, 8)),
-  ].filter(Boolean))];
+  return slackPrincipalHandleCandidates(input.name, input.serverSlug, input.agentId);
+}
+
+/** Same handle rules as Agents: bare Raft name, then server slug, then id prefix. */
+export function slackHumanHandleCandidates(input: {
+  name: string;
+  serverSlug: string;
+  userId: string;
+}): string[] {
+  return slackPrincipalHandleCandidates(input.name, input.serverSlug, input.userId);
 }
 
 /**

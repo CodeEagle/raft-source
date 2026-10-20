@@ -1083,6 +1083,7 @@ test("joint channel create uses directed person invites and target invitee accep
 
   const acceptedInvite = await db.select().from(jointChannelInvites).where(eq(jointChannelInvites.id, hostProjection.jointInvite!.id));
   assert.equal(acceptedInvite[0]?.status, "accepted");
+  assert.equal(acceptedInvite[0]?.acceptedVia, "invitee");
   const targetResolved = await resolveChannelAccess({ serverId: targetServer.id, channelId: targetProjection.id });
   assert.equal(targetResolved?.kind, "joint");
   assert.equal(targetResolved?.canonicalChannelId, joint.canonicalChannelId);
@@ -1458,6 +1459,163 @@ test("joint channel create uses directed person invites and target invitee accep
   assert.equal(hostStillResolved?.kind, "joint", "disconnecting one server should not delete the other projection");
 });
 
+
+async function captureInviteEmails<T>(run: () => Promise<T>): Promise<{ result: T; emailLogs: string[] }> {
+  const emailLogs: string[] = [];
+  const originalConsoleLog = console.log;
+  console.log = (...args: unknown[]) => {
+    emailLogs.push(args.map(String).join(" "));
+  };
+  try {
+    return { result: await run(), emailLogs };
+  } finally {
+    console.log = originalConsoleLog;
+  }
+}
+
+test("joint create connects directly without email when the inviter administers both servers (RFC 075 §4.5)", async ({ app }) => {
+  const db = getDb();
+  const admin = await seedUser("joint-same-admin@slock.test", "joint-same-admin");
+  const hostServer = await createServer("Joint Same Admin Host", "botiverse", admin.id);
+  const targetServer = await createServer("Joint Same Admin Target", "joint-same-admin-target", admin.id);
+  const adminToken = await tokenForHuman(admin.email);
+
+  const events = installFakeIo(app.app);
+  const { result: createRes, emailLogs } = await captureInviteEmails(() => fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(adminToken, hostServer.id),
+    body: JSON.stringify({
+      name: "same-admin-room",
+      visibility: "joint",
+      jointInvites: [{ targetServerSlug: targetServer.slug, invitedPeople: [`@${admin.name}`], sameAdmin: true }],
+    }),
+  }));
+  assert.equal(createRes.status, 200);
+  assert.ok(!emailLogs.some((log) => log.includes(`To: ${admin.email}`)), "a same-admin connection must not email the inviter");
+  const body = await createRes.json() as {
+    id: string;
+    jointInvites: Array<{ id: string; status: string }>;
+    jointServers?: Array<{ serverId: string; status: "active" | "pending" }>;
+  };
+  assert.equal(body.jointInvites[0]?.status, "accepted");
+  assert.ok(body.jointServers?.some((server) => server.serverId === targetServer.id && server.status === "active"));
+
+  const [invite] = await db.select().from(jointChannelInvites).where(eq(jointChannelInvites.id, body.jointInvites[0]!.id));
+  assert.equal(invite?.status, "accepted");
+  assert.equal(invite?.acceptedVia, "same_admin");
+  assert.equal(invite?.invitedUserId, admin.id);
+  assert.equal(invite?.acceptedByUserId, admin.id);
+
+  const [targetProjection] = await db
+    .select({ localChannelId: jointChannelServers.localChannelId, status: jointChannelServers.status })
+    .from(jointChannelServers)
+    .where(and(eq(jointChannelServers.jointChannelId, invite!.jointChannelId), eq(jointChannelServers.serverId, targetServer.id)));
+  assert.equal(targetProjection?.status, "active");
+  assert.ok(await isChannelHuman(targetProjection!.localChannelId, admin.id), "the admin joins the target projection");
+  assert.ok(
+    events.some((event) => event.room === `user:${admin.id}:server:${targetServer.id}` && event.event === "channel:updated"),
+    "the target projection reaches the admin's sockets on the target server",
+  );
+
+  const pending = await fetch(`${app.baseUrl}/api/channels/joint-invites`, { headers: headers(adminToken, targetServer.id) });
+  assert.deepEqual((await pending.json() as { invites: unknown[] }).invites, []);
+});
+
+test("joint same-admin is opt-in, inviter-only and re-checks target authority", async ({ app }) => {
+  const db = getDb();
+  const admin = await seedUser("joint-same-admin-gate@slock.test", "joint-same-admin-gate");
+  const otherAdmin = await seedUser("joint-same-admin-gate-other@slock.test", "joint-same-admin-gate-other");
+  const hostServer = await createServer("Joint Same Admin Gate Host", "botiverse", admin.id);
+  const adminTarget = await createServer("Joint Same Admin Gate Target", "joint-same-admin-gate-target", admin.id);
+  const memberTarget = await createServer("Joint Same Admin Gate Member", "joint-same-admin-gate-member", otherAdmin.id);
+  await addMember(memberTarget.id, admin.id);
+  const adminToken = await tokenForHuman(admin.email);
+
+  // Without the confirmation flag a self-invite keeps the email flow.
+  const { result: unconfirmedRes, emailLogs: unconfirmedEmails } = await captureInviteEmails(() => fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(adminToken, hostServer.id),
+    body: JSON.stringify({ name: "same-admin-unconfirmed", visibility: "joint", targetServerSlug: adminTarget.slug, invitedPeople: [admin.email] }),
+  }));
+  assert.equal(unconfirmedRes.status, 200);
+  assert.ok(unconfirmedEmails.some((log) => log.includes(`To: ${admin.email}`)));
+  const unconfirmed = await unconfirmedRes.json() as { jointInvite: { id: string; status: string } };
+  assert.equal(unconfirmed.jointInvite.status, "pending");
+
+  // The flag never applies to someone else: they are emailed as before.
+  const { result: otherRes, emailLogs: otherEmails } = await captureInviteEmails(() => fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(adminToken, hostServer.id),
+    body: JSON.stringify({
+      name: "same-admin-other-invitee",
+      visibility: "joint",
+      jointInvites: [{ targetServerSlug: memberTarget.slug, invitedPeople: [otherAdmin.email], sameAdmin: true }],
+    }),
+  }));
+  assert.equal(otherRes.status, 200);
+  assert.ok(otherEmails.some((log) => log.includes(`To: ${otherAdmin.email}`)));
+  const other = await otherRes.json() as { jointInvite: { id: string; status: string } };
+  assert.equal(other.jointInvite.status, "pending");
+
+  // The flag does not grant authority: a plain member of the target is rejected.
+  const { result: memberRes, emailLogs: memberEmails } = await captureInviteEmails(() => fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(adminToken, hostServer.id),
+    body: JSON.stringify({
+      name: "same-admin-not-target-admin",
+      visibility: "joint",
+      jointInvites: [{ targetServerSlug: memberTarget.slug, invitedPeople: [admin.email], sameAdmin: true }],
+    }),
+  }));
+  assert.equal(memberRes.status, 400);
+  assert.equal((await memberRes.json() as { code: string }).code, "joint_invitee_not_admin");
+  assert.ok(!memberEmails.some((log) => log.includes(`To: ${admin.email}`)));
+
+  // A link accept is recorded as the invitee's own accept.
+  const acceptRes = await fetch(`${app.baseUrl}/api/channels/joint-invites/${unconfirmed.jointInvite.id}/accept`, {
+    method: "POST",
+    headers: headers(adminToken, adminTarget.id),
+  });
+  assert.equal(acceptRes.status, 200);
+  const [linkAccepted] = await db.select().from(jointChannelInvites).where(eq(jointChannelInvites.id, unconfirmed.jointInvite.id));
+  assert.equal(linkAccepted?.acceptedVia, "invitee");
+});
+
+test("joint server invite connects directly when the inviter administers the new server", async ({ app }) => {
+  const db = getDb();
+  const admin = await seedUser("joint-same-admin-invite@slock.test", "joint-same-admin-invite");
+  const peer = await seedUser("joint-same-admin-invite-peer@slock.test", "joint-same-admin-invite-peer");
+  const hostServer = await createServer("Joint Same Admin Invite Host", "botiverse", admin.id);
+  const peerServer = await createServer("Joint Same Admin Invite Peer", "joint-same-admin-invite-peer", peer.id);
+  const thirdServer = await createServer("Joint Same Admin Invite Third", "joint-same-admin-invite-third", peer.id);
+  await addMember(thirdServer.id, admin.id, "admin");
+  const adminToken = await tokenForHuman(admin.email);
+
+  const createRes = await fetch(`${app.baseUrl}/api/channels`, {
+    method: "POST",
+    headers: headers(adminToken, hostServer.id),
+    body: JSON.stringify({ name: "same-admin-invite-room", visibility: "joint", targetServerSlug: peerServer.slug, invitedPeople: [peer.email] }),
+  });
+  assert.equal(createRes.status, 200);
+  const hostProjection = await createRes.json() as { id: string };
+
+  const { result: inviteRes, emailLogs } = await captureInviteEmails(() => fetch(`${app.baseUrl}/api/channels/${hostProjection.id}/joint-invites`, {
+    method: "POST",
+    headers: headers(adminToken, hostServer.id),
+    body: JSON.stringify({ targetServerSlug: thirdServer.slug, invitedPeople: [`@${admin.name}`], sameAdmin: true }),
+  }));
+  assert.equal(inviteRes.status, 200);
+  assert.ok(!emailLogs.some((log) => log.includes(`To: ${admin.email}`)));
+  const invited = await inviteRes.json() as { jointInvite: { id: string; status: string } };
+  assert.equal(invited.jointInvite.status, "accepted");
+  const [invite] = await db.select().from(jointChannelInvites).where(eq(jointChannelInvites.id, invited.jointInvite.id));
+  assert.equal(invite?.acceptedVia, "same_admin");
+  const [thirdProjection] = await db
+    .select({ status: jointChannelServers.status })
+    .from(jointChannelServers)
+    .where(and(eq(jointChannelServers.jointChannelId, invite!.jointChannelId), eq(jointChannelServers.serverId, thirdServer.id)));
+  assert.equal(thirdProjection?.status, "active");
+});
 
 test("joint channel create can invite multiple target servers in the initial request", async ({ app }) => {
   const hostOwner = await seedUser("joint-create-multi-host@slock.test", "joint-create-multi-host");
@@ -2472,6 +2630,20 @@ test("joint channel threads use per-server local thread projections over canonic
       )),
       "peer agent history should include follow-up replies projected to the peer local thread id",
     );
+    // Its projection has no parent message; the card is the reader's local channel.
+    const targetProjectionRow = await getChannel(targetProjection.id);
+    assert.ok(targetProjectionRow);
+    assert.deepEqual(
+      (targetAgentHistoryBody as { channel_card?: unknown }).channel_card,
+      {
+        id: targetProjection.id,
+        name: targetProjectionRow.name,
+        type: "joint",
+        description: targetProjectionRow.description ?? null,
+        archived: false,
+      },
+      "a joint thread read carries the card of the reader's local channel projection",
+    );
 
     const targetAgentAroundHistory = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${targetThreadRef}&around=${followupReplyBody.id.slice(0, 8)}&limit=3`, {
       headers: { Authorization: `Bearer ${targetAgentReadCredential.apiKey}` },
@@ -2528,6 +2700,23 @@ test("joint channel threads use per-server local thread projections over canonic
       (targetUnreadBody[targetThreadProjection.localChannelId] ?? 0) > 0,
       "peer reload unread counts should read joint thread replies from canonical storage but return the peer local thread id",
     );
+
+    // The peer's local thread projection has no parent message of its own; its
+    // thread unread folds onto the peer's local joint channel, not the host's.
+    const targetChannelSummary = await fetch(`${app.baseUrl}/api/channels/unread?summary=1`, {
+      headers: headers(targetToken, targetServer.id),
+    });
+    assert.equal(targetChannelSummary.status, 200);
+    const targetChannelSummaryBody = await targetChannelSummary.json() as {
+      channels: Record<string, { parentChannelId?: string }>;
+      threadUnread: Record<string, { count: number; hasMention: boolean }>;
+    };
+    assert.equal(
+      targetChannelSummaryBody.channels[targetThreadProjection.localChannelId]?.parentChannelId,
+      targetProjection.id,
+      "a joint local thread's parent is this server's projection of the joint channel",
+    );
+    assert.equal(targetChannelSummaryBody.threadUnread[targetProjection.id]?.count, 1);
 
     const targetUnreadSummary = await fetch(`${app.baseUrl}/api/servers/unread-summary`, {
       headers: { Authorization: `Bearer ${targetToken}` },
@@ -2762,10 +2951,15 @@ test("joint channel peer-side top-level sends use the sender projection authorit
     hostProjection.id,
     "host agent delivery should target the host local joint projection id",
   );
-  assert.deepEqual(
-    hostAgentDelivery.options,
-    { adminAuthority: true },
+  assert.equal(
+    hostAgentDelivery.options?.adminAuthority,
+    true,
     "peer-side owner/admin sends should use the sender's local projection authority instead of canonical storage server authority",
+  );
+  assert.equal(
+    typeof (hostAgentDelivery.options as { mentionDeliveryOccurrenceId?: unknown } | undefined)?.mentionDeliveryOccurrenceId,
+    "string",
+    "a joint mention delivery carries its durable occurrence id",
   );
 
   deliveries.length = 0;
@@ -2793,10 +2987,15 @@ test("joint channel peer-side top-level sends use the sender projection authorit
     targetProjection.id,
     "peer agent delivery should target the peer local joint projection id",
   );
-  assert.deepEqual(
-    targetAgentDelivery.options,
-    { adminAuthority: true },
+  assert.equal(
+    targetAgentDelivery.options?.adminAuthority,
+    true,
     "host-side owner/admin sends should use the sender's local projection authority instead of canonical storage server authority",
+  );
+  assert.equal(
+    typeof (targetAgentDelivery.options as { mentionDeliveryOccurrenceId?: unknown } | undefined)?.mentionDeliveryOccurrenceId,
+    "string",
+    "a joint mention delivery carries its durable occurrence id",
   );
 });
 

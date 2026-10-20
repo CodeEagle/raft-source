@@ -88,7 +88,16 @@ export interface InstalledAppDirectoryEntry {
   description?: string | null;
   /** One-line "when to use it". Empty/absent => the app is omitted entirely. */
   whenToUse?: string | null;
+  /**
+   * The id agents pass as `raft integration invoke --service <id>` (the app's
+   * client id). Rendered only when it has the client-id shape; absent on old
+   * Servers, which renders the entry exactly as before.
+   */
+  service?: string | null;
 }
+
+/** Client ids are server-generated slugs (e.g. `reminder-e2a966`). */
+const INSTALLED_APP_SERVICE_ID = /^[a-z][a-z0-9-]{2,63}$/u;
 
 /** Defensive cap; the write path enforces the real 160-code-point contract. */
 const INSTALLED_APP_LINE_MAX = 160;
@@ -115,6 +124,7 @@ export function buildInstalledAppDirectory(
       name: clampOneLine(entry.name),
       description: entry.description ? clampOneLine(entry.description) : "",
       whenToUse: clampOneLine(entry.whenToUse!),
+      service: entry.service && INSTALLED_APP_SERVICE_ID.test(entry.service) ? entry.service : null,
     }))
     .sort((a, b) =>
       a.name.localeCompare(b.name, "en", { sensitivity: "base" }) ||
@@ -126,7 +136,8 @@ export function buildInstalledAppDirectory(
   const lines = ["", "   Installed on this Server (name, what it is, when to use it):"];
   for (const entry of renderable) {
     const description = entry.description ? ` — ${entry.description}` : "";
-    lines.push(`   - ${entry.name}${description}`);
+    const service = entry.service ? ` (service \`${entry.service}\`)` : "";
+    lines.push(`   - ${entry.name}${service}${description}`);
     lines.push(`     Use it when: ${entry.whenToUse}`);
   }
   lines.push(
@@ -202,7 +213,10 @@ function describeRaftInstallation(audience: RaftCliGuideAudience): string {
   return "Install the published agent CLI: `npm i -g @botiverse/raft@latest` (exposes the `raft` command). Discover/select a valid external-CLI agent identity first, for example with `raft agent list --server <serverUrl>` or a Raft setup card; then run `raft agent login --server <serverUrl> --agent <id> --profile-slug <slug>` for the selected agent. After login succeeds, invoke commands as `raft --profile <slug> ...` (or set `RAFT_PROFILE=<slug>`).";
 }
 
-function describeRemindersCommands(audience: RaftCliGuideAudience): string {
+function describeRemindersCommands(audience: RaftCliGuideAudience, reminderApp: boolean): string {
+  if (audience === "managed-runner" && reminderApp) {
+    return "moved to the Reminder app on this Server (see Reminders below). `raft reminder list`, `raft reminder log`, and `raft reminder cancel` still work for reminders made before the move; `raft reminder schedule`, `raft reminder update`, and `raft reminder snooze` are refused with `reminders_moved_to_app`.";
+  }
   if (audience === "managed-runner") {
     return "`raft reminder schedule`, `raft reminder list`, `raft reminder snooze`, `raft reminder update`, `raft reminder cancel`, `raft reminder log`.";
   }
@@ -225,6 +239,7 @@ function describeAuthIntrospection(audience: RaftCliGuideAudience): string {
 function buildCommunicationSection(
   audience: RaftCliGuideAudience,
   installedApps: readonly InstalledAppDirectoryEntry[],
+  reminderApp: boolean,
 ): string {
   const installation = describeRaftInstallation(audience);
   return `## Communication — raft CLI ONLY
@@ -239,7 +254,7 @@ Use the \`raft\` CLI for chat / task / attachment operations. ${installation} Us
 6. **Attachments** — \`raft attachment upload\`, \`raft attachment view\`.
 7. **Profiles** — \`raft profile show\`, \`raft profile update\`.
 8. **Integrations** — \`raft integration list\`, \`raft integration marketplace\`, \`raft integration login\`, \`raft integration env\`, \`raft integration invoke\`, \`raft integration app\`. These cover only a small, specific set of apps connected through Raft Agent Login, where you sign in with your Raft agent identity and use the app's supported actions. They are not a catalog or gateway for everything you can do. Local CLIs, runtime tools (including MCP), and browser sessions are independent ways to complete a task; use the one that fits the request and available authority, and follow the user's explicit choice. Do not route ordinary CLI, MCP, or browser work through Raft integrations. An app missing from \`raft integration list\` may still be accessible through those other tools. When you need a Raft Agent Login app, read the \`integration\` Manual topic for discovery, login, and usage. ${OFFICIAL_APPS_HINT}${buildInstalledAppDirectory(installedApps)}
-9. **Reminders** — ${describeRemindersCommands(audience)}
+9. **Reminders** — ${describeRemindersCommands(audience, reminderApp)}
 10. **Action cards** — \`raft action prepare\`.
 11. **Manual** — \`raft manual get\`, \`raft manual search\`. Both require \`--intent\` (what the user ultimately wants to accomplish with Raft) and \`--reason\` (why Manual is needed now), each as a short natural-language summary. Never put raw prompts, credentials, private URLs, or message payloads in either field.
 12. **Runtime versions** — ${describeRuntimeVersions(audience)}
@@ -256,10 +271,13 @@ Run any subcommand with \`--help\` for syntax.
 The CLI prints human-readable canonical text on success (matching the format you see in received messages and history).`;
 }
 
-function buildCredentialHygieneSection(): string {
-  return `### Credential handling
+function buildCredentialHygieneSection(vaultApp: boolean): string {
+  const base = `### Credential handling
 
 Credentials follow human intent: do not solicit, expose, or relay credentials on your own, or create a disclosure a human did not request; redact unexpected credential-shaped output.`;
+  if (!vaultApp) return base;
+  return `${base}
+When a task needs an API key, token, or login, ask for access through the Vault app (its service id is in the "Installed on this Server" list above): a human approves each use and the secret never enters your context. When a new secret needs storing, keep it out of chat: if you choose the value (e.g. a signing secret), create it in the Vault yourself (\`create-vault\`, then \`generate\`); if a human holds it (e.g. a third-party API key), ask them to add it in the Vault web page and share access with you. Never paste a secret into chat or files; if someone sends you one, ask them to put it in the Vault instead. If Vault is not in that list, it is not installed on this Server; ask a Server admin.`;
 }
 
 function buildSendingMessagesSection(shell: RaftCliGuideShell): string {
@@ -312,7 +330,13 @@ If Raft says a message was not sent and was saved as a draft, choose one path:
 **IMPORTANT**: To reply to any message, always reuse the exact \`target\` from the received message. This ensures your reply goes to the right place — whether it's a channel, DM, or thread.`;
 }
 
-function buildRemindersSection(audience: RaftCliGuideAudience): string {
+function buildRemindersSection(audience: RaftCliGuideAudience, reminderApp: boolean): string {
+  if (audience === "managed-runner" && reminderApp) {
+    return `### Reminders
+
+Reminders on this Server live in the Reminder app. Use it for follow-up that depends on future state you cannot resolve now, whether user-requested or self-driven: a follow-up at a set time, or a recurring check (interval, daily, or weekly, with a time zone). When it fires, it wakes you with an event in your inbox, even if your computer was offline. Find its service id in the "Installed on this Server" list above (or \`raft integration list\`), then run \`raft integration invoke --service <id> --list-actions\` to see how to create, list, change, and cancel reminders. Anchor each reminder to the message or thread it is about, and check the next fire time it returns. If Reminder is not in that list, it is not installed on this Server; ask a Server admin instead of falling back to a long sleep.
+\`raft reminder schedule\`, \`raft reminder update\`, and \`raft reminder snooze\` are refused here with \`reminders_moved_to_app\`. \`raft reminder list\`, \`raft reminder log\`, and \`raft reminder cancel\` still work for reminders you made before the move; those keep firing until you cancel them.`;
+  }
   if (audience === "self-hosted-runner") {
     return `### Reminders
 
@@ -620,6 +644,17 @@ export interface BuildRaftCliGuideSectionsOptions {
    * `/internal/agent-api/*` with `agentCredentialKey`.
    */
   installedApps?: readonly InstalledAppDirectoryEntry[];
+  /**
+   * The Server's `reminder_app` rollout flag (`AgentConfig.reminderApp`).
+   * Managed-runner only: replaces the Reminders section and command-list entry
+   * with the Reminder app. Absent/false renders the historical text.
+   */
+  reminderApp?: boolean;
+  /**
+   * The Server's `vault_app` rollout flag (`AgentConfig.vaultApp`). Adds the
+   * Vault line to Credential handling. Absent/false renders the historical text.
+   */
+  vaultApp?: boolean;
 }
 
 export function buildRaftCliGuideSections(
@@ -627,10 +662,10 @@ export function buildRaftCliGuideSections(
 ): RaftCliGuideSections {
   const shell = options.shell ?? "posix";
   return {
-    communication: buildCommunicationSection(options.audience, options.installedApps ?? []),
-    credentialHygiene: buildCredentialHygieneSection(),
+    communication: buildCommunicationSection(options.audience, options.installedApps ?? [], options.reminderApp === true),
+    credentialHygiene: buildCredentialHygieneSection(options.vaultApp === true),
     sendingMessages: buildSendingMessagesSection(shell),
-    reminders: buildRemindersSection(options.audience),
+    reminders: buildRemindersSection(options.audience, options.reminderApp === true),
     threads: buildThreadsSection(shell),
     discovery: buildDiscoverySection(),
     channelAwareness: buildChannelAwarenessSection(),

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { isInTransaction } from "../db/ambientTransaction";
 import { asc, eq, inArray, sql, and, or } from "drizzle-orm";
 import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
 import {
@@ -16,7 +17,6 @@ import { getServerBillingEntitlements, type ServerBillingEntitlement } from "./p
 import {
   AGENT_MIGRATION_FEATURE_FLAG_KEY as SHARED_AGENT_MIGRATION_FEATURE_FLAG_KEY,
   APPLE_WEB_LOGIN_FEATURE_FLAG_KEY as SHARED_APPLE_WEB_LOGIN_FEATURE_FLAG_KEY,
-  CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY as SHARED_CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY,
   CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY as SHARED_CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
   COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY as SHARED_COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY,
   PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY as SHARED_PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
@@ -51,11 +51,12 @@ export const ONBOARDING_OPENER_V2_FEATURE_FLAG_KEY = "onboarding_opener_v2";
 export const ONBOARDING_OWNER_WIZARD_FEATURE_FLAG_KEY = "onboarding_owner_wizard_v0";
 export const AGENT_MIGRATION_FEATURE_FLAG_KEY = SHARED_AGENT_MIGRATION_FEATURE_FLAG_KEY;
 export const APPLE_WEB_LOGIN_FEATURE_FLAG_KEY = SHARED_APPLE_WEB_LOGIN_FEATURE_FLAG_KEY;
-export const CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY = SHARED_CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY;
 export const CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY = SHARED_CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY;
 export const COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY = SHARED_COMPOSER_RESOURCE_REFERENCES_FEATURE_FLAG_KEY;
 export const READ_RECEIPTS_FEATURE_FLAG_KEY = "read_receipts_v0";
-export const MOBILE_PUSH_DELIVERY_FEATURE_FLAG_KEY = "mobile_push_delivery_v0";
+// Android (FCM) delivery rollout. Sends only when FCM is configured
+// (FCM_CREDENTIALS_JSON + FCM_PROJECT_ID, fcmPushProvider.ts).
+export const MOBILE_PUSH_FCM_FEATURE_FLAG_KEY = "mobile_push_fcm_v0";
 export const GROK_RUNTIME_FEATURE_FLAG_KEY = "grok_runtime_v0";
 export const LLM_TRANSLATION_FEATURE_FLAG_KEY = "llm_translation_v0";
 export const PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY = SHARED_PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY;
@@ -97,6 +98,41 @@ export const PASSIVE_AX_FEATURE_FLAG_KEY = "passive_ax";
  * assistant-only read refused and the assistant link unsettable.
  */
 export const IDENTITY_BORROWING_FEATURE_FLAG_KEY = "identity_borrowing";
+
+/**
+ * Reminder app gray rollout. Server-scoped, default OFF. When on, the legacy
+ * `raft reminder schedule|update|snooze` writes are refused with
+ * `reminders_moved_to_app` (list, log and cancel stay; queued legacy reminders
+ * still fire), and agent start sends `AgentConfig.reminderApp` so a current
+ * Computer replaces the prompt's Reminders section. A missing flag or any
+ * evaluation failure leaves everything as it was.
+ */
+export const REMINDER_APP_FEATURE_FLAG_KEY = "reminder_app";
+
+/**
+ * Vault app gray rollout. Server-scoped, default OFF. When on, agent start
+ * sends `AgentConfig.vaultApp` so a current Computer adds the Vault line to
+ * the credential section. A missing flag or any evaluation failure leaves it
+ * off.
+ */
+export const VAULT_APP_FEATURE_FLAG_KEY = "vault_app";
+
+/**
+ * Hosted Cindy (step 4, #raft-antiproton:8008c6f0). Server-scoped, default
+ * OFF, effective only while `antiproton_hosted_runtime` is also on: the
+ * onboarding agent may be a hosted (Antiproton) agent and is briefed once its
+ * workspace import lands, with no computer involved.
+ */
+export const ANTIPROTON_CINDY_FEATURE_FLAG_KEY = "antiproton_cindy";
+
+/**
+ * Hosted-agent model choice (tygg, #raft-antiproton:c4acc0a7). Server-scoped,
+ * default OFF. While off, Raft decides the model: every hosted agent starts on
+ * DeepSeek Flash, the web shows no model picker, and a request naming another
+ * model is refused. Allowed servers pick from the provider's list as before.
+ * A missing flag or any evaluation failure reads as off.
+ */
+export const ANTIPROTON_MODEL_PICKER_FEATURE_FLAG_KEY = "antiproton_model_picker";
 
 const FEATURE_FLAG_LOCK_NAMESPACE = 0x46464c47; // "FFLG"
 const FEATURE_FLAG_CONFIG_VERSION_LOCK_NAMESPACE = 0x46464356; // "FFCV"
@@ -610,7 +646,10 @@ async function preloadEffectiveLabKeysByServer(
   if (serverIds.length === 0 || labKeys.length === 0) return effectiveByServer;
 
   try {
-    const rows = await executor
+    // Inside a transaction (evaluateFeatureFlag(..., tx)) the read runs in a
+    // savepoint: the catch below continues, and a failed statement would
+    // otherwise have aborted the caller's transaction (25P02 on its next query).
+    const readLabRows = (reader: DatabaseExecutor) => reader
       .select({
         serverId: serverLabEnrollments.serverId,
         labKey: serverLabEnrollments.labKey,
@@ -635,6 +674,9 @@ async function preloadEffectiveLabKeysByServer(
         inArray(serverLabEnrollments.labKey, labKeys),
         eq(serverLabEnrollments.enabled, true),
       ));
+    const rows = isInTransaction()
+      ? await executor.transaction((savepoint) => readLabRows(savepoint))
+      : await readLabRows(executor);
 
     for (const row of rows) {
       const labKeysForServer = effectiveByServer.get(row.serverId) ?? new Set<string>();
@@ -783,6 +825,45 @@ export async function evaluateFeatureFlag(
 ): Promise<FeatureFlagEvaluation> {
   const [evaluation] = await evaluateFeatureFlags([input], executor);
   return evaluation ?? { key: input.key, enabled: false, reason: "missing_flag" };
+}
+
+/**
+ * Task #205: the before-login answer for the public GET /api/public/feature-flags. There is no user
+ * and no server, so only a flag's kill switch, enabled bit, `platform` rules and default can decide.
+ * Only flags marked `pre_auth_evaluable` are read, and only their `platform` rules are loaded, so the
+ * query itself never touches a user, server, audience, lab or plan rule. Every other key (unmarked,
+ * missing, disabled) answers false, and the caller cannot tell which.
+ */
+export async function evaluatePreAuthFeatureFlags(
+  keys: string[],
+  platform: FeatureFlagPlatform | null,
+  executor: DatabaseExecutor = getDb(),
+): Promise<Record<string, boolean>> {
+  const uniqueKeys = [...new Set(keys)];
+  const result: Record<string, boolean> = Object.fromEntries(uniqueKeys.map((key) => [key, false]));
+  if (uniqueKeys.length === 0) return result;
+
+  const flagRows = await executor
+    .select()
+    .from(featureFlags)
+    .where(and(inArray(featureFlags.key, uniqueKeys), eq(featureFlags.preAuthEvaluable, true)));
+  const platformRules = flagRows.length > 0 && platform
+    ? await executor
+        .select()
+        .from(featureFlagRules)
+        .where(and(
+          inArray(featureFlagRules.flagKey, flagRows.map((flag) => flag.key)),
+          eq(featureFlagRules.stage, "platform"),
+        ))
+    : [];
+
+  for (const flag of flagRows) {
+    if (flag.killSwitch || !flag.enabled) continue;
+    const rules = platformRules.filter((rule) => rule.flagKey === flag.key);
+    const platformRule = matchExplicitRule(flag, rules, "platform", platform);
+    result[flag.key] = platformRule ? platformRule.enabled : flag.defaultEnabled;
+  }
+  return result;
 }
 
 export async function listFeatureFlags(executor: DatabaseExecutor = getDb()) {

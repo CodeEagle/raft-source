@@ -760,8 +760,15 @@ export async function getManagedMcpRuntimeSnapshot(serverId: string, agentId: st
       eq(managedMcpServers.enabled, true),
     ))
     .orderBy(asc(managedMcpServers.name));
+  // An OAuth connector this agent may use but that is not connected is listed
+  // apart, with no tools, so the agent can tell the user it needs reconnecting
+  // instead of acting as if it were never set up.
+  const unavailable = rows
+    .filter(({ server, assignment }) => server.authMode === "oauth" && server.oauthStatus !== "connected" && !(assignment && !assignment.enabled))
+    .map(({ server }) => ({ mcpServerId: server.id, serverName: server.name, status: "reconnect_required" as const }));
   return {
     catalogVersion: 1,
+    ...(unavailable.length > 0 ? { unavailable } : {}),
     tools: rows.flatMap(({ server, assignment }) => {
       if (server.authMode === "oauth" && server.oauthStatus !== "connected") return [];
       if (assignment && !assignment.enabled) return [];

@@ -144,8 +144,10 @@ export function SidebarConversationFinder({
 
   return (
     <div ref={rootRef} className="relative shrink-0 px-2 pt-2.5 pb-2">
-      <div className="flex min-w-0 items-center gap-2 rounded-md border border-line-field bg-layer-panel px-2.5 py-1.5 shadow-raft-xs focus-within:border-line-field-hover theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm theme-brutal:focus-within:shadow-brutal">
-        <Search size={15} className="shrink-0 text-foreground-hint" />
+      {/* DS Search field (`.rf-search`), at the sidebar's 36px row height: a
+          1.5px ink control edge on the surface layer, the focus ring on the box. */}
+      <div className="flex h-9 min-w-0 items-center gap-2 rounded-control border-[1.5px] border-line-strong bg-layer-card px-2.5 focus-within:shadow-focus">
+        <Search size={16} className="shrink-0 text-foreground-hint" />
         <input
           ref={inputRef}
           value={query}
@@ -160,18 +162,18 @@ export function SidebarConversationFinder({
           placeholder={formatMessage({ id: "sidebar.findConversationPlaceholder" })}
           aria-label={formatMessage({ id: "sidebar.findConversationPlaceholder" })}
           data-testid="sidebar-conversation-finder-input"
-          className="min-w-0 flex-1 bg-transparent text-sm font-display font-medium text-foreground-strong outline-none placeholder:text-foreground-placeholder"
+          className="min-w-0 flex-1 bg-transparent font-sans text-subhead text-foreground outline-none placeholder:text-foreground-hint"
         />
       </div>
 
       {showDropdown && (
         <div
           {...dismissLayerProps}
-          className="absolute inset-x-2 top-full z-30 mt-1 max-h-[min(60vh,22rem)] overflow-y-auto card-brutal"
+          className="absolute inset-x-2 top-full z-30 mt-1 max-h-[min(60vh,22rem)] overflow-y-auto rounded-container bg-layer-popover p-1.5 text-foreground shadow-float ring-1 ring-line-seam"
           data-testid="sidebar-conversation-finder-results"
         >
           {ranked.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-foreground-hint">
+            <div className="px-2.5 py-2 font-sans text-callout text-foreground-hint">
               {formatMessage({ id: "sidebar.findConversationEmpty" })}
             </div>
           ) : (
@@ -186,8 +188,10 @@ export function SidebarConversationFinder({
                   select(result);
                 }}
                 onMouseEnter={() => setActiveIndex(index)}
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm font-medium transition-colors ${
-                  index === activeRow ? "bg-primary-soft text-foreground-strong font-bold theme-brutal:bg-soft-signal theme-brutal:text-black" : "hover:bg-fill-muted theme-brutal:hover:bg-soft-signal/50"
+                // DS Menu/Search row: 36 tall, 14/20 500; the keyboard
+                // highlight (and hover) is yellow-soft — a pointer, not a value.
+                className={`flex min-h-9 w-full items-center gap-2.5 rounded-control px-2.5 py-1.5 text-left font-sans text-callout font-medium text-foreground transition-colors ${
+                  index === activeRow ? "bg-brand-soft" : "hover:bg-brand-soft"
                 }`}
               >
                 <FinderResultIcon result={result} />
@@ -198,11 +202,11 @@ export function SidebarConversationFinder({
                     a shrink-0 45% sublabel had squeezed "proj-frontend" and
                     "proj-frontend-perf" both down to "proj-fr…". */}
                 <span className="grid min-w-0 flex-1 grid-cols-[minmax(0,auto)_minmax(0,1fr)] items-baseline gap-2">
-                  <span className="min-w-0 truncate font-medium text-foreground-strong">
+                  <span className="min-w-0 truncate font-medium text-foreground">
                     {result.label}
                   </span>
                   {result.sublabel && (
-                    <span className="min-w-0 truncate text-[11px] text-foreground-hint theme-brutal:text-black/40">
+                    <span className="min-w-0 truncate text-caption text-foreground-hint">
                       {result.sublabel}
                     </span>
                   )}
@@ -218,10 +222,11 @@ export function SidebarConversationFinder({
 
 function FinderResultIcon({ result }: { result: FinderResult }) {
   if (result.kind === "channel") {
+    // A channel is a place, not a "who": a bare # (private: lock), ink-3.
     return result.private ? (
-      <Lock size={14} className="shrink-0 text-foreground-hint" />
+      <Lock size={16} className="shrink-0 text-foreground-hint" />
     ) : (
-      <Hash size={14} className="shrink-0 text-foreground-hint" />
+      <Hash size={16} className="shrink-0 text-foreground-hint" />
     );
   }
   // DMs / agents / people reuse the app's avatar primitive at the same size

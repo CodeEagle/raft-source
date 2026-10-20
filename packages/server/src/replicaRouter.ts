@@ -1912,6 +1912,8 @@ export function decodeWakeCrashLoopState(raw: unknown): DecodedWakeCrashLoopStat
     // task #365 fields; absent on older records, which is not a repair.
     startFailureOwnedLaunchId: optionalStringOrNull(record, "startFailureOwnedLaunchId", repaired),
     blockedByLaunchId: optionalStringOrNull(record, "blockedByLaunchId", repaired),
+    // Needs-action notice dedupe; absent on older records, which is not a repair.
+    actionRequiredNotifiedFingerprint: optionalStringOrNull(record, "actionRequiredNotifiedFingerprint", repaired),
   };
   return { state, repaired };
 }
@@ -2117,6 +2119,8 @@ export interface MachineMeta {
   migrationTransportCapabilities?: string | null;
   /** Probe carrier fact (F1): JSON string[] of ready-handshake capabilities. */
   probeCapabilities?: string | null;
+  /** task #1268: JSON of the owner's last fanned-out runtime detection state, or null for synchronous daemons. */
+  probeRuntimeDetection?: string | null;
   probeConnectionEpochId?: string | null;
   probeReplicaGeneration?: string | null;
   /** ISO timestamp of the owner replica's latest observation of this fact. */

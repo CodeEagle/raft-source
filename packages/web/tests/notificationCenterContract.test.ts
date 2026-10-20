@@ -28,12 +28,15 @@ test("system notification entries use kind, not warning severity", () => {
   assert.match(kind, /export type NotificationKind = "error" \| "warning" \| "info";/);
 });
 
-test("joint channel invites are accepted from email links, not notification center rows", () => {
+// RFC 075 §4.5 reverses the email-only rule: pending joint invites are listed
+// in the notification center, and both entries share the one accept endpoint.
+test("joint channel invites are accepted from email links and notification center rows", () => {
   const notifications = read("src/components/layout/useSystemNotifications.tsx");
+  const pending = read("src/components/layout/usePendingJointInvites.ts");
   const app = read("src/App.tsx");
 
-  assert.doesNotMatch(notifications, /joint-invites/);
-  assert.doesNotMatch(notifications, /Joint channel invite/);
+  assert.match(pending, /api\.get<\{ invites: PendingJointInvite\[\] \}>\("\/channels\/joint-invites"/);
+  assert.match(notifications, /\/channels\/joint-invites\/\$\{encodeURIComponent\(inviteId\)\}\/accept/);
   assert.match(app, /jointInvite/);
   assert.match(app, /\/channels\/joint-invites\/\$\{encodeURIComponent\(jointInviteId\)\}\/accept/);
 });
@@ -46,7 +49,7 @@ test("rail Help and Notification use raft-ui hover triggers", () => {
   assert.match(leftRail, /<PopoverTrigger\s+openOnHover\s+delay=\{0\}\s+closeDelay=\{120\}/);
   assert.match(leftRail, /forwardRef<HTMLButtonElement, RailTabButtonProps>/);
   assert.match(leftRail, /<AppRailItem[\s\S]*selected=\{active\}/);
-  assert.match(trigger, /import\s*\{[^}]*\bNotificationCenter\b[^}]*\}\s*from\s*"raft-ui";/);
+  assert.match(trigger, /import\s*\{[^}]*\bNotificationCenter\b[^}]*\}\s*from\s*"@botiverse\/raft-ui";/);
   assert.match(trigger, /<PopoverTrigger openOnHover delay=\{0\} closeDelay=\{120\}/);
   assert.doesNotMatch(leftRail, /setTimeout|document\.addEventListener/);
   assert.doesNotMatch(trigger, /setTimeout|document\.addEventListener|useViewportClamp/);
@@ -57,7 +60,7 @@ test("slock system notifications are rendered with raft-ui notification-center p
 
   assert.match(adapter, /NotificationCenterPopup/);
   assert.match(adapter, /NotificationCenterItem/);
-  assert.match(adapter, /from "raft-ui";/);
+  assert.match(adapter, /from "@botiverse\/raft-ui";/);
   assert.match(adapter, /dismissedNotificationStore/);
   assert.doesNotMatch(adapter, /KIND_DOT_BG/);
   assert.doesNotMatch(adapter, /DEFAULT_KIND_ICON/);

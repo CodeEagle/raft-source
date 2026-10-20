@@ -97,39 +97,39 @@ exports[`--help > raft channel --help 1`] = `
 Channel membership and attention operations
 
 Options:
-  -h, --help                 display help for command
+  -h, --help                  display help for command
 
 Commands:
-  info <target>              Show narrow channel facts: existence, joined
-                             state, description, and member count when visible
-  members <target>           List agents and humans who are members of a
-                             channel, DM, or thread
-  create [options]           Create a public or private channel when this agent
-                             has server admin authority
-  update [options]           Edit a public, private, or joint channel when this
-                             agent has server admin or channel admin authority
-                             (a joint channel's name and description change for
-                             every connected server; its visibility cannot
-                             change)
-  archive [options]          Archive a public, private, or joint channel when
-                             this agent has server admin authority (a joint
-                             channel is archived for every connected server)
-  unarchive [options]        Unarchive a public, private, or joint channel when
-                             this agent has server admin authority
-  add-member [options]       Add a human or agent from this server to a public,
-                             private, or joint channel when this agent has
-                             server admin authority
-  remove-member [options]    Remove a human or agent of this server from a
-                             public, private, or joint channel when this agent
-                             has server admin authority
-  join [options]             Join a visible public channel
-  leave [options]            Leave a channel you have joined (public, private,
-                             or joint)
-  mute [options] [target]    Mute ordinary Activity delivery for a public,
-                             private, or joint channel
-  unmute [options] [target]  Unmute ordinary Activity delivery for a public,
-                             private, or joint channel
-  help [command]             display help for command
+  info [options] [target]     Show narrow channel facts: existence, joined
+                              state, description, and member count when visible
+  members [options] [target]  List agents and humans who are members of a
+                              channel, DM, or thread
+  create [options]            Create a public or private channel when this
+                              agent has server admin authority
+  update [options]            Edit a public, private, or joint channel when
+                              this agent has server admin or channel admin
+                              authority (a joint channel's name and description
+                              change for every connected server; its visibility
+                              cannot change)
+  archive [options]           Archive a public, private, or joint channel when
+                              this agent has server admin authority (a joint
+                              channel is archived for every connected server)
+  unarchive [options]         Unarchive a public, private, or joint channel
+                              when this agent has server admin authority
+  add-member [options]        Add a human or agent from this server to a
+                              public, private, or joint channel when this agent
+                              has server admin authority
+  remove-member [options]     Remove a human or agent of this server from a
+                              public, private, or joint channel when this agent
+                              has server admin authority
+  join [options]              Join a visible public channel
+  leave [options]             Leave a channel you have joined (public, private,
+                              or joint)
+  mute [options] [target]     Mute ordinary Activity delivery for a public,
+                              private, or joint channel
+  unmute [options] [target]   Unmute ordinary Activity delivery for a public,
+                              private, or joint channel
+  help [command]              display help for command
 ",
 }
 `;
@@ -171,12 +171,14 @@ exports[`--help > raft channel members --help 1`] = `
   "exitCode": 0,
   "requests": [],
   "stderr": "",
-  "stdout": "Usage: raft channel members [options] <target>
+  "stdout": "Usage: raft channel members [options] [target]
 
 List agents and humans who are members of a channel, DM, or thread
 
 Options:
-  -h, --help  display help for command
+  --target <target>  Channel, DM, or thread to list (same as the positional
+                     target)
+  -h, --help         display help for command
 ",
 }
 `;
@@ -441,8 +443,9 @@ exports[`--help > raft message read --help 1`] = `
 Read message history for a channel, DM, or thread
 
 Options:
-  --target <target>   Target: '#channel', 'dm:@peer', '#channel:threadId',
-                      'dm:@peer:threadId', 'agent-event:eventId'
+  --target <target>   Target: '#channel', 'dm:@peer', '#channel:shortid',
+                      'dm:@peer:shortid' (a thread: shortid is its root
+                      message's msg=, as in replyTarget), 'agent-event:eventId'
   --channel <target>  Legacy alias for --target (accepted during transition)
   --peer-kind <kind>  For a DM target whose name a human and an agent share:
                       'agent' or 'human' (same as dm:@name~agent /
@@ -490,7 +493,12 @@ Options:
                       re-ranks as the corpus changes; under recent (including
                       filter-only searches) new messages shift every later row,
                       so the same offset can repeat rows. For recent, page with
-                      --before
+                      --cursor when the output gives one, else --before
+  --cursor <c>        Continue a recent search exactly where the previous
+                      output said (its nextCursor, unchanged); keep the same
+                      --query and filters, no --offset. An incomplete result
+                      (the search stopped at its scan budget) is continued this
+                      way
   -h, --help          display help for command
 ",
 }
@@ -507,7 +515,9 @@ Send a message to a channel, DM, or thread
 
 Options:
   --target <target>           Target: '#channel', 'dm:@peer',
-                              '#channel:threadId', 'dm:@peer:threadId'
+                              '#channel:shortid', 'dm:@peer:shortid' (a thread:
+                              shortid is its root message's msg=, as in
+                              replyTarget)
   --peer-kind <kind>          For a DM target whose name a human and an agent
                               share: 'agent' or 'human' (same as dm:@name~agent
                               / dm:@name~human)
@@ -529,8 +539,9 @@ Options:
   --json                      Emit the Agent API send response as JSON
   --content <content>         Unsupported. Pipe message content to stdin
                               instead.
-  --attachment-id <id>        Attachment id to link (repeatable). Get one from
-                              \`raft attachment upload\`.
+  --attachment-id <id>        Attachment ID to link (repeatable). Get one from
+                              \`raft attachment upload\`. Several IDs in one
+                              value, separated by spaces or commas, are split.
   --mention <actor>           Bind an @handle to one actor (repeatable):
                               human:<uuid>:<handle> or agent:<uuid>:<handle>.
   -h, --help                  display help for command
@@ -1185,9 +1196,9 @@ exports[`parse errors > raft channel members (missing required argument) 1`] = `
 {
   "exitCode": 1,
   "requests": [],
-  "stderr": "Error: missing required argument 'target'
+  "stderr": "Error: A target is required: a channel, DM, or thread.
 Code: INVALID_ARG
-Next action: Run \`raft channel members --help\` for syntax.
+Next action: Run \`raft channel members "#channel"\` (or \`--target "#channel"\`).
 ",
   "stdout": "",
 }

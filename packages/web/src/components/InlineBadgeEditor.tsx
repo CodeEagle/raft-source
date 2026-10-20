@@ -1,12 +1,12 @@
-import { Badge, DropdownMenuPopup, TaskStatusBadge } from "raft-ui";
-import type { BadgeProps, TaskStatusId } from "raft-ui";
+import { Badge, DropdownMenuPopup, TaskStatusBadge } from "@botiverse/raft-ui";
+import type { BadgeProps, TaskStatusId } from "@botiverse/raft-ui";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { Pencil } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 
 import { InlineBadgeMenuItem } from "./InlineBadgeMenuItem";
-import SelectionPopover from "./ui/SelectionPopover";
+import { SelectionPopoverPanel, SELECTION_POPOVER_SURFACE } from "./ui/SelectionPopover";
 import Tooltip from "./ui/Tooltip";
 import { dismissLayerProps } from "./ui/dismissLayer";
 
@@ -40,13 +40,6 @@ interface InlineBadgeEditorProps {
    */
   badgeStatus?: TaskStatusId;
   capitalize?: boolean;
-  /**
-   * Apply the brutal uppercase + tracking-wide transform on the
-   * trigger badge. Defaults to true (matches Badge primitive). Status
-   * pills mixed with case-sensitive identifiers (`@assignee`) pass
-   * `false`. stdrc msg=ce25da45 + msg=65681d15 (option B).
-   */
-  uppercase?: boolean;
   dropdownMinWidth?: string;
   dropdownAlign?: "left" | "right";
   disabled?: boolean;
@@ -89,7 +82,6 @@ export default function InlineBadgeEditor({
   badgeVariant = "muted",
   badgeStatus,
   capitalize,
-  uppercase = true,
   dropdownMinWidth = "min-w-[120px]",
   dropdownAlign,
   disabled,
@@ -216,8 +208,8 @@ export default function InlineBadgeEditor({
 
   const dropdown = open && searchable ? (
     // Same portal and same measured position as the plain list — only the panel
-    // itself is delegated. SelectionPopover brings its own border/shadow, so the
-    // wrapper must not also be `card-brutal` or the popup gets a double frame.
+    // itself is delegated. SelectionPopover brings its own popover surface, so
+    // the wrapper must not draw a second frame.
     <div
       ref={dropdownRef}
       style={dropdownStyle}
@@ -225,7 +217,7 @@ export default function InlineBadgeEditor({
       onMouseDown={stopPropagation}
       onClick={stopPropagation}
     >
-      <SelectionPopover
+      <SelectionPopoverPanel
         searchable
         title={popoverTitle ?? ""}
         showHeader={!!popoverTitle}
@@ -233,7 +225,7 @@ export default function InlineBadgeEditor({
         onSearchChange={onSearchChange ?? noop}
         searchPlaceholder={searchPlaceholder}
         emptyLabel={emptyLabel}
-        className="w-[240px] border border-line-muted bg-layer-popover text-foreground-strong shadow-raft-md theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:text-black theme-brutal:shadow-brutal"
+        className={`w-[240px] ${SELECTION_POPOVER_SURFACE}`}
         options={selectionOptions}
       />
     </div>
@@ -259,17 +251,12 @@ export default function InlineBadgeEditor({
     </DropdownMenuPopup>
   ) : null;
 
-  // Trigger badge matches the brutal Badge visual contract (stdrc
-  // #proj-theme:ac79cf20 msg=832c2c02): uppercase + tracking-wide. Source
-  // content stays Title Case ("In Progress") so future non-brutal themes
-  // can render it natural-cased.
-  // Interactive hover for solid-bg brutal badges: filter brightness shift
-  // (cross-tone — works on any `bg-brutal-{tone}` without per-tone classes).
-  // Transition target lists `filter` AND `opacity` because the disabled
-  // state below uses `disabled:opacity-60`. stdrc msg=3d60f9dd #proj-theme
-  // — the older `hover:opacity-70 transition-colors` was a mismatch
-  // (transition target didn't cover opacity, so the state snapped).
-  const defaultButtonClassName = `mt-0.5 inline-flex items-center gap-1 theme-brutal:border-2 theme-brutal:border-black ${badgeClassName} px-2 py-0.5 text-xs font-bold ${uppercase ? "uppercase tracking-wide " : ""}theme-brutal:text-black transition-[filter,opacity] duration-100 hover:brightness-90 disabled:cursor-not-allowed disabled:opacity-60${capitalize ? " capitalize" : ""}`;
+  // Raft Design System › StatusChip: an editable chip is a 22px soft chip
+  // with a trailing chevron. raft-ui's Badge draws the chip, its hover/press
+  // overlay and its disabled state; this class only lays the trigger out and
+  // carries the caller's tone class. No case transform: Title Case copy
+  // ("In Progress") renders as written.
+  const defaultButtonClassName = `mt-0.5 inline-flex items-center gap-1 ${badgeClassName} disabled:cursor-not-allowed${capitalize ? " capitalize" : ""}`;
 
   const badge = badgeStatus ? (
     <TaskStatusBadge
@@ -282,14 +269,13 @@ export default function InlineBadgeEditor({
       className={`mt-0.5 ${buttonClassName ?? ""}`.trim()}
     >
       {displayValue}
-      <Pencil size={10} className="opacity-40" />
+      <ChevronDown size={12} aria-hidden="true" />
     </TaskStatusBadge>
   ) : (
     <Badge
       render={<button ref={triggerRef} type="button" disabled={disabled} />}
       appearance="soft"
       variant={badgeVariant}
-      uppercase={uppercase}
       onClick={onToggle}
       data-testid={buttonTestId}
       data-task-status={buttonDataTaskStatus}
@@ -300,7 +286,7 @@ export default function InlineBadgeEditor({
       {buttonChildren ?? (
         <>
           {displayValue}
-          <Pencil size={10} className="opacity-40" />
+          <ChevronDown size={12} aria-hidden="true" />
         </>
       )}
     </Badge>

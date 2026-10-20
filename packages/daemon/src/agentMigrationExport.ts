@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { lstat, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
+import { isPortableAbsolutePath, normalizeAgentMigrationSymlinkTarget } from "@botiverse/raft-shared/src/agentMigrationBundleReader";
 import {
   agentMigrationTransferSummarySchema,
   type AgentMigrationTransferSummary,
@@ -373,38 +374,6 @@ function normalizeIgnorePaths(paths: string[], workspace: string): string[] {
   return [...new Set(result)];
 }
 
-export function normalizeAgentMigrationSymlinkTarget(
-  workspaceRelativePath: string,
-  linkTarget: string,
-): string {
-  const portableTarget = linkTarget.replaceAll("\\", "/");
-  if (
-    !linkTarget
-    || linkTarget.includes("\0")
-    || isPortableAbsolutePath(linkTarget)
-    || WINDOWS_DRIVE_PATH_PATTERN.test(linkTarget)
-  ) {
-    throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
-  }
-
-  const normalizedTarget = path.posix.normalize(portableTarget);
-  const normalizedLinkPath = normalizeRelativePath(workspaceRelativePath);
-  const resolvedTarget = path.posix.normalize(
-    path.posix.join(path.posix.dirname(normalizedLinkPath), normalizedTarget),
-  );
-  if (
-    !normalizedTarget
-    || normalizedTarget === "."
-    || resolvedTarget === ".."
-    || resolvedTarget.startsWith("../")
-    || isPortableAbsolutePath(resolvedTarget)
-    || WINDOWS_DRIVE_PATH_PATTERN.test(normalizedTarget)
-  ) {
-    throw new Error("MIGRATION_OBJECT_STORE_UNSAFE_LINK");
-  }
-  return normalizedTarget;
-}
-
 function normalizeRelativePath(value: string): string {
   const portable = value.replaceAll("\\", "/");
   if (
@@ -421,9 +390,6 @@ function normalizeRelativePath(value: string): string {
   return normalized;
 }
 
-function isPortableAbsolutePath(value: string): boolean {
-  return path.posix.isAbsolute(value.replaceAll("\\", "/")) || path.win32.isAbsolute(value);
-}
 
 function isOutsideWorkspaceRelativePath(value: string): boolean {
   const normalized = path.posix.normalize(value.replaceAll("\\", "/"));
@@ -446,3 +412,5 @@ function toPosixPath(value: string): string {
 function sortByPath<T extends { path: string }>(entries: T[]): T[] {
   return [...entries].sort((a, b) => a.path.localeCompare(b.path));
 }
+
+export { normalizeAgentMigrationSymlinkTarget };

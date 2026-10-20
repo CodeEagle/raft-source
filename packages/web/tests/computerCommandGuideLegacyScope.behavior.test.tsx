@@ -71,3 +71,36 @@ test("macOS / Linux shows the single install-and-setup command when one is given
   assert.ok(screen.getByText("irm https://cdn.raft.build/computer/install.ps1 | iex"));
   assert.ok(screen.getByText("raft-computer setup /launch"));
 });
+
+test("with the one-line command, a machine that already has Raft Computer can reveal a connect-only command", () => {
+  // The one-line command installs first and connects only if that succeeds,
+  // so a running Computer that refused the upgrade never connected
+  // (bug-triage task #22, julie).
+  const oneLine = "curl -fsSL https://cdn.raft.build/computer/install.sh | sh -s -- --setup /launch";
+  render(
+    <ComputerCommandGuide
+      computerCommand="raft-computer setup /launch"
+      computerInstallCommand="curl -fsSL https://cdn.raft.build/computer/install.sh | sh"
+      computerInstallAndSetupCommand={oneLine}
+    />,
+  );
+
+  const toggle = screen.getByTestId("computer-command-already-installed");
+  assert.equal(toggle.textContent, "Already have Raft Computer on this machine?");
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.ok(screen.queryByTestId("computer-command-connect-only") === null);
+  assert.ok(screen.queryByText("raft-computer setup /launch") === null, "connect-only stays hidden until asked for");
+
+  fireEvent.click(toggle);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  const connectOnly = screen.getByTestId("computer-command-connect-only");
+  assert.ok(connectOnly.textContent?.includes("raft-computer setup /launch"));
+  assert.ok(connectOnly.textContent?.includes("~/.local/bin/raft-computer"));
+  assert.ok(screen.getByText(oneLine), "the one-line command stays the default");
+});
+
+test("without a one-line command there is no separate connect-only toggle (setup is already its own step)", () => {
+  renderGuide();
+  fireEvent.click(screen.getByRole("radio", { name: "macOS / Linux" }));
+  assert.ok(screen.queryByTestId("computer-command-already-installed") === null);
+});

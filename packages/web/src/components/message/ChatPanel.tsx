@@ -1,10 +1,11 @@
 import { composerHostClassName } from "./composerHost";
 import CloseButton from "../ui/CloseButton";
-import { createContext, lazy, Suspense, useContext, useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
+import { createContext, lazy, memo, Suspense, useContext, useEffect, useLayoutEffect, useRef, useState, useMemo, useCallback } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { LogIn, ArrowLeft, MessageSquare, ListTodo, ArrowDown, Paperclip, BellOff, X } from "lucide-react";
 import {
+  Badge,
   ConversationPanelBody,
   ConversationPanelContent,
   ConversationPanelFooter,
@@ -14,12 +15,15 @@ import {
   SortableTabsList,
   SortableTabsTab,
   Tabs,
-  TabsIndicator,
   TabsLabel,
   toast,
   useOrderedTabs,
   Button,
-} from "raft-ui";
+  PanelNotice,
+  PanelNoticeActions,
+  PanelNoticeContent,
+  Status,
+} from "@botiverse/raft-ui";
 import SOSDialog from "./SOSDialog";
 import { useChannelStore } from "../../store/channelStore";
 import type { Channel } from "../../store/channelStore";
@@ -46,6 +50,7 @@ import { useChannelMembers } from "../../hooks/useChannelMembers";
 import StatusDot from "../ui/StatusDot";
 import Tooltip from "../ui/Tooltip";
 import { useThreadStore } from "../../store/threadStore";
+import { ThreadUnreadJumpPill } from "./ThreadUnreadJumpPill";
 import type { OpenThreadRequest } from "../../store/threadStore";
 import Banner from "../ui/Banner";
 import HistoryLimitBanner from "./HistoryLimitBanner";
@@ -62,6 +67,7 @@ import type {
 } from "./MessageTimeline";
 import SelectModeToolbar from "./SelectModeToolbar";
 import SelectShareLightbox from "./SelectShareLightbox";
+import type { ValidatedScreenshot } from "../../utils/screenshotBudget";
 import {
   buildSelectedMessagePermalinks,
   canForwardFromSource,
@@ -98,6 +104,10 @@ import NotificationActivationBanner, {
 import type { ForwardDelivery } from "./ForwardComposerDialog";
 import { formatAgentDisplayStateText } from "../../utils/activity";
 import { resolveAgentDmProfileSource } from "../layout/agentDmProfileSource";
+import HostedCindyFailedBanner from "../agent/HostedCindyFailedBanner";
+import { WorkingFaces } from "../layout/WorkingNowSummary";
+import { useLiveAgentActivityStore } from "../../store/liveAgentActivityStore";
+import { useAppearanceStore } from "../../store/appearanceStore";
 import { isJointChannelReadOnly, jointChannelGraceEndsAt, useRerenderAtJointDeadline } from "../../utils/jointChannelLimit";
 
 const ForwardComposerDialog = lazy(() => import("./ForwardComposerDialog"));
@@ -151,7 +161,7 @@ export function ActivityMutedBadge() {
   return (
     <Tooltip content={formatMessage({ id: "message.chatPanel.activityMuted" })}>
     <span
-      className="inline-flex shrink-0 items-center leading-none text-foreground-muted theme-brutal:text-black/70"
+      className="inline-flex shrink-0 items-center leading-none text-foreground-hint"
       data-testid="activity-muted-badge"
     >
       <BellOff size={12} />
@@ -170,13 +180,62 @@ function AgentDMStatus({ agentId }: { agentId: string }) {
     <>
       <StatusDot activity={displayState.activity} external={displayState.isExternal && !displayState.isOnline} title={activityText} />
       <Tooltip content={activityText}>
-      <span className="min-w-0 flex-1 max-w-fit truncate text-sm text-foreground-muted font-mono">
+      <span className="min-w-0 flex-1 max-w-fit truncate font-mono text-mono-meta text-foreground-hint">
         {activityText}
       </span>
       </Tooltip>
     </>
   );
 }
+
+const WORKING_ID_SEPARATOR = "\u0000";
+
+/**
+ * Raft Design System › Panel / AgentActivity: the channel header's subtitle
+ * first says who is working here — a stack of up to three agent faces and
+ * "2 agents working" — then the channel description. Isolated so the live
+ * activity feed re-renders this line only, never the conversation; with
+ * nobody working it renders the description alone (or nothing). Fed by the
+ * same live-activity store and appearance switch as the workspace summary.
+ */
+const ChannelHeaderSubtitle = memo(function ChannelHeaderSubtitle({
+  agentIdKey,
+  description,
+}: {
+  /** Channel agent ids joined by WORKING_ID_SEPARATOR: a stable memo key. */
+  agentIdKey: string;
+  description: string | null;
+}) {
+  const { formatMessage } = useIntl();
+  const items = useLiveAgentActivityStore((state) => state.items);
+  const visible = useAppearanceStore((state) => state.showLiveAgentActivityBar);
+  const working = useMemo(() => {
+    if (!visible || !agentIdKey || items.length === 0) return [];
+    const ids = new Set(agentIdKey.split(WORKING_ID_SEPARATOR));
+    return items.filter((item) => ids.has(item.agentId));
+  }, [agentIdKey, items, visible]);
+  const descriptionNode = description ? <ChannelDescription description={description} /> : null;
+  if (working.length === 0) return descriptionNode;
+  return (
+    <span className="flex min-w-0 items-center gap-1.5" data-testid="channel-header-working">
+      <WorkingFaces items={working} />
+      <span className="shrink-0">{formatMessage({ id: "layout.workingNow.summary" }, { count: working.length })}</span>
+      {descriptionNode ? (
+        <>
+          <span aria-hidden="true">·</span>
+          {descriptionNode}
+        </>
+      ) : null}
+    </span>
+  );
+});
+
+// The select-share failure receipt is a DS Toast: neutral HUD, one line, an
+// orange "problem" pixel (raft-ui Status, the error light) in place of a "who".
+const SELECT_SHARE_ERROR_HUD_CLASS = "fixed bottom-20 left-1/2 z-[110] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-container bg-layer-hud px-4 py-3 text-callout text-foreground-on-hud shadow-float";
+
+// UI text link inside banners (DS: ink, 1.5px underline, semibold).
+const BANNER_LINK_CLASS = "font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px]";
 
 export default function ChatPanel({
   channel,
@@ -276,6 +335,12 @@ export default function ChatPanel({
     changeMemberRole: changeMentionChannelMemberRole,
     roleChangeFailed: mentionRoleChangeFailed,
   } = useChannelMembers(channel?.id ?? "", { enabled: channelFirstPageSettled });
+  // A string key, so the header's who-is-working line only re-filters when
+  // the channel's agent roster changes, not on every canonical agent update.
+  const channelAgentIdKey = useMemo(
+    () => mentionChannelAgents.map((agent) => agent.id).join(WORKING_ID_SEPARATOR),
+    [mentionChannelAgents],
+  );
   const joinChannel = useChannelStore((s) => s.joinChannel);
   const leaveChannel = useChannelStore((s) => s.leaveChannel);
   const setChannelActivityMuteState = useChannelStore((s) => s.setActivityMuteState);
@@ -426,9 +491,8 @@ export default function ChatPanel({
         key={tab.id}
         value={tab.id}
         data-testid={`panel-tab-${tab.id}`}
-        className="!cursor-default h-7"
       >
-        <Icon size={12} />
+        <Icon />
         <TabsLabel>{tab.label}</TabsLabel>
       </SortableTabsTab>
     );
@@ -932,6 +996,23 @@ export default function ChatPanel({
       return next;
     });
   }, []);
+  // Thread jump pill: scroll the chat to a parent message and flash it. A loaded
+  // message only needs the highlight (its effect scrolls); otherwise load the
+  // context window around it, which sets the same highlight.
+  const threadJumpLoadedRange = useMemo(() => ({
+    oldestAt: messages[0]?.createdAt ?? null,
+    newestAt: messages[messages.length - 1]?.createdAt ?? null,
+    hasNewer,
+  }), [hasNewer, messages]);
+  const threadJumpRenderKey = `${messages.length}:${messages[0]?.id ?? ""}:${messages[messages.length - 1]?.id ?? ""}`;
+  const handleJumpToParentMessage = useCallback((messageId: string) => {
+    if (!channelId) return;
+    if (messages.some((message) => message.id === messageId)) {
+      setHighlightedMessageId(messageId);
+      return;
+    }
+    void loadMessageContext(channelId, messageId);
+  }, [channelId, loadMessageContext, messages, setHighlightedMessageId]);
   const preserveChannelAnchorForThreadOpen = useCallback(() => {
     timelineRef.current?.preserveAnchorOnNextLayoutChange();
   }, []);
@@ -941,6 +1022,13 @@ export default function ChatPanel({
     && !readOnly
     && !channel?.archivedAt
     && (channel?.type === "dm" || channel?.type === "thread" || channel?.joined === true);
+  // #693 DM read status (artin, option C): only the DM's last message, and only
+  // at the live edge — in a context window (`hasNewer`) the last loaded message
+  // is not the conversation's last. MessageItem still gates on own sender, the
+  // read-receipts flag and the peer watermark.
+  const dmReadStatusMessageId = channel?.type === "dm" && !hasNewer
+    ? messages[messages.length - 1]?.id ?? null
+    : null;
   const renderChannelItem = useCallback((msg: Message, index: number) => {
     const systemMessageState = systemMessageRenderStates[index];
     const wrapMessageRender = (children: ReactNode) =>
@@ -1035,11 +1123,12 @@ export default function ChatPanel({
             groupState={groupState}
             followedBy={followedBy}
             followsSystem={followsSystem}
+            showDmReadStatus={msg.id === dmReadStatusMessageId}
           />
         </div>
       </>
     );
-  }, [agentById, canReactInChannel, channel?.id, channelId, channels, expandedSystemMessageGroups, externalById, memberById, mentionMap, messageRenderScope, messages, messageGrouping, onOpenProfile, onOpenThread, preserveChannelAnchorForThreadOpen, systemMessageRenderStates, taskByMessageId, threadSummaries, toggleSystemMessageGroup]);
+  }, [agentById, canReactInChannel, channel?.id, channelId, channels, dmReadStatusMessageId, expandedSystemMessageGroups, externalById, memberById, mentionMap, messageRenderScope, messages, messageGrouping, onOpenProfile, onOpenThread, preserveChannelAnchorForThreadOpen, systemMessageRenderStates, taskByMessageId, threadSummaries, toggleSystemMessageGroup]);
 
   const channelHeader = useMemo(() => (
     <div className="px-3 pt-3">
@@ -1068,7 +1157,7 @@ export default function ChatPanel({
       {loadingNewer && (
         <div
           data-testid="list-loading-newer"
-          className="py-2 text-center text-foreground-muted font-mono text-xs"
+          className="py-2 text-center font-mono text-mono-meta text-foreground-hint"
         >
           {formatMessage({ id: "message.chatPanel.loadingNewer" })}
         </div>
@@ -1141,7 +1230,7 @@ export default function ChatPanel({
     channelMessages: messagesBelongToChannel ? messages : [],
     onUnresolvedSelection: showUnresolvedSelectionToast,
   });
-  const picPreviewRef = useRef<string | null>(null);
+  const picPreviewRef = useRef<ValidatedScreenshot | null>(null);
   picPreviewRef.current = picPreview;
 
   useEffect(() => {
@@ -1282,8 +1371,8 @@ export default function ChatPanel({
 
   if (!channel) {
     return (
-      <div className="flex flex-1 flex-col items-center justify-center text-foreground-muted font-display text-lg font-bold uppercase">
-        <Button onClick={onMobileBack} size="icon-sm" variant="outline" className="p-1.5 mb-4 md:hidden">
+      <div className="flex flex-1 flex-col items-center justify-center text-headline text-foreground-muted">
+        <Button onClick={onMobileBack} size="icon-sm" variant="outline" className="mb-4 md:hidden">
           <ArrowLeft size={14} />
         </Button>
         {formatMessage({ id: "message.chatPanel.selectChannel" })}
@@ -1344,19 +1433,16 @@ export default function ChatPanel({
   const isGuestReadOnlyChannel = isGuest
     && (joined === true || channel.guestJoinable !== true);
   const selectModeScopedHere = selectModeActive && selectModeChannelId === channel.id;
-  const channelHeaderIcon = isRegularChannel ? <ChannelKindIcon type={channel.type} /> : undefined;
-  const channelSubtitle =
-    isRegularChannel
-      ? channel.description
-        ? <ChannelDescription description={channel.description} />
-        : undefined
-      : undefined;
+  const channelHeaderIcon = isRegularChannel ? <ChannelKindIcon type={channel.type} onPublicPage={currentServer?.publicPageLive === true && channel.guestVisible === true && !channel.archivedAt} /> : undefined;
+  const channelSubtitle = isRegularChannel
+    ? <ChannelHeaderSubtitle agentIdKey={channelAgentIdKey} description={channel.description || null} />
+    : undefined;
   const regularTitleSuffix = isRegularChannel && (isArchived || activityMuted) ? (
     <div className="flex items-center gap-1.5">
       {isArchived && (
-        <span className="inline-flex shrink-0 items-center rounded-sm border border-line-muted bg-warning/30 px-1.5 py-1 text-[11px] font-bold uppercase tracking-wide leading-none text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-orange/30">
+        <Badge appearance="soft" variant="muted" className="shrink-0">
           {formatMessage({ id: "message.chatPanel.archived" })}
-        </span>
+        </Badge>
       )}
       {activityMuted && <ActivityMutedBadge />}
     </div>
@@ -1364,6 +1450,19 @@ export default function ChatPanel({
   const bottomButtonCount = hasNewer ? currentUnreadCount : newMessageCount;
   const showBottomButton = hasNewer || !atBottom || newMessageCount > 0;
   const handleBottomButton = hasNewer ? handleBackToBottom : scrollToBottom;
+  const bottomButton = showBottomButton ? (
+    <Button
+      onClick={handleBottomButton}
+      size="sm"
+      variant="outline"
+      className="w-fit"
+    >
+      <ArrowDown size={12} />
+      {bottomButtonCount > 0
+        ? formatMessage({ id: "message.chatPanel.newMessagesCount" }, { count: bottomButtonCount })
+        : formatMessage({ id: "message.chatPanel.backToBottom" })}
+    </Button>
+  ) : null;
   // Regular channels use the settings drawer; DMs share the same overflow
   // component in its DM mode (task #703).
   const channelHeaderActions = isJoinableChannel ? (
@@ -1396,7 +1495,7 @@ export default function ChatPanel({
   ) : null;
 
   return (
-    <ConversationPanelRoot edge="attached" className="relative border-l-0">
+    <ConversationPanelRoot edge="inset" className="relative">
       {/* Header — hidden when embedded in detail panels.
           DMs use titleSlot because the avatar is an interactive profile
           trigger. Regular channels use PanelHeader's native title/subtitle
@@ -1406,17 +1505,19 @@ export default function ChatPanel({
         onMobileBack={onMobileBack}
         mobileBackProps={CHAT_MOBILE_BACK_PROPS}
         icon={channelHeaderIcon}
+        iconTone="location"
         iconAlwaysVisible={isRegularChannel}
         title={isRegularChannel ? channel.name : undefined}
         titleSuffix={regularTitleSuffix}
         subtitle={channelSubtitle}
         subtitleMultiline={isRegularChannel}
+        subtitleClassName="empty:hidden"
         titleSlot={
           isAgentDM ? (
             <div className="flex min-w-0 items-center gap-3">
               <button
                 onClick={() => channel.peerId && useProfileStore.getState().openProfile("agent", channel.peerId, { openSource: "channel" })}
-                className="shrink-0 hover:brightness-90 transition-colors"
+                className="shrink-0 rounded-sticker outline-none focus-visible:shadow-focus"
               >
                 <AvatarSlot context="panel-header" type="agent" agentAvatarUrl={dmAvatarUrl} />
               </button>
@@ -1430,7 +1531,7 @@ export default function ChatPanel({
             <div className="flex min-w-0 items-center gap-3">
               <button
                 onClick={() => channel.peerId && useProfileStore.getState().openProfile("human", channel.peerId, { openSource: "channel" })}
-                className="shrink-0 hover:brightness-90 transition-colors"
+                className="shrink-0 rounded-sticker outline-none focus-visible:shadow-focus"
               >
                 <AvatarSlot
                   context="panel-header"
@@ -1454,39 +1555,33 @@ export default function ChatPanel({
       <ConversationPanelContent>
 
       {!hideHeader && activityMuteError && (
-        <div
-          className="flex items-center justify-between gap-3 border-b border-line-muted bg-warning-soft px-5 py-2 text-xs font-bold text-warning-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-brutal-orange/20 theme-brutal:text-black"
-          role="alert"
-          data-testid="activity-mute-error"
-        >
-          <span>{formatMessage({ id: activityMuteError })}</span>
-          <CloseButton
-            type="button"
-            className="inline-flex size-6 shrink-0 items-center justify-center "
-            aria-label={formatMessage({ id: "message.chatPanel.dismissActivityMuteError" })}
-            onClick={handleDismissActivityMuteError}
-          >
-            <X size={12} />
-          </CloseButton>
-        </div>
+        <PanelNotice role="alert" data-testid="activity-mute-error">
+          <PanelNoticeContent>{formatMessage({ id: activityMuteError })}</PanelNoticeContent>
+          <PanelNoticeActions>
+            <CloseButton
+              type="button"
+              aria-label={formatMessage({ id: "message.chatPanel.dismissActivityMuteError" })}
+              onClick={handleDismissActivityMuteError}
+            >
+              <X size={12} />
+            </CloseButton>
+          </PanelNoticeActions>
+        </PanelNotice>
       )}
 
       {!hideHeader && messageDisplayPrefsError && (
-        <div
-          className="flex items-center justify-between gap-3 border-b border-line-muted bg-warning-soft px-5 py-2 text-xs font-bold text-warning-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-brutal-orange/20 theme-brutal:text-black"
-          role="alert"
-          data-testid="message-display-prefs-error"
-        >
-          <span>{formatMessage({ id: messageDisplayPrefsError })}</span>
-          <CloseButton
-            type="button"
-            className="inline-flex size-6 shrink-0 items-center justify-center "
-            aria-label={formatMessage({ id: "message.chatPanel.dismissMessageDisplayPrefsError" })}
-            onClick={handleDismissMessageDisplayPrefsError}
-          >
-            <X size={12} />
-          </CloseButton>
-        </div>
+        <PanelNotice role="alert" data-testid="message-display-prefs-error">
+          <PanelNoticeContent>{formatMessage({ id: messageDisplayPrefsError })}</PanelNoticeContent>
+          <PanelNoticeActions>
+            <CloseButton
+              type="button"
+              aria-label={formatMessage({ id: "message.chatPanel.dismissMessageDisplayPrefsError" })}
+              onClick={handleDismissMessageDisplayPrefsError}
+            >
+              <X size={12} />
+            </CloseButton>
+          </PanelNoticeActions>
+        </PanelNotice>
       )}
 
       {/* Chat/Tasks tab bar — hidden when there's only one tab (e.g. thread
@@ -1496,10 +1591,8 @@ export default function ChatPanel({
           <SortableTabsList<ChatPanelTab>
             value={visibleTabIds}
             onReorder={reorderTabs}
-            variant="underline"
           >
             {visibleTabButtons}
-            <TabsIndicator />
           </SortableTabsList>
         </ConversationPanelTabs>
       )}
@@ -1513,15 +1606,15 @@ export default function ChatPanel({
         <>
           {/* Messages — virtualized.
               stdrc 2026-05-02 #proj-uiux:95e25b5b e33f2924: main panel
-              整个 white 底，messages scroller 也跟上。bg-white 让整个
-              主聊天列从 header 到 composer 全白。 */}
+              整个 white 底，messages scroller 也跟上 — the whole chat column
+              is DS paper (bg-layer-canvas) from header to composer. */}
           <div
-            className="relative flex-1 overflow-hidden bg-layer-panel theme-brutal:bg-white"
+            className="relative flex-1 overflow-hidden bg-layer-canvas"
             data-testid="message-content-surface"
           >
             {loading && !shouldShowMessageTimeline ? (
               <div className="flex-1 flex items-center justify-center py-4">
-                <div className="text-center text-foreground-muted font-mono text-sm">{formatMessage({ id: "message.chatPanel.loading" })}</div>
+                <div className="text-center font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "message.chatPanel.loading" })}</div>
               </div>
             ) : !shouldShowMessageTimeline ? (
               <EmptyState
@@ -1545,18 +1638,16 @@ export default function ChatPanel({
                 sparseAnchor="bottom"
               />
             )}
-            {showBottomButton && (
-              <Button
-                onClick={handleBottomButton}
-                size="sm"
-                variant="outline"
-                className="absolute bottom-3 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold z-10"
-              >
-                <ArrowDown size={12} />
-                {bottomButtonCount > 0
-                  ? formatMessage({ id: "message.chatPanel.newMessagesCount" }, { count: bottomButtonCount })
-                  : formatMessage({ id: "message.chatPanel.backToBottom" })}
-              </Button>
+            {!isDM && !isThread ? (
+              <ThreadUnreadJumpPill
+                channelId={channel.id}
+                onJumpToMessage={handleJumpToParentMessage}
+                bottomButton={bottomButton}
+                loadedRange={threadJumpLoadedRange}
+                renderKey={threadJumpRenderKey}
+              />
+            ) : bottomButton && (
+              <div className="absolute inset-x-0 bottom-3 z-10 mx-auto w-fit">{bottomButton}</div>
             )}
           </div>
 
@@ -1564,7 +1655,7 @@ export default function ChatPanel({
           {showComposer ? (
             <ConversationPanelFooter className={composerHostClassName(overlayComposer)}>
           {jointOverLimitGraceEndsAt && !readOnly && !isArchived && (
-            <div className="border-t border-line-muted bg-layer-panel px-3 pt-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
+            <div className="bg-layer-canvas px-3 pt-2">
               <Banner intent="warning" className="justify-center text-center font-bold" data-testid="joint-over-limit-grace-banner">
                 {formatMessage(
                   { id: "message.chatPanel.jointOverLimitGrace" },
@@ -1573,52 +1664,58 @@ export default function ChatPanel({
               </Banner>
             </div>
           )}
-          {readOnly ? (
-            <div className="border-t border-line-muted bg-layer-panel px-4 py-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
-              <div className="flex items-center px-3 py-2 opacity-50 cursor-not-allowed border border-line-muted theme-brutal:input-brutal">
-                <span className="text-sm text-foreground-muted">{formatMessage({ id: "message.chatPanel.unavailable" })}</span>
+          {dmAgent?.raftbenchService ? (
+            <div className="bg-layer-canvas px-3 pt-2 pb-3" data-testid="raftbench-service-dm-notice">
+              <Banner intent="info" className="justify-center text-center">
+                {formatMessage({ id: "message.chatPanel.raftbenchServiceDm" })}
+              </Banner>
+            </div>
+          ) : readOnly ? (
+            <div className="bg-layer-canvas px-3 pt-2 pb-3">
+              <div className="flex min-h-11 cursor-not-allowed items-center rounded-container border-[1.5px] border-line-hairline bg-fill-muted px-3">
+                <span className="text-body text-foreground-disabled">{formatMessage({ id: "message.chatPanel.unavailable" })}</span>
               </div>
             </div>
           ) : isArchived ? (
-            <div className="flex items-center border-t border-line-muted bg-warning-soft p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-brutal-orange/20">
-              <div className="flex w-full items-center justify-center gap-2 text-sm font-bold text-warning-strong theme-brutal:text-black">
-                {formatMessage({ id: "message.chatPanel.archivedNotice" })}
+            <div className="bg-layer-canvas p-3">
+              <Banner intent="warning" className="justify-center text-center font-bold">
+                {formatMessage({ id: "message.chatPanel.archivedNotice" })}{" "}
                 {effectiveChannelCapabilities.archiveChannels && (
                   <button
                     onClick={() => setOverflowOpen(true)}
-                    className="font-bold text-foreground-strong underline theme-brutal:text-black"
+                    className={BANNER_LINK_CLASS}
                   >
                     {formatMessage({ id: "message.chatPanel.unarchive" })}
                   </button>
                 )}
-              </div>
+              </Banner>
             </div>
           ) : isJointChannelFeatureLocked ? (
-            <div className="border-t border-line-muted bg-layer-panel p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
+            <div className="bg-layer-canvas p-3">
               <Banner intent="warning" className="justify-center text-center font-bold">
                 {formatMessage({ id: "message.chatPanel.jointLocked" })}{" "}
                 <button
                   onClick={() => nav.toSettings("billing")}
-                  className="font-bold text-foreground-strong underline theme-brutal:text-black"
+                  className={BANNER_LINK_CLASS}
                 >
                   {formatMessage({ id: "message.chatPanel.viewBilling" })}
                 </button>
               </Banner>
             </div>
           ) : isReadOnlyByQuota ? (
-            <div className="border-t border-line-muted bg-layer-panel p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
+            <div className="bg-layer-canvas p-3">
               <Banner intent="warning" className="justify-center text-center font-bold">
                 {formatMessage({ id: "message.chatPanel.readOnlyQuota" }, { plan: PLAN_CONFIG[plan].displayName })}{" "}
                 <button
                   onClick={() => nav.toSettings("billing")}
-                  className="font-bold text-foreground-strong underline theme-brutal:text-black"
+                  className={BANNER_LINK_CLASS}
                 >
                   {formatMessage({ id: "message.chatPanel.upgradeForMoreChannels" })}
                 </button>
               </Banner>
             </div>
           ) : isGuestReadOnlyChannel ? (
-            <div className="border-t border-line-muted bg-layer-panel p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white" data-testid="guest-readonly-channel-banner">
+            <div className="bg-layer-canvas p-3" data-testid="guest-readonly-channel-banner">
               <Banner intent="warning" className="justify-center text-center font-bold">
                 {formatMessage({ id: "message.chatPanel.guestReadOnlyChannel" })}
               </Banner>
@@ -1637,6 +1734,7 @@ export default function ChatPanel({
               />
             ) : (
               <div className="flex flex-col gap-2">
+                {dmAgent ? <HostedCindyFailedBanner agent={dmAgent} /> : null}
                 {primaryComposerEligible && !isMobileComposer ? (
                   <NotificationActivationBanner placement="desktop" />
                 ) : null}
@@ -1655,18 +1753,18 @@ export default function ChatPanel({
             )
           ) : joined === false
             && (currentServer?.role !== "guest" || channel.guestJoinable === true) ? (
-            <div className="flex flex-col items-center gap-2 border-t border-line-muted bg-layer-panel p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
+            <div className="flex flex-col items-center gap-2 bg-layer-canvas p-3">
               <Button
                 onClick={handleJoinChannel}
-                size="md"
+                size="lg"
                 variant="accent"
-                className="w-full gap-1.5 font-bold"
+                className="w-full"
               >
                 <LogIn size={14} />
                 {formatMessage({ id: "message.chatPanel.joinChannel" }, { channel: channel.name })}
               </Button>
               {isGuest ? (
-                <p className="text-center text-xs font-medium text-foreground-muted theme-brutal:text-black/60" data-testid="guest-join-explanation">
+                <p className="text-center text-caption text-foreground-hint" data-testid="guest-join-explanation">
                   {formatMessage({ id: "message.chatPanel.guestJoinExplanation" })}
                 </p>
               ) : null}
@@ -1703,7 +1801,7 @@ export default function ChatPanel({
 
       {picPreview && (
         <SelectShareLightbox
-          dataUrl={picPreview}
+          image={picPreview}
           filename={`slock-${channel.name || "export"}-${new Date().toISOString().slice(0, 10)}.png`}
           onClose={handleClosePicPreview}
           onShareToX={onSharePreviewToX}
@@ -1714,10 +1812,11 @@ export default function ChatPanel({
       {picError && (
         <div
           role="alert"
-          className="fixed bottom-20 left-1/2 z-[110] -translate-x-1/2 border border-warning bg-warning-soft px-3 py-2 text-xs font-bold text-warning-strong shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-orange theme-brutal:text-black theme-brutal:shadow-brutal-sm"
+          className={SELECT_SHARE_ERROR_HUD_CLASS}
           onClick={() => setPicError(null)}
           data-testid="select-share-error"
         >
+          <Status aria-hidden="true" presence="error" />
           {formatMessage({ id: "message.chatPanel.imageActionFailed" }, { error: picError })}
         </div>
       )}

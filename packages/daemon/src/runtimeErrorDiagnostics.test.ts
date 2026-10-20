@@ -144,6 +144,21 @@ test("buildRuntimeErrorActivityDiagnostic preserves exact compaction failure cla
   assert.match(aborted.fingerprint, /^[0-9a-f]{16}$/);
 });
 
+test("buildRuntimeErrorActivityDiagnostic reports when the owner must act, in the same terms as the envelope", () => {
+  const credential = buildRuntimeErrorActivityDiagnostic("Authentication failed: missing API token");
+  assert.equal(credential.errorClass, "AuthError");
+  assert.equal(credential.requiredAction, "user_reauth");
+  assert.equal(
+    buildRuntimeErrorDiagnosticEnvelope("Authentication failed: missing API token").spanAttrs.runtime_error_action,
+    credential.requiredAction,
+  );
+
+  // Retrying can fix these: no owner action, and the field is absent (not "none").
+  for (const text of ["Selected model is at capacity. Please try a different model.", "Compaction failed: 503: synthetic upstream unavailable"]) {
+    assert.equal("requiredAction" in buildRuntimeErrorActivityDiagnostic(text), false, text);
+  }
+});
+
 test("buildRuntimeErrorDiagnosticEnvelope treats Codex provider capacity as recoverable rate limiting", () => {
   const capacity = buildRuntimeErrorDiagnosticEnvelope("Selected model is at capacity. Please try a different model.");
   assert.equal(capacity.spanAttrs.runtime_error_class, "RateLimitError");

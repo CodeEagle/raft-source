@@ -65,7 +65,7 @@ test("/events senderType echo mirrors the buffer's agent-facing sender_type", as
     sender_id: randomUUID(),
     sender_name: "external-build-app",
     sender_type: "third_party_app",
-    content: "from a third-party app",
+    content: "from a third-party app @owner",
     seq: 9103,
     message_id: randomUUID(),
     third_party_event: {
@@ -104,7 +104,7 @@ test("/events senderType echo mirrors the buffer's agent-facing sender_type", as
   const projected = await db.transaction((executor) => insertCanonicalExternalMessage({
     executor,
     channelId: channel.id,
-    content: "hello &lt;result&gt; user:owner",
+    content: "hello <result> @owner",
     createdAt: new Date(),
     projectionId: actor!.id,
     provider: "slack",
@@ -129,10 +129,13 @@ test("/events senderType echo mirrors the buffer's agent-facing sender_type", as
   assert.equal(bySeq.get(9103)?.sender_type, "third_party_app");
   assert.equal(bySeq.get(9103)?.senderType, "third_party_app");
   assert.equal(bySeq.get(9103)?.third_party_event?.source?.client_id, "external-build-app");
+  // Third-party app event content stays inert.
+  assert.equal(bySeq.get(9103)?.content, "from a third-party app user:owner");
   const external = bySeq.get(projected.message.seq);
   assert.equal(external?.sender_type, "third_party_app");
   assert.equal(external?.senderType, "third_party_app");
   assert.equal(external?.mentioned, false);
   assert.equal(external?.external_message?.message_id, "1722387723.000100");
-  assert.equal(external?.content, "hello &lt;result&gt; user:owner", "inert content must not be escaped twice");
+  // Slack-bridged content reads like an ordinary Raft message.
+  assert.equal(external?.content, "hello <result> @owner");
 });

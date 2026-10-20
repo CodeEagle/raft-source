@@ -12,6 +12,8 @@ import { registerMachine } from "../services/machineService";
 import { mintAgentCredential } from "../services/agentCredentialService";
 import { createMessage } from "../services/messageService";
 import { createAppReminder } from "../apps/reminder/crud";
+import { createFeatureFlag, createFeatureFlagRule, REMINDER_APP_FEATURE_FLAG_KEY } from "../services/featureFlagService";
+import { BasicTracer, MemoryTraceSink } from "@botiverse/raft-shared";
 import * as channelService from "../services/channelService";
 import {
   fireReminder,
@@ -394,6 +396,107 @@ test("agent-api refuses reminder mutations for external agents with an explicit 
   const cancelRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders/${legacy.id}`, { method: "DELETE", headers });
   assert.equal(cancelRes.status, 200);
   assert.equal((await cancelRes.json() as { reminder: { status: string } }).reminder.status, "canceled");
+});
+
+test("reminder_app on: legacy reminder writes are refused with reminders_moved_to_app on both route families; reads and cancel stay", async ({ app }) => {
+  const { server, agent, apiKey, anchorId } = await seed();
+  const sync = installReminderOrchestratorStub(app.app);
+  const sink = new MemoryTraceSink();
+  app.app.set("serverTracer", new BasicTracer({ sink }));
+  const existing = await createAppReminder({
+    serverId: server.id,
+    ownerAgentId: agent.id,
+    targetChannelId: null,
+    msgId: anchorId,
+    title: "made before the move",
+    fireAt: new Date(Date.now() + 60_000),
+    payload: null,
+    recurrence: null,
+    createdBy: { type: "agent", id: agent.id },
+  });
+  await createFeatureFlag({ key: REMINDER_APP_FEATURE_FLAG_KEY, randomizationUnit: "server", defaultEnabled: false });
+  await createFeatureFlagRule({ flagKey: REMINDER_APP_FEATURE_FLAG_KEY, stage: "server", decision: "allow", values: [server.id] });
+  const agentApi = agentHeaders(await agentApiKey(agent.id));
+  const machine = machineHeaders(apiKey);
+  const create = { title: "after the move", delaySeconds: 60, msgId: anchorId };
+
+  const refused = [
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders`, { method: "POST", headers: agentApi, body: JSON.stringify(create) }),
+    // Refused before request validation, like the external-agent refusal.
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders`, { method: "POST", headers: agentApi, body: JSON.stringify({}) }),
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders/${existing.id}`, { method: "PATCH", headers: agentApi, body: JSON.stringify({ title: "changed" }) }),
+    await fetch(`${app.baseUrl}/internal/agent-api/reminders/${existing.id}/snooze`, { method: "POST", headers: agentApi, body: JSON.stringify({ delaySeconds: 300 }) }),
+    // Older Computers call the machine-key routes.
+    await fetch(`${app.baseUrl}/internal/agent/${agent.id}/reminders`, { method: "POST", headers: machine, body: JSON.stringify(create) }),
+    await fetch(`${app.baseUrl}/internal/agent/${agent.id}/reminders/${existing.id}`, { method: "PATCH", headers: machine, body: JSON.stringify({ title: "changed" }) }),
+    await fetch(`${app.baseUrl}/internal/agent/${agent.id}/reminders/${existing.id}/snooze`, { method: "POST", headers: machine, body: JSON.stringify({ delaySeconds: 300 }) }),
+  ];
+  for (const res of refused) {
+    assert.equal(res.status, 409);
+    const body = await res.json() as { code?: string; error?: string };
+    assert.equal(body.code, "reminders_moved_to_app");
+    assert.match(body.error ?? "", /moved to the Reminder app/);
+    assert.match(body.error ?? "", /raft integration invoke --service <id> --list-actions/);
+  }
+  const requestSpans = sink.getAllSpans().filter((span) => span.name === "server.http.request");
+  assert.equal(requestSpans.filter((span) => span.attrs?.error_code === "reminders_moved_to_app").length, refused.length);
+  const rows = await getDb().select().from(reminders).where(eq(reminders.ownerAgentId, agent.id));
+  assert.deepEqual(rows.map((row) => [row.title, row.version]), [["made before the move", existing.version]]);
+  assert.deepEqual(sync.upserts, []);
+
+  const listRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders?status=scheduled`, { headers: agentApi });
+  assert.equal(listRes.status, 200);
+  assert.deepEqual((await listRes.json() as { reminders: Array<{ reminderId: string }> }).reminders.map((r) => r.reminderId), [existing.id]);
+  const legacyListRes = await fetch(`${app.baseUrl}/internal/agent/${agent.id}/reminders`, { headers: machine });
+  assert.equal(legacyListRes.status, 200);
+  const logRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders/${existing.id}/log`, { headers: agentApi });
+  assert.equal(logRes.status, 200);
+  const cancelRes = await fetch(`${app.baseUrl}/internal/agent-api/reminders/${existing.id}`, { method: "DELETE", headers: agentApi });
+  assert.equal(cancelRes.status, 200);
+  assert.equal((await cancelRes.json() as { reminder: { status: string } }).reminder.status, "canceled");
+});
+
+test("every agent-api 4xx is classified on the request span (error_code + reason_class), never with the body's text", async ({ app }) => {
+  const { agent, server } = await seed();
+  const [visible] = await channelService.listChannels(server.id);
+  await channelService.addAgent(visible!.id, agent.id);
+  const sink = new MemoryTraceSink();
+  app.app.set("serverTracer", new BasicTracer({ sink }));
+  const headers = agentHeaders(await agentApiKey(agent.id));
+  const read = (query: string) => fetch(`${app.baseUrl}/internal/agent-api/history?${query}`, { headers });
+
+  const missing = await read(`channel=${encodeURIComponent("#no-such-channel")}`);
+  assert.equal(missing.status, 404);
+  assert.deepEqual(await missing.json(), { error: "Channel not found or not visible" }, "the caller still gets the neutral body");
+  const missingThread = await read(`channel=${encodeURIComponent("#no-such-channel:deadbeef")}`);
+  assert.equal(missingThread.status, 404);
+  const invalid = await read(`channel=${encodeURIComponent(`#${visible!.name}`)}&unread=true&before=1`);
+  assert.equal(invalid.status, 400);
+  const badBody = await fetch(`${app.baseUrl}/internal/agent-api/reminders`, { method: "POST", headers, body: JSON.stringify({}) });
+  assert.ok(badBody.status >= 400 && badBody.status < 500);
+
+  const spans = sink.getAllSpans().filter((span) => span.name === "server.http.request" && span.attrs?.error_code !== undefined);
+  assert.equal(spans.length, 4, "each refusal is classified once");
+  const classified = spans.map((span) => [span.attrs?.error_code, span.attrs?.reason_class]);
+  assert.deepEqual(classified.slice(0, 3), [
+    ["channel_not_found", "not_found"],
+    ["thread_parent_channel_not_found", "not_found"],
+    ["invalid_arg", "invalid_input"],
+  ]);
+  const last = classified.at(-1)!;
+  assert.equal(last[1], "invalid_input");
+  assert.ok(typeof last[0] === "string" && last[0].length > 0, "a validator's refusal is classified too");
+  for (const span of spans) {
+    assert.doesNotMatch(JSON.stringify(span.attrs), /no-such-channel/, "no request text on the span");
+  }
+
+  // Mounted before auth: an auth refusal is classified as well.
+  const before = sink.getAllSpans().length;
+  const unauthenticated = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${encodeURIComponent("#x")}`, { headers: { authorization: "Bearer sk_agent_not_a_real_key" } });
+  assert.ok(unauthenticated.status === 401 || unauthenticated.status === 403, String(unauthenticated.status));
+  const authSpan = sink.getAllSpans().slice(before).find((span) => span.name === "server.http.request");
+  assert.equal(authSpan?.attrs?.reason_class, "forbidden");
+  assert.ok(typeof authSpan?.attrs?.error_code === "string" && authSpan.attrs.error_code.length > 0);
 });
 
 test("agent-api reminder routes use bound credential identity without legacy agent id", async ({ app }) => {

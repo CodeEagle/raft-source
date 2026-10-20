@@ -14,6 +14,8 @@
  * on the frozen v1 set in runtimeFormDefinitionService. The admission row
  * carries a separate `runtimeFormV2` marker for every registered runtime.
  */
+import { configForms as oarConfigForms } from "@botiverse/oar/forms";
+import { narrowOarForm, reasoningModelOptionsFromOar, type RaftModelNarrowing } from "./runtimeFormFromOar";
 import {
   toRuntimeFormV2,
   type RuntimeFormV2ChoiceCopy,
@@ -127,12 +129,19 @@ export interface RuntimeFormOptionSourceContext {
   machineId: string;
   machine: { daemonVersion?: string | null; computerVersion?: string | null };
   /**
-   * `?refresh=1` on the v2 endpoint (a client's retry, `option_source.status`):
-   * bypass any cache. The server keeps no option-source cache today, so every
-   * request already probes the Computer (whose probe gate single-flights);
-   * an entry that ever caches must honour this.
+   * `?refresh=1` on the v2 endpoint (a client's retry, `option_source.status`,
+   * or the refresh action on any source-bound field): bypass any cache. The
+   * server keeps no option-source cache; entries pass it to the Computer as
+   * `force`, which bypasses the daemon's model-list cache.
    */
   refresh?: boolean;
+  /**
+   * The request came on the v2 endpoint, whose forms carry
+   * `option_source.status`: a non-live source is answered with
+   * status/reason/retryable instead of a 409. Absent on the v1 endpoint, whose
+   * clients keep the old bodies exactly (strict parsers, no status fields).
+   */
+  sourceStatus?: boolean;
   /** The server the form belongs to; saved-connection options are server-scoped. */
   serverId?: string;
   /**
@@ -172,6 +181,27 @@ export type RuntimeFormOptionSourceResolution =
   /** The response was already sent (replayed to another replica). */
   | { kind: "handled" }
   | { kind: "reply"; status: number; body: Record<string, unknown> };
+
+function withCapability(
+  capabilities: readonly string[] | undefined,
+  capability: RuntimeFormV2ClientCapability,
+): string[] {
+  return [...new Set([...(capabilities ?? []), capability])];
+}
+
+function sourceHasOptions(source: AgentCreateFormOptionSource): boolean {
+  return source.kind === "dependent_select"
+    ? Object.values(source.optionsByValue).some((options) => options.length > 0)
+    : "options" in source && source.options.length > 0;
+}
+
+/** A v2 source that fails closed: no options, the reason, and whether a retry can help. */
+function unavailableSource(source: AgentCreateFormOptionSource, reason: RuntimeFormV2OptionSourceReason): RuntimeFormV2OptionSourceBody {
+  const empty = source.kind === "dependent_select"
+    ? { ...source, optionsByValue: {} }
+    : { ...source, options: [], defaultValue: "" } as AgentCreateFormOptionSource;
+  return { ...empty, ...optionSourceStatusFields(reason, false) };
+}
 
 export type FormValuesBuildResult =
   | { ok: true; runtimeConfig: Record<string, unknown>; formDefinitionRef: RuntimeFormV2SubmitRef }
@@ -367,6 +397,10 @@ const builtinEntry: RuntimeFormV2Entry = {
   // show a hint under the Built-in Pi model field.
   buildForm() {
     const form = toRuntimeFormV2(buildBuiltInPiFormDefinition());
+    // The model source says when it is not the Computer's live catalog, so a
+    // client shows that one field as fallback/unavailable instead of failing
+    // the whole form on a 409.
+    form.requiredClientCapabilities = withCapability(form.requiredClientCapabilities, "option_source.status");
     const uiSchema = form.uiSchema ?? {};
     const localization = uiSchema.localization ?? {};
     localization.model = {
@@ -415,16 +449,31 @@ const builtinEntry: RuntimeFormV2Entry = {
       }
       return { kind: "source", source: await withSavedConnectionOptions(context.serverId, source) };
     };
-    const bundled = () => withEnrichment(buildBuiltInPiFormOptionSource(context.sourceId));
+    // Only the model source carries a status (v2): the provider select is static.
+    const withStatus = (source: AgentCreateFormOptionSource | null, reason: RuntimeFormV2OptionSourceReason | null) =>
+      source && context.sourceStatus && context.sourceId === "model"
+        ? { ...source, ...optionSourceStatusFields(reason, sourceHasOptions(source)) }
+        : source;
+    const bundled = (reason: RuntimeFormV2OptionSourceReason) =>
+      withEnrichment(withStatus(buildBuiltInPiFormOptionSource(context.sourceId), reason));
     const routing = await context.routeToComputer();
     if (routing === "handled") return { kind: "handled" };
-    if (routing !== "confirmed_local") return bundled();
+    if (routing !== "confirmed_local") return bundled("machine_offline");
     let detection;
     try {
-      detection = await context.agentOrchestrator.detectMachineRuntimeModelsWithAuthority(context.machineId, "builtin");
+      detection = await context.agentOrchestrator.detectMachineRuntimeModelsWithAuthority(context.machineId, "builtin", { force: context.refresh === true });
     } catch (error) {
       if (!(error instanceof RouteFailureError)) throw error;
-      return bundled();
+      return bundled(optionSourceReasonForProbeError(error));
+    }
+    // A probe that answered without the catalog fails closed, as on v1, but
+    // per source on v2: `unavailable` with the reason and no options, instead
+    // of the 409 builtin_catalog_unavailable. A live answer without a catalog
+    // stays the typed 409 builtin_catalog_capability_required on both: that
+    // Computer must be upgraded before any Built-in model can run.
+    if (context.sourceStatus && context.sourceId === "model" && detection.outcome.kind !== "live") {
+      const source = buildBuiltInPiFormOptionSource(context.sourceId);
+      return withEnrichment(source && unavailableSource(source, optionSourceReasonForOutcome(detection.outcome) ?? "probe_failed"));
     }
     const catalog = requireBuiltInCatalogCapability(detection.outcome, {
       machineId: context.machineId,
@@ -435,7 +484,7 @@ const builtinEntry: RuntimeFormV2Entry = {
     const source = unfilteredSource
       ? filterBuiltInPiFormOptionSourceForCatalog(unfilteredSource, catalog.supportedModelIds)
       : null;
-    return withEnrichment(source);
+    return withEnrichment(withStatus(source, null));
   },
   runtimeConfigFromValues(values, envVars, options) {
     const provider = buildBuiltInPiFormOptionSource("provider");
@@ -573,31 +622,37 @@ const builtinEntry: RuntimeFormV2Entry = {
 
 const kimiSdkEntry: RuntimeFormV2Entry = {
   runtimeId: "kimi-sdk",
-  buildForm: () => toRuntimeFormV2(buildKimiSdkFormDefinition()),
+  buildForm: () => {
+    const form = toRuntimeFormV2(buildKimiSdkFormDefinition());
+    // The model source says when it is not live (see builtin above).
+    form.requiredClientCapabilities = withCapability(form.requiredClientCapabilities, "option_source.status");
+    return form;
+  },
   validateProjection: () => validateKimiSdkDefinitionProjection(),
   async resolveOptionSource(context) {
     if (context.sourceId !== "model") return { kind: "source", source: null };
-    // The declared managed default, offered when the Computer cannot answer.
-    const managedDefault = {
-      kind: "source",
-      source: buildKimiSdkFormOptionSource({
+    // The declared managed default, offered when the Computer cannot answer
+    // (v2: marked `fallback` with the reason).
+    const managedDefault = (reason: RuntimeFormV2OptionSourceReason): RuntimeFormOptionSourceResolution => {
+      const source = buildKimiSdkFormOptionSource({
         models: RUNTIME_MODELS["kimi-sdk"] ?? [],
         defaultModel: getDefaultModel("kimi-sdk"),
-      }),
-    } as const;
+      });
+      return { kind: "source", source: context.sourceStatus ? { ...source, ...optionSourceStatusFields(reason, true) } : source };
+    };
     const routing = await context.routeToComputer();
     if (routing === "handled") return { kind: "handled" };
     // Offline or unreachable: the managed default, like the other runtimes'
     // bundled lists, instead of blocking the form.
-    if (routing !== "confirmed_local") return managedDefault;
+    if (routing !== "confirmed_local") return managedDefault("machine_offline");
     let detected;
     try {
-      detected = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, "kimi-sdk");
+      detected = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, "kimi-sdk", { force: context.refresh === true });
     } catch (error) {
       if (!(error instanceof RouteFailureError)) throw error;
-      return managedDefault;
+      return managedDefault(optionSourceReasonForProbeError(error));
     }
-    if (detected.kind === "error" && detected.code === "computer_offline") return managedDefault;
+    if (detected.kind === "error" && detected.code === "computer_offline") return managedDefault("machine_offline");
     if (detected.kind === "missing_config") {
       // Normal first-install shape: the machine has no ~/.kimi-code/config.toml
       // yet because nothing has been provisioned. The reviewed product
@@ -607,7 +662,18 @@ const kimiSdkEntry: RuntimeFormV2Entry = {
       // and offline only — every other non-live outcome keeps its typed 409
       // (this is the hard failure users saw as "model list unavailable" on
       // fresh machines).
-      return managedDefault;
+      return managedDefault("missing_config");
+    }
+    if (detected.kind !== "live" && context.sourceStatus) {
+      // Same fail-closed decision as v1, per source: no options to launch
+      // with, the reason, and whether a retry can help.
+      return {
+        kind: "source",
+        source: unavailableSource(
+          buildKimiSdkFormOptionSource({ models: [], defaultModel: undefined }),
+          optionSourceReasonForOutcome(detected) ?? "probe_failed",
+        ),
+      };
     }
     if (detected.kind !== "live") {
       return {
@@ -619,9 +685,10 @@ const kimiSdkEntry: RuntimeFormV2Entry = {
         },
       };
     }
+    const live = buildKimiSdkFormOptionSource({ models: detected.value.models, defaultModel: detected.value.default });
     return {
       kind: "source",
-      source: buildKimiSdkFormOptionSource({ models: detected.value.models, defaultModel: detected.value.default }),
+      source: context.sourceStatus ? { ...live, ...optionSourceStatusFields(optionSourceReasonForOutcome(detected), sourceHasOptions(live)) } : live,
     };
   },
   runtimeConfigFromValues(values, envVars) {
@@ -762,7 +829,7 @@ function modelFormEntry(runtimeId: string, options: { live: boolean; hint?: stri
       if (routing !== "confirmed_local") return fallback;
       let detected;
       try {
-        detected = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, runtimeId);
+        detected = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, runtimeId, { force: context.refresh === true });
       } catch {
         // Offline, timed out or failed probes keep the form usable, as legacy does.
         return fallback;
@@ -813,7 +880,7 @@ const antigravityEntry: RuntimeFormV2Entry = {
  * utils/reasoningEffortOptions.ts and utils/runtimeConfigForm.ts) is the oracle
  * for fields, options and the runtimeConfig a submit assembles.
  */
-interface ReasoningModelFormOptions {
+export interface ReasoningModelFormOptions {
   /** `select.custom_value`: a typed model that is not listed is stored as a custom model (supportsRuntimeCustomModelName). */
   customModel: boolean;
   /** A boolean field mapped to runtimeConfig.mode (RUNTIME_FAST_MODE_RUNTIMES). */
@@ -1051,7 +1118,7 @@ async function probeModels(context: RuntimeFormOptionSourceContext, runtimeId: s
   if (routing !== "confirmed_local") return { kind: "not_live", reason: "machine_offline" };
   let outcome: RuntimeModelSourceOutcome;
   try {
-    outcome = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, runtimeId);
+    outcome = await context.agentOrchestrator.detectMachineRuntimeModels(context.machineId, runtimeId, { force: context.refresh === true });
   } catch (error) {
     return { kind: "not_live", reason: optionSourceReasonForProbeError(error) };
   }
@@ -1268,13 +1335,17 @@ const codexEntry = reasoningModelFormEntry("codex", {
   modelHint: "Models available from this computer's Codex CLI. You can also type a model ID.",
 });
 
-// No custom model: the legacy form offers none for Grok (supportsRuntimeCustomModelName).
-const grokEntry = reasoningModelFormEntry("grok", {
-  customModel: false,
-  fastMode: false,
-  reasoning: true,
-  modelHint: "Models available from this computer's Grok CLI.",
-});
+// Grok's form is OAR's (`@botiverse/oar/forms`): its fields and the modes Grok
+// accepts come from configForms.grok. Raft offers less (a listed model, no
+// runtime default, no typed id, required) and keeps its own hint, so the served
+// v2 form stays unchanged.
+export const GROK_RAFT_NARROWING: RaftModelNarrowing = {
+  modes: ["preset"],
+  required: true,
+  hint: "Models available from this computer's Grok CLI.",
+};
+export const grokRaftForm = narrowOarForm(oarConfigForms.grok!, GROK_RAFT_NARROWING);
+const grokEntry = reasoningModelFormEntry("grok", reasoningModelOptionsFromOar(grokRaftForm));
 
 // Batch 3b. Each follows the legacy predicates in utils/runtimeConfigForm.ts
 // (supportsRuntimeCustomModelName, supportsRuntimeApiUrl, supportsRuntimeCommand,

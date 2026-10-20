@@ -5,11 +5,12 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 
 import argon2 from "argon2";
-import { desc, eq } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import {
   __resetFailpointsForTests,
   __setFailpointsForTests,
   BasicTracer,
+  channelCardRev,
   InMemoryFailpointRegistry,
   MemoryTraceSink,
   hasAgentMessageIdentity,
@@ -477,6 +478,36 @@ test("agent-api idempotent replay returns the original only when target, content
     assert.equal(persisted.some((message) => message.content === "something else"), false);
 });
 
+test("agent-api send rejects malformed attachment ids with a 400 instead of a database 500", async ({ app }) => {
+  // Agents wrote `--attachment-id "id1 id2"`; the joined value reached a uuid
+  // column and the send failed as 500 (Postgres 22P02, task #20).
+  const fixture = await seedFixture();
+  const parent = await sendHumanMessage(fixture, "parent before malformed attachments");
+  const first = "11111111-1111-4111-8111-111111111111";
+  const second = "22222222-2222-4222-8222-222222222222";
+  const cases = [
+    { send: sendViaAgentApi, ids: [`${first} ${second}`], key: undefined, entry: 1 },
+    { send: sendViaAgentApi, ids: [`${first},${second}`], key: "malformed-attachment-replay", entry: 1 },
+    { send: sendViaAgentApiV2, ids: [first, "not-an-id"], key: undefined, entry: 2 },
+  ];
+  for (const [index, { send, ids, key, entry }] of cases.entries()) {
+    const res = await send(app.baseUrl, fixture, {
+      target: `#${fixture.channelName}`,
+      content: `malformed attachment ${index}`,
+      attachmentIds: ids,
+      seenUpToSeq: parent.seq,
+      ...(key ? { idempotencyKey: key } : {}),
+    });
+    assert.equal(res.status, 400, JSON.stringify(res.body));
+    assert.equal(res.body.code, "attachment_id_invalid");
+    assert.ok(res.body.error.startsWith(`Not sent: attachmentIds entry ${entry} is not a single attachment ID.`), res.body.error);
+    assert.match(res.body.error, /one ID per --attachment-id/);
+    assert.equal(JSON.stringify(res.body).includes(first), false, "the rejected value is not echoed");
+  }
+  const persisted = await latestChannelMessages(fixture.channelId);
+  assert.equal(persisted.some((message) => message.content.startsWith("malformed attachment")), false);
+});
+
 test("agent-api first reply to a fresh channel thread creates the thread and sends", async ({ app }) => {
     const fixture = await seedFixture();
     const parent = await sendHumanMessage(fixture, "fresh thread parent");
@@ -569,6 +600,178 @@ test("agent-api reply to a system-message thread does not treat the system ident
       ],
       "the pseudo user:system identity is excluded without dropping real thread followers",
     );
+});
+
+test("agent-api send checks the channel card only for a client that names the version it saw", async ({ app }) => {
+    const fixture = await seedFixture();
+    const target = `#${fixture.channelName}`;
+    const card = { id: fixture.channelId, name: fixture.channelName, type: "channel", description: null, archived: false };
+
+    // No `seenCards`: today's behavior.
+    const plain = await sendViaAgentApiV2(app.baseUrl, fixture, { target, content: "no card field" });
+    assert.equal(plain.body.state, "sent");
+    assert.equal(plain.body.channelCard, undefined);
+
+    // Never seen in this context: held once, for the card alone, and nothing is posted.
+    const before = await latestChannelMessages(fixture.channelId);
+    const unseen = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target,
+      content: "first post this context",
+      seenUpToSeq: plain.body.messageSeq,
+      seenCards: { channel: null },
+    });
+    assert.equal(unseen.status, 200);
+    assert.equal(unseen.body.state, "held");
+    assert.deepEqual(unseen.body.holdReasons, ["channel_card"]);
+    assert.equal(unseen.body.newMessageCount, 0);
+    assert.deepEqual(unseen.body.channelCard, card);
+    assert.equal(unseen.body.channelCardChanged, undefined);
+    assert.equal((await latestChannelMessages(fixture.channelId)).length, before.length);
+
+    // The current version: sent, no card.
+    const seen = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target,
+      content: "card seen",
+      seenUpToSeq: plain.body.messageSeq,
+      seenCards: { channel: channelCardRev(card) },
+    });
+    assert.equal(seen.body.state, "sent");
+    assert.equal(seen.body.channelCard, undefined);
+
+    // An older version: sent, with the new card in the reply.
+    await getDb().update(channels).set({ description: "Release coordination only." }).where(eq(channels.id, fixture.channelId));
+    const changed = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target,
+      content: "card changed since",
+      seenUpToSeq: seen.body.messageSeq,
+      seenCards: { channel: channelCardRev(card) },
+    });
+    assert.equal(changed.body.state, "sent");
+    assert.deepEqual(changed.body.channelCard, { ...card, description: "Release coordination only." });
+    assert.equal(changed.body.channelCardChanged, true);
+
+    // A DM has no channel card.
+    await findOrCreateDM(fixture.serverId, fixture.ownerId, fixture.agentId);
+    const dm = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target: `dm:@${fixture.ownerName}`,
+      content: "dm",
+      seenCards: { channel: null },
+    });
+    assert.equal(dm.body.state, "sent");
+    assert.equal(dm.body.channelCard, undefined);
+});
+
+test("agent-api send accepts the card version a history read returned, for the channel and its threads", async ({ app }) => {
+    const fixture = await seedFixture();
+    const parent = await sendHumanMessage(fixture, "thread root");
+    await getOrCreateThread(parent.id, fixture.ownerId, "user");
+    const read = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${encodeURIComponent(`#${fixture.channelName}`)}&consume=false`, {
+      headers: agentHeaders(fixture.agentApiKey),
+    });
+    const readBody = await read.json() as { channel_card: Parameters<typeof channelCardRev>[0] };
+    const rev = channelCardRev(readBody.channel_card);
+
+    const threadTarget = `#${fixture.channelName}:${parent.id.slice(0, 8)}`;
+    const unseen = await sendViaAgentApiV2(app.baseUrl, fixture, { target: threadTarget, content: "in thread", seenUpToSeq: parent.seq, seenCards: { channel: null } });
+    assert.equal(unseen.body.state, "held");
+    assert.deepEqual(unseen.body.holdReasons, ["channel_card"]);
+    assert.equal(unseen.body.channelCard?.id, fixture.channelId, "a thread carries its parent channel's card");
+
+    const seen = await sendViaAgentApiV2(app.baseUrl, fixture, { target: threadTarget, content: "in thread", seenUpToSeq: parent.seq, seenCards: { channel: rev } });
+    assert.equal(seen.body.state, "sent");
+    assert.equal(seen.body.channelCard, undefined);
+});
+
+test("agent-api send: --anyway, an idempotent retry and reviewer isolation are not held for the card", async ({ app }) => {
+    const fixture = await seedFixture();
+    const target = `#${fixture.channelName}`;
+
+    const anyway = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target, content: "anyway", sendDraft: true, continueAnyway: true, seenCards: { channel: null },
+    });
+    assert.equal(anyway.body.state, "sent");
+    assert.equal(anyway.body.channelCard?.id, fixture.channelId, "the unseen card still comes back with the reply");
+    assert.equal(anyway.body.channelCardChanged, undefined);
+
+    const key = randomUUID();
+    const original = await sendViaAgentApiV2(app.baseUrl, fixture, { target, content: "once", idempotencyKey: key, seenUpToSeq: anyway.body.messageSeq });
+    assert.equal(original.body.state, "sent");
+    const retry = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target, content: "once", idempotencyKey: key, seenUpToSeq: anyway.body.messageSeq, seenCards: { channel: null },
+    });
+    assert.equal(retry.body.state, "sent", "a retry of a committed send replays its receipt instead of holding");
+    assert.equal(retry.body.messageId, original.body.messageId);
+
+    const isolated = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target, content: "isolated", freshnessContextMode: "withheld", seenUpToSeq: original.body.messageSeq, seenCards: { channel: null },
+    });
+    assert.equal(isolated.body.state, "sent");
+    assert.equal(isolated.body.channelCard, undefined);
+});
+
+test("agent-api DM reads carry the peer's card, and a DM send names the version it saw", async ({ app }) => {
+    const fixture = await seedFixture();
+    const dm = await findOrCreateDM(fixture.serverId, fixture.ownerId, fixture.agentId);
+    assert.ok(dm);
+    const target = `dm:@${fixture.ownerName}`;
+
+    // Nothing to show (no description, no zone): no card, and no hold for it.
+    const empty = await sendViaAgentApiV2(app.baseUrl, fixture, { target, content: "hi", seenCards: { peer: null } });
+    assert.equal(empty.body.state, "sent");
+    assert.equal(empty.body.peerCard, undefined);
+
+    await getDb().update(users).set({ description: "Founder. Prefers short updates." }).where(eq(users.id, fixture.ownerId));
+    const root = await createMessage(dm.id, "user", fixture.ownerId, "from Shanghai", "chat", undefined, { senderTimezone: "Asia/Shanghai" });
+    const card = { kind: "human", name: fixture.ownerName, description: "Founder. Prefers short updates.", timezone: "Asia/Shanghai" };
+
+    const read = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${encodeURIComponent(target)}&consume=false`, { headers: agentHeaders(fixture.agentApiKey) });
+    const readBody = await read.json() as { peer_card?: unknown; channel_card?: unknown };
+    assert.deepEqual(readBody.peer_card, card);
+    assert.equal(readBody.channel_card, undefined, "a DM has no channel card");
+
+    const unseen = await sendViaAgentApiV2(app.baseUrl, fixture, { target, content: "reply", seenUpToSeq: root.seq, seenCards: { peer: null } });
+    assert.equal(unseen.body.state, "held");
+    assert.deepEqual(unseen.body.holdReasons, ["peer_card"]);
+    assert.deepEqual(unseen.body.peerCard, card);
+
+    const seen = await sendViaAgentApiV2(app.baseUrl, fixture, { target, content: "reply", seenUpToSeq: root.seq, seenCards: { peer: "v-any" } });
+    assert.equal(seen.body.state, "sent");
+    assert.equal(seen.body.peerCard, undefined);
+
+    // The peer travels: any version this context has counts as seen (their
+    // next message shows the new zone); no hold, nothing attached.
+    const moved = await createMessage(dm.id, "user", fixture.ownerId, "now in Berlin", "chat", undefined, { senderTimezone: "Europe/Berlin" });
+    const travelled = await sendViaAgentApiV2(app.baseUrl, fixture, { target, content: "ok", seenUpToSeq: moved.seq, seenCards: { peer: "v-from-shanghai" } });
+    assert.equal(travelled.body.state, "sent");
+    assert.equal(travelled.body.peerCard, undefined);
+
+    // A thread in the DM carries the DM's peer, on read and on send.
+    await getOrCreateThread(moved.id, fixture.ownerId, "user");
+    const threadTarget = `${target}:${moved.id.slice(0, 8)}`;
+    const threadRead = await fetch(`${app.baseUrl}/internal/agent-api/history?channel=${encodeURIComponent(threadTarget)}&consume=false`, { headers: agentHeaders(fixture.agentApiKey) });
+    assert.deepEqual(((await threadRead.json()) as { peer_card?: unknown }).peer_card, { ...card, timezone: "Europe/Berlin" });
+    const threadSend = await sendViaAgentApiV2(app.baseUrl, fixture, { target: threadTarget, content: "in thread", seenUpToSeq: moved.seq, seenCards: { peer: null } });
+    assert.equal(threadSend.body.state, "held");
+    assert.deepEqual(threadSend.body.holdReasons, ["peer_card"]);
+});
+
+test("agent-api send holds unread messages and an unseen channel card in one hold", async ({ app }) => {
+    const fixture = await seedFixture();
+    const target = `#${fixture.channelName}`;
+    const first = await sendViaAgentApiV2(app.baseUrl, fixture, { target, content: "before" });
+    await sendHumanMessage(fixture, "news the agent has not seen");
+
+    const held = await sendViaAgentApiV2(app.baseUrl, fixture, {
+      target,
+      content: "reply",
+      seenUpToSeq: first.body.messageSeq,
+      seenCards: { channel: null },
+    });
+    assert.equal(held.body.state, "held");
+    assert.deepEqual(held.body.holdReasons, ["unread_messages", "channel_card"]);
+    assert.equal(held.body.newMessageCount, 1);
+    assert.equal(held.body.channelCard?.id, fixture.channelId);
+    assert.equal(held.body.heldMessages?.[0]?.content, "news the agent has not seen");
 });
 
 test("agent-api channel first post returns recent-join drive-by attention once", async ({ app }) => {
@@ -726,7 +929,8 @@ test("agent-api send does not warn for literal @handles inside markdown code", a
     const fixture = await seedFixture();
     const sent = await sendViaAgentApiV2(app.baseUrl, fixture, {
       target: `#${fixture.channelName}`,
-      content: "external `@DefinitelyMissingAgent` and ```txt\n@AnotherMissingAgent\n```",
+      // A fence opens only at the start of a line (as the web renders it).
+      content: "external `@DefinitelyMissingAgent` and\n```txt\n@AnotherMissingAgent\n```",
       seenUpToSeq: 0,
     });
 
@@ -789,6 +993,7 @@ test("agent-api send records route breakdown trace events", async ({ app }) => {
     assert.ok(started);
     assert.equal(started.attrs?.target_kind, "channel_thread");
     assert.equal(started.attrs?.attachment_count, 0);
+    assert.equal(started.attrs?.client_kind, "absent", "no X-Raft-Client header in this test");
     assert.equal(started.attrs?.freshness_requested, true);
     assert.equal("target" in (started.attrs ?? {}), false);
     assert.equal("content" in (started.attrs ?? {}), false);
@@ -887,7 +1092,7 @@ test("agent-api thread send records follower fallback inside its atomic persiste
     for (const event of degraded) {
       assert.equal(event.attrs?.durable_message_present, false);
       assert.equal(event.attrs?.persistence_state, "transaction_pending");
-      assert.equal(event.attrs?.failure_policy, "continue_within_transaction");
+      assert.equal(event.attrs?.failure_policy, "rollback_savepoint_and_continue");
       assert.equal(event.attrs?.query_name, "thread_follows.eligible_followers");
       assert.equal(event.attrs?.sqlstate, "57014");
     }
@@ -936,9 +1141,100 @@ test("agent-api thread send records same-send unfollow fallback inside its atomi
     assert.equal(degraded.length, 1);
     assert.equal(degraded[0]?.attrs?.durable_message_present, false);
     assert.equal(degraded[0]?.attrs?.persistence_state, "transaction_pending");
-    assert.equal(degraded[0]?.attrs?.failure_policy, "continue_within_transaction");
+    assert.equal(degraded[0]?.attrs?.failure_policy, "rollback_savepoint_and_continue");
     assert.equal(degraded[0]?.attrs?.sqlstate, "XX000");
     assert.equal(JSON.stringify(degraded[0]?.attrs).includes("follower_type"), false);
+});
+
+test("agent-api thread send survives a real Postgres error in a post-persist read: the read is rolled back to its savepoint", async ({ app }) => {
+    // A plain JS throw does not abort the transaction; a real statement error
+    // does. Before the savepoint, continuing after it failed the send with 25P02.
+    const sink = new MemoryTraceSink();
+    app.app.set("serverTracer", new BasicTracer({ sink }));
+    const fixture = await seedFixture();
+    const parent = await sendHumanMessage(fixture, "real db error parent");
+    const thread = await getOrCreateThread(parent.id, fixture.ownerId, "user");
+    const content = "real db error reply";
+    __setMessageServiceDepsForTests({
+      getThreadFollowerCandidates: async (_threadChannelId, executor) => {
+        await (executor ?? getDb()).execute(sql`select 1 / 0`);
+        return { humanFollowerIds: [], agentFollowers: [] };
+      },
+    });
+
+    const sent = await sendViaAgentApi(app.baseUrl, fixture, {
+      target: `#${fixture.channelName}:${parent.id.slice(0, 8)}`,
+      content,
+      seenUpToSeq: parent.seq,
+    });
+
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+    const persisted = (await latestChannelMessages(thread.id)).filter((message) => message.content === content);
+    assert.equal(persisted.length, 1);
+    const degraded = sink.getAllSpans().flatMap((span) => span.events)
+      .filter((event) => event.name === "message_pipeline.post_persist_side_effect.degraded");
+    assert.ok(degraded.length >= 1);
+    for (const event of degraded) {
+      assert.equal(event.attrs?.failure_policy, "rollback_savepoint_and_continue");
+      assert.equal(event.attrs?.sqlstate, "22012");
+    }
+});
+
+async function deadlockOnceScenario(
+    app: { baseUrl: string; app: { set(name: string, value: unknown): void } },
+    label: string,
+    idempotencyKey?: string,
+) {
+    const sink = new MemoryTraceSink();
+    app.app.set("serverTracer", new BasicTracer({ sink }));
+    const fixture = await seedFixture();
+    const parent = await sendHumanMessage(fixture, `${label} parent`);
+    const thread = await getOrCreateThread(parent.id, fixture.ownerId, "user");
+    const content = `${label} reply`;
+    let calls = 0;
+    __setMessageServiceDepsForTests({
+      getThreadFollowerCandidates: async () => {
+        calls += 1;
+        if (calls === 1) throw Object.assign(new Error("deadlock detected"), { code: "40P01" });
+        return { humanFollowerIds: [], agentFollowers: [] };
+      },
+    });
+    const body = {
+      target: `#${fixture.channelName}:${parent.id.slice(0, 8)}`,
+      content,
+      seenUpToSeq: parent.seq,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    };
+    const send = () => sendViaAgentApi(app.baseUrl, fixture, body);
+    const persistedCount = async () => (await latestChannelMessages(thread.id)).filter((message) => message.content === content).length;
+    const degraded = () => sink.getAllSpans().flatMap((span) => span.events)
+      .filter((event) => event.name === "message_pipeline.post_persist_side_effect.degraded");
+    return { send, persistedCount, degraded, calls: () => calls };
+}
+
+// 10-15 02:57Z: a 40P01 in this read was swallowed, the aborted transaction then
+// failed with 25P02, and the send returned 500. Rethrown, the 40P01 reaches
+// whoever owns the transaction's retry.
+test("agent-api thread send: a deadlock in a post-persist read retries the idempotent send server-side and sends once", async ({ app }) => {
+    const scenario = await deadlockOnceScenario(app, "deadlock idempotent", "deadlock-retry-key-0001");
+    const sent = await scenario.send();
+    assert.equal(sent.status, 200, JSON.stringify(sent.body));
+    assert.equal(scenario.calls(), 2, "the send transaction ran again");
+    assert.equal(await scenario.persistedCount(), 1);
+    assert.equal(scenario.degraded()[0]?.attrs?.failure_policy, "rethrow_for_transaction_retry");
+    assert.equal(scenario.degraded()[0]?.attrs?.sqlstate, "40P01");
+});
+
+test("agent-api thread send: without a send-owned transaction, the deadlock is a typed retryable conflict, not a 500", async ({ app }) => {
+    const scenario = await deadlockOnceScenario(app, "deadlock nested");
+    const first = await scenario.send();
+    assert.notEqual(first.status, 500, JSON.stringify(first.body));
+    assert.equal(first.body.code, "send_transient_conflict");
+    assert.equal(first.body.retryable, true);
+    assert.equal(await scenario.persistedCount(), 0, "nothing was written");
+    const retried = await scenario.send();
+    assert.equal(retried.status, 200, JSON.stringify(retried.body));
+    assert.equal(await scenario.persistedCount(), 1);
 });
 
 test("agent-api send rejects attachment IDs already linked to another message", async ({ app }) => {

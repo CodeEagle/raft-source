@@ -11,7 +11,7 @@
 // same field that disagree is the defect this card is about.
 
 import type { Command } from "commander";
-import { formatAgentTaskShow } from "@botiverse/raft-shared";
+import { formatAgentTaskShow } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

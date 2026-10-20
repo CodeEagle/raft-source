@@ -6,8 +6,10 @@ import { getDb } from "../db/index";
 import { closeTestDatabase, openTestDatabase } from "../test/integration/database";
 import { computerUpgradeRequests, servers, users } from "../db/schema";
 import {
+  computerUpgradeRequestTraceAttrs,
   createComputerUpgradeRequest,
   expireComputerUpgradeRequests,
+  traceSafeUpgradeReason,
   listLatestComputerUpgradeRequests,
   observeComputerVersionForUpgradeRequests,
   projectComputerUpgradeRequest,
@@ -109,6 +111,23 @@ test("a reconnect with the old version fails the request only with the installer
     assert.equal(expired.length, 1);
     assert.equal(expired[0]!.id, third.row.id);
     assert.equal(expired[0]!.outcome, "no_response");
+    assert.deepEqual(computerUpgradeRequestTraceAttrs(expired[0]!), {
+      request_id: third.row.id,
+      server_id: serverId,
+      machine_id: machineId,
+      target_version: "1.0.42",
+      observed_version: "",
+      outcome: "no_response",
+      reason: "no_reconnect_before_deadline",
+      duration_ms: UPGRADE_REQUEST_DEADLINE_MS,
+    });
+    assert.equal("duration_ms" in computerUpgradeRequestTraceAttrs(second.row), false, "an open request has no duration yet");
+    assert.equal(
+      traceSafeUpgradeReason("EACCES: /Users/alice/Library/raft and C:\\Users\\Bob Smith\\AppData and /home/carol/.raft"),
+      "EACCES: /Users/~/Library/raft and C:\\Users\\~\\AppData and /home/~/.raft",
+    );
+    assert.equal(traceSafeUpgradeReason("x".repeat(500)).length, 120);
+    assert.equal(traceSafeUpgradeReason(null), "");
 
     // Projection picks the open request first, otherwise the most recent.
     const latest = await listLatestComputerUpgradeRequests([machineId, "cccccccc-cccc-4ccc-8ccc-cccccccccccc"]);

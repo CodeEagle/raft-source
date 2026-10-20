@@ -1,5 +1,5 @@
-import { MessageReferenceChip } from "raft-ui";
-import type { MessageReferenceChipVariant } from "raft-ui";
+import { MessageReferenceChip } from "@botiverse/raft-ui";
+import type { MessageReferenceChipVariant } from "@botiverse/raft-ui";
 import type { LucideIcon } from "lucide-react";
 import Tooltip from "../ui/Tooltip";
 

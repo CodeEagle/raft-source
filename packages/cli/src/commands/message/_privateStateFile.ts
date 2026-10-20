@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { isLocalStateAgentId } from "@botiverse/raft-shared";
+import { isLocalStateAgentId } from "@botiverse/raft-shared/src/agentCliSurface";
 import { resolveRaftHome } from "../../state/raftHome";
 
 function privateDirectory(directory: string): void {

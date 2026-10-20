@@ -6,18 +6,20 @@
  * works; under a full-window blurred modal each frame is ~3x more expensive.
  * Controlled CDP measurement on live staging (12 working dots): modal open
  * 144 fps / 80% GPU main thread; only the dots paused → 2 fps / 3%.
- * Bounded waits the user is actively watching (e.g. AddMachineDialog's
- * "waiting for connection") may still pulse; they are listed explicitly.
+ * Raft Design System: status lights never animate, so the allowlist of
+ * bounded waits that may pulse is empty (AddMachineDialog's "waiting for
+ * connection" banner left it with a static pixel). Add a site only with a
+ * product decision.
  */
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { test } from "vitest";
 import { AGENT_ACTIVITIES } from "@botiverse/raft-shared";
-import { getActivityDotClass } from "../src/utils/activity";
+import { activityPresence } from "../src/utils/activity";
 
 const src = resolve(import.meta.dirname, "../src");
-const ALLOWED_PULSE_SITES = new Set(["components/machine/AddMachineDialog.tsx"]);
+const ALLOWED_PULSE_SITES = new Set<string>();
 
 function walk(dir: string): string[] {
   return readdirSync(dir).flatMap((name) => {
@@ -26,9 +28,10 @@ function walk(dir: string): string[] {
   });
 }
 
-test("no activity maps to an animation class", () => {
+test("every activity maps to one of the five fixed presence lights (never an animation)", () => {
+  const lights = new Set(["online", "busy", "error", "offline", "external"]);
   for (const activity of AGENT_ACTIVITIES) {
-    assert.doesNotMatch(getActivityDotClass(activity), /\banimate-/, activity);
+    assert.ok(lights.has(activityPresence(activity)), activity);
   }
 });
 

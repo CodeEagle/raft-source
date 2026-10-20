@@ -9,7 +9,7 @@ import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";
 import { cliError } from "../../core/errors";
 import { writeText, adoptCliReplyText } from "../../core/renderer";
-import { currentDate } from "@botiverse/raft-shared";
+import { currentDate } from "@botiverse/raft-shared/src/agentCliSurface";
 import { formatReminderList } from "./_format";
 
 interface ListOpts {

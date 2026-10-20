@@ -11,6 +11,7 @@ import { hostname } from "node:os";
 import path from "node:path";
 import { and, asc, eq, inArray } from "drizzle-orm";
 import * as channelService from "../services/channelService";
+import { readWithStaleOnOverload, resolveSoftTimeoutMs, STALE_RESPONSE_HEADER } from "./rwStaleRead";
 import { getActiveJointProjectionLocalChannelId, JointChannelLimitError } from "../services/jointChannelLimitService";
 import { resolveGatingParentJointId } from "../services/jointChannelLimitState";
 import * as channelConversionService from "../services/channelConversionService";
@@ -21,7 +22,8 @@ import * as messageService from "../services/messageService";
 import * as userService from "../services/userService";
 import * as savedService from "../services/savedService";
 import * as activitySyncService from "../services/activitySyncService";
-import { CHANNEL_MANAGEMENT_CAPABILITIES, MAX_JOINT_CHANNEL_SERVERS, SERVER_GUEST_FEATURE_FLAG_KEY, asMachineId, authorizeTaskAction, channelTypeSupportsActivityMute, noopTracer, validateName, type ServerCapability, type ActiveSpan, type ServerId, type TraceAttributes, type Tracer, type WorkspacePathValidationStatus } from "@botiverse/raft-shared";
+import { applyActivityContractHandshake } from "./activityContractHeader";
+import { CHANNEL_MANAGEMENT_CAPABILITIES, MAX_JOINT_CHANNEL_SERVERS, SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY, SERVER_GUEST_FEATURE_FLAG_KEY, asMachineId, authorizeTaskAction, channelTypeSupportsActivityMute, noopTracer, validateName, type ServerCapability, type ActiveSpan, type ServerId, type TraceAttributes, type Tracer, type WorkspacePathValidationStatus } from "@botiverse/raft-shared";
 import { getServerPlan, getHistoryCutoff, isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
 import {
   CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
@@ -830,21 +832,24 @@ function normalizeStringList(raw: unknown, maxItems?: number): string[] {
 function parseJointInviteRequests(raw: {
   targetServerSlug?: unknown;
   invitedPeople?: unknown;
+  sameAdmin?: unknown;
   jointInvites?: unknown;
 }): channelService.JointInviteRequest[] {
   const rawRequests = Array.isArray(raw.jointInvites) && raw.jointInvites.length > 0
     ? raw.jointInvites.slice(0, channelService.MAX_JOINT_CHANNEL_INVITE_TARGETS + 1).map((request) => {
         const input = request && typeof request === "object"
-          ? request as { targetServerSlug?: unknown; invitedPeople?: unknown }
+          ? request as { targetServerSlug?: unknown; invitedPeople?: unknown; sameAdmin?: unknown }
           : {};
         return {
           targetServerSlug: typeof input.targetServerSlug === "string" ? input.targetServerSlug.trim() : "",
           invitedPeople: normalizeStringList(input.invitedPeople, channelService.MAX_JOINT_CHANNEL_INVITED_PEOPLE_PER_TARGET),
+          sameAdmin: input.sameAdmin === true,
         };
       })
     : [{
         targetServerSlug: typeof raw.targetServerSlug === "string" ? raw.targetServerSlug.trim() : "",
         invitedPeople: normalizeStringList(raw.invitedPeople, channelService.MAX_JOINT_CHANNEL_INVITED_PEOPLE_PER_TARGET),
+        sameAdmin: raw.sameAdmin === true,
       }];
   if (rawRequests.length > channelService.MAX_JOINT_CHANNEL_INVITE_TARGETS) {
     throw new channelService.JointChannelInviteValidationError(
@@ -1022,14 +1027,14 @@ channelRouter.post("/", async (req, res) => {
       res.status(403).json({ error: "You do not have permission to create channels" });
       return;
     }
-    const { name, description, visibility, agentIds, userIds, targetServerSlug, invitedPeople, jointInvites, actionCardMessageId, actionCardConfirmationVersion } = req.body;
+    const { name, description, visibility, agentIds, userIds, targetServerSlug, invitedPeople, sameAdmin, jointInvites, actionCardMessageId, actionCardConfirmationVersion } = req.body;
     const parsedVisibility = parseChannelVisibility(visibility);
     if (parsedVisibility === null) {
       res.status(400).json({ error: "visibility must be one of: public, private, joint" });
       return;
     }
     const channelType: channelService.RegularChannelType = parsedVisibility === "private" ? "private" : "channel";
-    const selectedJointInviteRequests = parseJointInviteRequests({ targetServerSlug, invitedPeople, jointInvites });
+    const selectedJointInviteRequests = parseJointInviteRequests({ targetServerSlug, invitedPeople, sameAdmin, jointInvites });
     const nameError = validateName(name, "Channel name");
     if (nameError) {
       res.status(400).json({ error: nameError });
@@ -1083,6 +1088,7 @@ channelRouter.post("/", async (req, res) => {
     }
     let channel: Awaited<ReturnType<typeof channelService.createChannel>>;
     let createdJointInvites: unknown[] = [];
+    let sameAdminProjections: channelService.SameAdminAcceptedProjection[] = [];
     if (parsedVisibility === "joint") {
       const result = await channelService.createJointChannel({
         hostServerId: req.serverId!,
@@ -1096,6 +1102,7 @@ channelRouter.post("/", async (req, res) => {
       });
       channel = result.channel;
       createdJointInvites = result.invites;
+      sameAdminProjections = result.acceptedProjections;
     } else {
       channel = await channelService.createChannel(
         req.serverId!,
@@ -1115,6 +1122,10 @@ channelRouter.post("/", async (req, res) => {
     const [channelWithMetadata] = await channelService.attachJointChannelMetadata([{ ...channel, joined: true }]);
     const io = req.app.get("io") as SocketServer | undefined;
     await publishChannelUpdate(io, channelWithMetadata);
+    if (sameAdminProjections.length > 0) {
+      await emitJointProjectionUpdates(io, channel.id);
+      await emitSameAdminJointProjections(io, req.userId!, sameAdminProjections);
+    }
     const activityMuteSupported = channelTypeSupportsActivityMute(channel.type);
     const rawActivityMuteState = activityMuteSupported
       ? await channelService.getInboxTargetActivityMuteState("user", req.userId!, channel.id)
@@ -1186,6 +1197,26 @@ channelRouter.post("/", async (req, res) => {
   }
 });
 
+/**
+ * A same-admin accept (RFC 075 §4.5) creates the target server's projection in
+ * the inviting request. Like a link accept, the new projection goes only to the
+ * inviter's sockets on that server; the caller refreshes existing projections
+ * with emitJointProjectionUpdates.
+ */
+async function emitSameAdminJointProjections(
+  io: SocketServer | undefined,
+  userId: string,
+  projections: readonly channelService.SameAdminAcceptedProjection[],
+) {
+  if (!io || projections.length === 0) return;
+  const projectionsWithMetadata = await channelService.attachJointChannelMetadata(
+    projections.map((projection) => ({ ...projection, joined: true })),
+  );
+  for (const channel of projectionsWithMetadata) {
+    io.to(socketUserServerRoom(userId, channel.serverId)).emit("channel:updated", { channel });
+  }
+}
+
 channelRouter.get("/joint-invites", async (req, res) => {
   try {
     const invites = await channelService.listPendingJointChannelInvites(req.serverId!, req.userId!);
@@ -1233,36 +1264,57 @@ channelRouter.get("/unread", async (req, res) => {
   try {
     addTraceEvent("unread_counts.load.started");
     const wantsSummary = req.query.summary === "1";
-    const loaded = wantsSummary
-      ? await tracePhase(
-        () => channelService.getUnreadSummary(req.serverId!, req.userId!, {
-          traceQuery: createTraceDbQueryTracer("unread_counts.loaded"),
-        }),
-        (durationMs, result) => ({
-          name: "unread_counts.loaded",
-          attrs: {
-            unread_channels_count: Object.keys(result).length,
-            response_summary: wantsSummary,
-          },
-        }),
-      )
-      : await tracePhase(
-        () => channelService.getUnreadCounts(req.serverId!, req.userId!, {
-          traceQuery: createTraceDbQueryTracer("unread_counts.loaded"),
-        }),
-        (durationMs, result) => ({
-          name: "unread_counts.loaded",
-          attrs: {
-            unread_channels_count: Object.keys(result).length,
-            response_summary: wantsSummary,
-          },
-        }),
-      );
-    addTraceEvent("response.ready", {
-      unread_channels_count: Object.keys(loaded).length,
-      response_summary: wantsSummary,
+    const { value: body, stale, staleReason, traceAttrs: staleTraceAttrs } = await readWithStaleOnOverload({
+      surface: wantsSummary ? "channels_unread_summary" : "channels_unread",
+      userId: req.userId!,
+      scope: req.serverId!,
+      load: async () => {
+        const loaded = wantsSummary
+          ? await tracePhase(
+            () => channelService.getUnreadSummary(req.serverId!, req.userId!, {
+              traceQuery: createTraceDbQueryTracer("unread_counts.loaded"),
+            }),
+            (durationMs, result) => ({
+              name: "unread_counts.loaded",
+              attrs: {
+                unread_channels_count: Object.keys(result).length,
+                response_summary: wantsSummary,
+              },
+            }),
+          )
+          : await tracePhase(
+            () => channelService.getUnreadCounts(req.serverId!, req.userId!, {
+              traceQuery: createTraceDbQueryTracer("unread_counts.loaded"),
+            }),
+            (durationMs, result) => ({
+              name: "unread_counts.loaded",
+              attrs: {
+                unread_channels_count: Object.keys(result).length,
+                response_summary: wantsSummary,
+              },
+            }),
+          );
+        return wantsSummary
+          ? {
+            channels: loaded,
+            threadUnread: channelService.summarizeThreadUnreadByParent(
+              loaded as Record<string, channelService.ChannelUnreadSummaryEntry>,
+            ),
+          }
+          : loaded;
+      },
     });
-    res.json(wantsSummary ? { channels: loaded } : loaded);
+    const channelsLoaded = wantsSummary ? (body as { channels: Record<string, unknown> }).channels : body;
+    addTraceEvent("response.ready", {
+      unread_channels_count: Object.keys(channelsLoaded).length,
+      response_summary: wantsSummary,
+      stale_served: stale,
+      ...staleTraceAttrs,
+    });
+    if (stale) res.setHeader(STALE_RESPONSE_HEADER, staleReason ?? "rw_overloaded");
+    // The bare count map is keyed by channel id, so it cannot carry a body
+    // flag; the header marks it. The summary also says so in the body.
+    res.json(stale && wantsSummary ? { ...(body as object), stale: true } : body);
   } catch (err) {
     if (respondToRisingWaveUnavailable(err, res)) return;
     res.status(500).json({ error: "Failed to get unread counts" });
@@ -1273,6 +1325,7 @@ channelRouter.get("/unread", async (req, res) => {
 // wake signals; clients hydrate/repair through these exact snapshot/difference
 // reads rather than treating socket payloads as a second source of truth.
 channelRouter.get("/activity/snapshot", async (req, res) => {
+  applyActivityContractHandshake(req, res, "snapshot");
   const requestId = typeof req.query.requestId === "string" ? req.query.requestId.trim() : "";
   const windowId = req.query.windowId;
   if (!requestId || (windowId !== undefined && windowId !== "main")) {
@@ -1309,6 +1362,7 @@ channelRouter.get("/activity/snapshot", async (req, res) => {
 });
 
 channelRouter.get("/activity/difference", async (req, res) => {
+  applyActivityContractHandshake(req, res, "difference");
   const requestId = typeof req.query.requestId === "string" ? req.query.requestId.trim() : "";
   const epoch = typeof req.query.epoch === "string" ? req.query.epoch : "";
   const afterWatermark = typeof req.query.afterWatermark === "string"
@@ -1385,50 +1439,63 @@ channelRouter.get("/inbox", async (req, res) => {
       query_present: Boolean(q),
       scope: scope ?? "all",
     });
-    const plan = await tracePhase(
-      () => getServerPlan(req.serverId!),
-      (durationMs, result) => ({
-        name: "history.policy.checked",
-        attrs: {
-          plan: result,
-        },
-      }),
-    );
-    const historyCutoff = getHistoryCutoff(plan);
-    const loadedResult = await tracePhase(
-      () => channelService.getInboxItems(req.serverId!, req.userId!, {
-        filter,
-        limit,
-        offset,
-        channelId,
-        q,
-        scope,
-        sort,
-        historyCutoff,
-        includeUnfollowedThreads: filter === "all",
-        traceQuery: createTraceDbQueryTracer("inbox.loaded"),
-      }),
-      (durationMs, loaded) => ({
-        name: "inbox.loaded",
-        attrs: {
+    // Only the first page without a search: the view a fresh load opens on.
+    const load = async () => {
+      const plan = await tracePhase(
+        () => getServerPlan(req.serverId!),
+        (durationMs, result) => ({
+          name: "history.policy.checked",
+          attrs: {
+            plan: result,
+          },
+        }),
+      );
+      const historyCutoff = getHistoryCutoff(plan);
+      const loadedResult = await tracePhase(
+        () => channelService.getInboxItems(req.serverId!, req.userId!, {
           filter,
           limit,
           offset,
-          channel_id_present: Boolean(channelId),
-          query_present: Boolean(q),
-          history_cutoff_present: Boolean(historyCutoff),
-          inbox_items_count: loaded.items.length,
-          total_count: loaded.totalCount,
-          total_unread_count: loaded.totalUnreadCount,
-          active_unread_count: loaded.activeUnreadCount,
-          channel_items_count: countInboxItemsByKind(loaded.items, "channel"),
-          dm_items_count: countInboxItemsByKind(loaded.items, "dm"),
-          thread_items_count: countInboxItemsByKind(loaded.items, "thread"),
-          has_more: loaded.hasMore,
-        },
-      }),
-    );
-    const result = await filterGuestInboxResult(loadedResult, req.userId!, req.serverId!);
+          channelId,
+          q,
+          scope,
+          sort,
+          historyCutoff,
+          includeUnfollowedThreads: filter === "all",
+          traceQuery: createTraceDbQueryTracer("inbox.loaded"),
+        }),
+        (durationMs, loaded) => ({
+          name: "inbox.loaded",
+          attrs: {
+            filter,
+            limit,
+            offset,
+            channel_id_present: Boolean(channelId),
+            query_present: Boolean(q),
+            history_cutoff_present: Boolean(historyCutoff),
+            inbox_items_count: loaded.items.length,
+            total_count: loaded.totalCount,
+            total_unread_count: loaded.totalUnreadCount,
+            active_unread_count: loaded.activeUnreadCount,
+            channel_items_count: countInboxItemsByKind(loaded.items, "channel"),
+            dm_items_count: countInboxItemsByKind(loaded.items, "dm"),
+            thread_items_count: countInboxItemsByKind(loaded.items, "thread"),
+            has_more: loaded.hasMore,
+          },
+        }),
+      );
+      return await filterGuestInboxResult(loadedResult, req.userId!, req.serverId!);
+    };
+    const { value: result, stale, staleReason, traceAttrs: staleTraceAttrs } = offset === 0 && !q
+      ? await readWithStaleOnOverload({
+        surface: "inbox_first_page",
+        userId: req.userId!,
+        scope: [req.serverId!, filter, limit, sort, scope ?? "", channelId ?? ""].join(":"),
+        load,
+        softTimeoutMs: resolveSoftTimeoutMs(),
+      })
+      : { value: await load(), stale: false, staleReason: undefined, traceAttrs: {} };
+    if (stale) res.setHeader(STALE_RESPONSE_HEADER, staleReason ?? "rw_overloaded");
     addTraceEvent("response.ready", {
       filter,
       channel_id_present: Boolean(channelId),
@@ -1438,8 +1505,10 @@ channelRouter.get("/inbox", async (req, res) => {
       total_unread_count: result.totalUnreadCount,
       active_unread_count: result.activeUnreadCount,
       has_more: result.hasMore,
+      stale_served: stale,
+      ...staleTraceAttrs,
     });
-    res.json(result);
+    res.json(stale ? { ...result, stale: true } : result);
   } catch (err) {
     sendJsonServerError(req, res, {
       error: "Failed to get inbox",
@@ -1677,37 +1746,76 @@ channelRouter.post("/inbox/read-all", async (req, res) => {
 });
 
 // List threads the user participates in, with unread counts
+const FOLLOWED_THREADS_MAX_LIMIT = 200;
+
 channelRouter.get("/threads/followed", async (req, res) => {
   try {
     addTraceEvent("followed_threads.load.started");
-    const plan = await tracePhase(
-      () => getServerPlan(req.serverId!),
-      (durationMs, result) => ({
-        name: "history.policy.checked",
-        attrs: {
-          plan: result,
-        },
-      }),
-    );
-    const historyCutoff = getHistoryCutoff(plan);
-    const threads = await tracePhase(
-      () => channelService.getFollowedThreads(req.serverId!, req.userId!, historyCutoff, {
-        traceQuery: createTraceDbQueryTracer("followed_threads.loaded"),
-      }),
-      (durationMs, result) => ({
-        name: "followed_threads.loaded",
-        attrs: {
-          followed_threads_count: result.length,
-          unread_threads_count: result.filter((thread) => thread.unreadCount > 0).length,
-          history_cutoff_present: Boolean(historyCutoff),
-        },
-      }),
-    );
+    // `limit` pages the list (newest activity first) and returns `next`;
+    // without it the whole list is returned as before (older web clients).
+    // `unreadOnly=1` keeps only the threads with unread replies, all channels.
+    const limitParam = req.query.limit;
+    const limit = limitParam === undefined ? undefined : Number(limitParam);
+    if (limit !== undefined && !(Number.isInteger(limit) && limit >= 1 && limit <= FOLLOWED_THREADS_MAX_LIMIT)) {
+      res.status(400).json({ error: `limit must be an integer from 1 to ${FOLLOWED_THREADS_MAX_LIMIT}` });
+      return;
+    }
+    const cursorParam = req.query.cursor;
+    const cursor = cursorParam === undefined ? null : channelService.parseFollowedThreadsCursor(cursorParam);
+    if (cursorParam !== undefined && (cursor === null || limit === undefined)) {
+      res.status(400).json({ error: "cursor must be a value returned as next, with limit" });
+      return;
+    }
+    const unreadOnly = req.query.unreadOnly === "1" || req.query.unreadOnly === "true";
+    const load = async () => {
+      const plan = await tracePhase(
+        () => getServerPlan(req.serverId!),
+        (durationMs, result) => ({
+          name: "history.policy.checked",
+          attrs: {
+            plan: result,
+          },
+        }),
+      );
+      const historyCutoff = getHistoryCutoff(plan);
+      return await tracePhase(
+        () => channelService.loadFollowedThreads(req.serverId!, req.userId!, historyCutoff, {
+          traceQuery: createTraceDbQueryTracer("followed_threads.loaded"),
+          unreadOnly,
+          ...(limit === undefined ? {} : { page: { limit, cursor } }),
+        }),
+        (durationMs, result) => ({
+          name: "followed_threads.loaded",
+          attrs: {
+            followed_threads_count: result.threads.length,
+            unread_threads_count: result.threads.filter((thread) => thread.unreadCount > 0).length,
+            history_cutoff_present: Boolean(historyCutoff),
+            unread_only: unreadOnly,
+            paged: limit !== undefined,
+            has_next: result.next !== null,
+          },
+        }),
+      );
+    };
+    // Only first pages are remembered for the stale fallback (like the Inbox).
+    const { value: loaded, stale, staleReason, traceAttrs: staleTraceAttrs } = cursor === null
+      ? await readWithStaleOnOverload({
+        surface: "followed_threads",
+        userId: req.userId!,
+        scope: [req.serverId!, unreadOnly ? "unread" : "all", limit ?? "full"].join(":"),
+        load,
+      })
+      : { value: await load(), stale: false, staleReason: undefined, traceAttrs: {} };
+    const { threads, next } = loaded;
     addTraceEvent("response.ready", {
       followed_threads_count: threads.length,
       unread_threads_count: threads.filter((thread) => thread.unreadCount > 0).length,
+      stale_served: stale,
+      ...staleTraceAttrs,
     });
-    res.json({ threads });
+    if (stale) res.setHeader(STALE_RESPONSE_HEADER, staleReason ?? "rw_overloaded");
+    const body = limit === undefined ? { threads } : { threads, next };
+    res.json(stale ? { ...body, stale: true } : body);
   } catch (err) {
     if (respondToRisingWaveOverload(err, res)) return;
     res.status(500).json({ error: "Failed to get followed threads" });
@@ -3382,7 +3490,7 @@ channelRouter.post("/:id/convert-to-joint", async (req, res) => {
 
 channelRouter.post("/:id/joint-invites", async (req, res) => {
   try {
-    const { targetServerSlug, invitedPeople } = req.body || {};
+    const { targetServerSlug, invitedPeople, sameAdmin } = req.body || {};
     if (typeof targetServerSlug !== "string" || !targetServerSlug.trim()) {
       res.status(400).json({ error: "Invite server slug is required" });
       return;
@@ -3417,10 +3525,12 @@ channelRouter.post("/:id/joint-invites", async (req, res) => {
       invitedByUserId: req.userId!,
       targetServerSlug,
       invitedPeople: selectedInvitedPeople,
+      sameAdmin: sameAdmin === true,
     });
     const [channelWithMetadata] = await channelService.attachJointChannelMetadata([{ ...channel, joined: true }]);
     const io = req.app.get("io") as SocketServer | undefined;
     await emitJointProjectionUpdates(io, channel.id);
+    await emitSameAdminJointProjections(io, req.userId!, result.acceptedProjections);
     res.json({ ...channelWithMetadata, jointInvites: result.invites, jointInvite: result.invites[0] ?? null });
   } catch (err: any) {
     if (sendJointInviteValidationError(res, err)) return;
@@ -5182,6 +5292,43 @@ channelRouter.post("/:id/read-all", async (req, res) => {
       return;
     }
     res.status(500).json({ error: "Failed to mark as read" });
+  }
+});
+
+// Explicit sidebar action: channel messages plus active followed threads.
+// The existing /read-all contract remains a single-scope read.
+channelRouter.post("/:id/conversation-read-all", async (req, res) => {
+  try {
+    const flag = await evaluateFeatureFlag({
+      key: SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY, serverId: req.serverId!, userId: req.userId!,
+    });
+    if (!flag.enabled) {
+      res.status(404).json({ error: "Conversation read-all is not enabled", code: "sidebar_mark_all_read_disabled" });
+      return;
+    }
+    if (!await channelService.canUserAccessChannel(req.params.id, req.userId!, req.serverId!)) {
+      res.status(404).json({ error: "Conversation not found" });
+      return;
+    }
+    const result = await channelService.markConversationReadLatest(req.serverId!, req.userId!, req.params.id);
+    emitReadStateUpdatedBulk(req, result.scopes);
+    res.json({
+      ok: true,
+      serverId: req.serverId!,
+      markedCount: result.markedCount,
+      scopes: result.scopes.map((scope) => ({
+        scopeId: scope.channelId,
+        maxReadSeq: scope.maxReadSeq,
+        readStateVersion: scope.readStateVersion,
+      })),
+    });
+  } catch (err) {
+    if (sendCompatibilityReadPending(res, err)) return;
+    if (err instanceof ReadMutationError && err.code === "SCOPE_NOT_FOUND") {
+      res.status(404).json({ error: "Conversation not found" });
+      return;
+    }
+    sendJsonServerError(req, res, { error: "Failed to mark conversation as read", logPrefix: "Failed to mark conversation as read:", err });
   }
 });
 

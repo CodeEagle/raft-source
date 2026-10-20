@@ -1,4 +1,5 @@
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ComponentProps } from "react";
 import { isHostShell } from "../../embed";
 import { useIntl } from "react-intl";
 import { useNavigate } from "react-router-dom";
@@ -25,8 +26,10 @@ import { useInboxStore } from "../../store/inboxStore";
 import { useChannelStore } from "../../store/channelStore";
 import { useMachineStore } from "../../store/machineStore";
 import { SERVER_NOTIFICATION_PREFS_UPDATED_EVENT } from "../../store/events/notificationPrefsEvents";
+import type { RailMode } from "../../hooks/useSidebarTab";
 import { useRailMode } from "../../hooks/useSidebarTab";
 import { trackActivityOpen } from "../../analytics/activity";
+import { trackNavEntrySelected } from "../../analytics/navigation";
 import {
   hasCurrentServerActivityUnread,
   hasOtherServerActivityUnread,
@@ -50,7 +53,7 @@ import {
   PopoverContent,
   PopoverTrigger,
   Spinner,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import NotificationTrigger from "./NotificationTrigger";
 import { hasChatAttentionUnread, selectChatAttentionChannelIds } from "../../utils/chatAttentionUnread";
@@ -83,8 +86,17 @@ const TOOLTIP_CONTENT_PROPS = {
   right: { side: "right" },
 } as const;
 
-function stopMouseDownPropagation(event: React.MouseEvent) {
-  event.stopPropagation();
+// The public rail's workspace block: a rail item filled by the workspace
+// avatar. It opens the switcher for a signed-in visitor and asks an anonymous
+// one to sign in, so it renders both as a PopoverTrigger and on its own.
+function PublicServerSwitcherTrigger(props: ComponentProps<typeof AppRailItem>) {
+  return (
+    <AppRailItem
+      {...props}
+      className="group size-10 overflow-hidden p-0 md:[@media(max-height:600px)]:size-9"
+      data-testid="public-server-switcher-trigger"
+    />
+  );
 }
 
 function initialFocusForKeyboardOpen(openType: string) {
@@ -99,7 +111,8 @@ export function focusFirstUnreadActivity() {
 
 interface LeftRailProps {
   hidden?: boolean;
-  thinDivider?: boolean;
+  /** The top bar owns the server switcher, search and notifications, so the rail drops them. */
+  topBar?: boolean;
   publicProjection?: PublicLeftRailProjection;
 }
 
@@ -113,7 +126,7 @@ export interface PublicLeftRailProjection {
   onAnonymousServerSelection: () => void;
 }
 
-export function LeftRail({ hidden, thinDivider = false, publicProjection }: LeftRailProps) {
+export function LeftRail({ hidden, topBar = false, publicProjection }: LeftRailProps) {
   // Display-language (react-intl) — layout namespace. Rail tab labels feed both
   // raft-ui Tooltip content and `aria-label`, so they must come from the catalog,
   // not literals.
@@ -152,7 +165,7 @@ export function LeftRail({ hidden, thinDivider = false, publicProjection }: Left
         { count: computerAttentionCount, total: machineCount },
       )
     : undefined;
-  const { railMode, selectRailMode } = useRailMode();
+  const { railMode, currentMode, selectRailMode } = useRailMode();
 
   const [showServerMenu, setShowServerMenu] = useState(false);
   const [showHelpMenu, setShowHelpMenu] = useState(false);
@@ -220,99 +233,104 @@ export function LeftRail({ hidden, thinDivider = false, publicProjection }: Left
     hasPreloadActiveUnread: hasPreloadActivityUnread,
     summaryUnreadCount: currentServerActivityCount,
   });
-  // Chat dot tracks unread in joined channels and DMs; Activity dot tracks
-  // the server-authoritative Activity count independently of the selected
-  // Activity filter.
-  // Before Activity earned its own rail
-  // entry (stdrc #proj-activity:171042a3 6/20) the Chat dot summed both
-  // signals so the user wouldn't miss inbox-only items; with Activity now
-  // visible on the rail, the Chat dot returns to its narrower meaning.
+  // Chat dot tracks unread in joined channels and DMs only; Activity has its
+  // own rail entry, whose dot tracks the server-authoritative Activity count
+  // independently of the selected Activity filter.
   const hasChatUnread = hasLocalChatUnread;
 
-  const toggleServerMenu = useCallback(() => {
-    setShowHelpMenu(false);
-    setShowServerMenu((open) => !open);
+  // One rail popup at a time: opening the switcher closes Help.
+  const handleServerMenuOpenChange = useCallback((open: boolean) => {
+    if (open) setShowHelpMenu(false);
+    setShowServerMenu(open);
   }, []);
   const closeServerMenu = useCallback(() => setShowServerMenu(false), []);
+  // The switcher opens 8px right of the rail head, 4px below its top.
+  const railHeaderRef = useRef<HTMLDivElement | null>(null);
   const closeHelpMenu = useCallback(() => setShowHelpMenu(false), []);
-  const railModeSelectors = useMemo(() => ({
-    search: () => selectRailMode("search"),
-    chat: () => selectRailMode("chat"),
-    tasks: () => selectRailMode("tasks"),
-    members: () => selectRailMode("members"),
-    computers: () => selectRailMode("computers"),
-    settings: () => selectRailMode("settings"),
-  }), [selectRailMode]);
+  const railModeSelectors = useMemo(() => {
+    const select = (mode: Exclude<RailMode, "activity">) => () => {
+      trackNavEntrySelected(mode === "chat" ? "home" : mode, "rail", currentMode === mode);
+      selectRailMode(mode);
+    };
+    return {
+      search: select("search"),
+      chat: select("chat"),
+      tasks: select("tasks"),
+      members: select("members"),
+      computers: select("computers"),
+      settings: select("settings"),
+    };
+  }, [currentMode, selectRailMode]);
   const handleClassicActivityClick = useCallback((event: React.MouseEvent) => {
     if (event.detail >= 2) return;
     trackActivityOpen("rail");
+    trackNavEntrySelected("activity", "rail", currentMode === "activity");
     selectRailMode("activity");
-  }, [selectRailMode]);
+  }, [currentMode, selectRailMode]);
   const selectPublicChatMode = useCallback(() => publicProjection?.onSelectMode("chat"), [publicProjection]);
   const selectPublicSettingsMode = useCallback(() => publicProjection?.onSelectMode("settings"), [publicProjection]);
   const openPublicFeedback = useCallback(() => publicProjection?.onSelectSettingsTab("feedback"), [publicProjection]);
   const openPublicMobileApp = useCallback(() => publicProjection?.onSelectSettingsTab("about"), [publicProjection]);
-  const handlePublicServerSwitcherClick = useCallback(() => {
-    if (!publicProjection) return;
-    if (!publicProjection.authenticated) {
-      publicProjection.onAnonymousServerSelection();
-      return;
-    }
-    setShowServerMenu((open) => !open);
+  const handleAnonymousServerSelection = useCallback(() => {
+    publicProjection?.onAnonymousServerSelection();
   }, [publicProjection]);
-
-  // Outside-click + ESC dismissal lives inside <ServerSwitcherMenu>; the
-  // trigger button below uses `onMouseDown={(e) => e.stopPropagation()}` so
-  // toggling the menu doesn't re-fire the document mousedown listener and
-  // close the just-opened menu.
 
   const serverInitial = (server?.name || "S").trim().charAt(0).toUpperCase() || "S";
 
   if (hidden) return null;
   if (publicProjection) {
-    // Public rail runs the same rui AppRail* chrome as the authenticated rail,
-    // in every theme (cindyz, #wg-rbac:f8b37c04: "都改成和登录后的一致"). This
-    // replaces the hand-built brutal strip that rendered yellow in Elegant, and
-    // the black server-avatar block that only this rail had.
+    // The public rail is the same raft-ui AppRail as the signed-in one.
+    const publicServerTriggerLabel = formatMessage(
+      { id: "layout.leftRail.switchServerAria" },
+      { serverName: publicProjection.server.name },
+    );
+    // The avatar fills the button, so on selected it shrinks a step and the
+    // selected card shows round it as a frame.
+    const publicServerIcon = (
+      <AppRailItemIcon>
+        <AvatarSlot
+          context="panel-header"
+          type="server"
+          serverAvatarUrl={publicProjection.server.avatarUrl}
+          serverInitial={publicProjection.server.name}
+          className="group-data-[selected=true]:!size-8 md:[@media(max-height:600px)]:!size-8 md:[@media(max-height:600px)]:group-data-[selected=true]:!size-7"
+        />
+      </AppRailItemIcon>
+    );
     return (
       <AppRailRoot
         className="hidden shrink-0 pb-2 md:flex"
         data-testid="workspace-left-rail"
         data-public-server-rail="true"
       >
-        <AppRailHeader>
-          <Tooltip content={publicProjection.server.name} contentProps={TOOLTIP_CONTENT_PROPS.right}>
-            <AppRailItem
-              selected={showServerMenu}
-              onMouseDown={stopMouseDownPropagation}
-              onClick={handlePublicServerSwitcherClick}
-              aria-label={formatMessage(
-                { id: "layout.leftRail.switchServerAria" },
-                { serverName: publicProjection.server.name },
-              )}
-              className="size-10 overflow-hidden p-0 md:[@media(max-height:600px)]:size-9"
-              data-testid="public-server-switcher-trigger"
-            >
-              <AppRailItemIcon>
-                <AvatarSlot
-                  context="panel-header"
-                  type="server"
-                  serverAvatarUrl={publicProjection.server.avatarUrl}
-                  serverInitial={publicProjection.server.name}
-                  className="md:[@media(max-height:600px)]:!size-8"
-                />
-              </AppRailItemIcon>
-            </AppRailItem>
-          </Tooltip>
+        <AppRailHeader ref={railHeaderRef}>
           {publicProjection.authenticated ? (
-            <ServerSwitcherMenu
-              open={showServerMenu}
-              onClose={closeServerMenu}
-              serverUnreadCounts={EMPTY_SERVER_UNREAD_COUNTS}
-              testId="desktop-server-switcher-menu"
-              className="absolute left-full top-1 ml-2 max-h-[calc(100dvh-16px)] w-64"
-            />
-          ) : null}
+            <Popover open={showServerMenu} onOpenChange={handleServerMenuOpenChange}>
+              <Tooltip content={publicProjection.server.name} contentProps={TOOLTIP_CONTENT_PROPS.right}>
+                <PopoverTrigger
+                  render={<PublicServerSwitcherTrigger selected={showServerMenu} aria-label={publicServerTriggerLabel} />}
+                >
+                  {publicServerIcon}
+                </PopoverTrigger>
+              </Tooltip>
+              <ServerSwitcherMenu
+                onClose={closeServerMenu}
+                serverUnreadCounts={EMPTY_SERVER_UNREAD_COUNTS}
+                testId="desktop-server-switcher-menu"
+                anchor={railHeaderRef}
+                side="right"
+                sideOffset={8}
+                alignOffset={4}
+                className="w-64"
+              />
+            </Popover>
+          ) : (
+            <Tooltip content={publicProjection.server.name} contentProps={TOOLTIP_CONTENT_PROPS.right}>
+              <PublicServerSwitcherTrigger aria-label={publicServerTriggerLabel} onClick={handleAnonymousServerSelection}>
+                {publicServerIcon}
+              </PublicServerSwitcherTrigger>
+            </Tooltip>
+          )}
         </AppRailHeader>
         <AppRailNav>
           <RailTabButton
@@ -381,70 +399,73 @@ export function LeftRail({ hidden, thinDivider = false, publicProjection }: Left
   // assertion can catch.
   if (isHostShell()) return null;
 
-  const brutalRailDividerClassName = thinDivider ? "theme-brutal:!border-r" : "";
-
   return (
     <>
       <AppRailRoot
-        className={`hidden md:flex pb-2 ${brutalRailDividerClassName}`}
+        className="hidden md:flex"
         data-testid="workspace-left-rail"
       >
+      {topBar ? null : (
+      <>
       {/* Server switcher (top) */}
-      <AppRailHeader>
-        <Tooltip
-          content={server?.name || formatMessage({ id: "layout.leftRail.serverFallbackName" })}
-          contentProps={TOOLTIP_CONTENT_PROPS.right}
-        >
-          <AppRailItem
-            selected={showServerMenu}
-            onMouseDown={stopMouseDownPropagation}
-            onClick={toggleServerMenu}
-            aria-label={formatMessage(
-              { id: "layout.leftRail.switchServerAria" },
-              { serverName: server?.name || formatMessage({ id: "layout.leftRail.serverFallbackName" }) },
-            )}
-            // Server-name button matches RailTabButton geometry: h-10 (40)
-            // on tall viewports for visual weight, h-9 (36) on short to fit
-            // the compact 48px h-panel-header. stdrc 2026-05-02
-            // #proj-uiux:8e7df837 task #98 followup 54fbf722: "server name
-            // 按钮怎么没修？" — keep server-initial in step with the rail
-            // tabs, not pinned at size-icon-header (36 across all viewports).
-            // No overflow-hidden here: the avatar clips its own image, and the
-            // other-server unread dot sits on the button's corner (task #685).
-            className="size-10 p-0 md:[@media(max-height:600px)]:size-9"
+      <AppRailHeader ref={railHeaderRef}>
+        <Popover open={showServerMenu} onOpenChange={handleServerMenuOpenChange}>
+          <Tooltip
+            content={server?.name || formatMessage({ id: "layout.leftRail.serverFallbackName" })}
+            contentProps={TOOLTIP_CONTENT_PROPS.right}
           >
-            <AppRailItemIcon className="[&_[data-slot=app-rail-item-attention-mask]]:z-[2] [&_[data-slot=app-rail-item-indicator]]:z-[2]">
-              <AvatarSlot
-                context="panel-header"
-                type="server"
-                serverAvatarUrl={server?.avatarUrl}
-                serverInitial={serverInitial}
-                className="md:[@media(max-height:600px)]:!size-8"
-              />
-              {hasOtherServerUnread ? (
-                <AppRailItemAttention title={formatMessage({ id: "layout.leftRail.serverFallbackName" })}>
-                  <span aria-hidden="true" className="hidden">
-                    <AttentionDot size="lg" aria-hidden="true" />
-                  </span>
-                </AppRailItemAttention>
-              ) : null}
-            </AppRailItemIcon>
-          </AppRailItem>
-        </Tooltip>
-
-        <ServerSwitcherMenu
-          open={showServerMenu}
-          onClose={closeServerMenu}
-          serverUnreadCounts={serverUnreadCounts}
-          testId="desktop-server-switcher-menu"
-          className="absolute left-full top-1 ml-2 w-64 max-h-[calc(100dvh-16px)]"
-        />
+            <PopoverTrigger
+              render={(
+                <AppRailItem
+                  selected={showServerMenu}
+                  aria-label={formatMessage(
+                    { id: "layout.leftRail.switchServerAria" },
+                    { serverName: server?.name || formatMessage({ id: "layout.leftRail.serverFallbackName" }) },
+                  )}
+                  // The workspace block is a rail item: 40, 36 in short
+                  // windows. No overflow-hidden: the avatar clips its own
+                  // image, and the other-workspace unread dot sits on the
+                  // button's corner. `group` lets the avatar read the item's
+                  // selected state.
+                  className="group size-10 p-0 md:[@media(max-height:600px)]:size-9"
+                />
+              )}
+            >
+              <AppRailItemIcon className="[&_[data-slot=app-rail-item-attention-mask]]:z-[2] [&_[data-slot=app-rail-item-indicator]]:z-[2]">
+                {/* The avatar fills the button, so on selected it shrinks a
+                    step and the selected card shows round it as a frame. */}
+                <AvatarSlot
+                  context="panel-header"
+                  type="server"
+                  serverAvatarUrl={server?.avatarUrl}
+                  serverInitial={serverInitial}
+                  className="group-data-[selected=true]:!size-8 md:[@media(max-height:600px)]:!size-8 md:[@media(max-height:600px)]:group-data-[selected=true]:!size-7"
+                />
+                {hasOtherServerUnread ? (
+                  <AppRailItemAttention title={formatMessage({ id: "layout.leftRail.serverFallbackName" })} />
+                ) : null}
+              </AppRailItemIcon>
+            </PopoverTrigger>
+          </Tooltip>
+          <ServerSwitcherMenu
+            onClose={closeServerMenu}
+            serverUnreadCounts={serverUnreadCounts}
+            testId="desktop-server-switcher-menu"
+            anchor={railHeaderRef}
+            side="right"
+            sideOffset={8}
+            alignOffset={4}
+            className="w-64"
+          />
+        </Popover>
       </AppRailHeader>
+      </>
+      )}
 
       {/* Rail buttons (middle). Mutually-exclusive — at most one is
           highlighted at a time. */}
       <AppRailNav className="relative w-full">
-        <RailTabButton icon={<Search size={18} />} label={formatMessage({ id: "layout.leftRail.tabSearch" })} active={railMode === "search"} onClick={railModeSelectors.search} testId="left-rail-tab-search" />
+        {topBar ? null : <RailTabButton icon={<Search size={18} />} label={formatMessage({ id: "layout.leftRail.tabSearch" })} active={railMode === "search"} onClick={railModeSelectors.search} testId="left-rail-tab-search" />}
         <RailTabButton icon={<MessageSquare size={18} />} label={formatMessage({ id: "layout.leftRail.tabChat" })} active={railMode === "chat"} onClick={railModeSelectors.chat} showDot={hasChatUnread} dotInactiveOnly testId="left-rail-tab-chat" />
         <RailTabButton
           icon={<Activity size={18} />}
@@ -472,15 +493,18 @@ export function LeftRail({ hidden, thinDivider = false, publicProjection }: Left
 
       {/* Notification Center trigger — the permanent Bell sits above Help.
           Its pink dot is conditional, but the entry point and empty-state
-          drawer remain available even with zero notifications. Originating direction:
-          stdrc 2026-05-02 #proj-uiux:f87f6eb9 (task #94 "the top warning bar
-          covers itself; collect everything into a popup hung off Settings").
+          drawer remain available even with zero notifications: workspace
+          notices collect there instead of stacking warning bars on the page.
           The popup floats to the right of the rail. */}
       <AppRailFooter>
-      <NotificationTrigger flavor="rail-bottom" />
+      {/* With the top bar, the Bell lives in its right region; Help stays here
+          above Settings. */}
+      {topBar ? null : <NotificationTrigger flavor="rail-bottom" />}
 
+      {/* Each footer item is the bare 40px rail button: the footer's 6px gap
+          spaces them like the items above (Raft DS › Rail). */}
       <Popover open={showHelpMenu} onOpenChange={setShowHelpMenu}>
-        <div className="relative flex h-11 w-full items-center justify-center">
+        <div className="relative flex w-full justify-center">
           <PopoverTrigger
             openOnHover
             delay={0}
@@ -508,7 +532,8 @@ export function LeftRail({ hidden, thinDivider = false, publicProjection }: Left
         </div>
       </Popover>
 
-      <div className="flex h-11 w-full items-center justify-center">
+
+      <div className="flex w-full justify-center">
         <RailTabButton icon={<Settings size={18} />} label={formatMessage({ id: "layout.leftRail.tabSettings" })} active={railMode === "settings"} onClick={railModeSelectors.settings} showDot={feedbackUnread > 0} dotTooltip={formatMessage({ id: "layout.systemNotifications.feedbackRepliesTitle" })} testId="left-rail-settings" />
       </div>
       </AppRailFooter>
@@ -517,9 +542,10 @@ export function LeftRail({ hidden, thinDivider = false, publicProjection }: Left
   );
 }
 
-function HelpMenu({
+export function HelpMenu({
   servers,
   serverSlugOverride,
+  side = "right",
   onClose,
   showMobileAppBadge,
   onMobileAppOpened,
@@ -528,6 +554,8 @@ function HelpMenu({
 }: {
   servers: Server[];
   serverSlugOverride?: string;
+  /** Where the menu opens from its trigger: beside the rail, or under the top bar. */
+  side?: "right" | "bottom";
   onClose: () => void;
   showMobileAppBadge: boolean;
   onMobileAppOpened: () => void;
@@ -607,7 +635,7 @@ function HelpMenu({
   return (
     <>
       <PopoverContent
-        side="right"
+        side={side}
         align="end"
         sideOffset={8}
         initialFocus={initialFocusForKeyboardOpen}
@@ -616,7 +644,7 @@ function HelpMenu({
         data-testid="left-rail-help-menu"
         className="w-80 overflow-hidden p-0"
       >
-          <div className="flex items-center border-b border-line-muted bg-layer-panel px-3 py-2 text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-brutal-cream theme-brutal:text-black">
+          <div className="flex items-center border-b border-line-hairline px-3 py-2">
             <SectionEyebrow>
               {formatMessage({ id: "layout.leftRail.helpMenuTitle" })}
             </SectionEyebrow>
@@ -629,7 +657,7 @@ function HelpMenu({
             {formatMessage({ id: "layout.leftRail.helpDocumentation" })}
           </MenuItem>
           {/* Signpost only — the content lives in Settings so there is one host
-              to keep current, not two that can drift (@huxijin, #wg-download-mobile). */}
+              to keep current, not two that can drift. */}
           {serverSlug ? (
             <MenuItem
               icon={<Smartphone size={14} className="shrink-0" />}
@@ -692,7 +720,6 @@ type RailTabButtonProps = Omit<
   active: boolean;
   showDot?: boolean;
   dotInactiveOnly?: boolean;
-  dotTone?: string;
   dotTooltip?: string;
   tooltipSide?: "left" | "right";
   onClick: (event: React.MouseEvent) => void;
@@ -710,7 +737,6 @@ export const RailTabButton = forwardRef<HTMLButtonElement, RailTabButtonProps>(f
   active,
   showDot,
   dotInactiveOnly,
-  dotTone,
   dotTooltip,
   tooltipSide = "right",
   onClick,
@@ -741,24 +767,14 @@ export const RailTabButton = forwardRef<HTMLButtonElement, RailTabButtonProps>(f
       aria-expanded={ariaExpanded}
       data-testid={testId}
       onPointerDown={onPointerDown}
-      // RailTabButton size — h-10 (40) on tall viewports for visual weight
-      // matching the original brutal aesthetic; shrinks to h-9 (36) on
-      // short viewports (max-h:600) to fit the compact 48px h-panel-header
-      // and stay aligned with size-icon-header (36) used by main panel
-      // header icons. stdrc 2026-05-02 #proj-uiux:8e7df837 task #98:
-      // "正常桌面上还是原来的大小比较合适，只在缩窄 rail 和 header 的时候
-      // 应该缩按钮".
+      // Raft Design System › Rail: 40×40 items, 36×36 when the window is
+      // under 600 tall (the heads shrink to 48 with them).
       className={`size-10 [@media(max-height:600px)]:h-9 [@media(max-height:600px)]:w-9 ${className}`}
     >
       <AppRailItemIcon className="relative">
         {icon}
         {dotVisible ? (
-          <AppRailItemAttention title={dotTooltip ?? label}>
-            {icon}
-            <span className="hidden">
-              <AttentionDot size="lg" tone={dotTone} aria-hidden="true" />
-            </span>
-          </AppRailItemAttention>
+          <AppRailItemAttention title={dotTooltip ?? label} />
         ) : null}
       </AppRailItemIcon>
       <AppRailItemLabel>{label}</AppRailItemLabel>

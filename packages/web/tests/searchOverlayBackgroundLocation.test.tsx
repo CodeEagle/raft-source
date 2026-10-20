@@ -201,3 +201,42 @@ test("isFullPageSearchRequested / fullPageSearchHopState: the hop keeps a search
   assert.deepEqual(fullPageSearchHopState({ searchFrom: "javascript:alert(1)" }), {});
   assert.deepEqual(fullPageSearchHopState(null), {});
 });
+
+// Task #143: the web gets the same overlay at desktop width (md, ≥768px). Phones
+// keep the full page, and a /search URL with nothing to float over (opened fresh
+// from a link) lands on the full page instead of hovering over an empty home.
+function webWidth(px: number) {
+  const prev = window.matchMedia;
+  window.matchMedia = ((query: string) => ({
+    matches: /min-width:\s*768px/.test(query) && px >= 768,
+    media: query, onchange: null,
+    addListener() {}, removeListener() {}, addEventListener() {}, removeEventListener() {}, dispatchEvent: () => false,
+  })) as typeof window.matchMedia;
+  return () => { window.matchMedia = prev; };
+}
+
+test("web at desktop width: search entry floats the overlay over the current view", () => {
+  const restore = webWidth(1280);
+  try {
+    const state = searchEntryState({ pathname: "/s/b/channel/c", search: "" });
+    assert.deepEqual(state.backgroundLocation, { pathname: "/s/b/channel/c", search: "" });
+    const bg = resolveSearchOverlayBackground(locB(state));
+    assert.equal(bg?.pathname, "/s/b/channel/c");
+  } finally { restore(); }
+});
+
+test("web at desktop width: a /search with nothing behind it is the full page, not an overlay over an empty home", () => {
+  const restore = webWidth(1280);
+  try {
+    assert.equal(resolveSearchOverlayBackground(locB(null)), null);
+  } finally { restore(); }
+});
+
+test("web at phone width: search stays the full page", () => {
+  const restore = webWidth(390);
+  try {
+    const state = searchEntryState({ pathname: "/s/b/channel/c", search: "" });
+    assert.equal(state.backgroundLocation, undefined);
+    assert.equal(resolveSearchOverlayBackground(locB({ backgroundLocation: { pathname: "/s/b/channel/c", search: "" } })), null);
+  } finally { restore(); }
+});

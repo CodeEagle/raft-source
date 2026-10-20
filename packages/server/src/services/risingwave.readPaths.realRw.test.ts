@@ -369,9 +369,11 @@ test.skipIf(!configured)("threads below a deleted DM leave Activity and the side
   );
 
   await db.update(channels).set({ deletedAt: new Date() }).where(eq(channels.id, dm.id));
+  // The server-side parent check hides the threads as soon as Postgres has the
+  // deletion, so also wait for the DM's own row: that is when RisingWave has it.
   const after = await waitFor(
-    (targets) => threads.every((id) => !targets.includes(id)),
-    "threads below the deleted DM are still served",
+    (targets) => [...threads, dm.id].every((id) => !targets.includes(id)),
+    "the deleted DM or a thread below it is still served",
   );
   const pg = (await getInboxItems(f.receiverServer.id, user.id, { filter: "all", limit: 50, forceCanonicalPostgres: true }))
     .items.map(targetOf);
@@ -387,6 +389,13 @@ test.skipIf(!configured)("threads below a deleted DM leave Activity and the side
     [user.id, threads],
   );
   assert.deepEqual(sidebar.result.rows, [], "the sidebar has no slot for a thread below the deleted DM");
+  // The view itself drops them too (077), not only the server-side parent check.
+  const served = await queryRisingWave<{ thread_channel_id: string }>(
+    getRisingWavePool()!,
+    `SELECT thread_channel_id FROM ${UNIFIED_CHAIN_VIEWS.serving} WHERE receiver_type = 'user' AND receiver_id = $1 AND thread_channel_id = ANY($2)`,
+    [user.id, threads],
+  );
+  assert.deepEqual(served.result.rows, [], "the serving view has no row for a thread below the deleted DM");
 });
 
 test.skipIf(!configured)("active followed threads are served by rw_followed_threads_v5 and equal the legacy path", async () => {

@@ -7,8 +7,8 @@ import {
   MessageImageGalleryOverlay,
   MessageImageGalleryPreview,
   Spinner,
-} from "raft-ui";
-import type { MessageImageGalleryItemLayout } from "raft-ui";
+} from "@botiverse/raft-ui";
+import type { MessageImageGalleryItemLayout } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import type { Message } from "../../store/messageStore";
 import { useImageLightboxStore } from "../../store/imageLightboxStore";
@@ -52,10 +52,7 @@ export function GalleryImageItem({
   }, [onDownload, att]);
   return (
     <Tooltip content={att.filename}>
-    <MessageImageGalleryItem
-      className="bg-brutal-cream/60"
-      layout={layout}
-    >
+    <MessageImageGalleryItem layout={layout}>
       <img
         src={previewSrc}
         alt={att.filename}

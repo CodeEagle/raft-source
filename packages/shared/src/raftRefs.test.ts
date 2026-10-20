@@ -152,10 +152,13 @@ test("shared bare token scanners cover user, task, and DM thread refs", () => {
   );
 });
 
-test("extractRaftMentionHandles includes bare, angle, named-link label, and named-link target mentions", () => {
+// Task #762 (artin, #proj-frontend df4947f1 msg 901ebfeb): an @ in a link
+// label or URL is not a mention. The web shows `[@Carol](<@Dave>)` as one
+// chip for Dave, so only Dave is notified.
+test("extractRaftMentionHandles includes bare, angle and named-link target mentions, not link labels", () => {
   assert.deepEqual(
     extractRaftMentionHandles("hi @Bob and <@Alice> plus [@Carol](<@Dave>)").sort(),
-    ["Alice", "Bob", "Carol", "Dave"],
+    ["Alice", "Bob", "Dave"],
   );
 });
 
@@ -164,15 +167,34 @@ test("resource ref labels are inert and do not become human or agent mentions", 
     extractRaftMentionHandles(
       "see [@Desk](<computer:550e8400-e29b-41d4-a716-446655440000>) and [@Reminder](<app:system.reminder>) plus [@Carol](<@Dave>)",
     ).sort(),
-    ["Carol", "Dave"],
+    ["Dave"],
   );
 });
 
 test("extractRaftMentionHandles ignores code and escaped angle refs", () => {
   assert.deepEqual(
-    extractRaftMentionHandles("hi \\<@Nope> `@Code` ```txt\n@Fence\n``` <@Yes>"),
+    extractRaftMentionHandles("hi \\<@Nope> `@Code`\n```txt\n@Fence\n```\n<@Yes>"),
     ["Yes"],
   );
+});
+
+// Task #762: "where is code" and "where is a link" come from the markdown
+// parser the web renders with, so a mention is notified exactly where the
+// web shows a mention chip.
+test("extractRaftMentionHandles skips every code form the parser knows", () => {
+  assert.deepEqual(extractRaftMentionHandles("~~~\n@Tilde\n~~~\nthen @Yes"), ["Yes"]);
+  assert.deepEqual(extractRaftMentionHandles("````\n```\n@Nested\n```\n````\n@Yes"), ["Yes"]);
+  assert.deepEqual(extractRaftMentionHandles("``` code @Inline ``` and @Yes"), ["Yes"]);
+  assert.deepEqual(extractRaftMentionHandles("@Yes\n```\nunclosed @Fence"), ["Yes"]);
+  // Indented lines are prose in chat (the web disables indented code).
+  assert.deepEqual(extractRaftMentionHandles("text\n\n    @Indented"), ["Indented"]);
+});
+
+test("extractRaftMentionHandles skips link labels and URLs", () => {
+  assert.deepEqual(extractRaftMentionHandles("[hi @Label](https://e.com) and @Yes"), ["Yes"]);
+  assert.deepEqual(extractRaftMentionHandles("see https://x.com/@Url and @Yes"), ["Yes"]);
+  assert.deepEqual(extractRaftMentionHandles("glued seehttps://x.com/@Glued and @Yes"), ["Yes"]);
+  assert.deepEqual(extractRaftMentionHandles("<https://x.com/@Angle> and @Yes"), ["Yes"]);
 });
 
 test("extractRaftMentionHandles ignores package versions and email-like words", () => {

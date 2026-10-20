@@ -1,4 +1,4 @@
-import { Switch } from "raft-ui";
+import { Switch } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
@@ -35,21 +35,20 @@ export function ServerLabRow({
   return (
     <div
       data-testid="server-lab-row"
-      className={`grid grid-cols-[minmax(0,1fr)_44px] items-start gap-4 py-3 first:pt-0 last:pb-0 ${!editable ? "opacity-60" : ""}`}
+      className="grid grid-cols-[minmax(0,1fr)_44px] items-start gap-4 py-3 first:pt-0 last:pb-0"
     >
       <div className="min-w-0">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <span className="min-w-0 truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">{lab.name}</span>
+          <span className={`min-w-0 truncate text-subhead font-semibold ${editable ? "text-foreground" : "text-foreground-disabled"}`}>{lab.name}</span>
         </div>
-        <div className="mt-1 text-xs leading-5 text-foreground-muted theme-brutal:text-black/60">{description}</div>
+        <div className="mt-0.5 text-footnote text-foreground-muted">{description}</div>
         {disabledReason && (
-          <div className="mt-1 text-xs font-mono text-foreground-muted theme-brutal:text-black/45">{disabledReason}</div>
+          <div className="mt-1 text-caption text-foreground-hint">{disabledReason}</div>
         )}
       </div>
       {disabledReason ? (
         <Tooltip content={disabledReason}>
           <Switch
-            size="md"
             checked={checked}
             disabled={!editable || mutationPending}
             onCheckedChange={handleCheckedChange}
@@ -60,7 +59,6 @@ export function ServerLabRow({
         </Tooltip>
       ) : (
         <Switch
-          size="md"
           checked={checked}
           disabled={!editable || mutationPending}
           onCheckedChange={handleCheckedChange}

@@ -1,4 +1,5 @@
 import { createServer } from "node:http";
+import type { PublicSearchServiceBucketStore, PublicSearchServiceKeySource } from "../../lib/publicSearchServiceAccess";
 import express from "express";
 import type { RequestHandler } from "express";
 import type { AddressInfo } from "node:net";
@@ -36,6 +37,7 @@ type StubAgentOrchestrator = {
   getActivity: (agentId: string) => Promise<{ activity: string; activityDetail: string }>;
   getActivities: (rows: ReadonlyArray<{ id: string }>) => Promise<Array<{ activity: string; activityDetail: string }>>;
   listRecentActivityLog: (agentId: string, limit?: number) => Promise<never[]>;
+  listTurnSummaries: (agentId: string, options?: { limit?: number; before?: { endedAt: number; id: string } }) => Promise<{ summaries: never[] }>;
   getLiveActivityObservedAtMs: (agentId: string) => Promise<number | null>;
   getMachineStatus: (machineId: string) => Promise<"online" | "offline">;
   getMachineStatusVersion: (machineId: string) => Promise<number>;
@@ -112,6 +114,7 @@ function createAgentOrchestratorStub(): StubAgentOrchestrator {
     // stub still drives list endpoints.
     getActivities: async (rows) => Promise.all(rows.map((row) => stub.getActivity(row.id))),
     listRecentActivityLog: async () => [],
+    listTurnSummaries: async () => ({ summaries: [] }),
     getLiveActivityObservedAtMs: async () => null,
     getMachineStatus: async () => "offline",
     getMachineStatusVersion: async () => 0,
@@ -138,6 +141,7 @@ export type TestAppOptions = {
   channelToJointConversionFlagDefaultEnabled?: boolean;
   clock?: { now(): Date };
   humanActivityMuteFlagDefaultEnabled?: boolean;
+  sidebarMarkAllReadFlagDefaultEnabled?: boolean;
   onboardingOpenerFlagDefaultEnabled?: boolean;
   attachmentUploadSessionService?: AttachmentUploadSessionService;
   slackBridge?: SlackBridgeRouteDependencies;
@@ -145,10 +149,16 @@ export type TestAppOptions = {
   skipAuthRateLimit?: boolean;
   enforceMessageRateLimit?: boolean;
   messageRateLimitMax?: number;
+  publicSearchKeySource?: PublicSearchServiceKeySource;
+  publicSearchBucketStore?: PublicSearchServiceBucketStore;
 };
 
 export async function createTestApp(port = 0, opts: TestAppOptions = {}) {
   ensureTestEnv();
+  if (opts.sidebarMarkAllReadFlagDefaultEnabled !== undefined) {
+    await getDb().update(featureFlags).set({ defaultEnabled: opts.sidebarMarkAllReadFlagDefaultEnabled })
+      .where(eq(featureFlags.key, "sidebar_mark_all_read_v0"));
+  }
   if (opts.humanActivityMuteFlagDefaultEnabled !== undefined) {
     await getDb()
       .update(featureFlags)
@@ -176,6 +186,8 @@ export async function createTestApp(port = 0, opts: TestAppOptions = {}) {
       skipAuthRateLimit: opts.skipAuthRateLimit ?? false,
       enforceMessageRateLimit: opts.enforceMessageRateLimit,
       messageRateLimitMax: opts.messageRateLimitMax,
+      publicSearchKeySource: opts.publicSearchKeySource,
+      publicSearchBucketStore: opts.publicSearchBucketStore,
     },
   });
   const server = createServer(opts.beforeApp ? express().use(opts.beforeApp).use(app) : app);

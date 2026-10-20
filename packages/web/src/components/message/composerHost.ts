@@ -10,3 +10,9 @@
 export function composerHostClassName(overlay: boolean): string {
   return `!flex !shrink-0 !flex-col !items-stretch !p-0 !border-0 before:!hidden ${overlay ? "!absolute inset-x-0 bottom-0 z-20" : "!relative z-20"}`;
 }
+
+// A compact composer docked under content that scrolls (attachment comments,
+// the forward dialog, its phone page): one seam above it — the line between
+// two regions of a panel — and the 12px those surfaces keep around their
+// content, so every docked composer sits the same way.
+export const COMPOSER_DOCK_CLASS = "shrink-0 border-t border-line-seam p-3";

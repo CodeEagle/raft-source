@@ -598,3 +598,71 @@ test("profile hover card renders a fallback preview agent missing from the local
   assert.match(fallbackHtml, /Remote profile fallback/);
   assert.match(fallbackHtml, /Online/);
 });
+
+// Task #762: refs are recognised on the parsed markdown tree, so the parser
+// decides what is code, a link or an escape.
+test("MessageItem never turns @ in a ~~~ block, a link label or a URL into a mention", () => {
+  resetStores({ members: [makeMember({ userId: "user-2", name: "alice", displayName: "Alice" })] });
+  const mentionMap = new Map([["alice", { type: "user" as const, id: "user-2", displayName: "Alice" }]]);
+  const html = renderMessage(
+    makeMessage({ content: "~~~\n@alice in tilde code\n~~~\n\n[hi @alice](https://e.com) https://x.com/@alice and @alice" }),
+    { mentionMap },
+  );
+  assert.equal((html.match(/data-mention-id|>@Alice</g) ?? []).length > 0, true, "the plain @alice is still a mention");
+  assert.match(html, /<code[^>]*>@alice in tilde code\n?<\/code>/);
+  assert.match(html, /<a[^>]*href="https:\/\/e\.com"[^>]*>hi @alice<\/a>/);
+  assert.match(html, /<a[^>]*href="https:\/\/x\.com\/@alice"[^>]*>https:\/\/x\.com\/@alice<\/a>/);
+  assert.equal((html.match(/>@Alice</g) ?? []).length, 1, "only the plain @alice renders as a mention");
+});
+
+test("thread search highlight keeps links intact", () => {
+  resetStores();
+  const html = renderMessage(
+    makeMessage({ content: "see [docs](https://example.com/link) and https://example.com/in here" }),
+    { threadSearchHighlightQuery: "in" },
+  );
+  assert.doesNotMatch(html, /LINK\d/);
+  assert.match(html, /href="https:\/\/example\.com\/link"/);
+  assert.match(html, /href="https:\/\/example\.com\/in"/);
+  assert.match(html, /<mark/);
+});
+
+test("raw HTML a user types is shown as text", () => {
+  resetStores();
+  const html = renderMessage(makeMessage({ content: "inline <b>bold</b> and\n\n<div>block</div>" }));
+  assert.match(html, /&lt;b&gt;bold&lt;\/b&gt;/);
+  assert.match(html, /&lt;div&gt;block&lt;\/div&gt;/);
+  assert.doesNotMatch(html, /<b>bold<\/b>/);
+});
+
+test("generated-markdown repairs apply outside code only", () => {
+  resetStores();
+  const html = renderMessage(makeMessage({
+    content: "> quoted\nafter the quote\n\n- **Registration: **203 users\n\nline one\\nline two\n\n```\n> code\nnot lifted\n```",
+  }));
+  assert.match(html, /<blockquote[^>]*>[\s\S]*quoted[\s\S]*<\/blockquote>\s*<p[^>]*>after the quote<\/p>/, "an unquoted line after a quote leaves the quote");
+  assert.match(html, /<strong[^>]*>Registration:<\/strong> 203 users/);
+  assert.match(html, /line one<br\/>\s*line two/);
+  assert.match(html, /<code[^>]*>[^<]*&gt; code\nnot lifted/, "code keeps its source");
+});
+
+test("dm refs with peer kinds are not read as strikethrough", () => {
+  resetStores();
+  const html = renderMessage(makeMessage({ content: "dm:@Twin~agent and dm:@Twin~human" }));
+  assert.doesNotMatch(html, /<del/);
+  assert.match(html, /dm:@Twin~agent/);
+  assert.match(html, /dm:@Twin~human/);
+});
+
+test("an escaped ref stays literal next to an unescaped one and a bare URL", () => {
+  resetStores();
+  const html = renderMessage(
+    // `foohttps://…`: GFM does not link a URL glued to a word, so this one goes
+    // through remarkAutolinkBareUrls, which splits the text node around it.
+    makeMessage({ content: "<#general> and \\<#general> foohttps://example.com then \\<#general>" }),
+    { channels: [makeChannel()] },
+  );
+  assert.equal((html.match(/>#general<\/a>/g) ?? []).length, 1, "only the unescaped ref is a link");
+  assert.equal((html.match(/&lt;#general&gt;/g) ?? []).length, 2);
+  assert.match(html, /href="https:\/\/example\.com"/);
+});

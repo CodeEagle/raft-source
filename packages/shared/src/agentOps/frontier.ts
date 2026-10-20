@@ -31,6 +31,12 @@
 //    a context (null, the default) every booking is attested, exactly as
 //    before contexts existed.
 
+import { parseDmPeerRef } from "../dmPeerRef";
+import { parseRaftRefTarget } from "../raftRefs";
+import { agentChannelRef } from "../agentText/server";
+import { channelCardRev, peerCardId, peerCardRev, senderObservationId, type ChannelCard, type PeerCard } from "./passiveResources";
+import { getParentTargetForThread } from "./seenPolicy/consumedSeqs";
+
 export interface SeenAttestation {
   seenUpToSeq?: number;
   seenExactSeqs: number[];
@@ -50,9 +56,31 @@ export interface SeenFrontierSnapshot {
   aliases: Record<string, string>;
   /** The frontier's current model context (`setContext`), when one is set. */
   contextId?: string;
+  /**
+   * Cards this agent's contexts have seen (`conversationCards`), one entry per
+   * context and card: `type` `channel` (id `#name`) or `sender` (id
+   * `human:<name>` / `agent:<name>`), the CLI ledger's type and id, with the
+   * version seen. Oldest first. Absent in snapshots from SDKs before 0.18.0.
+   */
+  observations?: Array<{ contextId: string; type: "channel" | "sender"; id: string; rev: string }>;
+  /**
+   * When each target was last read (`messages.read`), in local read order,
+   * with the newest seq that read showed and its context: the thread-target
+   * check (a top-level send right after reading one of its threads) compares
+   * them. At most MAX_READS, oldest first. Absent before SDK 0.20.0.
+   */
+  reads?: Array<{ target: string; order: number; seq?: number; contextId?: string }>;
 }
 
 const MAX_EXACT_SEQS = 2_500;
+/**
+ * Most card observations a frontier keeps; past it, other contexts' go first,
+ * then the oldest. A hosted state store may save the whole snapshot as one
+ * value on every operation, so a full list stays under 100 KB.
+ */
+export const MAX_OBSERVATIONS = 500;
+/** Most read records a frontier keeps (one per target, the oldest go first). */
+export const MAX_READS = 500;
 
 function positiveInt(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
@@ -62,6 +90,10 @@ function contextOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function observationKey(context: string, type: string, id: string): string {
+  return `${context}\u0000${type}:${id}`;
+}
+
 interface TargetState {
   upTo?: number;
   upToContext: string | null;
@@ -69,14 +101,32 @@ interface TargetState {
   exactContext: string | null;
 }
 
+interface ObservationState {
+  context: string;
+  type: "channel" | "sender";
+  id: string;
+  rev: string;
+}
+
+interface ReadState {
+  order: number;
+  seq?: number;
+  context: string | null;
+}
+
 interface FrontierCore {
   targets: Map<string, TargetState>;
   aliases: Map<string, string>;
   context: string | null;
+  /** Keyed by context and card, so concurrent contexts do not overwrite each other. Insertion order is age. */
+  observations: Map<string, ObservationState>;
+  /** The last read of each target; insertion order is age. */
+  reads: Map<string, ReadState>;
+  readCounter: number;
 }
 
 export class SeenFrontier {
-  private core: FrontierCore = { targets: new Map(), aliases: new Map(), context: null };
+  private core: FrontierCore = { targets: new Map(), aliases: new Map(), context: null, observations: new Map(), reads: new Map(), readCounter: 0 };
   /** Set on a view from `inContext`: the context this view books and attests under. */
   private bound: string | null | undefined = undefined;
 
@@ -126,7 +176,88 @@ export class SeenFrontier {
       if (positiveInt(state.upTo)) this.bookUpTo(target, state.upTo, contextOrNull(state.upToContextId));
       if (Array.isArray(state.exact)) this.bookExact(target, state.exact, contextOrNull(state.exactContextId));
     }
+    for (const observed of Array.isArray(snapshot.observations) ? snapshot.observations : []) {
+      const context = contextOrNull(observed?.contextId);
+      if (context !== null && (observed.type === "channel" || observed.type === "sender")
+        && typeof observed.id === "string" && observed.id.length > 0
+        && typeof observed.rev === "string" && observed.rev.length > 0) {
+        this.bookObservation(context, observed.type, observed.id, observed.rev);
+      }
+    }
+    for (const read of Array.isArray(snapshot.reads) ? [...snapshot.reads].sort((a, b) => a.order - b.order) : []) {
+      if (typeof read?.target === "string" && read.target.length > 0 && positiveInt(read.order)) {
+        this.bookRead(read.target, read.order, positiveInt(read.seq) ? read.seq : undefined, contextOrNull(read.contextId));
+      }
+    }
     if (this.core.context === null) this.core.context = contextOrNull(snapshot.contextId);
+  }
+
+  /**
+   * Book an explicit read of `target` (a `messages.read` window) in local
+   * read order, with the newest seq it showed. The thread-target check
+   * compares when a thread and its parent were last read in this context.
+   */
+  recordRead(target: string, seq?: number): void {
+    this.bookRead(this.canonical(target), this.core.readCounter + 1, seq, this.contextId);
+  }
+
+  /** When `target` was last read in this context (local read order), or undefined. */
+  readOrder(target: string): number | undefined {
+    const read = this.core.reads.get(this.canonical(target));
+    const context = this.contextId;
+    return read && (context === null || read.context === context) ? read.order : undefined;
+  }
+
+  /** The thread under `parent` read most recently in this context (one that showed messages), or undefined. */
+  latestThreadRead(parent: string): { target: string; seq: number; readOrder: number } | undefined {
+    const parentKey = this.canonical(parent);
+    const context = this.contextId;
+    let best: { target: string; seq: number; readOrder: number } | undefined;
+    for (const [target, read] of this.core.reads) {
+      if (context !== null && read.context !== context) continue;
+      if (read.seq === undefined || getParentTargetForThread(target) !== parentKey) continue;
+      if (!best || read.order > best.readOrder) best = { target, seq: read.seq, readOrder: read.order };
+    }
+    return best;
+  }
+
+  private bookRead(target: string, order: number, seq: number | undefined, context: string | null): void {
+    this.core.reads.delete(target);
+    this.core.reads.set(target, { order, ...(seq === undefined ? {} : { seq }), context });
+    this.core.readCounter = Math.max(this.core.readCounter, order);
+    for (const oldest of this.core.reads.keys()) {
+      if (this.core.reads.size <= MAX_READS) break;
+      this.core.reads.delete(oldest);
+    }
+  }
+
+  /**
+   * The version of a card (`type` `channel` or `sender`, the CLI ledger's id)
+   * this frontier's context has seen, or undefined. Without a context nothing
+   * counts as seen: such a caller gets the card every time.
+   */
+  seenCard(type: "channel" | "sender", id: string): string | undefined {
+    const context = this.contextId;
+    return context === null ? undefined : this.core.observations.get(observationKey(context, type, id))?.rev;
+  }
+
+  /**
+   * Claim the first showing of a card version in this context: books it and
+   * answers true when this context had not seen exactly that version. Without
+   * a context it answers true and books nothing.
+   */
+  claimCard(type: "channel" | "sender", id: string, rev: string): boolean {
+    const context = this.contextId;
+    if (context === null) return true;
+    if (this.seenCard(type, id) === rev) return false;
+    this.bookObservation(context, type, id, rev);
+    return true;
+  }
+
+  /** Book a card shown to the model in this context (a held call's cards, a sent reply's card). */
+  recordCard(type: "channel" | "sender", id: string, rev: string): void {
+    const context = this.contextId;
+    if (context !== null) this.bookObservation(context, type, id, rev);
   }
 
   /** Remember that the Server resolved `requested` to `canonical` (a thread spelling, a `~agent` suffix, …). */
@@ -152,14 +283,47 @@ export class SeenFrontier {
    * Attest that the model saw the context of an interrupt (`outcome.interrupt`
    * of an `interrupted` send, claim or task write). Call it only after
    * `interrupt.context` actually reached the model (the SDK cannot know that,
-   * so it never records this implicitly). Returns false and records nothing
-   * when the context was withheld, not fully shown (`contextComplete: false`),
-   * or the Server sent no boundary.
+   * so it never records this implicitly). Books the interrupt's cards, if
+   * any; returns whether a message boundary was booked: false when the
+   * context was withheld, not fully shown (`contextComplete: false`), or the
+   * Server sent no boundary (an `unseen_card` interrupt has none).
    */
-  recordHeld(held: { target: string; seenUpToSeq: number | null; withheld: boolean; contextComplete?: boolean }): boolean {
+  recordHeld(held: {
+    target: string;
+    seenUpToSeq: number | null;
+    withheld: boolean;
+    contextComplete?: boolean;
+    cards?: { channel?: ChannelCard; peer?: PeerCard };
+    /** The context the held call was made in; booked under it even when called on another view. */
+    contextId?: string;
+  }): boolean {
+    const into = held.contextId !== undefined ? this.inContext(held.contextId) : this;
+    // The cards an interrupt showed are booked whatever else it did not show.
+    if (held.cards && !held.withheld) into.recordCardsShown(held.target, held.cards);
     if (held.withheld || held.contextComplete === false || held.seenUpToSeq === null) return false;
-    this.recordUpTo(held.target, held.seenUpToSeq);
+    into.recordUpTo(held.target, held.seenUpToSeq);
     return true;
+  }
+
+  /**
+   * Book cards shown to the model for `target`: the channel card under its
+   * ref and under the target's own spelling (a thread short id resolves
+   * whatever channel part it carries), the peer card under its sender id and
+   * under the name the target used.
+   */
+  recordCardsShown(target: string, cards: { channel?: ChannelCard; peer?: PeerCard }): void {
+    const ref = parseRaftRefTarget(target);
+    if (cards.channel) {
+      const rev = channelCardRev(cards.channel);
+      this.recordCard("channel", agentChannelRef(cards.channel.name, cards.channel.type), rev);
+      if (ref?.kind === "channel" || ref?.kind === "channel-thread") this.recordCard("channel", `#${ref.channelName}`, rev);
+    }
+    if (cards.peer) {
+      const rev = peerCardRev(cards.peer);
+      this.recordCard("sender", peerCardId(cards.peer), rev);
+      const parsed = ref?.kind === "dm" || ref?.kind === "dm-thread" ? parseDmPeerRef(ref.peerName) : undefined;
+      if (parsed?.ok && parsed.peerName !== cards.peer.name) this.recordCard("sender", senderObservationId(cards.peer.kind, parsed.peerName), rev);
+    }
   }
 
   /**
@@ -189,13 +353,41 @@ export class SeenFrontier {
         ...(state.exact.size === 0 || state.exactContext === null ? {} : { exactContextId: state.exactContext }),
       };
     }
+    const observations: NonNullable<SeenFrontierSnapshot["observations"]> = [...this.core.observations.values()]
+      .map((observed) => ({ contextId: observed.context, type: observed.type, id: observed.id, rev: observed.rev }));
+    const reads: NonNullable<SeenFrontierSnapshot["reads"]> = [...this.core.reads].map(([target, read]) => ({
+      target,
+      order: read.order,
+      ...(read.seq === undefined ? {} : { seq: read.seq }),
+      ...(read.context === null ? {} : { contextId: read.context }),
+    }));
     return {
       version: 1,
       targets,
       aliases: Object.fromEntries(this.core.aliases),
       ...(this.core.context === null ? {} : { contextId: this.core.context }),
+      ...(observations.length === 0 ? {} : { observations }),
+      ...(reads.length === 0 ? {} : { reads }),
     };
   }
+
+  /** Book (or re-book, which makes it the newest) and keep the map within MAX_OBSERVATIONS. */
+  private bookObservation(context: string, type: "channel" | "sender", id: string, rev: string): void {
+    const key = observationKey(context, type, id);
+    this.core.observations.delete(key);
+    this.core.observations.set(key, { context, type, id, rev });
+    if (this.core.observations.size <= MAX_OBSERVATIONS) return;
+    const current = this.contextId;
+    for (const [oldKey, observed] of this.core.observations) {
+      if (this.core.observations.size <= MAX_OBSERVATIONS) return;
+      if (observed.context !== current) this.core.observations.delete(oldKey);
+    }
+    for (const oldKey of this.core.observations.keys()) {
+      if (this.core.observations.size <= MAX_OBSERVATIONS) return;
+      this.core.observations.delete(oldKey);
+    }
+  }
+
 
   /** A high-water booking (seenPolicy `bookStreamEntries`): another context's record is replaced, not merged. */
   private bookUpTo(target: string, seq: number, context: string | null): void {

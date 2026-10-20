@@ -42,8 +42,11 @@ test("pending mention strip keeps the compact neutral treatment and exposes reco
   const strip = screen.getByTestId("pending-mention-action-strip");
   const row = screen.getByTestId("pending-mention-action-rows").querySelector(":scope > div") as HTMLElement;
   assert.match(strip.className, /\bw-full\b/);
-  assert.match(strip.className, /\bbg-brutal-cream\b/);
-  assert.doesNotMatch(strip.className, /\bbg-soft-signal\b/);
+  // Raft DS card surface: white surface + content hairline, never a wash.
+  assert.match(strip.className, /\bbg-layer-card\b/);
+  assert.match(strip.className, /\bborder-line-hairline\b/);
+  assert.doesNotMatch(strip.className, /\bbg-(?:palette-yellow|soft-signal)\b/);
+  assert.doesNotMatch(strip.className, /\btheme-brutal:/);
   assert.doesNotMatch(strip.className, /\bml-12\b/);
   assert.doesNotMatch(strip.className, /\bmr-2\b/);
   assert.doesNotMatch(strip.textContent ?? "", /Undelivered mentions/);
@@ -176,7 +179,10 @@ test("pending mention strip renders real target avatars only when avatar metadat
   assert.equal(within(avatarRow).queryAllByTestId("pending-mention-target-avatar").length, 1);
   assert.equal(within(avatarRow).queryAllByTestId("pending-mention-target-initial").length, 0);
   assert.doesNotMatch(avatarRow.innerHTML, />V<\/span>/);
-  assert.match(avatarRow.innerHTML, /bg-brutal-cyan/);
+  // The raft identity sticker carries the target's type (agents sit on the
+  // stone `bg-inactive` fill until their sprite covers it).
+  assert.match(avatarRow.innerHTML, /data-avatar-type="agent"/);
+  assert.match(avatarRow.innerHTML, /\bbg-inactive\b/);
   // The real avatar is a single pixel <img> (task #137 / #8498), not the old
   // 64-div CSS grid — assert the image attribute, not the removed grid.
   assert.match(avatarRow.innerHTML, /data-agent-pixel-avatar/);
@@ -191,7 +197,8 @@ test("pending mention strip renders real target avatars only when avatar metadat
   assert.equal(within(humanRow).queryAllByTestId("pending-mention-target-avatar").length, 1);
   assert.equal(within(humanRow).queryAllByTestId("pending-mention-target-initial").length, 0);
   assert.doesNotMatch(humanRow.innerHTML, />H<\/span>/);
-  assert.match(humanRow.innerHTML, /bg-brutal-lavender/);
+  assert.match(humanRow.innerHTML, /data-avatar-type="human"/);
+  assert.doesNotMatch(humanRow.innerHTML, /data-avatar-type="agent"/);
   assert.match(humanRow.innerHTML, /data-agent-pixel-avatar/);
 
   const externalRow = rows[3] as HTMLElement;
@@ -225,9 +232,9 @@ test("pending mention strip offers one bottom-right batch add for all eligible u
 
   const footer = screen.getByTestId("pending-mention-action-footer");
   assert.match(footer.className, /\bjustify-end\b/);
-  // The separator rides the semantic hairline; Brutal re-adds its 2px rule.
-  assert.match(footer.className, /\bborder-t\b/);
-  assert.match(footer.className, /\bborder-line-hairline\b/);
+  // The footer is set off by rui's Separator (task #741), not a border class.
+  assert.equal(footer.previousElementSibling?.getAttribute("data-slot"), "separator");
+  assert.doesNotMatch(footer.className, /\bborder-t\b/);
   const addAll = within(footer).getByRole("button", { name: "Add all" }) as HTMLButtonElement;
   assert.equal(addAll.disabled, false);
   fireEvent.click(addAll);

@@ -84,22 +84,26 @@ const ConversationPreviewCard = forwardRef<HTMLButtonElement, ConversationPrevie
   onDragStart,
 }, ref) {
   const interactive = Boolean(onClick || onContextMenu);
-  const className = `relative flex w-full items-start gap-3 rounded-md border p-3 text-left transition-colors hover:border-line-strong hover:shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:hover:border-black theme-brutal:hover:shadow-brutal-sm ${
-    interactive ? `active:border-line-strong active:shadow-raft-xs theme-brutal:active:border-black theme-brutal:active:shadow-brutal-sm` : "cursor-default"
+  // Raft Design System › Inbox / ListRow: a preview is content — the card
+  // surface with a hairline and the container radius, never an ink line or a
+  // lift. Hover/press lay the pressed wash over it. The row that is open next
+  // to the list (`active`) and the row you just jumped to (`focused`) are the
+  // same cyan-soft "this one" highlight.
+  const highlighted = focused || active;
+  const className = `relative flex w-full items-start gap-3 rounded-container border border-line-hairline p-3 text-left transition-colors ${
+    highlighted ? "bg-info-soft" : "bg-layer-card"
   } ${
-    focused
-      ? "border-line-strong bg-info-soft shadow-raft-sm theme-brutal:border-black theme-brutal:bg-brutal-cyan/25 theme-brutal:shadow-brutal"
-      : active
-      ? "border-line-strong bg-layer-panel shadow-raft-sm theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
-      : "border-line-muted bg-layer-panel theme-brutal:border-black/30 theme-brutal:bg-white"
+    interactive
+      ? `outline-none focus-visible:shadow-focus ${highlighted ? "" : "hover:press-overlay active:press-overlay"}`
+      : "cursor-default"
   }`;
   const content = (
     <>
       <div className="min-w-0 flex-1">
-        <div className="mb-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs leading-4">
-          <span className="font-bold text-foreground-hint">{channelLabel}</span>
+        <div className="mb-1 flex flex-wrap items-center gap-x-2.5 gap-y-1 text-caption">
+          <span className="text-foreground-hint">{channelLabel}</span>
           {author && !previewAuthor ? (
-            <span className="inline-flex min-w-0 items-center gap-1 font-bold text-foreground-strong">
+            <span className="inline-flex min-w-0 items-center gap-1 font-semibold text-foreground">
               {author.kind === "agent" ? (
                 <AvatarSlot context="preview-mini" type="agent" agentAvatarUrl={author.avatarUrl ?? null} />
               ) : (
@@ -107,20 +111,20 @@ const ConversationPreviewCard = forwardRef<HTMLButtonElement, ConversationPrevie
               )}
               <span className="min-w-0 truncate">{author.name}</span>
               {author.subtitle ? (
-                <span className="min-w-0 flex-1 max-w-fit truncate font-mono text-[10px] text-foreground-hint">{author.subtitle}</span>
+                <span className="min-w-0 flex-1 max-w-fit truncate font-mono text-mono-meta font-normal text-foreground-hint">{author.subtitle}</span>
               ) : null}
             </span>
           ) : null}
           {marker}
-          {timestamp ? <span className="font-mono text-xs leading-4 text-foreground-hint">{timestamp}</span> : null}
+          {timestamp ? <span className="font-mono text-mono-meta text-foreground-hint">{timestamp}</span> : null}
         </div>
-        <p className={`${previewLineClampClassName} text-sm ${emphasized ? "font-bold" : ""} ${previewClassName ?? ""}`}>
+        <p className={`${previewLineClampClassName} text-callout ${emphasized ? "font-bold text-foreground" : "text-foreground-muted"} ${previewClassName ?? ""}`}>
           {previewLeading ? <span className="mr-1 inline-flex align-[-1px]">{previewLeading}</span> : null}
-          {previewAuthor ? <span className="font-bold text-foreground-muted">{previewAuthor}: </span> : null}
+          {previewAuthor ? <span className="font-semibold text-foreground">{previewAuthor}: </span> : null}
           <InlineMarkdownPreview markdown={preview} />
         </p>
         {secondaryPreview ? (
-          <p className={`mt-1 line-clamp-1 text-xs ${secondaryPreviewClassName ?? "text-foreground-hint"}`}>
+          <p className={`mt-1 line-clamp-1 text-caption ${secondaryPreviewClassName ?? "text-foreground-hint"}`}>
             {secondaryPreview}
           </p>
         ) : null}

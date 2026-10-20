@@ -1,7 +1,7 @@
 import { useCallback } from "react";
 import type { ChangeEvent } from "react";
 import { useIntl } from "react-intl";
-import { Button, Input } from "raft-ui";
+import { Button, Input } from "@botiverse/raft-ui";
 import { Trash2 } from "lucide-react";
 
 export type EnvVarEntry = { key: string; value: string };
@@ -27,29 +27,32 @@ export function EnvVarEntryRow({
     [onChange, index],
   );
   const handleRemove = useCallback(() => onRemove(index), [onRemove, index]);
+  // A key/value row: raft-ui draws both inputs as DS fields (44px, 1.5px ink
+  // line); the page only sets their widths. Removing a row is recoverable, so
+  // the remove action is a ghost icon button, not the red destructive sticker.
   return (
     <div className="flex items-center gap-2">
       <Input
         type="text"
         value={entry.key}
         onChange={handleKeyChange}
-        className="border border-line-muted bg-layer-card px-2 py-1 text-xs font-mono shadow-raft-sm focus:outline-none w-1/3 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+        className="w-1/3 min-w-0"
         placeholder={formatMessage({ id: "agent.runtimeConfig.envVarName" })}
       />
-      <span className="text-foreground-muted">=</span>
+      <span className="font-mono text-mono-code text-foreground-hint">=</span>
       <Input
         type="text"
         value={entry.value}
         onChange={handleValueChange}
-        className="border border-line-muted bg-layer-card px-2 py-1 text-xs font-mono shadow-raft-sm focus:outline-none flex-1 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+        className="min-w-0 flex-1"
         placeholder={formatMessage({ id: "agent.runtimeConfig.envVarFallback" })}
       />
-      <Button variant="danger" size="icon-sm"
+      <Button variant="ghost" size="icon-sm"
         type="button"
         onClick={handleRemove}
-        className=""
+        aria-label={formatMessage({ id: "agent.runtimeConfig.removeEnvVar" })}
       >
-        <Trash2 size={12} />
+        <Trash2 size={14} aria-hidden="true" />
       </Button>
     </div>
   );

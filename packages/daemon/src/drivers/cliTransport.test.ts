@@ -1,5 +1,6 @@
 // Tests for prepareCliTransport wrapper generation across platforms.
 
+import { withProcessEnvPatch } from "../processEnvPatch";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { readFileSync, existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
@@ -104,6 +105,10 @@ test("prepareCliTransport publishes a fresh spawn context generation in the tran
     // task #359: the composed gate on the spawn config is published as-is.
     await prepareCliTransport({ ...ctx, config: { ...ctx.config, passiveAx: true } as typeof ctx.config }, {}, "linux");
     assert.equal(JSON.parse(readFileSync(file, "utf8")).passiveAx, true);
+
+    // glimpse G0: an id the daemon planned for this spawn is published unchanged.
+    await prepareCliTransport({ ...ctx, contextGeneration: { contextId: "planned-context-id", reason: "spawn" } }, {}, "linux");
+    assert.equal(JSON.parse(readFileSync(file, "utf8")).contextId, "planned-context-id");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -159,6 +164,34 @@ test("prepareCliTransport keeps an agent-configured PATH behind the wrapper dir 
     assert.equal(driver.spawnEnv.PATH, `${driver.slockDir}${path.delimiter}/driver/bin`);
   } finally {
     if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("prepareCliTransport on Windows reads the daemon's `Path` in any case and leaves the runtime one PATH", async () => {
+  // Windows process.env is case-insensitive and usually spells it `Path`; the
+  // plain copy the transport builds from is not. 1.0.48 read `.PATH` from that
+  // copy, found nothing, and gave every Windows runtime only the wrapper dir.
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-test-"));
+  const originalPath = process.env.PATH;
+  const originalWinPath = process.env.Path;
+  delete process.env.PATH;
+  process.env.Path = "C:\\Windows\\System32;C:\\Program Files\\nodejs";
+  try {
+    const result = await prepareCliTransport(makeCtx(tmp), {}, "win32");
+    const pathKeys = Object.keys(result.spawnEnv).filter((key) => key.toLowerCase() === "path");
+    assert.deepEqual(pathKeys, ["PATH"]);
+    assert.equal(result.spawnEnv.PATH, `${result.slockDir}${path.delimiter}C:\\Windows\\System32;C:\\Program Files\\nodejs`);
+
+    // An agent-configured `Path` is found the same way and still wins over the daemon's.
+    const configured = await prepareCliTransport(makeCtx(tmp, {
+      runtimeConfig: { version: 1, runtime: "claude", provider: { kind: "default" }, model: { kind: "default" }, mode: { kind: "default" }, envVars: { Path: "D:\\tools" } },
+    }), {}, "win32");
+    assert.deepEqual(Object.keys(configured.spawnEnv).filter((key) => key.toLowerCase() === "path"), ["PATH"]);
+    assert.equal(configured.spawnEnv.PATH, `${configured.slockDir}${path.delimiter}D:\\tools`);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH; else process.env.PATH = originalPath;
+    if (originalWinPath === undefined) delete process.env.Path; else process.env.Path = originalWinPath;
     rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -1964,6 +1997,32 @@ test("a wrapper written while running from K's experiment slot still runs after 
   } finally {
     setProcSelfExeReaderForTests(null);
     process.execPath = originalExecPath;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("task #28: an agent spawned while a Pi session is being created does not inherit that Pi agent's env", async () => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "slock-cli-test-"));
+  const oldSlockHome = process.env.SLOCK_HOME;
+  const oldPath = process.env.PATH;
+  try {
+    process.env.SLOCK_HOME = path.join(tmp, "home");
+    let spawnEnv: NodeJS.ProcessEnv | undefined;
+    // The Pi session-create patch holds process.env across awaits; another
+    // agent's transport is prepared inside that window.
+    await withProcessEnvPatch({ TASK28_PI_AGENT_SECRET: "pi-agent-only", PATH: "/pi-agent/bin" }, async () => {
+      assert.equal(process.env.TASK28_PI_AGENT_SECRET, "pi-agent-only");
+      spawnEnv = (await prepareCliTransport(makeCtx(tmp), {}, "linux")).spawnEnv;
+    });
+    assert.equal(spawnEnv!.TASK28_PI_AGENT_SECRET, undefined);
+    assert.ok(spawnEnv!.PATH?.endsWith(`${path.delimiter}${oldPath ?? ""}`), spawnEnv!.PATH);
+    assert.ok(!spawnEnv!.PATH?.includes("/pi-agent/bin"));
+    // And the patch is undone afterwards, as before.
+    assert.equal(process.env.TASK28_PI_AGENT_SECRET, undefined);
+    assert.equal(process.env.PATH, oldPath);
+  } finally {
+    if (oldSlockHome === undefined) delete process.env.SLOCK_HOME;
+    else process.env.SLOCK_HOME = oldSlockHome;
     rmSync(tmp, { recursive: true, force: true });
   }
 });

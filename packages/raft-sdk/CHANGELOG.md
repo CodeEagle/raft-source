@@ -6,6 +6,404 @@ follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-10-19
+
+Two layers, one package (artin, tygg, Tenny; #proj-sdk). Nothing breaks: the
+old names keep working until 1.0. See MIGRATING.md.
+
+### Added
+
+- `@botiverse/raft-sdk/agent`: the agent layer. `createRaftAgent` and
+  `createRaftAgentFromStore` (the renamed `createRaft` / `createRaftFromStore`;
+  same options and client), the `CreateRaftAgentOptions` / `RaftAgent` /
+  `CreateRaftAgentFromStoreOptions` types, the errors they throw, and every
+  agent-layer helper and type. It may evolve faster than the root; breaking
+  changes are called out here.
+- Both entries are built together, so shared code is one chunk: a class or
+  helper (`RaftSdkConfigurationError`, `SeenFrontier`, the
+  `raftbenchFailedReport` brand) is the same value from either entry.
+
+### Changed
+
+- `createRaftClient` and `createRaftClientFromStore` are **no longer
+  deprecated**. They are the program layer for programs and bots, stable under
+  semver. This withdraws the 0.17 deprecation and its "removed in 1.0".
+- README is organised as "Program layer" and "Agent layer". MIGRATING.md now
+  covers `createRaft` → `createRaftAgent` and shows the two layers side by side.
+- The invalid-`hints` error now names `createRaftAgent`.
+
+### Deprecated
+
+- `createRaft`, `createRaftFromStore`, `CreateRaftFromStoreOptions` on the
+  root: use the `/agent` names. Removed in 1.0. The agent-layer helpers and
+  types are still exported from the root until 1.0, when they move to `/agent`
+  only.
+
+## [0.23.1] — 2026-10-18
+
+### Fixed
+
+- `raftbenchFailureKind` returns `stop` for `raftbench_service_credential_required`
+  (403), which the Server now answers when a run is read or submitted by
+  anything other than its assigned RaftBench service agent with the read-only
+  credential. Before, it returned `null` (unclassified). `raftbench_hosted_required`,
+  which older Servers answer, stays `stop`.
+
+## [0.23.0] — 2026-10-18
+
+### Changed
+
+- `raft.raftbench.readAll` returns `state: "empty"` when no messages were
+  read (before: `complete` when the window was exhausted). A result of
+  "complete, 0 findings" would read as "nothing wrong" on the dashboard.
+
+### Added
+
+- `raftbenchEmptyWindowReport(material)` / `RAFTBENCH_EMPTY_WINDOW_REASON`:
+  the result for an empty window — an ordinary `incomplete` ("No messages
+  were read in this window; nothing was analyzed."), no findings, gaps from
+  coverage, not a failure. Submit it without calling the model (Sage, Tenny).
+
+## [0.22.7] — 2026-10-18
+
+### Added
+
+- `raftbenchRunAssignment(event)`: the run assignment from the delivered
+  `system.raftbench` event (`third_party_event.payload`), a third-party
+  event's `payload`, or a bare payload; null otherwise. An event counts only
+  when its `client_id` is `system.raftbench` (`RAFTBENCH_SYSTEM_APP`), so the
+  same payload from another app is ignored.
+
+### Fixed
+
+- README: `isRaftbenchRunAssigned` checks the payload, not the event; the
+  example now uses `raftbenchRunAssignment(event)` and saves the assignment
+  first (the event is acknowledged once returned) (cody).
+
+## [0.22.6] — 2026-10-18
+
+0.22.5 was merged but never published (a skipped chunk plus a limit gave
+only `budget`); its changes ship here.
+
+### Fixed
+
+- `raftbenchGapsFromCoverage`: a skipped chunk adds `partial_scan` even when
+  the run also stopped at the message or character limit (both `budget` and
+  `partial_scan`) (Bencher).
+
+### Changed (from 0.22.5)
+
+Ships before the Server change that adds `coverage.skippedChunks` and more
+notes, so clients already running keep working (Tenny).
+
+### Changed
+
+- RaftBench responses are parsed permissively: unknown fields are ignored and
+  lengths are not capped (`coverage.notRead`, `sources`). Requests and the
+  model's result stay strict.
+- `coverage.skippedChunks` (optional): `raftbenchGapsFromCoverage` adds
+  `partial_scan` when it is above 0.
+- `formatRaftbenchCoverage` says "Your result must have status incomplete"
+  once, in the Coverage line, whenever the window was not read in full —
+  including a later run of a window and a skipped chunk (Sage).
+- Validation wording for limits follows whether the bound is inclusive
+  ("at least N" / "at most N") (Sage).
+
+## [0.22.4] — 2026-10-18
+
+### Added
+
+- `raftbenchGapsFromCoverage(coverage)`: the result's `gaps`, set by the
+  harness rather than the model (always `missing_tool_outcomes`; `budget`
+  at the message or character limit; `partial_scan` when the window was
+  otherwise not read in full).
+
+### Changed
+
+- `raft.raftbench.submit`'s `invalid` issues say what to put there instead
+  of zod's defaults: "Use one of: complete, incomplete.", "Add this field: a
+  list.", "Shorten this to at most 1000 characters.", "Copy the runId given
+  with the material exactly.", and so on. Messages the contract wrote itself
+  are kept.
+
+## [0.22.3] — 2026-10-18
+
+0.22.2 was merged but never published (a model output that is not an
+object made `submit` throw); its changes ship here.
+
+### Fixed
+
+- `raft.raftbench.submit` with a model output that is not a JSON object
+  (`null`, a string, an array) returns `invalid` ("Your reply was not a JSON
+  object. Reply with the complete result as one JSON object.") instead of
+  throwing, so the harness still gets its one fix (Bencher).
+- Every unknown field reads "Remove the field `x`: it is not part of the
+  result.", one item per field (Sage).
+
+### Added
+
+- `raft.raftbench.submitFailure(run, reason)` and `raftbenchFailedReport`:
+  the result for a run the harness could not finish (read, model or fix
+  failed; cancelled or timed out), `incomplete` with `failure: true`, so the
+  Server retries the material and skips it after 3 failures.
+
+### Changed
+
+- `raft.raftbench.submit` checks the model's result against
+  `raftbenchModelReportSchema`, which has no `failure`: only a report made by
+  `raftbenchFailedReport` may carry it. This keeps a model's output off the
+  failure path inside the SDK; it is not a Server permission (the Server
+  accepts `failure` from the RaftBench credential). A result with `failure` (or another
+  unknown field) is `invalid` locally ("Remove the field `failure`: it is not
+  part of the result.") and never sent.
+- `formatRaftbenchCoverage`: a later run of a window (`window_end` without
+  `exhausted`) says "NOT the whole window; see Not included below." — the
+  Server's Not included line gives the reason.
+
+## [0.22.1] — 2026-10-18
+
+### Changed
+
+- `raft.raftbench` text (Sage, AX): `readAll` joins pages with a blank line,
+  as messages within a page; the `invalid` issue list drops the Server's
+  "Nothing has been saved." from each item (the list says it once) and ends
+  with "Reply with the complete corrected result, not only the changes."
+
+## [0.22.0] — 2026-10-18
+
+### Added
+
+- `raft.raftbench` for the hosted harness of RaftBench's read-only service
+  agent (staging pilot; needs the `raftbench` capability; not an `invoke`
+  operation): `context()` (one page), `readAll()` (every page with one
+  Coverage block on top) and `submit()` (natural write: a lost response is
+  resent and an identical replay returns the same receipt; `state: "invalid"`
+  lists every problem for the model's one fix).
+- `formatRaftbenchCoverage`, `isRaftbenchRunAssigned` (the run-assignment
+  event the harness consumes), `raftbenchFailureKind` (`reread` / `stop` /
+  `retry_identical`) and `raftbenchIncompleteReport`.
+
+## [0.21.2] — 2026-10-18
+
+### Security
+
+- Connector and tool names in the SDK's model-facing text (`mcp.tools()`
+  catalog text, `formatMcpReconnectRequired`, the empty `tool_error` text) are
+  quoted on one line and capped at 80 characters, so a remote MCP server
+  cannot inject instructions through a tool name with newlines. Descriptions
+  in the catalog text are put on one line. The Server's managed MCP error text
+  and the daemon's pi driver (Computer agents) do the same.
+
+### Added
+
+- `formatMcpPromptName(name)` and `flattenMcpPromptText(text)`, for runtimes
+  that write their own lines about connectors or tools into the model's
+  context.
+
+## [0.21.1] — 2026-10-18
+
+### Changed
+
+- `MCP_OUTCOME_UNKNOWN_TEXT` (a transport failure mid `raft.mcp.call`) adds a
+  handoff for agents that can't check: "…; if you can't check, tell the
+  person who asked instead of calling it again." Computer agents now read the
+  same sentence (daemon pi driver).
+- `mcpFailureKind` also returns `outcome_unknown` when something between the
+  caller and Raft (a gateway) answers a call with 5xx and no Raft `code`: the
+  request may have reached the tool. Non-retryable, with
+  `MCP_OUTCOME_UNKNOWN_TEXT` as `nextAction`. Same on the daemon path.
+- Raft's own `managed_mcp_internal_error` on a `raft.mcp.call` is
+  `outcome_unknown` too (it can come after the remote tool ran), with
+  `MCP_CALL_INTERNAL_ERROR_TEXT` ("Raft hit an error during this call, so it
+  may already have taken effect. …") as `nextAction`, also for Servers that
+  don't send it yet.
+
+## [0.21.0] — 2026-10-18
+
+### Added
+
+- `raft.mcp.tools()` / `raft.mcp.call({ tool, arguments })`: the Server's
+  managed MCP connectors (credentials held by Raft) for runtimes that mount
+  them as their own model tools, one per catalog entry (`runtimeName`,
+  `inputSchema`), as Computer agents get them. `tools()` also returns
+  `reconnectRequired` (from Servers that report disconnected connectors);
+  `formatMcpReconnectRequired(name)` is the line to give the model for each.
+  `call` sends the catalog entry's versions, returns `result` or
+  `tool_error` (capped at 4,000 characters, marked), is never held for unread
+  messages and never retried automatically; failures carry the Server's
+  agent-facing words as `nextAction`, and `mcpFailureKind` returns `stale` /
+  `reconnect_required` / `unavailable` / `outcome_unknown` (a transport
+  failure mid-call: it may have taken effect, so never retry blindly). Not an `invoke` operation. Types
+  `RaftMcpTool`, `RaftMcpCatalog`, `RaftMcpResult`, `CallMcpToolRequest`.
+
+## [0.20.1] — 2026-10-17
+
+### Fixed
+
+- `tasks.claim`, `tasks.updateStatus` and `tasks.amend` (methods and
+  `invoke`) now load the saved state first, as `messages.send` does. In
+  0.20.0 a freshly created client with a `state` store attested nothing on a
+  task write (its frontier was still empty), so the Server never held it.
+
+## [0.20.0] — 2026-10-17
+
+### Changed
+
+- `tasks.claim`, `tasks.updateStatus` and `tasks.amend` are held like a send
+  (glimpse G2): they now tell the Server what the model's context has seen of
+  the task's channel (the frontier's attestation, as `messages.send` does),
+  and a Server with the task freshness gate holds the write when that channel
+  has newer messages. A held write returns `state: "interrupted"`
+  (`reason: "unread_messages"`) with the CLI's held text and nothing applied;
+  show `interrupt.context`, call `frontier.recordHeld(interrupt)` (it books
+  under `interrupt.contextId`), then resume with the identical call. A rerun
+  of the same write is held at most once per catch-up. With nothing seen of
+  the channel yet in the context, nothing is attested and the write is not
+  held. `invoke(…, { contextId })` attests that context's view.
+- Sends the model makes through `invoke` (`messages.send` / `messages.reply`,
+  origin `"model"`, the default) run the CLI's thread-target check (glimpse
+  G2-5): a send to a top-level target right after this context read one of
+  its threads stops before anything is sent, with
+  `interrupt.reason: "thread_target"`, `interrupt.threadTarget`, and the
+  CLI's text. Send to the thread instead, or resume with the same input plus
+  `targetConfirmed: true` (`interrupt.resume.with`) and the same
+  `idempotencyKey`. Reading the target again clears it. Direct calls
+  (`raft.messages.send(…)`) and `invoke(…, { origin: "code" })` are not
+  checked: a program choosing a top-level target means it.
+
+### Added
+
+- `SendMessageRequest.targetConfirmed` / `messages_send({ targetConfirmed })`:
+  the top-level target is intentional (answers a `thread_target` interrupt).
+  Client-side only; not sent to the Server.
+- `SeenFrontier.recordRead`, `readOrder`, `latestThreadRead`: when each
+  target was last read, in local read order, per context. Snapshots carry
+  `reads` (still `version: 1`, at most 500); an older snapshot without them
+  only means the check has nothing to compare yet.
+- `RaftInterruptResume.with` and `RaftInterrupt.threadTarget`.
+
+### Type change
+
+- `RaftInterruptReason` is now `"unread_messages" | "unseen_card" |
+  "thread_target"`. Code with an exhaustive `switch` over `interrupt.reason`
+  needs a `"thread_target"` case or a `default` branch.
+
+## [0.19.0] — 2026-10-16
+
+### Added
+
+- `createRaft({ onStateError })`: called when loading (`phase: "load"`) or
+  saving (`phase: "save"`) the state fails or is rejected as stale. Type
+  `RaftStateErrorHandler`.
+
+### Deprecated
+
+- `onStateSaveError` and `RaftStateSaveErrorHandler`: use `onStateError` /
+  `RaftStateErrorHandler` (same signature; the old name already received
+  load failures too). Still honoured when `onStateError` is not set; removed
+  in 1.0.
+
+### Type change
+
+- `raft.messages.search` resolves to `"results" | "empty" | "incomplete"`. A
+  recent-sort text search reads at most 10,000 messages per call (newest
+  first, on servers with the timeline walk); when it stops before older
+  messages with nothing found yet, the state is `"incomplete"`, not
+  `"empty"`, and `next` is a `continue_search` step carrying the cursor
+  (`messages_search({ …, cursor })` in tool hints). A page with results that
+  stopped early stays `"results"` with `data.incomplete: true`. `"empty"`
+  now means everything in range was searched and nothing matched. New on
+  `RaftSearchPage`: `incomplete`, `nextCursor`, `searchedThrough`,
+  `searchedMessages`; new request field `cursor` (use instead of `offset`).
+  An exhaustive `switch` over `state` needs an `"incomplete"` case. Servers
+  before this change never return `"incomplete"`.
+
+## [0.18.0] — 2026-10-15
+
+### Added
+
+- `createRaft({ conversationCards: true })` (default off): conversation
+  cards, by the rules the `raft` CLI follows. `messages.read` starts with the
+  channel's card the first time in the model's context (and after it
+  changed) and with a DM peer's card when the context has seen nothing of
+  them; sender descriptions show once per context. `messages.send` /
+  `messages.reply` name the card versions the context has: a send whose
+  context never saw the card is held once (`interrupt.reason:
+  "unseen_card"`, `interrupt.cards`), a changed channel card comes back after
+  the receipt. Without a context (no `setContext`, no `invoke` contextId) no
+  card holds a send; every send is followed by the conversation's cards and
+  latest messages. See README, "Conversation cards".
+- `SeenFrontier`: `seenCard`, `claimCard`, `recordCard`, `recordCardsShown`;
+  `recordHeld` books an interrupt's cards, under `interrupt.contextId` (new:
+  the context the call was made in) on whichever view it is called. Snapshots
+  carry `observations`, one entry per context and card (still `version: 1`;
+  at most 500, other contexts' evicted first). Types `ChannelCard`,
+  `PeerCard`.
+
+### Type change
+
+- `RaftInterruptReason` is now `"unread_messages" | "unseen_card"`. Code with
+  an exhaustive `switch` over `interrupt.reason` needs a `default` branch (or
+  an `"unseen_card"` case). `"unseen_card"` only occurs with
+  `conversationCards` on.
+
+### Changed
+
+- Held text: `interrupt.context` (and the outcome `text`) of a held
+  `messages.send`, `replyTo`, `tasks.claim`, `tasks.updateStatus` or
+  `tasks.amend` is now the text the `raft` CLI prints for the same hold. It
+  shows the conversation's latest messages as 160-character previews, the
+  thread's start, how many earlier ones were skipped and the calls for older
+  and full text, in the client's hint style. Before, a held send printed full
+  bodies, and a held task call printed only a count. A held send ends with
+  the ways forward, naming its idempotency key. When the preview does not
+  cover every new message, the text says to read the conversation first.
+  Structured fields (`heldMessages`, `newMessageCount`, `contextComplete`, …)
+  are unchanged. Under reviewer isolation the text is the CLI's count-only
+  notice, followed by what happened to the call and the way forward (no
+  target, no content).
+
+## [0.17.0] — 2026-10-15
+
+### Deprecated
+
+- `createRaftClient` and `createRaftClientFromStore` (the 0.x client) are
+  deprecated. They are no longer updated and are removed in 1.0. Use
+  `createRaft`, which now covers everything they did; see
+  [MIGRATING.md](./MIGRATING.md). This withdraws the 0.3.0 note that the 0.x
+  client would be kept as a low-level client: route-level calls are
+  `raft.routes`.
+
+### Added
+
+- `raft.profile.updateAvatar({ data, filename, mimeType })` uploads an avatar
+  image (JPEG, PNG, GIF or WebP, at most 5 MB) and returns the profile as an
+  outcome.
+- `raft.apps.getConfig({ appId })` and `raft.apps.patchConfig({ appId, patch })`
+  read and atomically change a built-in app's configuration. Their `text` is
+  the snapshot `raft app config` prints.
+- `createRaftFromStore({ store, ... })` creates `createRaft` from a credential
+  store saved by `bootstrapRaftCredential`, with the same `CREDENTIAL_*`
+  errors as before.
+
+## [0.16.0] — 2026-10-13
+
+### Added
+
+- `actions.prepare` with `agent:create` takes `hosting` (`computer` or
+  `antiproton`) and, with `antiproton` only, `model`. The card then proposes an
+  agent hosted by Raft, without a computer, on that model. The human can still
+  change both in the dialog. Prepare refuses `antiproton` when hosting is off
+  or not configured for the Server (`HOSTED_RUNTIME_UNAVAILABLE`), a model the
+  hosted runtime does not offer (`HOSTED_MODEL_NOT_OFFERED`, the message lists
+  the offered ids) and a model while an administrator sets it
+  (`HOSTED_MODEL_LOCKED`). `hosting: "antiproton"` with a computer field, or
+  `model` without it, is `INVALID_PAYLOAD`.
+- `agent.context()` returns `features: { reminderApp, vaultApp }`, the
+  Server's rollout flags that a daemon-managed agent's prompt is built from:
+  reminders moved to the Reminder app, and secrets go through the Vault app.
+  Both are `false` on Servers that predate the field.
+
 ## [0.15.0] — 2026-10-11
 
 ### Added

@@ -5,7 +5,7 @@ import {
   type ApmHeldFreshnessEnvelopeBody,
 } from "./apmStateMachine";
 
-export type AgentInboxStateMachineAction = "send" | "task_claim" | "task_update";
+export type AgentInboxStateMachineAction = "send" | "task_claim" | "task_update" | "task_amend";
 
 export type AgentInboxStateMachineMessage = {
   seq?: number;
@@ -186,7 +186,7 @@ export function planAgentInboxSideEffect(input: AgentInboxSideEffectPlanInput): 
         heldMessageCount: 0,
         omittedMessageCount: 0,
       }, trace, {
-        forwardSeenUpToSeq: input.action === "send" && canAdvanceBoundary ? boundary.seenUpToSeq : undefined,
+        forwardSeenUpToSeq: canAdvanceBoundary ? boundary.seenUpToSeq : undefined,
         consumeEffect: {
           type: "consume_visible_messages",
           target: input.target,
@@ -251,7 +251,7 @@ export function planAgentInboxSideEffect(input: AgentInboxSideEffectPlanInput): 
       reason: "model_seen_boundary",
       pendingCount: 0,
       modelSeenSeq: boundary,
-    }, trace, { forwardSeenUpToSeq: input.action === "send" ? boundary : undefined });
+    }, trace, { forwardSeenUpToSeq: boundary });
   }
 
   if (input.recentMessages.length > 0) {
@@ -376,7 +376,7 @@ function planFirstTouchRecentContext(
       heldMessageCount: 0,
       omittedMessageCount: 0,
     }, trace, {
-      forwardSeenUpToSeq: input.action === "send" ? boundary.seenUpToSeq : undefined,
+      forwardSeenUpToSeq: boundary.seenUpToSeq,
       consumeEffect: {
         type: "consume_visible_messages",
         target: input.target,

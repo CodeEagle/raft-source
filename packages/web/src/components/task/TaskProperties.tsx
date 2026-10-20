@@ -5,12 +5,13 @@ import { ChevronDown, ChevronRight } from "lucide-react";
 import type { MessageId } from "../../i18n/messages";
 
 import AvatarSlot from "../ui/AvatarSlot";
+import SectionEyebrow from "../ui/SectionEyebrow";
 import { useChannelMembers } from "../../hooks/useChannelMembers";
 import { useAuthStore } from "../../store/authStore";
 import { useTaskStore } from "../../store/taskStore";
 import type { Task, TaskHistoryEvent, TaskStatus } from "../../store/taskStore";
 import { useServerPermissions } from "../../hooks/useServerPermissions";
-import { DescriptionDetails, DescriptionItem, DescriptionList, DescriptionTerm } from "raft-ui";
+import { DescriptionDetails, DescriptionItem, DescriptionList, DescriptionTerm } from "@botiverse/raft-ui";
 
 import InlineBadgeEditor from "../InlineBadgeEditor";
 import { HistoryTimeline } from "./HistoryTimeline";
@@ -205,13 +206,13 @@ export default function TaskProperties({ task }: { task: Task }) {
     setOpenEditor((cur) => (cur === "assignee" ? null : "assignee"));
   }, []);
   const closeEditor = useCallback(() => setOpenEditor(null), []);
+  const toggleHistory = useCallback(() => setHistoryOpen((v) => !v), []);
 
   // @artin asked for one horizontal facts row in #proj-task:142b9b9a. Keep
   // each label/value pair together, but let the row wrap on narrow panels.
+  // Raft DS › TaskCard: History folds under the properties, as a collapsible
+  // section title (13/18 700 ink-3); its timeline uses task-status pixels.
   return (<>
-    <div className="mb-4 border-b border-line-muted theme-brutal:border-black/10 pb-3"><button type="button" className="mb-1 flex w-full items-center gap-1 text-left text-xs font-bold" aria-expanded={historyOpen} onClick={() => setHistoryOpen((v) => !v)}><span>{formatMessage({ id: "task.properties.history" })}</span>{historyOpen ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}</button>
-      {historyOpen && <div className="mt-3 w-full">{historyError ? <p className="text-xs text-warning-strong">{formatMessage({ id: "task.history.error" })}</p> : visibleHistory.length === 0 ? <p className="text-xs text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "task.history.empty" })}</p> : <HistoryTimeline history={visibleHistory} resolveName={displayNameFor} />}</div>}
-    </div>
     <DescriptionList
       className="flex flex-wrap items-center gap-x-6 gap-y-2"
       data-testid="task-properties"
@@ -250,8 +251,7 @@ export default function TaskProperties({ task }: { task: Task }) {
           open={canEditAssignee && openEditor === "assignee"}
           onToggle={toggleAssigneeEditor}
           onRequestClose={closeEditor}
-          badgeClassName="bg-layer-panel text-foreground-strong theme-brutal:bg-white theme-brutal:text-black"
-          uppercase={false}
+          badgeClassName="bg-transparent text-foreground"
           disabled={busy || !canEditAssignee}
           buttonTitle={assigneeReadOnlyTitle}
           buttonTestId="task-properties-assignee"
@@ -268,9 +268,12 @@ export default function TaskProperties({ task }: { task: Task }) {
         <span>{createdByDisplay}</span>
       </PropertyRow>
     </DescriptionList>
-    {task.readOnlyReason && <p className="mt-2 text-xs text-black/60" data-testid="task-readonly-reason">
+    {task.readOnlyReason && <p className="mt-2 text-caption text-foreground-hint" data-testid="task-readonly-reason">
       {formatMessage({ id: "task.permissions.historicalJoint" })}
     </p>}
+    <div className="pt-4"><SectionEyebrow as="button" className="flex w-full items-center gap-1 rounded-sticker text-left outline-none hover:text-foreground focus-visible:shadow-focus" aria-expanded={historyOpen} onClick={toggleHistory}><span>{formatMessage({ id: "task.properties.history" })}</span>{historyOpen ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}</SectionEyebrow>
+      {historyOpen && <div className="mt-3 w-full">{historyError ? <p className="text-caption text-warning-strong">{formatMessage({ id: "task.history.error" })}</p> : visibleHistory.length === 0 ? <p className="text-caption text-foreground-hint">{formatMessage({ id: "task.history.empty" })}</p> : <HistoryTimeline history={visibleHistory} resolveName={displayNameFor} />}</div>}
+    </div>
   </>);
 }
 
@@ -282,8 +285,8 @@ export function TimelineText({ text, bold = false, className = "" }: { text: str
 
 export function TimelineDetail({ event, resolveName, formatMessage }: { event: TaskHistoryEvent; resolveName: (type: "agent" | "user", id: string) => string | null; formatMessage: ReturnType<typeof useIntl>["formatMessage"] }) {
   const p = event.payload;
-  if (["status_changed", "closed", "reopened"].includes(event.eventType) && p.from && p.to) { const from = String(p.from) as TaskStatus; const to = String(p.to) as TaskStatus; return <div className="mt-0.5 flex items-center gap-1 text-foreground-muted theme-brutal:text-black/60"><StatusBadge status={from}>{formatMessage({ id: STATUS_STYLES[from]?.labelId ?? "task.status.todo" })}</StatusBadge> → <StatusBadge status={to}>{formatMessage({ id: STATUS_STYLES[to]?.labelId ?? "task.status.todo" })}</StatusBadge></div>; }
-  return <TimelineText text={historyDetail(event, resolveName, formatMessage)} className="mt-0.5 text-foreground-muted theme-brutal:text-black/60" />;
+  if (["status_changed", "closed", "reopened"].includes(event.eventType) && p.from && p.to) { const from = String(p.from) as TaskStatus; const to = String(p.to) as TaskStatus; return <div className="mt-0.5 flex items-center gap-1 text-foreground-hint"><StatusBadge status={from}>{formatMessage({ id: STATUS_STYLES[from]?.labelId ?? "task.status.todo" })}</StatusBadge> → <StatusBadge status={to}>{formatMessage({ id: STATUS_STYLES[to]?.labelId ?? "task.status.todo" })}</StatusBadge></div>; }
+  return <TimelineText text={historyDetail(event, resolveName, formatMessage)} className="mt-0.5 text-foreground-hint" />;
 }
 
 

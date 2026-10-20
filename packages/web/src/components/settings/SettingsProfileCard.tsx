@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Card, Separator } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 
 type SettingsProfileCardProps = {
@@ -24,34 +25,35 @@ export default function SettingsProfileCard({
   testId,
 }: SettingsProfileCardProps) {
   return (
-    <div
+    <Card
       data-testid={testId}
-      className="space-y-4 border border-line-muted bg-layer-panel p-4 shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+      className="space-y-4 p-4"
     >
       <div className="flex items-start gap-4">
         <div className="flex size-16 shrink-0 items-center justify-center">
           {avatar}
         </div>
 
-        <div className="min-w-0 flex-1 pt-1">
+        <div className="min-w-0 flex-1 pt-2">
           <Tooltip content={title}>
           <div
-            className="min-w-0 truncate text-lg font-bold leading-tight text-foreground-strong theme-brutal:text-black"
+            className="min-w-0 truncate text-headline text-foreground"
           >
             {title}
           </div>
           </Tooltip>
           <Tooltip content={subtitle}>
-          <div className="truncate font-mono text-sm text-foreground-muted theme-brutal:text-black/50">
+          <div className="mt-0.5 truncate font-mono text-mono-code text-foreground-muted">
             {subtitle}
           </div>
           </Tooltip>
         </div>
       </div>
 
-      <div className="space-y-3 border-t border-line-muted pt-4">
+      <div className="space-y-3">
+        <Separator className="mb-4" />
         {children}
       </div>
-    </div>
+    </Card>
   );
 }

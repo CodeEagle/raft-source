@@ -1,7 +1,7 @@
 import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import type { AppNotificationGroup } from "@botiverse/raft-shared";
-import { Select, SelectContent, SelectIcon, SelectItem, SelectItemIndicator, SelectItemText, SelectList, SelectTrigger, SelectValue, TableCell, TableRow } from "raft-ui";
+import { Select, SelectContent, SelectIcon, SelectItem, SelectItemIndicator, SelectItemText, SelectList, SelectTrigger, SelectValue, TableCell, TableRow } from "@botiverse/raft-ui";
 import { APP_NOTIFICATION_GROUP_META, permissionGroupLabel, toggleAppNotificationGroup } from "./AppNotificationsControls";
 import type { AppNotificationSelection } from "./AppNotificationsControls";
 
@@ -32,8 +32,8 @@ export function AppPermissionAccessRow({
   return (
     <TableRow>
       <TableCell>
-        <div className="font-bold text-foreground-strong">{formatMessage({ id: APP_NOTIFICATION_GROUP_META[group].labelId })}</div>
-        <div className="mt-1 text-[11px] text-foreground-muted">{formatMessage({ id: APP_NOTIFICATION_GROUP_META[group].summaryId })}</div>
+        <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: APP_NOTIFICATION_GROUP_META[group].labelId })}</div>
+        <div className="mt-0.5 text-footnote text-foreground-muted">{formatMessage({ id: APP_NOTIFICATION_GROUP_META[group].summaryId })}</div>
       </TableCell>
       <TableCell className="align-middle">
         <Select
@@ -42,7 +42,7 @@ export function AppPermissionAccessRow({
           disabled={disabled}
           onValueChange={handleValueChange}
         >
-          <SelectTrigger aria-label={permissionGroupLabel(group, formatMessage)} className="w-full text-xs">
+          <SelectTrigger aria-label={permissionGroupLabel(group, formatMessage)} className="w-full">
             <SelectValue />
             <SelectIcon />
           </SelectTrigger>

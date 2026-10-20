@@ -1,8 +1,8 @@
-@import "raft-ui/fonts.css";
+@import "@botiverse/raft-ui/fonts.css";
 @import "tailwindcss" source(none);
-@import "raft-ui/styles.css";
+@import "@botiverse/raft-ui/styles.css";
 @import "@botiverse/hands-feedback-react/styles.css";
-@source "../../../node_modules/raft-ui/dist";
+@source "../../../node_modules/@botiverse/raft-ui/dist";
 @source "../";
 html, body, #root { height: 100%; margin: 0; }
 .feedback-entry { height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; background: var(--layer-canvas); }

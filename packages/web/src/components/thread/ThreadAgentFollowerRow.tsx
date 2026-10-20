@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import { X } from "lucide-react";
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
@@ -95,7 +95,7 @@ export function ThreadAgentFollowerRow({ agent, canManage, removing, currentServ
               type="button"
               size="icon-sm"
               variant="ghost"
-              className={`size-7 ${canRemoveAgent ? "" : "cursor-not-allowed opacity-45"}`}
+              className={canRemoveAgent ? undefined : "cursor-not-allowed"}
               disabled={!canRemoveAgent || removing}
               onClick={handleRemoveClick}
               aria-label={removeLabel}

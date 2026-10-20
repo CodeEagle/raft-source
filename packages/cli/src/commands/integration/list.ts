@@ -1,10 +1,12 @@
 // `raft integration list` — GET /internal/agent-api/integrations
 
 import type { Command } from "commander";
+import type {
+  AgentLoginIntegrationInventoryProjection,
+} from "@botiverse/raft-shared";
 import {
   AGENT_LOGIN_INTEGRATION_INVENTORY_PROJECTION,
-  type AgentLoginIntegrationInventoryProjection,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { defineCommand, registerCliCommand } from "../../core/command";
 import type { CommandRuntimeOptions } from "../../core/context";

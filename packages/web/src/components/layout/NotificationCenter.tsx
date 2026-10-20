@@ -17,13 +17,14 @@ import {
   NotificationCenterPopup,
   NotificationCenterScroller,
   NotificationCenterTitle,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import type { NotificationAction, NotificationEntry } from "./useSystemNotifications";
 import { useDismissedNotificationStore } from "./dismissedNotificationStore";
 
 export interface NotificationCenterProps {
   notifications: NotificationEntry[];
-  flavor: "desktop" | "mobile";
+  /** "top-bar": the desktop-width panel, hung under the top bar's Bell instead of beside the rail. */
+  flavor: "desktop" | "mobile" | "top-bar";
 }
 
 function initialFocusForKeyboardOpen(openType: string) {
@@ -39,7 +40,7 @@ const NotificationCenter = forwardRef<HTMLDivElement, NotificationCenterProps>(
       <NotificationCenterPopup
         ref={ref}
         data-testid="notification-center"
-        viewport={flavor}
+        viewport={flavor === "mobile" ? "mobile" : "desktop"}
         size="md"
         className="w-80"
         side={flavor === "desktop" ? "right" : "bottom"}
@@ -64,7 +65,7 @@ const NotificationCenter = forwardRef<HTMLDivElement, NotificationCenterProps>(
               <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
                 <CheckCircle2 size={36} />
                 <div className="font-bold">{formatMessage({ id: "ui.notificationCenter.emptyTitle" })}</div>
-                <div className="text-sm text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "ui.notificationCenter.emptyBody" })}</div>
+                <div className="text-sm text-foreground-muted">{formatMessage({ id: "ui.notificationCenter.emptyBody" })}</div>
               </div>
             </NotificationCenterEmptyState>
           ) : (
@@ -105,18 +106,19 @@ function NotificationActions({
   const handleDismiss = useCallback(() => {
     if (dismissalKey) dismiss(dismissalKey);
   }, [dismiss, dismissalKey]);
-  const actions: Array<{ action: NotificationAction; variant: "primary" | "secondary" }> = [];
-  if (entry.action) actions.push({ action: entry.action, variant: "primary" });
-  if (entry.secondaryAction) actions.push({ action: entry.secondaryAction, variant: "secondary" });
+  // In-row actions all look the same (raft-ui's outline button); order says
+  // which comes first.
+  const actions = [entry.action, entry.secondaryAction].filter(
+    (action): action is NotificationAction => action != null,
+  );
 
   if (actions.length === 0 && !dismissalKey) return null;
   return (
     <NotificationCenterItemActions className="mt-2 ml-0 flex-wrap justify-start">
-      {actions.map(({ action, variant }) => (
+      {actions.map((action) => (
         <NotificationCenterActionButton
           key={action.label}
           type="button"
-          variant={variant}
           onClick={action.onClick}
           disabled={action.disabled}
         >
@@ -126,7 +128,6 @@ function NotificationActions({
       {dismissalKey ? (
         <NotificationCenterActionButton
           type="button"
-          variant="secondary"
           onClick={handleDismiss}
         >
           {formatMessage({ id: "common.announcement.dismiss" })}

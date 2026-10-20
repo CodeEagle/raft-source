@@ -1,12 +1,12 @@
-import CloseButton from "../ui/CloseButton";
 import Tooltip from "../ui/Tooltip";
 import { useCallback, useMemo, useState, useEffect } from "react";
 import { useIntl } from "react-intl";
 import { X } from "lucide-react";
 import {
+  PanelAction,
   ProfilePanel,
   ProfilePanelBody,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { useProfileStore } from "../../store/profileStore";
 import { useAgentStore } from "../../store/agentStore";
 import type { Agent } from "../../store/agentStore";
@@ -318,8 +318,8 @@ export default function ConnectedProfilePanel({
     return (
       <ProfilePanel
         data-testid="profile-panel"
-        edge="attached"
-        className="absolute inset-0 z-30 flex min-h-0 min-w-0 flex-col border-l-0 bg-layer-panel lg:relative lg:inset-auto lg:z-auto"
+        edge="inset"
+        className="absolute inset-0 z-30 flex min-h-0 min-w-0 flex-col bg-layer-canvas lg:relative lg:inset-auto lg:z-auto"
         style={agentDetailStyle}
       >
         <div
@@ -398,17 +398,16 @@ export default function ConnectedProfilePanel({
           mobileBackProps={skeletonMobileBackProps}
           actions={onClose ? (
             <Tooltip content={formatMessage({ id: "common.close" })}>
-              <CloseButton
+              <PanelAction
                 onClick={closePanel}
                 aria-label={formatMessage({ id: "common.close" })}
-                data-slot="button"
               >
-                <X size={14} />
-              </CloseButton>
+                <X size={22} aria-hidden="true" />
+              </PanelAction>
             </Tooltip>
           ) : undefined}
         />
-        <ProfilePanelBody className="flex flex-1 items-center justify-center text-sm text-foreground-muted font-display">
+        <ProfilePanelBody className="flex flex-1 items-center justify-center text-callout text-foreground-hint">
           {formatMessage({ id: "common.loading" })}
         </ProfilePanelBody>
       </ProfilePanel>

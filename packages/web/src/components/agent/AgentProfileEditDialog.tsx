@@ -22,7 +22,7 @@ import {
   RadioGroup,
   RadioGroupItem,
   Textarea,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import type { ServerRole } from "@botiverse/raft-shared";
 import api from "../../api/client";
 import { useAgentStore } from "../../store/agentStore";
@@ -204,11 +204,15 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
     void save();
   }, [save]);
 
-  const presetButtonClass = (selected: boolean) =>
-    `flex size-10 items-center justify-center overflow-hidden rounded-md border transition-colors theme-brutal:rounded-none theme-brutal:border-2 ${
+  // "You chose this" is yellow: the picked tile is a yellow sticker behind the
+  // sprite, which keeps its own background. The upload tile is dashed until used.
+  const presetButtonClass = (selected: boolean, upload = false) =>
+    `flex size-11 items-center justify-center overflow-hidden rounded-control border-[1.5px] text-foreground-muted outline-none focus-visible:shadow-focus ${
       selected
-        ? "border-accent bg-accent-soft theme-brutal:border-brutal-pink theme-brutal:bg-brutal-pink/20"
-        : "border-line-muted hover:border-line-strong theme-brutal:border-black"
+        ? "border-sticker-ink bg-brand text-sticker-ink hover:press-overlay-sticker"
+        : upload
+          ? "border-dashed border-line-strong hover:bg-fill-pressed"
+          : "border-transparent hover:bg-fill-pressed"
     }`;
 
   return (
@@ -219,18 +223,19 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
             <DialogTitle id={ids.title}>{formatMessage({ id: TITLE_ID[field] })}</DialogTitle>
             <Button
               type="button"
-              variant="outline"
-              size="icon-md"
+              variant="ghost"
+              size="icon-sm"
+              className="-my-1.5 -mr-1.5"
               aria-label={formatMessage({ id: "common.close" })}
               onClick={requestClose}
               disabled={saving}
             >
-              <X className="size-5" aria-hidden="true" />
+              <X className="size-4.5" aria-hidden="true" />
             </Button>
           </DialogHeader>
-          <DialogBody className="grid gap-5 font-normal">
+          <DialogBody className="grid gap-5">
             {field === "displayName" ? (
-            <FormField label={formatMessage({ id: "agent.detail.displayName" })} htmlFor={ids.name} labelStyle="plain">
+            <FormField label={formatMessage({ id: "agent.detail.displayName" })} htmlFor={ids.name}>
               <Input
                 id={ids.name}
                 value={displayName}
@@ -245,7 +250,6 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
             <FormField
               label={formatMessage({ id: "machine.detail.description" })}
               htmlFor={ids.description}
-              labelStyle="plain"
               error={descriptionTooLong
                 ? formatMessage({ id: "agent.detail.descriptionMaxLength" }, { count: MAX_AGENT_DESCRIPTION_LENGTH })
                 : undefined}
@@ -266,11 +270,11 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
                 aria-label={formatMessage({ id: "agent.detail.role" })}
                 value={role}
                 onValueChange={handleRoleChange}
-                className="grid gap-3"
+                className="grid"
                 data-testid="agent-profile-edit-role"
               >
                 {roleOptions.map((option) => (
-                  <label key={option.id} className="flex items-center gap-2 text-sm font-medium text-foreground">
+                  <label key={option.id} className="flex min-h-11 items-center gap-3 text-subhead font-semibold text-foreground">
                     <RadioGroupItem value={option.id} autoFocus={option.id === role} />
                     {option.label}
                   </label>
@@ -281,9 +285,7 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
             // The dialog title already names this field, so no separate label.
             <div>
               <div className="flex items-start gap-4" data-testid="agent-profile-edit-avatar">
-                <div className="size-16 shrink-0">
-                  <AvatarSlot context="profile-tile" type="agent" agentAvatarUrl={previewAvatarUrl} />
-                </div>
+                <AvatarSlot context="profile-tile" type="agent" agentAvatarUrl={previewAvatarUrl} />
                 <div className="flex min-w-0 flex-wrap gap-2">
                   <Tooltip content={formatMessage({ id: "agent.detail.uploadImage" })}>
                     <button
@@ -291,9 +293,9 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
                       autoFocus={field === "avatar"}
                       aria-label={formatMessage({ id: "agent.detail.uploadImage" })}
                       onClick={() => fileInputRef.current?.click()}
-                      className={presetButtonClass(avatar.kind === "upload" || (avatar.kind === "unchanged" && isCustomAvatar(agent.avatarUrl)))}
+                      className={presetButtonClass(avatar.kind === "upload" || (avatar.kind === "unchanged" && isCustomAvatar(agent.avatarUrl)), true)}
                     >
-                      <Upload size={16} className="text-foreground-muted theme-brutal:text-black/60" />
+                      <Upload size={18} />
                     </button>
                   </Tooltip>
                   <input
@@ -327,13 +329,13 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
             {error ? <Banner status="warning" size="sm" role="alert">{error}</Banner> : null}
           </DialogBody>
           <DialogFooter>
-            <Button type="button" variant="outline" size="sm" onClick={requestClose} disabled={saving}>
+            <Button type="button" variant="ghost" size="lg" onClick={requestClose} disabled={saving}>
               {formatMessage({ id: "common.confirm.cancel" })}
             </Button>
             <Button
               type="button"
               variant="accent"
-              size="sm"
+              size="lg"
               loading={saving}
               disabled={!dirty || descriptionTooLong}
               onClick={handleSaveClick}
@@ -352,10 +354,10 @@ export default function AgentProfileEditDialog({ agent, open, field, onClose, ro
           </AlertDialogHeader>
           <AlertDialogBody>{formatMessage({ id: "agent.detail.editProfile.discardBody" })}</AlertDialogBody>
           <AlertDialogFooter>
-            <AlertDialogCancel size="sm">{formatMessage({ id: "message.chatPanel.overflow.keepEditing" })}</AlertDialogCancel>
+            <AlertDialogCancel size="lg">{formatMessage({ id: "message.chatPanel.overflow.keepEditing" })}</AlertDialogCancel>
             <AlertDialogAction
               variant="danger"
-              size="sm"
+              size="lg"
               onClick={handleDiscardClick}
             >
               {formatMessage({ id: "message.chatPanel.overflow.discardChanges" })}

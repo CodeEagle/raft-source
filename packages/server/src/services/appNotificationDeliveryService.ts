@@ -12,6 +12,7 @@ import {
 } from "@botiverse/raft-shared";
 import { and, asc, eq, isNull, lt, lte, or, sql } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../db/index";
+import { afterAmbientTransaction } from "../db/ambientTransaction";
 import { addTraceEvent, withTraceRoot } from "../tracing/semanticTrace";
 import {
   agents,
@@ -288,7 +289,9 @@ export async function emitAppFacingNotificationEvent(input: {
     }).onConflictDoNothing();
     recipientCount += 1;
   }
-  if (recipientCount > 0) scheduledDrain?.();
+  // After commit: started inside the caller's transaction the drain claimed
+  // uncommitted deliveries through it and could post webhooks before commit.
+  if (recipientCount > 0) afterAmbientTransaction(() => scheduledDrain?.());
   return { eventId, recipientCount };
 }
 

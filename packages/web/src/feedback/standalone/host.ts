@@ -15,7 +15,8 @@ export interface FeedbackHostSession {
   clientKind: string;
   clientVersion: string;
   locale: "en" | "zh-CN";
-  theme: "brutal" | "elegant";
+  /** The host's own theme family. The page always renders the Raft Design System; only `mode` is honoured. */
+  theme: "brutal" | "elegant" | "raft";
   mode: "light" | "dark";
 }
 export type FeedbackBinding = Pick<FeedbackHostSession, "accountId" | "sessionGeneration" | "webViewGeneration">;
@@ -43,7 +44,7 @@ export function parseFeedbackHost(value: unknown, pageOrigin: string, compiledAp
   // as a request header.
   if (typeof s.clientKind !== "string" || !s.clientKind || s.clientKind.length > 64 || /\s/.test(s.clientKind)) return null;
   if (typeof s.clientVersion !== "string" || !s.clientVersion.trim() || s.clientVersion.length > 64) return null;
-  if (!["en", "zh-CN"].includes(s.locale) || !["brutal", "elegant"].includes(s.theme) || !["light", "dark"].includes(s.mode)) return null;
+  if (!["en", "zh-CN"].includes(s.locale) || !["brutal", "elegant", "raft"].includes(s.theme) || !["light", "dark"].includes(s.mode)) return null;
   try {
     const origin = new URL(s.apiOrigin);
     // The additional API target is build-owned, never an arbitrary host choice.

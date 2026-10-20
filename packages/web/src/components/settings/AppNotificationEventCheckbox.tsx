@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import type { AppNotificationEvent } from "@botiverse/raft-shared";
-import { Checkbox } from "raft-ui";
+import { Checkbox } from "@botiverse/raft-ui";
 import { toggleAppNotificationEvent } from "./AppNotificationsControls";
 import type { AppNotificationSelection } from "./AppNotificationsControls";
 
@@ -21,5 +21,5 @@ export function AppNotificationEventCheckbox({
     (nextChecked: boolean) => onChange(toggleAppNotificationEvent(value, event, nextChecked)),
     [event, onChange, value],
   );
-  return <Checkbox size="sm" checked={checked} disabled={disabled} onCheckedChange={handleCheckedChange} />;
+  return <Checkbox checked={checked} disabled={disabled} onCheckedChange={handleCheckedChange} />;
 }

@@ -1,4 +1,4 @@
-// `raft channel info <#channel>` — narrow channel fact lookup from visible server inventory.
+// `raft channel info <#channel>` (or `--target <#channel>`) — narrow channel fact lookup from visible server inventory.
 
 import type { Command } from "commander";
 
@@ -9,6 +9,7 @@ import { CliError } from "../../core/errors";
 import { writeText } from "../../core/renderer";
 import { formatChannelInfo } from "../server/_format";
 import { parseRegularChannelTarget } from "./leave";
+import { positionalOrFlagTarget } from "./_targetArg";
 
 function normalizeChannelInfoTarget(target: string | undefined): { input: string; name: string } {
   const input = target?.trim() ?? "";
@@ -27,10 +28,11 @@ export const channelInfoCommand = defineCommand(
   {
     name: "info",
     description: "Show narrow channel facts: existence, joined state, description, and member count when visible",
-    arguments: ["<target>"],
+    arguments: ["[target]"],
+    options: [{ flags: "--target <target>", description: "Channel to describe, e.g. '#engineering' (same as the positional target)" }],
   },
-  async (ctx, target: string | undefined) => {
-    const { input, name } = normalizeChannelInfoTarget(target);
+  async (ctx, targetArg: string | undefined, opts: { target?: string } = {}) => {
+    const { input, name } = normalizeChannelInfoTarget(positionalOrFlagTarget(targetArg, opts.target));
     const agentContext = ctx.loadAgentContext();
     const client = ctx.createApiClient(agentContext);
     const agentApi = createAgentApiSurfaceClient(client);

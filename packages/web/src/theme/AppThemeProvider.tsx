@@ -7,7 +7,7 @@ import {
   useSyncExternalStore,
 } from "react";
 import type { ReactNode } from "react";
-import { ThemeProvider, useTheme } from "raft-ui";
+import { ThemeProvider } from "@botiverse/raft-ui";
 import { AppThemeContext } from "../hooks/useAppTheme";
 import {
   DEVICE_THEME_STORAGE_KEY,
@@ -18,19 +18,15 @@ import {
   APP_THEME_PRESET_STORAGE_KEY_PREFIX,
   APP_THEME_STORAGE_KEY,
   DEFAULT_APP_THEME_PREFERENCES,
-  isAppThemePreferences,
-  isAppThemePreset,
-  preferencesFromPreset,
-  resolveAppThemePreferences,
-  supportsAppThemeMode,
+  isAppAppearanceMode,
+  resolveAppThemeMode,
 } from "./appTheme";
 import type {
   AppAppearanceMode,
   AppResolvedMode,
-  AppThemeId,
   AppThemePreferences,
-  AppThemePreset,
 } from "./appTheme";
+import { appThemeChromeColor } from "./appThemeChrome";
 
 // RUI reads matchMedia even when an explicit mode is supplied. Keep the
 // provider usable in non-browser test/SSR harnesses that do not install it.
@@ -59,24 +55,14 @@ function getSystemMode(): AppResolvedMode {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-function syncRootTheme(theme: "brutal" | "elegant", mode: AppResolvedMode): void {
+function syncRootTheme(mode: AppResolvedMode): void {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
-  root.dataset.theme = theme;
-  root.classList.toggle("light", theme === "elegant" && mode === "light");
-  root.classList.toggle("dark", theme === "elegant" && mode === "dark");
-  root.style.colorScheme = theme === "brutal" ? "light" : mode;
+  root.classList.toggle("light", mode === "light");
+  root.classList.toggle("dark", mode === "dark");
+  root.style.colorScheme = mode;
   const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-  if (meta) meta.content = theme === "brutal" ? "#FFD440" : mode === "dark" ? "#141411" : "#FFFFFF";
-}
-
-function AppThemeChromeSynchronizer() {
-  const { resolvedMode, theme } = useTheme();
-  useLayoutEffect(() => {
-    const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
-    if (meta) meta.content = theme === "brutal" ? "#FFD440" : resolvedMode === "dark" ? "#141411" : "#FFFFFF";
-  }, [resolvedMode, theme]);
-  return null;
+  if (meta) meta.content = appThemeChromeColor(mode);
 }
 
 function isDeviceThemeStorageKey(key: string | null): boolean {
@@ -94,98 +80,39 @@ export function AppThemeProvider({ children }: { children: ReactNode }) {
     getSystemMode,
     () => "light",
   );
-  const resolved = useMemo(
-    () => resolveAppThemePreferences(preferences, systemMode),
-    [preferences, systemMode],
-  );
+  const resolvedMode = resolveAppThemeMode(preferences, systemMode);
 
   useLayoutEffect(() => {
-    syncRootTheme(resolved.theme, resolved.resolvedMode);
-  }, [resolved.resolvedMode, resolved.theme]);
+    syncRootTheme(resolvedMode);
+  }, [resolvedMode]);
 
+  // Another tab changed the appearance: follow it.
   useEffect(() => {
     const handleStorage = (event: StorageEvent) => {
       if (!isDeviceThemeStorageKey(event.key)) return;
-      if (event.key === DEVICE_THEME_STORAGE_KEY && event.newValue) {
-        try {
-          const parsed: unknown = JSON.parse(event.newValue);
-          if (isAppThemePreferences(parsed)) {
-            setPreferenceState(parsed);
-            return;
-          }
-        } catch {
-          // Fall through to a full storage read.
-        }
-      }
-      if (event.key === APP_THEME_STORAGE_KEY && isAppThemePreset(event.newValue)) {
-        setPreferenceState(preferencesFromPreset(event.newValue));
-        return;
-      }
       setPreferenceState(readDeviceThemePreferences());
     };
     window.addEventListener("storage", handleStorage);
     return () => window.removeEventListener("storage", handleStorage);
   }, []);
 
-  const setPreferences = useCallback((nextPreferences: AppThemePreferences) => {
-    if (!isAppThemePreferences(nextPreferences)) return;
-    setPreferenceState(nextPreferences);
-    writeDeviceThemePreferences(nextPreferences);
+  const setMode = useCallback((mode: AppAppearanceMode) => {
+    if (!isAppAppearanceMode(mode)) return;
+    const next = { mode };
+    setPreferenceState(next);
+    writeDeviceThemePreferences(next);
   }, []);
 
-  const setMode = useCallback((mode: AppAppearanceMode) => {
-    setPreferences({ ...preferences, mode });
-  }, [preferences, setPreferences]);
-
-  const setThemeForMode = useCallback((mode: AppResolvedMode, themeId: AppThemeId) => {
-    if (!supportsAppThemeMode(themeId, mode)) return;
-    setPreferences({
-      ...preferences,
-      ...(mode === "light" ? { lightThemeId: themeId } : { darkThemeId: themeId }),
-    });
-  }, [preferences, setPreferences]);
-
-  const setPreset = useCallback((preset: AppThemePreset) => {
-    if (!isAppThemePreset(preset)) return;
-    setPreferences(preferencesFromPreset(preset));
-  }, [setPreferences]);
-
-  const handleThemeChange = useCallback((theme: "brutal" | "elegant") => {
-    const mode = resolved.resolvedMode;
-    if (supportsAppThemeMode(theme, mode)) setThemeForMode(mode, theme);
-  }, [resolved.resolvedMode, setThemeForMode]);
-
-  const handleModeChange = useCallback((mode: AppAppearanceMode) => {
-    setMode(mode);
-  }, [setMode]);
-
   const contextValue = useMemo(() => ({
-    preset: resolved.preset,
     preferences,
-    resolvedMode: resolved.resolvedMode,
-    setPreferences,
+    mode: preferences.mode,
+    resolvedMode,
     setMode,
-    setThemeForMode,
-    setPreset,
-  }), [
-    preferences,
-    resolved.preset,
-    resolved.resolvedMode,
-    setMode,
-    setPreferences,
-    setPreset,
-    setThemeForMode,
-  ]);
+  }), [preferences, resolvedMode, setMode]);
 
   return (
     <AppThemeContext.Provider value={contextValue}>
-      <ThemeProvider
-        theme={resolved.theme}
-        mode={resolved.resolvedMode}
-        onThemeChange={handleThemeChange}
-        onModeChange={handleModeChange}
-      >
-        <AppThemeChromeSynchronizer />
+      <ThemeProvider mode={resolvedMode} onModeChange={setMode}>
         {children}
       </ThemeProvider>
     </AppThemeContext.Provider>

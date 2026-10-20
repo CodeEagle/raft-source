@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 import type { APIRequestContext, Locator, Page, TestInfo } from "@playwright/test";
 import { assertApiOk } from "../../fixtures/apiResponse";
+import { expectCssColor } from "../../fixtures/colorAssertions";
 import { navigateToMessageScrollerWithReadinessEvidence } from "../../fixtures/messageScrollerReadiness";
 import type { ScenarioSeedState } from "../../fixtures/seedState";
 import { test } from "../../fixtures/scenario";
@@ -137,10 +138,13 @@ async function openRowMenu(row: Locator, page: Page) {
   }
 }
 
+// The unread count is the row's pink sticker (Raft DS › Badge: pink means
+// "go read"), raft-ui's SidebarItemCount.
 async function expectUnreadBadge(row: Locator, count: number) {
-  const unreadBadge = row.locator("span.bg-brutal-pink");
+  const unreadBadge = row.locator('[data-slot="sidebar-item-count"]');
   if (count > 0) {
     await expect(unreadBadge).toHaveText(String(count));
+    await expectCssColor(row.page(), await unreadBadge.evaluate((el) => getComputedStyle(el).backgroundColor), "#FF99C3", 2);
     return;
   }
   await expect(unreadBadge).toHaveCount(0);
@@ -306,4 +310,57 @@ test.describe("sidebar Mark as Unread works across channels and DMs from current
       }
     }
   }
+});
+
+test.describe("conversation All Read", () => {
+  // This test overrides the browser flag response; service-worker fetches can
+  // bypass Playwright routing (notably in WebKit).
+  test.use({ serviceWorkers: "block" });
+
+test("sidebar All Read clears thread-only unread and a later reply becomes unread again", async ({ page, request, scenario }, testInfo) => {
+  const { seed, login, peer } = scenario;
+  const target = await createChannel(request, seed, login.accessToken, `all-read-${Date.now().toString(36)}`);
+  await addHumanToChannel(request, seed, login.accessToken, target.id, peer.id);
+  const parentResponse = await request.post(`${seed.urls.api}/api/messages`, {
+    headers: authHeaders(login.accessToken, seed.server.id),
+    data: { channelId: target.id, content: "All-read thread parent" },
+  });
+  await assertApiOk(parentResponse, "create All Read parent");
+  const parent = await parentResponse.json() as { id: string };
+  const followed = await request.post(`${seed.urls.api}/api/channels/threads/follow`, {
+    headers: authHeaders(login.accessToken, seed.server.id), data: { parentMessageId: parent.id },
+  });
+  await assertApiOk(followed, "follow All Read thread");
+  const postReply = async (content: string) => {
+    const response = await request.post(`${seed.urls.api}/api/channels/${target.id}/threads`, {
+      headers: authHeaders(peer.accessToken, seed.server.id),
+      data: { parentMessageId: parent.id, content },
+    });
+    await assertApiOk(response, "post All Read reply");
+  };
+  await createMessage(request, seed, login.accessToken, seed.channel.id, "Anchor while clearing another conversation");
+  await postReply("Unread before explicit All Read");
+  await markChannelRead(request, seed, login.accessToken, target.id);
+  await page.route("**/api/feature-flags/evaluate", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json() as { evaluations: Array<{ key: string; enabled: boolean }> };
+    body.evaluations = body.evaluations.filter((item: { key: string }) => item.key !== "thread_unread_badge_v0");
+    body.evaluations.push({ key: "thread_unread_badge_v0", enabled: true });
+    await route.fulfill({ status: response.status(), json: body });
+  });
+  await navigateToMessageScrollerWithReadinessEvidence(page, testInfo, { consumer: "unread-click-read", channelId: seed.channel.id }, () => page.goto(channelPath(seed, seed.channel.id), { waitUntil: "domcontentloaded" }));
+  const row = page.locator(`button[data-sidebar-channel-id="${target.id}"]`).first();
+  const threadBadge = row.getByTestId("sidebar-thread-unread");
+  await expect(threadBadge).toHaveText("1 thread with new replies");
+  expect(await getServerUnreadCount(request, seed, login.accessToken, target.id)).toBe(0);
+  await row.click({ button: "right" });
+  const receipt = page.waitForResponse((response) =>
+    response.url().endsWith(`/channels/${target.id}/conversation-read-all`) && response.request().method() === "POST");
+  await page.getByRole("menuitem", { name: "Mark All as Read", exact: true }).click();
+  expect((await receipt).ok()).toBe(true);
+  await expect(threadBadge).toHaveCount(0);
+  await postReply("New reply after All Read must remain unread");
+  await expect(threadBadge).toHaveText("1 thread with new replies");
+});
+
 });

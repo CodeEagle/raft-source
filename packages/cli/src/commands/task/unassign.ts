@@ -12,7 +12,7 @@
 // surface; the route is not.
 
 import type { Command } from "commander";
-import { type AgentApiTaskAssignBody } from "@botiverse/raft-shared";
+import type { AgentApiTaskAssignBody } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

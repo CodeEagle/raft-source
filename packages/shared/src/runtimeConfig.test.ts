@@ -939,11 +939,12 @@ test("legacy hydration sanitizes nested unknown variant fields with the parser f
   assert.equal(JSON.stringify(launch).includes("should-not-survive"), false);
 });
 
-test("write validation gates reasoning effort per preset model — max/ultra can't leak to Claude (task #496)", () => {
+test("write validation gates reasoning effort per preset model — ultra can't leak to Claude, max only where declared (task #496)", () => {
   // parseRuntimeConfig is the strict WRITE validator (create/update). The real form
-  // sends a structured `{ kind: "preset", id }` model. Claude declares no
-  // supportedReasoningEfforts → BASE set, so a max/ultra effort (Codex-GPT-5.6-only)
-  // must fail-closed to null rather than persist, even though the raw enum accepts it.
+  // sends a structured `{ kind: "preset", id }` model. Claude models declare
+  // low..max (Claude Code's `--effort`), never ultra; Haiku 4.5 declares nothing and
+  // keeps the BASE set. An undeclared effort must fail-closed to null rather than
+  // persist, even though the raw enum accepts it.
   const parsePreset = (runtime: string, modelId: string, reasoningEffort: ReasoningEffort, provider?: unknown) => {
     const r = parseRuntimeConfig({
       runtimeConfig: {
@@ -960,7 +961,9 @@ test("write validation gates reasoning effort per preset model — max/ultra can
     return r.config.reasoningEffort;
   };
   assert.equal(parsePreset("claude", "sonnet", "ultra", { kind: "default" }), null);
-  assert.equal(parsePreset("claude", "sonnet", "max", { kind: "default" }), null);
+  assert.equal(parsePreset("claude", "sonnet", "max", { kind: "default" }), "max");
+  assert.equal(parsePreset("claude", "claude-opus-5-5", "max", { kind: "default" }), "max");
+  assert.equal(parsePreset("claude", "claude-haiku-4-5", "max", { kind: "default" }), null);
   // A base-level effort on Claude is preserved.
   assert.equal(parsePreset("claude", "sonnet", "high", { kind: "default" }), "high");
   // Codex Astra and GPT-5.6 sol DECLARE ultra via supportedReasoningEfforts → it is kept;

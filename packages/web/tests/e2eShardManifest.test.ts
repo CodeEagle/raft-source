@@ -236,6 +236,10 @@ test("manifest refresh matches formal runner contracts and builds e2e dist first
   assert.ok(profileJob.indexOf(profileContract.build) < profileJob.indexOf("pnpm exec node --import @oxc-node/core/register scripts/perf/profileE2eShards.ts"));
   assert.match(profileJob, /E2E_PROFILE_SOURCE_COMMIT: \$\{\{ github\.sha \}\}/);
   assert.match(profileJob, /- name: Report e2e profile verdict\n\s+shell: bash\n/);
+  // Browser failures can still produce timings; their first-attempt attachments
+  // must survive even when profiling or the later verdict step fails.
+  assert.match(profileJob, /- name: Upload e2e profile evidence\n\s+if: always\(\)\n\s+uses: actions\/upload-artifact@v6\n/);
+  assert.match(profileJob, /name: e2e-profile-evidence\n\s+path: packages\/web\/test-results\//);
 
   const profileServerJob = jobBlock(refreshWorkflow, "profile-server");
   const formalServerJob = jobBlock(testWorkflow, "unit-server");

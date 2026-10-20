@@ -224,6 +224,10 @@ export class ChildProcessRuntimeSession implements RuntimeSession {
       this.events.emit("error", err);
     };
     const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+      // One exit per child. Node emits it once; a test double may emit more
+      // (e.g. after a kill it already honoured), which must not become a
+      // second process_exited frame.
+      if (exitEmitted) return;
       exitEmitted = true;
       this.events.emit("exit", {
         code,

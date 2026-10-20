@@ -8,7 +8,8 @@ import type { ServerSetupRuntimeStatus } from "./serverSetupProjection";
 import { formatRelativeTime } from "../../utils/relativeTime";
 import ComputerCommandGuide from "../machine/ComputerCommandGuide";
 import Banner from "../ui/Banner";
-import { Button, Spinner } from "raft-ui";
+import SectionEyebrow from "../ui/SectionEyebrow";
+import { Badge, Button, Card, CardDescription, CardHeader, CardTitle, DialogSurface, Separator, Spinner, Status } from "@botiverse/raft-ui";
 import TextLink from "../ui/TextLink";
 import Tooltip from "../ui/Tooltip";
 import SetupSessionFooter from "./SetupSessionFooter";
@@ -285,15 +286,16 @@ export default function ServerSetupComputerRuntimeStep({
   }, [computerOnline]);
 
   return (
-    <section className="flex w-full max-w-[960px] flex-col rounded-lg border border-line-muted bg-layer-panel shadow-raft-md theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal md:h-[min(720px,calc(100dvh-3rem))] md:min-h-[520px] md:overflow-hidden">
-      <header className="shrink-0 border-b border-line-hairline px-6 pb-4 pt-6 sm:px-9 theme-brutal:border-b-2 theme-brutal:border-black">
-        <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-foreground-muted">
+    <DialogSurface render={<section />} className="w-full max-w-[960px] md:h-[min(720px,calc(100dvh-3rem))] md:min-h-[520px]">
+      <header className="shrink-0 border-b border-line-seam px-6 pb-4 pt-6 sm:px-9">
+        {/* The onboarding step label: Space Mono 12, sentence case. */}
+        <p className="font-mono text-mono-meta text-foreground-hint">
           {formatMessage({ id: "onboarding.computerRuntime.eyebrow" })}
         </p>
         {/* Do not ask a returning user who they are. "Connect a computer" is the right
             question only for someone who has never connected one; for someone whose machine
             is merely asleep it is the product saying it does not remember them. */}
-        <h1 className="mt-2 text-xl font-bold">
+        <h1 className="mt-1 text-title text-foreground">
           {/* Three independent sentences, one id each — not a composed string.
               zh does not keep this clause order. */}
           {formatMessage({
@@ -304,7 +306,7 @@ export default function ServerSetupComputerRuntimeStep({
                 : "onboarding.computerRuntime.titleConnect",
           })}
         </h1>
-        <p className="mt-1 text-xs leading-5 text-foreground-muted">
+        <p className="mt-1.5 text-callout text-foreground-muted">
           {formatMessage({
             id: recoveringMany
               ? "onboarding.computerRuntime.bodyRecoverMany"
@@ -316,7 +318,7 @@ export default function ServerSetupComputerRuntimeStep({
       </header>
 
       <div className="space-y-3 px-5 py-4 sm:px-9 md:min-h-0 md:flex-1 md:overflow-y-auto">
-        {error ? <Banner intent="warning" density="sm" className="font-bold">{error}</Banner> : null}
+        {error ? <Banner intent="warning" density="sm">{error}</Banner> : null}
 
         {/* The connect step is one linear flow, not a collapsible section: its
             title is already the modal's heading, and wrapping it in a second
@@ -386,16 +388,17 @@ export default function ServerSetupComputerRuntimeStep({
             made it appear and vanish again the moment the list landed. The log's
             "Detecting runtime…" spinner is the honest thing to show while we wait. */}
         {runtimeVisible && !ready && runtimeAnswered ? (
-        <div
-          className={`rounded-md border border-line-muted theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black ${connectionMotionPhase === "handoff" ? "onboarding-runtime-reveal" : ""}`}
+        <Card
+          variant="inset"
+          className={connectionMotionPhase === "handoff" ? "onboarding-runtime-reveal" : undefined}
           data-motion-state={connectionMotionPhase}
         >
-          <div className="px-4 py-3">
-            <h2 className="text-sm font-bold">{formatMessage({ id: "onboarding.computerRuntime.noRuntimeTitle" })}</h2>
-            <p className="mt-1 text-xs text-foreground-muted">
+          <CardHeader>
+            <CardTitle render={<h2>{formatMessage({ id: "onboarding.computerRuntime.noRuntimeTitle" })}</h2>} className="text-subhead font-bold" />
+            <CardDescription render={<p />}>
               {formatMessage({ id: "onboarding.computerRuntime.noRuntimeBody" })}
-            </p>
-          </div>
+            </CardDescription>
+          </CardHeader>
 
           <div>
           <RuntimeGroupLabel note={formatMessage({ id: "onboarding.computerRuntime.recommendedNote" })}>
@@ -412,6 +415,7 @@ export default function ServerSetupComputerRuntimeStep({
             />
           ))}
 
+          <Separator />
           <RuntimeGroupLabel>{formatMessage({ id: "onboarding.computerRuntime.allSupported" })}</RuntimeGroupLabel>
           {catalog.supported.map((runtime) => (
             <RuntimeRow
@@ -432,13 +436,13 @@ export default function ServerSetupComputerRuntimeStep({
             />
           ) : null}
           </div>
-        </div>
+        </Card>
         ) : null}
       </div>
 
-      <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-line-hairline px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-9 theme-brutal:border-t-2 theme-brutal:border-black">
+      <footer className="flex shrink-0 flex-col-reverse gap-3 border-t border-line-seam px-5 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-9">
         <div className="flex min-w-0 items-center gap-3">
-          <SetupSessionFooter disabled={loading} />
+          <SetupSessionFooter disabled={loading} showServerSettings />
         </div>
         <Button
           type="button"
@@ -453,7 +457,7 @@ export default function ServerSetupComputerRuntimeStep({
           })}
         </Button>
       </footer>
-    </section>
+    </DialogSurface>
   );
 }
 
@@ -494,7 +498,7 @@ function RecoveryCommandRow({
   return (
     <div className="flex items-center gap-2">
       <code
-        className="min-w-0 flex-1 rounded-md border border-line-strong bg-black px-3 py-2 font-mono text-xs text-brutal-lime shadow-raft-sm break-all theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:shadow-brutal-sm"
+        className="min-h-10 min-w-0 flex-1 rounded-control border border-line-hairline bg-layer-code px-3 py-2.5 font-mono text-mono-code text-foreground break-all"
         data-testid={testId}
       >
         {command}
@@ -556,8 +560,8 @@ function OfflineComputerRecovery({
   return (
     <div className="space-y-4" data-testid="onboarding-offline-recovery">
       <div className="flex items-center gap-2">
-        <Terminal size={16} className="text-foreground-strong" />
-        <p className="font-mono text-[10px] font-bold uppercase tracking-wide text-foreground-muted">
+        <Terminal size={18} className="shrink-0 text-foreground-muted" />
+        <p className="text-subhead font-bold text-foreground">
           {many
             ? formatMessage({ id: "onboarding.computerRuntime.titleRecoverMany" })
             : formatMessage(
@@ -572,12 +576,12 @@ function OfflineComputerRecovery({
           {computers.map((c) => {
             const lastSeen = formatRelativeTime(c.lastHeartbeat, locale);
             return (
-              <li key={c.id} className="flex items-center gap-3 rounded-md border border-line-muted bg-layer-panel px-3 py-2 theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">
-                <Monitor size={16} className="shrink-0 text-foreground-muted" />
+              <Card key={c.id} render={<li />} className="flex-row items-center gap-3 px-3 py-2.5">
+                <Monitor size={20} className="shrink-0 text-foreground-muted" />
                 <div className="min-w-0">
-                  <p className="truncate text-xs font-bold">{c.name}</p>
+                  <p className="truncate font-mono text-mono-code font-bold text-foreground">{c.name}</p>
                   {/* Only what we actually know. No last-seen row rather than a made-up one. */}
-                  <p className="text-[11px] text-foreground-hint">
+                  <p className="text-caption text-foreground-hint">
                     {/* `lastSeen` is app-locale correct: task #53 (#5848) gave
                         formatRelativeTime an explicit locale parameter, and this
                         call site passes the one from useIntl. */}
@@ -586,7 +590,7 @@ function OfflineComputerRecovery({
                       : formatMessage({ id: "onboarding.computerRuntime.offline" })}
                   </p>
                 </div>
-              </li>
+              </Card>
             );
           })}
         </ul>
@@ -594,7 +598,7 @@ function OfflineComputerRecovery({
 
       {anyLegacyDaemon ? (
         <div data-testid="onboarding-recovery-legacy-daemon">
-          <p className="mb-2 text-xs leading-5 text-foreground-muted">
+          <p className="mb-2 text-callout text-foreground-muted">
             {formatMessage({ id: "onboarding.computerRuntime.legacyDaemon" })}
           </p>
           <ComputerCommandGuide
@@ -607,7 +611,7 @@ function OfflineComputerRecovery({
       ) : (
         <>
           <div>
-            <p className="mb-2 text-xs leading-5 text-foreground-muted">
+            <p className="mb-2 text-callout text-foreground-muted">
               {many
                 ? formatMessage({ id: "onboarding.computerRuntime.recoverManyHint" })
                 : formatMessage(
@@ -619,7 +623,7 @@ function OfflineComputerRecovery({
           </div>
 
           <div>
-            <p className="mb-2 text-xs leading-5 text-foreground-muted">
+            <p className="mb-2 text-callout text-foreground-muted">
               {/* REUSED from the Computer detail page rather than minted again: it is the
                   same prompt, and this whole recovery card exists because
                   MachineDetailPanel worked the problem out first (see the note at
@@ -644,7 +648,7 @@ function OfflineComputerRecovery({
         "throw this away and start again". One question, one answer, in the same place.
       */}
       {!canReset ? null : (
-        <div className="flex flex-wrap items-baseline gap-x-1 text-sm">
+        <div className="flex flex-wrap items-baseline gap-x-1 text-callout text-foreground-muted">
           <span data-testid="onboarding-recovery-start-over-description">
             {formatMessage({
               id: many
@@ -741,7 +745,7 @@ function ConnectProgressLog({
 
   return (
     <ol
-      className="space-y-1.5 font-mono text-xs leading-5"
+      className="space-y-1.5 font-mono text-mono-meta"
       aria-live="polite"
       data-testid="onboarding-connect-log"
     >
@@ -754,18 +758,18 @@ function ConnectProgressLog({
         >
           <span className="mt-0.5 flex size-4 shrink-0 items-center justify-center" aria-hidden="true">
             {line.done ? (
-              <span className="flex size-4 items-center justify-center border-2 border-black bg-brutal-lime">
-                <Check size={10} strokeWidth={4} />
+              <span className="flex size-4 items-center justify-center rounded-sticker border-[1.5px] border-sticker-ink bg-success text-sticker-ink">
+                <Check size={10} strokeWidth={3} />
               </span>
             ) : line.failed ? (
-              <span className="flex size-4 items-center justify-center border-2 border-black bg-brutal-orange">
-                <X size={10} strokeWidth={4} />
+              <span className="flex size-4 items-center justify-center rounded-sticker border-[1.5px] border-sticker-ink bg-warning text-sticker-ink">
+                <X size={10} strokeWidth={3} />
               </span>
             ) : line.pending ? (
               <Spinner size="sm"  aria-label={formatMessage({ id: "common.loadingLabel" })} />
             ) : null}
           </span>
-          <span className={line.done || line.failed ? "font-bold text-foreground-strong" : "text-foreground-muted"}>{line.text}</span>
+          <span className={line.done || line.failed ? "font-bold text-foreground" : "text-foreground-muted"}>{line.text}</span>
         </li>
       ))}
     </ol>
@@ -800,7 +804,7 @@ function ConnectComputerInstructions({ platform }: { platform: "mac-linux" | "wi
 
   return (
     <ol
-      className="space-y-1.5 text-xs leading-5 text-foreground-muted"
+      className="space-y-2 text-callout text-foreground-muted"
       aria-label={formatMessage({ id: "onboarding.computerRuntime.instructionsAria" })}
       data-testid="onboarding-computer-instructions"
     >
@@ -808,7 +812,7 @@ function ConnectComputerInstructions({ platform }: { platform: "mac-linux" | "wi
         <li key={label} className="flex gap-2">
           <span
             aria-hidden="true"
-            className="mt-px flex size-4 shrink-0 items-center justify-center rounded-sm border border-line-muted font-mono text-[9px] font-bold text-foreground-muted theme-brutal:rounded-none theme-brutal:border-black/30"
+            className="flex size-5 shrink-0 items-center justify-center rounded-sticker border border-line-seam font-mono text-mono-meta text-foreground-hint"
           >
             {index + 1}
           </span>
@@ -822,9 +826,9 @@ function ConnectComputerInstructions({ platform }: { platform: "mac-linux" | "wi
 
 function RuntimeGroupLabel({ children, note }: { children: ReactNode; note?: string }) {
   return (
-    <div className="border-t border-line-hairline px-3.5 pb-1 pt-2.5 first:border-t-0">
-      <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-foreground-hint">{children}</span>
-      {note ? <span className="ml-2 text-[10px] text-foreground-hint">{note}</span> : null}
+    <div className="px-3.5 pb-1 pt-3">
+      <SectionEyebrow>{children}</SectionEyebrow>
+      {note ? <span className="ml-2 text-caption text-foreground-hint">{note}</span> : null}
     </div>
   );
 }
@@ -851,30 +855,34 @@ function RuntimeRow({
   // Says so where the click happened, instead of throwing a toast across the screen.
   const [copied, setCopied] = useState(false);
   return (
-    <div className={`border-t border-line-hairline ${expanded ? "bg-fill-muted/40 theme-brutal:bg-soft-signal/20" : ""}`}>
+    <>
+    <Separator />
+    <div className={expanded ? "bg-info-soft" : ""}>
       <button
         type="button"
-        className={`flex w-full items-center gap-2.5 px-3.5 py-2 text-left ${quiet ? "text-foreground-hint" : ""}`}
+        className={`flex min-h-11 w-full items-center gap-2.5 px-3.5 py-2 text-left outline-none hover:bg-fill-pressed focus-visible:shadow-[inset_0_0_0_2px_var(--foreground)] ${quiet ? "text-foreground-hint" : "text-foreground"}`}
         aria-expanded={expanded}
         onClick={handleToggle}
       >
-        <span className={`flex shrink-0 items-center justify-center rounded-md border border-line-muted bg-layer-panel font-mono text-[9px] font-bold text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white ${runtime.recommended ? "size-7" : "size-6"}`}>
+        <span className={`flex shrink-0 items-center justify-center rounded-sticker bg-fill-muted font-mono text-mono-meta font-bold text-foreground-muted ${runtime.recommended ? "size-[27px]" : "size-6"}`}>
           {runtime.abbreviation}
         </span>
-        <span className={`min-w-0 flex-1 font-bold ${runtime.recommended ? "text-[13px]" : "text-xs"}`}>
+        <span className={`min-w-0 flex-1 font-semibold ${runtime.recommended ? "text-callout" : "text-footnote"}`}>
           {runtime.displayName}
         </span>
-        <span className={`shrink-0 rounded-sm border px-2 py-0.5 font-mono text-[9px] font-bold uppercase theme-brutal:rounded-none theme-brutal:border-2 ${runtime.detected ? "border-line-muted bg-success-soft text-success-strong theme-brutal:border-black theme-brutal:bg-brutal-lime theme-brutal:text-black" : "border-line-muted bg-layer-inset text-foreground-hint theme-brutal:border-black/20 theme-brutal:bg-white theme-brutal:text-black/40"}`}>
+        {/* DS StatusChip: a soft wash, a square pixel, one word. */}
+        <Badge variant={runtime.detected ? "success" : "muted"} appearance="soft" className="shrink-0">
+          <Status variant={runtime.detected ? "success" : "default"} aria-hidden="true" />
           {formatMessage({
             id: runtime.detected
               ? "onboarding.computerRuntime.detected"
               : "onboarding.computerRuntime.notDetected",
           })}
-        </span>
-        <ChevronRight size={15} className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`} />
+        </Badge>
+        <ChevronRight size={16} className={`shrink-0 text-foreground-muted transition-transform ${expanded ? "rotate-90" : ""}`} />
       </button>
       {expanded ? (
-        <div className="px-3.5 pb-3 pl-12 text-[11px] leading-5 text-foreground-muted">
+        <div className="px-3.5 pb-3 pl-12 text-footnote text-foreground-muted">
           {runtime.detected ? (
             <p>
               {/* Was a sentence plus a leading-space fragment concatenated in JSX.
@@ -888,7 +896,7 @@ function RuntimeRow({
                 },
                 {
                   computer: computerName ?? formatMessage({ id: "onboarding.computerRuntime.yourComputer" }),
-                  b: (chunks: ReactNode) => <strong key="b" className="text-foreground-strong">{chunks}</strong>,
+                  b: (chunks: ReactNode) => <strong key="b" className="text-foreground">{chunks}</strong>,
                 },
               )}
             </p>
@@ -899,7 +907,7 @@ function RuntimeRow({
                   { id: "onboarding.computerRuntime.runtimeInstallHint" },
                   {
                     runtime: runtime.displayName,
-                    b: (chunks: ReactNode) => <strong key="b" className="text-foreground-strong">{chunks}</strong>,
+                    b: (chunks: ReactNode) => <strong key="b" className="text-foreground">{chunks}</strong>,
                   },
                 )}
               </p>
@@ -911,7 +919,7 @@ function RuntimeRow({
                     setCopied(true);
                     setClockTimeout(() => setCopied(false), 2_000);
                   }}
-                  className="inline-flex items-center gap-1 font-bold text-foreground-strong underline underline-offset-2"
+                  className="inline-flex items-center gap-1 rounded-control font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus"
                 >
                   {copied ? <Check size={12} strokeWidth={3} /> : <Copy size={12} />}
                   {formatMessage({
@@ -926,6 +934,7 @@ function RuntimeRow({
         </div>
       ) : null}
     </div>
+    </>
   );
 }
 
@@ -940,31 +949,34 @@ function OwnApiKeyRow({
 }) {
   const { formatMessage } = useIntl();
   return (
-    <div className={`border-t border-line-hairline ${expanded ? "bg-fill-muted/40 theme-brutal:bg-soft-signal/20" : ""}`}>
-      <button type="button" className="flex w-full items-center gap-2.5 px-3.5 py-2 text-left" aria-expanded={expanded} onClick={onToggle}>
-        <span className="flex size-6 shrink-0 items-center justify-center rounded-md border border-line-muted bg-layer-panel text-foreground-strong theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">
-          <KeyRound size={13} />
+    <>
+    <Separator />
+    <div className={expanded ? "bg-info-soft" : ""}>
+      <button type="button" className="flex min-h-11 w-full items-center gap-2.5 px-3.5 py-2 text-left text-foreground outline-none hover:bg-fill-pressed focus-visible:shadow-[inset_0_0_0_2px_var(--foreground)]" aria-expanded={expanded} onClick={onToggle}>
+        <span className="flex size-6 shrink-0 items-center justify-center rounded-sticker bg-fill-muted text-foreground-muted">
+          <KeyRound size={14} />
         </span>
-        <span className="min-w-0 flex-1 text-xs font-bold">
+        <span className="min-w-0 flex-1 text-footnote font-semibold">
           {formatMessage({ id: "onboarding.computerRuntime.ownApiKey" })}
         </span>
-        <span className="shrink-0 rounded-sm border border-line-muted bg-layer-inset px-2 py-0.5 font-mono text-[9px] font-bold uppercase text-foreground-hint theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/20 theme-brutal:bg-white theme-brutal:text-black/40">
+        <Badge variant="muted" appearance="soft" className="shrink-0">
           {formatMessage({ id: "onboarding.computerRuntime.notSet" })}
-        </span>
-        <ChevronRight size={15} className={`shrink-0 transition-transform ${expanded ? "rotate-90" : ""}`} />
+        </Badge>
+        <ChevronRight size={16} className={`shrink-0 text-foreground-muted transition-transform ${expanded ? "rotate-90" : ""}`} />
       </button>
       {expanded ? (
-        <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 pb-3 pl-12 text-[11px] leading-5 text-foreground-muted">
+        <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 pb-3 pl-12 text-footnote text-foreground-muted">
           <p>
             {formatMessage({ id: "onboarding.computerRuntime.ownApiKeyHint" })}
           </p>
           {onOpenSettings ? (
-            <button type="button" onClick={onOpenSettings} className="font-bold text-foreground-strong underline underline-offset-2">
+            <button type="button" onClick={onOpenSettings} className="rounded-control font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus">
               {formatMessage({ id: "onboarding.computerRuntime.addApiKey" })}
             </button>
           ) : null}
         </div>
       ) : null}
     </div>
+    </>
   );
 }

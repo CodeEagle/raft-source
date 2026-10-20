@@ -24,11 +24,12 @@ import {
   __setAgentCredentialProxyServerFactoryForTest,
   __setThirdPartyEventDeliveryReportRetryBaseMsForTest,
   __setThirdPartyEventLeaseMsForTest,
+  bodySizeBucket,
   registerAgentCredentialProxy,
   unregisterAgentCredentialProxyForLaunch,
   type AgentProxyVisibleMessage,
 } from "./agentCredentialProxy";
-import { AgentVisibleDeliveryLedger } from "./agentVisibleDeliveryLedger";
+import { AgentVisibleDeliveryLedger, type AgentVisibleFreshnessView } from "./agentVisibleDeliveryLedger";
 import { groupThreadJoinContextReceiptMessages } from "./agentRuntimeInput";
 import { AGENT_API_ROUTE_MANIFEST } from "../../shared/src/generated/agentApiRoutes";
 import { createAgentAppInboxStore } from "./agentAppInbox";
@@ -332,6 +333,57 @@ test("agent credential proxy continues caller trace with a daemon child carrier"
     assert.equal(span.attrs?.outcome, "upstream_response");
     assert.equal(span.attrs?.http_status, 200);
   });
+});
+
+test("agent credential proxy tags uploads with a coarse body size bucket only", async () => {
+  const sink = new MemoryTraceSink();
+  await withUpstream((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  }, async (serverUrl) => {
+    const handle = await registerAgentCredentialProxy({
+      agentId: "agent-upload-size",
+      launchId: "launch-upload-size",
+      serverUrl,
+      apiKey: "sk_agent_server_side",
+      activeCapabilities: "write",
+      tracer: deterministicProxyTracer(sink),
+    });
+    try {
+      const upload = await fetch(`${handle.proxyUrl}/internal/agent-api/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${handle.proxyToken}`, "content-type": "application/octet-stream" },
+        body: new Uint8Array(2 * 1024 * 1024),
+      });
+      assert.equal(upload.status, 200);
+      const other = await fetch(`${handle.proxyUrl}/internal/agent-api/server`, {
+        headers: { Authorization: `Bearer ${handle.proxyToken}` },
+      });
+      assert.equal(other.status, 200);
+    } finally {
+      unregisterAgentCredentialProxyForLaunch({ agentId: "agent-upload-size", launchId: "launch-upload-size" });
+    }
+  });
+  const spans = sink.getAllSpans().filter((span) => span.name === "daemon.agent_proxy.request");
+  const uploadSpan = spans.find((span) => span.attrs?.route_family === "attachments/upload");
+  const otherSpan = spans.find((span) => span.attrs?.route_family === "server");
+  assert.equal(uploadSpan?.attrs?.body_size_bucket, "1-10MiB");
+  assert.equal(otherSpan?.attrs?.body_size_bucket, undefined);
+});
+
+test("upload body size buckets split at 1, 10 and 50 MiB", () => {
+  const mib = 1024 * 1024;
+  assert.equal(bodySizeBucket(0), "<1MiB");
+  assert.equal(bodySizeBucket(mib - 1), "<1MiB");
+  assert.equal(bodySizeBucket(mib), "1-10MiB");
+  assert.equal(bodySizeBucket(10 * mib - 1), "1-10MiB");
+  assert.equal(bodySizeBucket(10 * mib), "10-50MiB");
+  assert.equal(bodySizeBucket(24 * mib), "10-50MiB");
+  assert.equal(bodySizeBucket(50 * mib), "10-50MiB");
+  assert.equal(bodySizeBucket(50 * mib + 1), ">50MiB");
 });
 
 test("agent credential proxy relays attachment redirects without following them with the server credential", async () => {
@@ -2628,6 +2680,7 @@ test("agent credential proxy does not consume pending messages for other targets
 test("agent credential proxy records successful self send by exact id without advancing boundary", async () => {
   let upstreamSendCount = 0;
   const consumed: Array<{ target?: string; source: string; boundarySeq?: number; seqs: number[]; ids: Array<string | undefined> }> = [];
+  const sendOutcomes: unknown[] = [];
   await withUpstream(async (req, res) => {
     if (req.url === "/internal/agent-api/send") {
       upstreamSendCount += 1;
@@ -2635,6 +2688,11 @@ test("agent credential proxy records successful self send by exact id without ad
       req.setEncoding("utf8");
       for await (const chunk of req) raw += String(chunk);
       const body = JSON.parse(raw) as { target?: string; content?: string; seenUpToSeq?: number };
+      if (upstreamSendCount === 3) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ state: "held", freshnessContextMode: "withheld", withheldMessageCount: 1 }));
+        return;
+      }
       if (upstreamSendCount === 1) {
         assert.equal(body.seenUpToSeq, 40);
         res.writeHead(200, { "content-type": "application/json" });
@@ -2671,6 +2729,8 @@ test("agent credential proxy records successful self send by exact id without ad
             boundary = Math.max(boundary, input.boundarySeq);
           }
         },
+        // Task #17: the turn summary counts sent replies and held sends.
+        recordSendOutcome: (outcome) => sendOutcomes.push(outcome),
       },
     });
 
@@ -2687,10 +2747,25 @@ test("agent credential proxy records successful self send by exact id without ad
       assert.equal((await res.json() as { state?: string }).state, "sent");
     }
 
-    assert.equal(upstreamSendCount, 2);
+    const held = await fetch(`${handle.proxyUrl}/internal/agent-api/send`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${handle.proxyToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ target: "dm:@tygg", content: "third" }),
+    });
+    assert.equal((await held.json() as { state?: string }).state, "held");
+
+    assert.equal(upstreamSendCount, 3);
     assert.deepEqual(consumed, [
       { target: "dm:@tygg", source: "agent_api_send_commit", boundarySeq: undefined, seqs: [0], ids: ["self-41"] },
       { target: "dm:@tygg", source: "agent_api_send_commit", boundarySeq: undefined, seqs: [0], ids: ["self-42"] },
+    ]);
+    assert.deepEqual(sendOutcomes, [
+      { state: "sent", messageId: "self-41" },
+      { state: "sent", messageId: "self-42" },
+      { state: "held" },
     ]);
   });
 });
@@ -2840,6 +2915,173 @@ test("agent credential proxy consumes server held context after it is returned",
     assert.equal((await res.json() as { state?: string }).state, "held");
     assert.deepEqual(consumed, [{ target: "dm:@tygg", source: "server_held_context", boundarySeq: 8, seqs: [8] }]);
   });
+});
+
+// Glimpse G2-3: task writes carry the daemon's model-seen boundary to the
+// Server's task gate, and the Server's held context is booked like a send's,
+// so the identical rerun attests it and passes.
+test("agent credential proxy forwards the boundary on task writes and consumes a server-held task response", async () => {
+  for (const [path, body] of [
+    ["/internal/agent-api/tasks/claim", { channel: "#board", task_numbers: [7] }],
+    ["/internal/agent-api/tasks/update-status", { channel: "#board", task_number: 7, status: "in_review" }],
+    ["/internal/agent-api/tasks/amend", { channel: "#board", task_number: 7, title: "renamed" }],
+  ] as const) {
+    const forwarded: Array<Record<string, unknown>> = [];
+    const consumed: Array<{ target?: string; source: string; boundarySeq?: number; seqs: number[] }> = [];
+    await withUpstream((req, res) => {
+      let raw = "";
+      req.on("data", (chunk) => { raw += chunk; });
+      req.on("end", () => {
+        forwarded.push(JSON.parse(raw) as Record<string, unknown>);
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          state: "held",
+          seenUpToSeq: 9,
+          heldMessages: [{ seq: 9, id: "held-9", channel_type: "channel", channel_name: "board", content: "scope changed" }],
+        }));
+      });
+    }, async (serverUrl) => {
+      const handle = await registerAgentCredentialProxy({
+        agentId: "agent-1",
+        launchId: "launch-1",
+        serverUrl,
+        apiKey: "sk_agent_server_side",
+        activeCapabilities: "send,read,tasks",
+        inboxCoordinator: {
+          getBoundary: () => 7,
+          getPendingMessages: () => [],
+          consumeVisibleMessages: (input) => {
+            consumed.push({
+              target: input.target,
+              source: input.source,
+              boundarySeq: input.boundarySeq,
+              seqs: input.messages.map((message) => Number(message.seq ?? 0)),
+            });
+          },
+        },
+      });
+      const res = await fetch(`${handle.proxyUrl}${path}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${handle.proxyToken}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      assert.equal(res.status, 200, path);
+      assert.equal((await res.json() as { state?: string }).state, "held", path);
+    });
+    assert.equal(forwarded.length, 1, `${path} reached the Server`);
+    assert.equal(forwarded[0]!.seenUpToSeq, 7, `${path} carries the daemon's boundary`);
+    assert.deepEqual(
+      consumed.filter((entry) => entry.source === "server_held_context"),
+      [{ target: "#board", source: "server_held_context", boundarySeq: 9, seqs: [9] }],
+      path,
+    );
+  }
+});
+
+// Glimpse G2-3: a task write has no --anyway, so the daemon's local hold is at
+// most one per catch-up: after a hold the model took in, newer messages that
+// reached the daemon meanwhile do not hold the same write's rerun again; it is
+// forwarded with the model-seen boundary and nothing newer is consumed.
+test("a local task-write hold is one per catch-up; another write is held as usual", async () => {
+  const forwarded: Array<{ url?: string; body: Record<string, unknown> }> = [];
+  let boundary = 7;
+  let pending: AgentProxyVisibleMessage[] = [{ seq: 8, id: "pending-8", channel_type: "channel", channel_name: "board", content: "scope changed" }];
+  const consumedSeqs: number[] = [];
+  await withUpstream((req, res) => {
+    let raw = "";
+    req.on("data", (chunk) => { raw += chunk; });
+    req.on("end", () => {
+      forwarded.push({ url: req.url, body: JSON.parse(raw) as Record<string, unknown> });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, results: [{ taskNumber: 7, success: true }] }));
+    });
+  }, async (serverUrl) => {
+    const handle = await registerAgentCredentialProxy({
+      agentId: "agent-1",
+      launchId: "launch-rehold",
+      serverUrl,
+      apiKey: "sk_agent_server_side",
+      activeCapabilities: "send,read,tasks",
+      inboxCoordinator: {
+        getBoundary: () => boundary,
+        getPendingMessages: (target) => (target === "#board" ? pending : []),
+        consumeVisibleMessages: (input) => {
+          const seqs = input.messages.map((message) => Number(message.seq ?? 0));
+          consumedSeqs.push(...seqs);
+          if (typeof input.boundarySeq === "number") boundary = Math.max(boundary, input.boundarySeq);
+          pending = pending.filter((message) => !seqs.includes(Number(message.seq)));
+        },
+      },
+    });
+    const post = async (path: string, body: Record<string, unknown>) => {
+      const res = await fetch(`${handle.proxyUrl}${path}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${handle.proxyToken}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      return await res.json() as { state?: string };
+    };
+    const claim = { channel: "#board", task_numbers: [7] };
+
+    assert.equal((await post("/internal/agent-api/tasks/claim", claim)).state, "held", "the first claim is held locally");
+    assert.equal(forwarded.length, 0);
+    assert.equal(boundary, 8, "the hold's context reached the model");
+
+    // While the agent read, the board moved on.
+    pending = [{ seq: 9, id: "pending-9", channel_type: "channel", channel_name: "board", content: "arrived during the read" }];
+    assert.notEqual((await post("/internal/agent-api/tasks/claim", claim)).state, "held", "the rerun is not held again");
+    assert.equal(forwarded.length, 1);
+    assert.equal(forwarded[0]!.body.seenUpToSeq, 8, "forwarded with the model-seen boundary; the Server decides by the same rule");
+    assert.equal(consumedSeqs.includes(9), false, "nothing newer is consumed by the pass-through");
+
+    // A different write on the board is not covered by that hold.
+    assert.equal((await post("/internal/agent-api/tasks/update-status", { channel: "#board", task_number: 7, status: "in_review" })).state, "held");
+    assert.equal(forwarded.length, 1);
+  });
+});
+
+// Glimpse input duplication: the server groups the bodies it returns by launch and model context.
+test("agent credential proxy tells the server which launch and model context a request belongs to", async () => {
+  const seen: Array<[string | undefined, string | undefined]> = [];
+  await withUpstream((req, res) => {
+    seen.push([req.headers["x-agent-launch-id"] as string | undefined, req.headers["x-agent-context-id"] as string | undefined]);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ messages: [] }));
+  }, async (serverUrl) => {
+    let contextId: string | null = "context-1111-aaaa";
+    const coordinator = {
+      getBoundary: () => undefined,
+      getPendingMessages: () => [],
+      consumeVisibleMessages: () => {},
+      getContextId: () => contextId,
+    };
+    for (const [launchId, inboxCoordinator] of [["launch-1234-abcd", coordinator], [null, undefined]] as const) {
+      const handle = await registerAgentCredentialProxy({
+        agentId: "agent-1",
+        launchId,
+        serverUrl,
+        apiKey: "sk_agent_server_side",
+        activeCapabilities: "send,read",
+        ...(inboxCoordinator ? { inboxCoordinator } : {}),
+      });
+      const history = () => fetch(`${handle.proxyUrl}/internal/agent-api/history?channel=%23board`, {
+        headers: { Authorization: `Bearer ${handle.proxyToken}` },
+      });
+      assert.equal((await history()).status, 200);
+      if (inboxCoordinator) {
+        contextId = "context-2222-bbbb"; // a compaction: same launch, new context
+        assert.equal((await history()).status, 200);
+        contextId = null; // none published
+        assert.equal((await history()).status, 200);
+      }
+    }
+  });
+  assert.deepEqual(seen, [
+    ["launch-1234-abcd", "context-1111-aaaa"],
+    ["launch-1234-abcd", "context-2222-bbbb"],
+    ["launch-1234-abcd", undefined],
+    [undefined, undefined],
+  ]);
 });
 
 test("reviewer-isolation request does not consume bodies from a legacy server held response", async () => {
@@ -5236,9 +5478,11 @@ function threadReplyWithJoinContext(input: { triggerSeq: number; recentSeqs: num
 async function sendThroughLedgerBackedProxy(
   ledger: AgentVisibleDeliveryLedger,
   requestBody: Record<string, unknown>,
-  options: { path?: string; pending?: AgentProxyVisibleMessage[]; passiveAx?: boolean; upstreamResponse?: Record<string, unknown> } = {},
+  options: { path?: string; pending?: AgentProxyVisibleMessage[]; upstreamResponse?: Record<string, unknown>; freshness?: () => AgentVisibleFreshnessView } = {},
 ): Promise<Record<string, unknown>> {
   const path = options.path ?? "/internal/agent-api/send";
+  // Defaults to the process-wide facts (no context signal); `freshness` wires a scoped view.
+  const freshness = options.freshness ?? (() => ledger.freshnessView("agent-1", undefined));
   let forwarded: Record<string, unknown> | undefined;
   await withUpstream((req, res) => {
     let raw = "";
@@ -5256,12 +5500,11 @@ async function sendThroughLedgerBackedProxy(
       serverUrl,
       apiKey: "sk_agent_server_side",
       activeCapabilities: "send,read",
-      passiveAx: options.passiveAx,
       inboxCoordinator: {
-        getBoundary: (target) => ledger.getBoundary("agent-1", target),
+        getBoundary: (target) => freshness().getBoundary(target),
         getPendingMessages: () => options.pending ?? [],
-        isMessageModelSeen: ({ target, message }) => ledger.isModelSeen("agent-1", target, message),
-        getExactSeenSeqs: (target) => ledger.getExactSeenSeqs("agent-1", target),
+        isMessageModelSeen: ({ target, message }) => freshness().isModelSeen(target, message),
+        getExactSeenSeqs: (target) => freshness().getExactSeenSeqs(target),
         consumeVisibleMessages: (input) => { ledger.recordConsumed("agent-1", input); },
       },
     });
@@ -5276,12 +5519,12 @@ async function sendThroughLedgerBackedProxy(
   return forwarded;
 }
 
-function deliverIdleWithJoinContext(ledger: AgentVisibleDeliveryLedger, message: AgentMessage): void {
+function deliverIdleWithJoinContext(ledger: AgentVisibleDeliveryLedger, message: AgentMessage, contextId?: string): void {
   // Mirrors the idle stdin delivery: the rendered package, then the reply itself.
   for (const [target, contextMessages] of groupThreadJoinContextReceiptMessages([message])) {
-    ledger.recordConsumed("agent-1", { target, messages: contextMessages, source: "thread_join_context_rendered" });
+    ledger.recordConsumed("agent-1", { target, messages: contextMessages, source: "thread_join_context_rendered", contextId });
   }
-  ledger.recordConsumed("agent-1", { messages: [message], source: "stdin_idle_delivery" });
+  ledger.recordConsumed("agent-1", { messages: [message], source: "stdin_idle_delivery", contextId });
 }
 
 test("task #360 sample 1: a thread reply delivered in full is forwarded as an exact seen seq above the boundary", async () => {
@@ -5310,7 +5553,7 @@ test("task #360 sample 2: daemon exact seqs are unioned with the CLI's own, neve
 
 // task #360 follow-up: the CLI has sent through /internal/agent-api/v2/send
 // since #7035, which the side-effect preflight never matched. These pin the
-// real route: forward-only enrichment, never a local hold, off under passiveAx.
+// real route: forward-only enrichment, never a local hold.
 const SEND_V2 = "/internal/agent-api/v2/send";
 
 test("task #360 v2: a thread reply delivered in full reaches the Server as an exact seen seq on the real CLI route", async () => {
@@ -5353,20 +5596,93 @@ test("task #360 v2: an unseen pending message never turns a v2 send into a local
   assert.equal(ledger.isModelSeen("agent-1", "#general", { seq: 2001, message_id: "pending-2001" }), false, "a hold the agent never saw consumes nothing");
 });
 
-test("task #360 v2: a passiveAx launch forwards v2 sends untouched", async () => {
+// glimpse G0: under passive AX the daemon's facts are scoped like the CLI's.
+// A thread package pushed in this context counts for a v2 send (it used to be
+// withheld entirely); one pushed before a compaction does not.
+test("glimpse G0: a v2 send carries daemon facts from the current context only", async () => {
   const ledger = new AgentVisibleDeliveryLedger();
-  deliverIdleWithJoinContext(ledger, threadReplyWithJoinContext({ triggerSeq: 1030, recentSeqs: [1010, 1020] }));
+  let contextId = "ctx-1";
+  const freshness = () => ledger.freshnessView("agent-1", { contextId });
+  deliverIdleWithJoinContext(ledger, threadReplyWithJoinContext({ triggerSeq: 1030, recentSeqs: [1010, 1020] }), contextId);
 
-  const forwarded = await sendThroughLedgerBackedProxy(ledger, { target: "#proj-raft-computer:459ad9a0", content: "reply" }, { path: SEND_V2, passiveAx: true });
-  assert.equal(forwarded.seenUpToSeq, undefined);
-  assert.equal(forwarded.seenExactSeqs, undefined);
+  const sameContext = await sendThroughLedgerBackedProxy(ledger, { target: "#proj-raft-computer:459ad9a0", content: "reply" }, { path: SEND_V2, freshness });
+  assert.equal(sameContext.seenUpToSeq, 1020, "within the context the package is evidence, as before");
+  assert.deepEqual(sameContext.seenExactSeqs, [1030]);
+
+  contextId = "ctx-2";
+  const afterCompaction = await sendThroughLedgerBackedProxy(ledger, { target: "#proj-raft-computer:459ad9a0", content: "reply" }, { path: SEND_V2, freshness });
+  assert.equal(afterCompaction.seenUpToSeq, undefined, "the Server decides from the CLI's own (empty) evidence and holds");
+  assert.equal(afterCompaction.seenExactSeqs, undefined);
+  assert.equal(ledger.getBoundary("agent-1", "#proj-raft-computer:459ad9a0"), 1020, "delivery facts themselves are kept");
+  assert.equal(ledger.isModelSeen("agent-1", "#proj-raft-computer:459ad9a0", { message_id: "trigger-1030" }), true);
+});
+
+// glimpse G0: the claim preflight reads the same context-scoped view. A target
+// read in this context forwards; after a compaction the same claim is held
+// until the model sees the target's latest messages again.
+test("glimpse G0: a task claim after a compaction is held for context the model no longer has", async () => {
+  const ledger = new AgentVisibleDeliveryLedger();
+  let contextId = "ctx-1";
+  ledger.recordConsumed("agent-1", {
+    target: "#proj-runtime",
+    messages: [{ seq: 99, id: "recent-task-99", channel_type: "channel", channel_name: "proj-runtime" }],
+    boundarySeq: 99,
+    source: "verified_contiguous_content_consumption",
+    contextId,
+  });
+  let upstreamClaimCount = 0;
+  await withUpstream(async (req, res) => {
+    if (req.url?.startsWith("/internal/agent-api/history")) {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ messages: [{ seq: 99, id: "recent-task-99", senderType: "human", senderName: "tygg", content: "task context", createdAt: "2026-05-20T00:00:00.000Z" }] }));
+      return;
+    }
+    if (req.url === "/internal/agent-api/tasks/claim") upstreamClaimCount += 1;
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, results: [{ taskNumber: 201, success: true }] }));
+  }, async (serverUrl) => {
+    const view = () => ledger.freshnessView("agent-1", { contextId });
+    const handle = await registerAgentCredentialProxy({
+      agentId: "agent-1",
+      launchId: "launch-glimpse-claim",
+      serverUrl,
+      apiKey: "sk_agent_server_side",
+      activeCapabilities: "read,tasks",
+      inboxCoordinator: {
+        getBoundary: (target) => view().getBoundary(target),
+        getPendingMessages: () => [],
+        isMessageModelSeen: ({ target, message }) => view().isModelSeen(target, message),
+        consumeVisibleMessages: (input) => { ledger.recordConsumed("agent-1", { ...input, contextId }); },
+      },
+    });
+    const claim = async () => {
+      const res = await fetch(`${handle.proxyUrl}/internal/agent-api/tasks/claim`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${handle.proxyToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ channel: "#proj-runtime", task_numbers: [201] }),
+      });
+      return await res.json() as { state?: string; heldMessages?: Array<{ seq?: number }> };
+    };
+
+    assert.notEqual((await claim()).state, "held", "read in this context: forwarded");
+    assert.equal(upstreamClaimCount, 1);
+
+    contextId = "ctx-2";
+    const held = await claim();
+    assert.equal(held.state, "held", "after the compaction the same claim is held");
+    assert.equal(held.heldMessages?.[0]?.seq, 99);
+    assert.equal(upstreamClaimCount, 1, "the held claim did not reach the Server");
+
+    assert.notEqual((await claim()).state, "held", "shown again in this context: the retry forwards");
+    assert.equal(upstreamClaimCount, 2);
+  });
 });
 
 // Guard: the CLI changed its send route once and the proxy never followed,
 // while both sides' unit tests stayed green. Every side-effect route the CLI
 // can call must be classified by the proxy, including any future send version.
 test("every CLI side-effect route, including every message send version, is classified by the proxy", () => {
-  const sideEffectKeys = new Set(["taskClaim", "taskUpdateStatus"]);
+  const sideEffectKeys = new Set(["taskClaim", "taskUpdateStatus", "taskAmend"]);
   const routes = AGENT_API_ROUTE_MANIFEST.filter((route) => route.key.startsWith("messageSend") || sideEffectKeys.has(route.key));
   assert.ok(routes.some((route) => route.key === "messageSendV2"), "fixture: the v2 send route is in the manifest");
   for (const route of routes) {
@@ -5407,4 +5723,78 @@ test("task #360 v2: a v2 send's own commit and the Server's held context feed th
     },
   });
   assert.equal(held.isModelSeen("agent-1", "#general", { seq: 3100, message_id: "held-3100" }), true, "the v2 hold's shown context is seen");
+});
+
+// 2026-10-14 (Tenny, armbian-jojo): a send addressed the thread by its
+// `threadId` (`:46a146e8`); the Server resolved it and held the send with the
+// thread's unread replies, which name the canonical target (`:3ae9bd99`, the
+// root message). The ledger refused the mismatch, the proxy turned the held
+// reply into PROXY_5XX, and the agent never saw the hold.
+const heldThreadReply = (id: string, seq: number): Record<string, unknown> => ({
+  id,
+  seq,
+  channel_type: "thread",
+  channel_name: "thread-3ae9bd99",
+  parent_channel_name: "proj-raft-computer",
+  parent_channel_type: "channel",
+  sender_type: "human",
+  sender_name: "xxchan",
+  content: "unread reply",
+  createdAt: "2026-10-14T03:40:00.000Z",
+});
+
+test("a held send to a thread's alias reaches the agent and records the context under the thread the Server resolved", async () => {
+  const ledger = new AgentVisibleDeliveryLedger();
+  await sendThroughLedgerBackedProxy(ledger, { target: "#proj-raft-computer:46a146e8", content: "reply" }, {
+    path: SEND_V2,
+    upstreamResponse: { state: "held", seenUpToSeq: 4101, heldMessages: [heldThreadReply("held-4100", 4100), heldThreadReply("held-4101", 4101)] },
+  });
+  assert.equal(ledger.isModelSeen("agent-1", "#proj-raft-computer:3ae9bd99", { seq: 4101, message_id: "held-4101" }), true);
+  assert.equal(ledger.getBoundary("agent-1", "#proj-raft-computer:46a146e8"), undefined, "nothing is recorded under the alias");
+});
+
+test("a send's reply reaches the agent even when the ledger update throws; a read still reports post_response_local", async () => {
+  for (const upstreamResponse of [
+    { state: "sent", messageId: "own-5001", messageSeq: 5001 },
+    { state: "held", heldMessages: [{ id: "held-5002", seq: 5002, channel_type: "channel", channel_name: "general", content: "new" }] },
+  ]) {
+    await withUpstream((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(upstreamResponse));
+    }, async (serverUrl) => {
+      const handle = await registerAgentCredentialProxy({
+        agentId: "agent-1",
+        launchId: "launch-ledger-throws",
+        serverUrl,
+        apiKey: "sk_agent_server_side",
+        activeCapabilities: "send,read",
+        inboxCoordinator: {
+          getBoundary: () => undefined,
+          getPendingMessages: () => [],
+          consumeVisibleMessages: () => {
+            throw new Error("AgentVisibleDeliveryLedger target mismatch");
+          },
+        },
+      });
+      const res = await fetch(`${handle.proxyUrl}${SEND_V2}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${handle.proxyToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ target: "#general", content: "reply" }),
+      });
+      assert.equal(res.status, 200, `${upstreamResponse.state}: the Server's reply is forwarded`);
+      assert.equal((await res.json() as { state?: string }).state, upstreamResponse.state);
+    });
+  }
+  // The read side keeps its typed failure (pinned by "proxy diagnostics class fixture post_response_local").
+});
+
+test("held context from another channel's thread still refuses to enter the ledger, but the reply is forwarded", async () => {
+  const ledger = new AgentVisibleDeliveryLedger();
+  const otherChannel = { ...heldThreadReply("held-4200", 4200), parent_channel_name: "general" };
+  await sendThroughLedgerBackedProxy(ledger, { target: "#proj-raft-computer:46a146e8", content: "reply" }, {
+    path: SEND_V2,
+    upstreamResponse: { state: "held", heldMessages: [otherChannel] },
+  });
+  assert.equal(ledger.isModelSeen("agent-1", "#general:3ae9bd99", { seq: 4200, message_id: "held-4200" }), false, "parent/thread isolation holds");
+  assert.equal(ledger.isModelSeen("agent-1", "#proj-raft-computer:46a146e8", { seq: 4200, message_id: "held-4200" }), false);
 });

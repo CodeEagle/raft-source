@@ -30,7 +30,7 @@ import {
   type SidebarUnreadTotalsQuery,
 } from "./conversationUnreadSource";
 import { getActivityReadSourceOverride } from "./activityReadSource";
-import { agentPrivateSurfaces, channels, channelAgents, channelHumans, dmChannelIdentities, agents, users, serverMembers, messages, userChannelReadCursors, userChannelInboxStates, userChannelDisplayPrefs, inboxTargetMuteStates, inboxSuppressionStates, agentChannelReadCursors, servers, threadFollows, agentActivityEvents, tasks, taskEvents, jointChannels, jointChannelServers, jointChannelInvites, readMutationAuthorities, channelMembershipRoleEvents, serverAgentMembers, externalMessageAuthorFacts, externalProjectionAvatarArtifacts, externalActorProjections, externalAddressabilityProjections, externalAppInstalls, externalAppRegistrations, externalChannelBindings } from "../db/schema";
+import { agentMigrationReceiptChannels, agentPrivateSurfaces, channels, channelAgents, channelHumans, dmChannelIdentities, agents, users, serverMembers, messages, userChannelReadCursors, userChannelInboxStates, userChannelDisplayPrefs, inboxTargetMuteStates, inboxSuppressionStates, agentChannelReadCursors, servers, threadFollows, agentActivityEvents, tasks, taskEvents, jointChannels, jointChannelServers, jointChannelInvites, readMutationAuthorities, channelMembershipRoleEvents, serverAgentMembers, externalMessageAuthorFacts, externalProjectionAvatarArtifacts, externalActorProjections, externalAddressabilityProjections, externalAppInstalls, externalAppRegistrations, externalChannelBindings } from "../db/schema";
 import { gt, gte, lt } from "drizzle-orm";
 import { acquireServerLock, assertGuestJoinableChannelCapacityAvailable, GUEST_JOINABLE_CHANNEL_LOCK_NAMESPACE, GuestJoinableChannelLimitError, isChannelReadOnlyByBillingFeature, withServerLock, withServerResourceLock } from "./planService";
 import { assertJointAdmission, freeServerIds, reconcileJointOverLimit, reconcileJointOverLimitFor, refreshJointEntitlementsBeforeAdmission } from "./jointChannelLimitService";
@@ -216,7 +216,7 @@ export type JointThreadProjection = {
 };
 
 const REGULAR_CHANNEL_TYPES: RegularChannelType[] = ["channel", "private"];
-const LISTABLE_CHANNEL_TYPES: ListableChannelType[] = ["channel", "private", "joint"];
+export const LISTABLE_CHANNEL_TYPES: ListableChannelType[] = ["channel", "private", "joint"];
 const DM_LOCK_NAMESPACE = 5;
 export const JOINT_STORAGE_SERVER_SLUG = "__joint_storage__";
 const SYSTEM_ALL_CHANNEL_KEY = "all";
@@ -499,7 +499,15 @@ export interface CreateJointChannelInput {
 export interface JointInviteRequest {
   targetServerSlug: string;
   invitedPeople: string[];
+  /**
+   * The inviter confirmed connecting directly as admin of both servers
+   * (RFC 075 §4.5). Only takes effect for the inviter's own invite on this
+   * target; authority is re-checked server-side, never taken from this flag.
+   */
+  sameAdmin?: boolean;
 }
+
+export type JointInviteAcceptedVia = "invitee" | "same_admin";
 
 type JointInvitee = {
   userId: string;
@@ -525,7 +533,7 @@ export async function createJointChannel(input: CreateJointChannelInput) {
     for (const inviteRequest of inviteRequests) {
       const targetServer = await getJointInviteTargetServer(tx, inviteRequest.targetServerSlug, input.hostServerId);
       const invitees = await resolveJointInvitees(tx, targetServer.id, inviteRequest.invitedPeople, inviteRequest.targetServerSlug);
-      resolvedInviteRequests.push({ targetServer, invitees });
+      resolvedInviteRequests.push({ targetServer, invitees, sameAdmin: inviteRequest.sameAdmin === true });
     }
     // Contract v0.3 §18.6/§18.7: no per-host joint count; the new joint must
     // fit the server and free-server caps with every invited target counted.
@@ -565,6 +573,7 @@ export async function createJointChannel(input: CreateJointChannelInput) {
     });
 
     const invites = [];
+    const sameAdminInviteIds = new Set<string>();
     for (const inviteRequest of resolvedInviteRequests) {
       for (const invitee of inviteRequest.invitees) {
         const invite = await createJointChannelInvite({
@@ -576,14 +585,65 @@ export async function createJointChannel(input: CreateJointChannelInput) {
           executor: tx,
         });
         invites.push(invite);
+        if (inviteRequest.sameAdmin && invitee.userId === input.createdByUserId) {
+          sameAdminInviteIds.add(invite.id);
+        }
       }
     }
 
-    return { channel, jointChannel: joint, invites };
+    return { channel, jointChannel: joint, invites, sameAdminInviteIds };
   });
 
-  await sendJointChannelInviteEmails(result.invites.map((invite) => invite.id));
-  return result;
+  const sameAdmin = await acceptSameAdminJointInvites(result.invites, result.sameAdminInviteIds, input.createdByUserId);
+  return { channel: result.channel, jointChannel: result.jointChannel, ...sameAdmin };
+}
+
+/** The target server's projection created by a same-admin accept. */
+export type SameAdminAcceptedProjection = Awaited<ReturnType<typeof acceptJointChannelInvite>>;
+
+/**
+ * RFC 075 §4.5: when the inviter is also the invitee (an owner/admin of the
+ * target, already enforced by resolveJointInvitees and re-checked under the
+ * target lock by acceptJointChannelInvite), accept in the same request instead
+ * of emailing the inviter a link to themselves. Runs after the invite
+ * transaction commits so it takes the target server lock on its own, the same
+ * way a link accept does. An accept that fails (e.g. the joint hit a limit in
+ * between) falls back to the email flow, so the invite is never left silent.
+ */
+async function acceptSameAdminJointInvites<T extends { id: string; toServerId: string }>(
+  invites: T[],
+  sameAdminInviteIds: ReadonlySet<string>,
+  inviterUserId: string,
+) {
+  const acceptedProjections: SameAdminAcceptedProjection[] = [];
+  const emailInviteIds: string[] = [];
+  for (const invite of invites) {
+    if (!sameAdminInviteIds.has(invite.id)) {
+      emailInviteIds.push(invite.id);
+      continue;
+    }
+    try {
+      const channel = await acceptJointChannelInvite({
+        inviteId: invite.id,
+        targetServerId: invite.toServerId,
+        acceptedByUserId: inviterUserId,
+        acceptedVia: "same_admin",
+      });
+      acceptedProjections.push(channel);
+    } catch (err) {
+      console.error("[JointChannel] same-admin accept failed; falling back to the invite email:", err);
+      emailInviteIds.push(invite.id);
+    }
+  }
+  await sendJointChannelInviteEmails(emailInviteIds);
+  const refreshedInvites = acceptedProjections.length > 0
+    ? await getDb().select().from(jointChannelInvites).where(inArray(jointChannelInvites.id, invites.map((invite) => invite.id)))
+    : [];
+  const byId = new Map(refreshedInvites.map((invite) => [invite.id, invite]));
+  return {
+    invites: invites.map((invite) => byId.get(invite.id) ?? invite),
+    acceptedProjections,
+  };
 }
 
 function normalizeJointInviteRequests(input: Pick<CreateJointChannelInput, "targetServerSlug" | "invitedPeople" | "jointInvites">): JointInviteRequest[] {
@@ -614,8 +674,9 @@ function normalizeJointInviteRequests(input: Pick<CreateJointChannelInput, "targ
     const existing = byTargetSlug.get(key);
     if (existing) {
       existing.invitedPeople = normalizeJointInvitePeople([...existing.invitedPeople, ...invitedPeople]);
+      existing.sameAdmin = existing.sameAdmin === true || rawRequest.sameAdmin === true;
     } else {
-      byTargetSlug.set(key, { targetServerSlug, invitedPeople });
+      byTargetSlug.set(key, { targetServerSlug, invitedPeople, sameAdmin: rawRequest.sameAdmin === true });
     }
   }
 
@@ -631,6 +692,8 @@ export async function inviteServerToJointChannel(input: {
   invitedByUserId: string;
   targetServerSlug: string;
   invitedPeople: string[];
+  /** See JointInviteRequest.sameAdmin. */
+  sameAdmin?: boolean;
 }) {
   const targetSlug = input.targetServerSlug.trim();
   if (!targetSlug) {
@@ -684,6 +747,7 @@ export async function inviteServerToJointChannel(input: {
     }, now);
     const invitees = await resolveJointInvitees(tx, targetServer.id, invitedPeople, targetSlug);
     const invites = [];
+    const sameAdminInviteIds = new Set<string>();
     for (const invitee of invitees) {
       const invite = await createJointChannelInvite({
         jointChannelId: projection.jointChannelId,
@@ -694,12 +758,14 @@ export async function inviteServerToJointChannel(input: {
         executor: tx,
       });
       invites.push(invite);
+      if (input.sameAdmin === true && invitee.userId === input.invitedByUserId) {
+        sameAdminInviteIds.add(invite.id);
+      }
     }
-    return { invites };
+    return { invites, sameAdminInviteIds };
   });
 
-  await sendJointChannelInviteEmails(result.invites.map((invite) => invite.id));
-  return result;
+  return acceptSameAdminJointInvites(result.invites, result.sameAdminInviteIds, input.invitedByUserId);
 }
 
 function normalizeJointInvitePeople(invitedPeople: string[] | undefined): string[] {
@@ -979,7 +1045,10 @@ export async function acceptJointChannelInvite(input: {
   inviteId: string;
   targetServerId: string;
   acceptedByUserId: string;
+  /** Audit only; authority checks are identical for both paths. */
+  acceptedVia?: JointInviteAcceptedVia;
 }) {
+  const acceptedVia: JointInviteAcceptedVia = input.acceptedVia ?? "invitee";
   assertJointChannelInviteId(input.inviteId);
   const now = currentDate();
   const [preInvite] = await getDb()
@@ -1066,6 +1135,7 @@ export async function acceptJointChannelInvite(input: {
           status: "accepted",
           acceptedByUserId: input.acceptedByUserId,
           acceptedAt: currentDate(),
+          acceptedVia,
         })
         .where(eq(jointChannelInvites.id, input.inviteId));
       const [existingChannel] = await tx
@@ -1122,6 +1192,7 @@ export async function acceptJointChannelInvite(input: {
         status: "accepted",
         acceptedByUserId: input.acceptedByUserId,
         acceptedAt: currentDate(),
+        acceptedVia,
       })
       .where(eq(jointChannelInvites.id, input.inviteId));
     if (parentJointId) await reconcileJointOverLimit(tx, parentJointId, now);
@@ -1398,8 +1469,35 @@ export type ChannelUnreadSummaryEntry = {
    * cursor. Such a channel has no exact count (unreadCount is 0); the sidebar
    * shows a quiet indicator instead.
    */
-  hasNew?: boolean;
+  hasNew?: boolean;  /**
+   * Followed-thread rows with unread replies only: the LOCAL channel the thread
+   * hangs under in this server (for a joint thread, this server's joint
+   * channel). Absent when it cannot be resolved yet (e.g. CDC lag on a
+   * just-created projection).
+   */
+  parentChannelId?: string;
 };
+
+/**
+ * Per parent channel: how many followed threads under it have unread replies,
+ * and whether any of them has an unread mention. Kept apart from the channel's
+ * own unreadCount (thread replies are never part of it).
+ */
+export type ThreadUnreadByParent = Record<string, { count: number; hasMention: boolean }>;
+
+/** Folds the followed-thread rows of a sidebar summary onto their parent channels. */
+export function summarizeThreadUnreadByParent(
+  summary: Record<string, ChannelUnreadSummaryEntry>,
+): ThreadUnreadByParent {
+  const byParent: ThreadUnreadByParent = {};
+  for (const entry of Object.values(summary)) {
+    if (!entry.parentChannelId || entry.unreadCount <= 0) continue;
+    const slot = byParent[entry.parentChannelId] ??= { count: 0, hasMention: false };
+    slot.count += 1;
+    if (entry.hasMention) slot.hasMention = true;
+  }
+  return byParent;
+}
 
 interface SidebarUnreadSummaryOptions {
   traceQuery?: DbQueryTracer;
@@ -1742,6 +1840,13 @@ interface FollowedThreadsOptions {
   channelId?: string;
   q?: string;
   sort?: "asc" | "desc";
+  /** Active follows only: just the threads with unread replies (all channels). */
+  unreadOnly?: boolean;
+  /**
+   * Active follows only: one page, newest activity first (latestActivitySeq
+   * desc, then thread id desc). Without it the whole list is returned as before.
+   */
+  page?: { limit: number; cursor?: FollowedThreadsCursor | null };
   /**
    * Internal: run the legacy all-Postgres list even when the active-follows
    * RisingWave path (rw_followed_threads_v5) applies. For the path diff script
@@ -1754,6 +1859,14 @@ interface ThreadSummaryOptions {
   traceQuery?: DbQueryTracer;
   userId?: string;
   parentMessageIds?: string[];
+  /**
+   * Default true. False skips the participants read entirely and returns an
+   * empty `participantIds` for every thread. That read aggregates every sender
+   * over each thread's whole history, so its cost grows with the thread and is
+   * not bounded by the page; a caller that does not show participants (the
+   * anonymous public page) must not pay for it or read those ids at all.
+   */
+  includeParticipants?: boolean;
   parentMessageScopeSource?: "client" | "compat_recent" | "messages_page" | "messages_context";
 }
 
@@ -1980,6 +2093,66 @@ export async function listChannels(
   return attachJointChannelMetadata(
     await attachLastMessageAt(visibleChannels, traceQuery, "channels.last_messages_by_channels", "channels_count"),
   );
+}
+
+/**
+ * The subset of `channelIds` (top-level channels of this server) one human
+ * may view, by the same rule as `listChannels`: public channels for every
+ * member, private and joint channels only with a channel membership, Guest
+ * channels through the Guest policy, and never a hidden #all. Archived
+ * channels stay visible; deleted ones and anything outside the server do not.
+ */
+export async function filterChannelIdsVisibleToHuman(
+  serverId: string,
+  userId: string,
+  channelIds: readonly string[],
+  executor: DatabaseExecutor = getDb(),
+): Promise<Set<string>> {
+  const visible = new Set<string>();
+  if (channelIds.length === 0) return visible;
+  const serverRole = await resolveHumanServerRole(serverId, userId, executor);
+  if (!serverRole) return visible;
+  const ids = [...new Set(channelIds)];
+  const [rows, memberships] = await Promise.all([
+    executor.select({
+      id: channels.id,
+      name: channels.name,
+      type: channels.type,
+      guestVisible: channels.guestVisible,
+      guestJoinable: channels.guestJoinable,
+      archivedAt: channels.archivedAt,
+      deletedAt: channels.deletedAt,
+    }).from(channels).where(and(
+      eq(channels.serverId, serverId),
+      inArray(channels.id, ids),
+      inArray(channels.type, LISTABLE_CHANNEL_TYPES),
+      isNull(channels.deletedAt),
+    )),
+    executor.select({ channelId: channelHumans.channelId })
+      .from(channelHumans)
+      .where(and(eq(channelHumans.userId, userId), inArray(channelHumans.channelId, ids))),
+  ]);
+  const guestGateEnabled = serverRole === "guest" && await isGuestFeatureEnabled(serverId, userId, executor);
+  const joinedSet = new Set(memberships.map((membership) => membership.channelId));
+  for (const ch of rows) {
+    const allChannelHidden = isAllSystemChannel(ch) && !isEnabledAllChannel(ch);
+    const readable = serverRole === "guest"
+      ? canGuestReadChannel({
+          gateEnabled: guestGateEnabled,
+          serverRole,
+          channelType: ch.type,
+          channelName: ch.name,
+          allChannelHidden,
+          guestVisible: ch.guestVisible,
+          guestJoinable: ch.guestJoinable,
+          isChannelMember: joinedSet.has(ch.id),
+          archived: ch.archivedAt !== null,
+          deleted: ch.deletedAt !== null,
+        })
+      : !allChannelHidden && (!requiresExplicitMembership(ch.type) || joinedSet.has(ch.id));
+    if (readable) visible.add(ch.id);
+  }
+  return visible;
 }
 
 export async function getSystemAllChannel(serverId: string) {
@@ -6639,6 +6812,11 @@ export async function resolveAgentFacingChannelRef(
   if (channel.type !== "dm") return `#${channel.name}`;
   // The agent's own private reminder conversation (no peer, no identity row).
   if (await getAgentPrivateSurfaceKind(agentId, channelId) === "reminders") return `dm:@${AGENT_REMINDERS_DM_PEER}`;
+  // A migration receipt DM (no peer either): named by the channel, for its own agent.
+  if (channel.name.startsWith(MIGRATION_RECEIPT_CHANNEL_PREFIX)
+    && await findAgentMigrationReceiptChannelId(getDb(), serverId, agentId, channel.name) === channelId) {
+    return `dm:@${channel.name}`;
+  }
 
   const db = getDb();
   const [identity] = await db
@@ -6692,6 +6870,46 @@ export async function resolveAgentFacingChannelRef(
   // Built-in app conversations intentionally have one agent member and no DM
   // identity row. Their registry app id is the documented dm:@ target.
   return isAppId(channel.name) ? `dm:@${channel.name}` : null;
+}
+
+/**
+ * The other participant of a DM, for `agentId`, from the DM's identity row:
+ * their kind, id, handle and profile description. Null for the agent's own
+ * reminders DM, app DMs, DMs the agent is not part of, deleted agents, and
+ * legacy DMs without an identity row (no card for those, never a hold).
+ */
+export async function getDmPeerForAgent(
+  serverId: string,
+  agentId: string,
+  dmChannelId: string,
+): Promise<{ kind: "human" | "agent"; id: string; name: string; description: string | null } | null> {
+  const db = getDb();
+  const [identity] = await db
+    .select({ kind: dmChannelIdentities.kind, peerKey: dmChannelIdentities.peerKey })
+    .from(dmChannelIdentities)
+    .where(and(
+      eq(dmChannelIdentities.channelId, dmChannelId),
+      eq(dmChannelIdentities.serverId, serverId),
+    ))
+    .limit(1);
+  if (!identity) return null;
+  const participants = identity.peerKey.split(":");
+  if (!participants.includes(agentId)) return null;
+  const peerId = participants.find((id) => id !== agentId);
+  if (!peerId) return null;
+  if (identity.kind === "human_agent") {
+    const [peer] = await db.select({ name: users.name, description: users.description }).from(users).where(eq(users.id, peerId)).limit(1);
+    return peer?.name ? { kind: "human", id: peerId, name: peer.name, description: peer.description || null } : null;
+  }
+  if (identity.kind === "agent_agent") {
+    const [peer] = await db.select({ name: agents.name, description: agents.description }).from(agents).where(and(
+      eq(agents.id, peerId),
+      eq(agents.serverId, serverId),
+      isNull(agents.deletedAt),
+    )).limit(1);
+    return peer?.name ? { kind: "agent", id: peerId, name: peer.name, description: peer.description || null } : null;
+  }
+  return null;
 }
 
 /**
@@ -7205,6 +7423,37 @@ async function getThreadParentChannelId(threadChannelId: string): Promise<string
  * Resolve a DM channel by peer name (for agents).
  * Searches for an existing DM between the agent and a user/agent with this name.
  */
+/** Name prefix of the agent-only DM a migration receipt is posted to (agentMigrationService). */
+export const MIGRATION_RECEIPT_CHANNEL_PREFIX = "migration-receipt-";
+
+async function findAgentMigrationReceiptChannelId(
+  db: ReturnType<typeof getDb>,
+  serverId: string,
+  agentId: string,
+  channelName: string,
+): Promise<string | null> {
+  const [row] = await db.select({ channelId: agentMigrationReceiptChannels.channelId })
+    .from(agentMigrationReceiptChannels)
+    .innerJoin(channels, eq(channels.id, agentMigrationReceiptChannels.channelId))
+    .where(and(
+      eq(agentMigrationReceiptChannels.serverId, serverId),
+      eq(agentMigrationReceiptChannels.agentId, agentId),
+      eq(channels.name, channelName),
+      isNull(channels.deletedAt),
+    ))
+    .limit(1);
+  return row?.channelId ?? null;
+}
+
+/** Whether a channel is a migration receipt surface: one-way, the agent reads it but never replies there. */
+export async function isAgentMigrationReceiptChannel(channelId: string): Promise<boolean> {
+  const [row] = await getDb().select({ channelId: agentMigrationReceiptChannels.channelId })
+    .from(agentMigrationReceiptChannels)
+    .where(eq(agentMigrationReceiptChannels.channelId, channelId))
+    .limit(1);
+  return Boolean(row);
+}
+
 async function resolveDMByPeerName(
   serverId: string,
   agentId: string,
@@ -7218,6 +7467,16 @@ async function resolveDMByPeerName(
   if (rawPeer.toLowerCase() === AGENT_REMINDERS_DM_PEER) {
     const channelId = await getAgentPrivateSurfaceChannelId(agentId, "reminders");
     return channelId ? { channelId, type: "dm" } : null;
+  }
+
+  // A migration receipt lives in a hidden DM whose only member is the agent,
+  // so it has no peer and renders as `dm:@migration-receipt-<support ref>`
+  // (the channel's name). It resolves for the agent it belongs to and for no
+  // one else. For that agent the receipt wins over a peer with the same name;
+  // for everyone else the lookup falls through to the peer rules below.
+  if (rawPeer.startsWith(MIGRATION_RECEIPT_CHANNEL_PREFIX)) {
+    const receiptChannelId = await findAgentMigrationReceiptChannelId(db, serverId, agentId, rawPeer);
+    if (receiptChannelId) return { channelId: receiptChannelId, type: "dm" };
   }
 
   // Built-in app DMs are resolved for the authenticated owner only. The
@@ -7989,6 +8248,8 @@ type ThreadSummaryResult = {
   participantIds: string[];
   unreadCount: number;
   firstUnreadMessageId: string | null;
+  /** The requesting user follows this thread (done or not). False without a user. */
+  followed: boolean;
   latestReplies: ThreadSummaryLatestReply[];
 };
 
@@ -8038,7 +8299,7 @@ export async function getThreadSummaries(
   // THREAD_SUMMARY_QUERY_CONCURRENCY at once.
   const limit = createConcurrencyLimiter(THREAD_SUMMARY_QUERY_CONCURRENCY);
   // Batch-fetch unique participants (senders in each thread)
-  const participantRowsPending = limit(() => traceQuery(
+  const participantRowsPending = opts?.includeParticipants === false ? null : limit(() => traceQuery(
     "channel_threads.participants_by_threads",
     () => db.execute(sql`
       SELECT
@@ -8060,7 +8321,16 @@ export async function getThreadSummaries(
       SELECT
         input_threads.thread_id::text AS "threadChannelId",
         first_unread.id::text AS "firstUnreadMessageId",
-        COALESCE(unread.unread_count, 0)::int AS "unreadCount"
+        COALESCE(unread.unread_count, 0)::int AS "unreadCount",
+        -- Following, done or not (Done only stops the unread count). By the
+        -- thread_follows primary key.
+        EXISTS (
+          SELECT 1 FROM thread_follows any_follow
+          WHERE any_follow.thread_channel_id = input_threads.thread_id
+            AND any_follow.follower_type = 'user'
+            AND any_follow.follower_id = ${opts.userId}
+            AND any_follow.unfollowed_at IS NULL
+        ) AS "followed"
       FROM (VALUES ${sql.join(threadStorageRows, sql`, `)}) AS input_threads(thread_id, storage_thread_id)
       LEFT JOIN thread_follows tf
         ON tf.thread_channel_id = input_threads.thread_id
@@ -8131,18 +8401,19 @@ export async function getThreadSummaries(
     latestReplyRowsPending,
   ]);
   const participantsByThreadId = new Map<string, string[]>();
-  for (const row of participantRows.rows as Array<{ threadChannelId: string; senderId: string }>) {
+  for (const row of (participantRows?.rows ?? []) as Array<{ threadChannelId: string; senderId: string }>) {
     const list = participantsByThreadId.get(row.threadChannelId) ?? [];
     list.push(row.senderId);
     participantsByThreadId.set(row.threadChannelId, list);
   }
 
-  const unreadByThreadId = new Map<string, { unreadCount: number; firstUnreadMessageId: string | null }>();
+  const unreadByThreadId = new Map<string, { unreadCount: number; firstUnreadMessageId: string | null; followed: boolean }>();
   if (unreadRows) {
-    for (const row of unreadRows.rows as Array<{ threadChannelId: string; unreadCount: number; firstUnreadMessageId: string | null }>) {
+    for (const row of unreadRows.rows as Array<{ threadChannelId: string; unreadCount: number; firstUnreadMessageId: string | null; followed: boolean }>) {
       unreadByThreadId.set(row.threadChannelId, {
         unreadCount: row.unreadCount,
         firstUnreadMessageId: row.firstUnreadMessageId ?? null,
+        followed: row.followed === true,
       });
     }
   }
@@ -8268,6 +8539,7 @@ export async function getThreadSummaries(
       participantIds: participantsByThreadId.get(thread.threadChannelId) ?? [],
       unreadCount: unread?.unreadCount ?? 0,
       firstUnreadMessageId: unread?.firstUnreadMessageId ?? null,
+      followed: unread?.followed ?? false,
       latestReplies: latestRepliesByThreadId.get(thread.threadChannelId) ?? [],
     };
   }
@@ -8818,6 +9090,8 @@ export type FollowedThread = {
   parentMessagePreview: string;
   parentMessageSenderType: string;
   parentMessageSenderId: string;
+  /** When the parent message was posted: the thread's place in its channel (jump pill order). */
+  parentMessageCreatedAt: string;
   latestActivityPreview: string;
   latestActivitySenderType: string;
   latestActivitySenderId: string;
@@ -8829,6 +9103,13 @@ export type FollowedThread = {
   replyCount: number;
   lastReplyAt: string | null;
   unreadCount: number;
+  /**
+   * An unread reply in this thread mentions the user. Same source as the
+   * sidebar summary's thread rows (and so threadUnread.hasMention), so the
+   * jump pill and the badge agree. False when that read fails: it only orders
+   * the pill.
+   */
+  hasMention: boolean;
   taskId: string | null;
   taskNumber: number | null;
   taskStatus: string | null;
@@ -9542,18 +9823,103 @@ async function loadActiveFollowedThreadsFromRisingWave(
 }
 
 /** Get all threads a user participates in, with unread counts and parent message info. */
+/** The followed threads of a user in a server (the whole list without `opts.page`). */
 export async function getFollowedThreads(
   serverId: string,
   userId: string,
   historyCutoff?: Date,
   opts?: FollowedThreadsOptions,
 ): Promise<FollowedThread[]> {
+  return (await loadFollowedThreads(serverId, userId, historyCutoff, opts)).threads;
+}
+
+/**
+ * Opaque cursor of the followed-thread pages: the last returned thread's
+ * (latestActivitySeq, threadChannelId). Produced only by
+ * encodeFollowedThreadsCursor; a client passes it back unchanged.
+ */
+export type FollowedThreadsCursor = string & { readonly __brand: "FollowedThreadsCursor" };
+
+function encodeFollowedThreadsCursor(seq: bigint, threadChannelId: string): FollowedThreadsCursor {
+  return Buffer.from(JSON.stringify({ s: seq.toString(), i: threadChannelId }), "utf8").toString("base64url") as FollowedThreadsCursor;
+}
+
+/** Null for anything that is not a cursor this server produced. */
+export function parseFollowedThreadsCursor(raw: unknown): FollowedThreadsCursor | null {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > 200) return null;
+  return decodeFollowedThreadsCursor(raw as FollowedThreadsCursor) ? raw as FollowedThreadsCursor : null;
+}
+
+function decodeFollowedThreadsCursor(cursor: FollowedThreadsCursor): { seq: bigint; threadChannelId: string } | null {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { s?: unknown; i?: unknown };
+    if (typeof parsed.s !== "string" || !/^\d{1,20}$/.test(parsed.s)) return null;
+    if (typeof parsed.i !== "string" || !UUID_RE.test(parsed.i)) return null;
+    return { seq: BigInt(parsed.s), threadChannelId: parsed.i };
+  } catch {
+    return null;
+  }
+}
+
+/** Newest activity first; the thread id breaks ties so the order is total. */
+function compareFollowedThreadOrder(
+  a: { seq: bigint; threadChannelId: string },
+  b: { seq: bigint; threadChannelId: string },
+): number {
+  if (a.seq !== b.seq) return a.seq > b.seq ? -1 : 1;
+  return a.threadChannelId > b.threadChannelId ? -1 : a.threadChannelId < b.threadChannelId ? 1 : 0;
+}
+
+function selectFollowedThreadsPage(
+  threads: FollowedThreadSourceRow[],
+  statsMap: Map<string, { unreadCount: number; lastReplyMessageId: string | null; lastReplySeqExact: string | null }>,
+  opts: FollowedThreadsOptions | undefined,
+): { rows: FollowedThreadSourceRow[]; next: FollowedThreadsCursor | null; paged: boolean } {
+  let rows = opts?.unreadOnly
+    ? threads.filter((thread) => (statsMap.get(thread.threadChannelId)?.unreadCount ?? 0) > 0)
+    : threads;
+  const page = opts?.page;
+  if (!page) return { rows, next: null, paged: false };
+  const keyed = rows.map((thread) => ({
+    thread,
+    key: {
+      seq: BigInt(latestActivitySeqSameSource(statsMap.get(thread.threadChannelId), thread.parentMessageSeq) ?? "0"),
+      threadChannelId: thread.threadChannelId,
+    },
+  }));
+  keyed.sort((a, b) => compareFollowedThreadOrder(a.key, b.key));
+  const after = page.cursor ? decodeFollowedThreadsCursor(page.cursor) : null;
+  // Strictly older than the cursor: a thread that got new activity moved to an
+  // earlier page and is neither repeated nor skipped.
+  const remaining = after ? keyed.filter((entry) => compareFollowedThreadOrder(entry.key, after) > 0) : keyed;
+  const limit = Math.max(1, Math.floor(page.limit));
+  const taken = remaining.slice(0, limit);
+  const last = taken[taken.length - 1];
+  rows = taken.map((entry) => entry.thread);
+  return {
+    rows,
+    next: remaining.length > limit && last ? encodeFollowedThreadsCursor(last.key.seq, last.key.threadChannelId) : null,
+    paged: true,
+  };
+}
+
+export async function loadFollowedThreads(
+  serverId: string,
+  userId: string,
+  historyCutoff?: Date,
+  opts?: FollowedThreadsOptions,
+): Promise<{ threads: FollowedThread[]; next: FollowedThreadsCursor | null }> {
   const db = opts?.executor ?? getDb();
   const traceQuery = opts?.traceQuery ?? untracedDbQuery;
   const guestAccess = await guestInboxChannelIds(serverId, userId, db);
   const state = opts?.state ?? "active";
   const ctx: FollowedThreadsQueryContext = { serverId, userId, db, traceQuery, guestAccess, state, opts };
 
+  // Started with the thread read, awaited after it (settled, so a failure never
+  // goes unhandled while the thread read is in flight).
+  const mentionRead = state === "active"
+    ? loadFollowedThreadMentionIds(serverId, userId, traceQuery)
+    : Promise.resolve(new Set<string>());
   const legacyReason = followedThreadsLegacyReason(ctx);
   let loaded = legacyReason === null ? await loadActiveFollowedThreadsFromRisingWave(ctx, historyCutoff) : null;
   if (!loaded) {
@@ -9563,8 +9929,10 @@ export async function getFollowedThreads(
     });
     loaded = await loadFollowedThreadsLegacy(ctx, historyCutoff);
   }
-  const { threads, statsRows, readStateByThread } = loaded;
-  if (threads.length === 0) return [];
+  const { statsRows, readStateByThread } = loaded;
+  let threads = loaded.threads;
+  const mentionedThreadIds = await mentionRead;
+  if (threads.length === 0) return { threads: [], next: null };
 
   const statsMap = new Map<string, {
     replyCount: number;
@@ -9590,6 +9958,12 @@ export async function getFollowedThreads(
       unreadCount: row.unreadCount,
     });
   }
+
+  // unreadOnly / page: chosen here, before the per-thread enrichment below,
+  // so claimant names, external names and the response only cover the page.
+  const selection = selectFollowedThreadsPage(threads, statsMap, state === "active" ? opts : undefined);
+  threads = selection.rows;
+  if (threads.length === 0) return { threads: [], next: selection.next };
 
   // Batch-resolve task claimant names
   const claimantNameMap = new Map<string, string>();
@@ -9662,6 +10036,7 @@ export async function getFollowedThreads(
         : t.parentMessageContent,
       parentMessageSenderType: t.parentMessageSenderType,
       parentMessageSenderId: t.parentMessageSenderId,
+      parentMessageCreatedAt: t.parentMessageCreatedAt.toISOString(),
       latestActivityPreview: latestActivityContent.length > 140
         ? latestActivityContent.slice(0, 140) + "…"
         : latestActivityContent,
@@ -9678,6 +10053,7 @@ export async function getFollowedThreads(
       replyCount: stats?.replyCount ?? 0,
       lastReplyAt: stats?.lastReplyAt ?? null,
       unreadCount: stats?.unreadCount ?? 0,
+      hasMention: (stats?.unreadCount ?? 0) > 0 && mentionedThreadIds.has(t.threadChannelId),
       taskId: t.taskId,
       taskNumber: t.taskNumber,
       taskStatus: t.taskStatus,
@@ -9709,7 +10085,14 @@ export async function getFollowedThreads(
     return new Date(b.lastActivityAt).getTime() - new Date(a.lastActivityAt).getTime();
   });
 
-  return result;
+  if (selection.paged) {
+    // A page keeps the cursor order (latestActivitySeq desc, then id desc).
+    result.sort((a, b) => compareFollowedThreadOrder(
+      { seq: BigInt(a.latestActivitySeq ?? "0"), threadChannelId: a.threadChannelId },
+      { seq: BigInt(b.latestActivitySeq ?? "0"), threadChannelId: b.threadChannelId },
+    ));
+  }
+  return { threads: result, next: selection.next };
 }
 
 export type InboxFilter = "all" | "unread" | "mentions" | "unread_mentions";
@@ -10531,6 +10914,8 @@ function buildRisingWaveInboxItemsServingQuery(
     includeMentionOnlyInAllAndUnread?: boolean;
     sort?: "asc" | "desc";
     servingViewOverride?: string;
+    /** Bind $8 (varchar[]): thread rows below these parents are left out of rows, groups and totals. */
+    excludeThreadParents?: boolean;
   } = {},
 ) {
   const sortDirection = opts.sort === "asc" ? "ASC" : "DESC";
@@ -10565,6 +10950,11 @@ function buildRisingWaveInboxItemsServingQuery(
   const activeMentionOnlyPredicate = opts.includeMentionOnlyInAllAndUnread
     ? ""
     : `AND ${mentionOnlyExpr} = false`;
+  // Parents the receiver can no longer see (getInboxItemsFromRisingWave checks
+  // them in Postgres). A NULL parent compares unknown and is kept.
+  const excludedThreadParentPredicate = opts.excludeThreadParents
+    ? "AND (i.kind <> 'thread' OR NOT COALESCE(i.parent_channel_id = ANY($8::varchar[]), false))"
+    : "";
   // CONTRACT: RW serving must stay behavior-compatible with the inline Postgres
   // SQL in getInboxItems below. SYNC REQUIRED: any field, filter, unread-count,
   // mention, ordering, pagination, or total-count semantic changed here or in
@@ -10651,6 +11041,7 @@ function buildRisingWaveInboxItemsServingQuery(
         ${filterMentionOnlyPredicate}
         AND (COALESCE($7::text, '') <> 'dms' OR ${RISINGWAVE_DM_SCOPE_PREDICATE})
         AND (COALESCE($7::text, '') <> 'no_dms' OR NOT COALESCE(${RISINGWAVE_DM_SCOPE_PREDICATE}, false))
+        ${excludedThreadParentPredicate}
     ),
     faceted AS (
       SELECT
@@ -10701,6 +11092,19 @@ function buildRisingWaveInboxItemsServingQuery(
         AND (COALESCE($7::text, '') <> 'dms' OR ${RISINGWAVE_DM_SCOPE_PREDICATE})
         AND (COALESCE($7::text, '') <> 'no_dms' OR NOT COALESCE(${RISINGWAVE_DM_SCOPE_PREDICATE}, false))
         ${activeMentionOnlyPredicate}
+        ${excludedThreadParentPredicate}
+    ),
+    -- Every thread parent this receiver's rows hang below, whatever the filter,
+    -- so one Postgres check covers the rows, the groups and both totals.
+    thread_parents AS (
+      SELECT array_agg(DISTINCT i.parent_channel_id) AS "threadParentChannelIds"
+      FROM ${inboxItems} i
+      WHERE i.server_id = $1
+        AND ${inboxReceiverExpr} = $2
+        ${receiverTypePredicate}
+        AND i.kind = 'thread'
+        AND i.parent_channel_id IS NOT NULL
+        AND ($4::timestamptz IS NULL OR i.activity_at > $4::timestamptz)
     ),
     totals AS (
       SELECT
@@ -10773,10 +11177,12 @@ function buildRisingWaveInboxItemsServingQuery(
       group_totals."groupChannelNames",
       group_totals."groupChannelTypes",
       group_totals."groupCounts",
-      group_totals."groupLastActivityAts"
+      group_totals."groupLastActivityAts",
+      thread_parents."threadParentChannelIds"
     FROM totals
     CROSS JOIN active_totals
     CROSS JOIN group_totals
+    CROSS JOIN thread_parents
     LEFT JOIN page_enriched ON true
     ORDER BY page_enriched."activityAt" ${sortDirection} NULLS LAST,
       page_enriched."kind" ${sortDirection},
@@ -10800,6 +11206,7 @@ async function getInboxItemsFromRisingWave(
     servingVersion?: RisingWaveInboxItemsServingVersion;
     requestedServingVersion?: RisingWaveInboxItemsServingVersion;
     traceQuery: DbQueryTracer;
+    executor?: DatabaseExecutor;
   },
 ): Promise<InboxQueryResult> {
   const client = getRisingWaveInboxPool();
@@ -10835,13 +11242,14 @@ async function getInboxItemsFromRisingWave(
   // splits the metric series while the flag is ramping - that separation is the
   // point, and it disappears when the flag reaches 100% and the branch is
   // deleted.
-  const read = await opts.traceQuery(
+  const readPage = (excludedThreadParentIds: readonly string[]) => opts.traceQuery(
     "channels.inbox_items_by_user",
     () => queryRisingWaveInbox(client, buildRisingWaveInboxItemsServingQuery(pageLimit, pageOffset, inboxItemsVersion, {
       includeMentionOnlyInAllAndUnread: opts.includeMentionOnlyInAllAndUnread,
       sort: opts.sort,
       servingViewOverride: servingView,
-    }), queryParams),
+      excludeThreadParents: excludedThreadParentIds.length > 0,
+    }), excludedThreadParentIds.length > 0 ? [...queryParams, [...excludedThreadParentIds]] : queryParams),
     (queryRead) => ({
       ...inboxTraceAttrs("rw_mv", opts.filter, "none", inboxItemsVersion),
       backend: "risingwave",
@@ -10880,6 +11288,7 @@ async function getInboxItemsFromRisingWave(
       query_present: Boolean(opts.q),
       scope: opts.scope ?? "all",
       row_count: queryRead.result.rows.length,
+      excluded_thread_parent_count: excludedThreadParentIds.length,
     }),
     (error) => risingWaveInboxFailureAttrs({
       route: opts.filter,
@@ -10888,6 +11297,27 @@ async function getInboxItemsFromRisingWave(
       queryName: "channels.inbox_items_by_user",
     }),
   );
+  // Threads below a parent the receiver can no longer see (archived, deleted,
+  // or a non-public parent they left) stay in the serving views until 077's
+  // parent condition is built everywhere. Check the parents in Postgres, after
+  // whichever view generation answered, and in the rare case one fails, read
+  // again with those parents excluded in SQL so rows, groups, page size and
+  // totals all agree. Redundant once 077 serves.
+  let read = await readPage([]);
+  const invisibleParents = await findInvisibleThreadParentChannelIds(
+    userId,
+    read.result.rows[0]?.threadParentChannelIds,
+    opts.traceQuery,
+    opts.executor ?? getDb(),
+  );
+  if (invisibleParents.length > 0) {
+    addTraceEvent("inbox.rw.invisible_thread_parents_excluded", {
+      ...inboxTraceAttrs("rw_mv", opts.filter, "none", inboxItemsVersion),
+      server_id: serverId,
+      excluded_thread_parent_count: invisibleParents.length,
+    });
+    read = await readPage(invisibleParents);
+  }
   recordRisingWaveInboxThreadReplyCountNullContractViolation(read.result.rows, {
     filter: opts.filter,
     servedVersion: inboxItemsVersion,
@@ -10897,6 +11327,45 @@ async function getInboxItemsFromRisingWave(
     historyCutoff: Boolean(opts.historyCutoff),
   });
   return { rows: read.result.rows, contractVersion: inboxItemsVersion };
+}
+
+/**
+ * The thread parents among `parentChannelIds` that `userId` cannot see, by the
+ * rule the Postgres Activity read and 077's rw_inbox_items_v12 apply: a thread
+ * shows only below a live, unarchived parent that is public or has the user as
+ * a member. Ids that are not UUIDs or not found count as not visible.
+ * Human receivers only: membership is channel_humans. An agent read would need
+ * channel_agents, or every private parent would count as not visible.
+ */
+async function findInvisibleThreadParentChannelIds(
+  userId: string,
+  parentChannelIds: unknown,
+  traceQuery: DbQueryTracer,
+  db: DatabaseExecutor,
+): Promise<string[]> {
+  if (!Array.isArray(parentChannelIds)) return [];
+  const candidates = [...new Set(parentChannelIds.filter((id): id is string => typeof id === "string"))];
+  if (candidates.length === 0) return [];
+  const uuidCandidates = candidates.filter((id) => UUID_TEXT_RE.test(id));
+  const visible = new Set<string>();
+  if (uuidCandidates.length > 0) {
+    const rows = await traceQuery(
+      "channels.inbox_thread_parent_visibility",
+      () => db
+        .select({ id: channels.id })
+        .from(channels)
+        .leftJoin(channelHumans, and(eq(channelHumans.channelId, channels.id), eq(channelHumans.userId, userId)))
+        .where(and(
+          inArray(channels.id, uuidCandidates),
+          isNull(channels.deletedAt),
+          isNull(channels.archivedAt),
+          or(eq(channels.type, "channel"), isNotNull(channelHumans.userId)),
+        )),
+      (result) => ({ input_count: uuidCandidates.length, result_count: result.length }),
+    );
+    for (const row of rows) visible.add(row.id.toLowerCase());
+  }
+  return candidates.filter((id) => !visible.has(id.toLowerCase()));
 }
 
 async function enrichInboxRowsWithProfileNames(
@@ -11171,35 +11640,80 @@ async function getActivityUnreadTotalsBatchFromRisingWave(
     totals.set(serverId, { totalUnreadCount: 0, activeUnreadCount: 0 });
   }
   const totalsView = UNIFIED_CHAIN_VIEWS.totals;
+  // The second arm lists the unread each thread parent contributes to the
+  // total (what the totals view sums for threads), so threads below a parent
+  // the receiver can no longer see can be taken back out, as the Activity list
+  // leaves them out (getInboxItemsFromRisingWave). Same round trip.
   const read = await traceQuery(
     "channels.activity_unread_totals_batch_by_user.derivation",
-    () => queryRisingWaveInbox<{ serverId: string; totalUnreadCount: number }>(
+    () => queryRisingWaveInbox<{ serverId: string; parentChannelId: string | null; unreadCount: number }>(
       client,
       `SELECT
          t.server_id AS "serverId",
-         t.total_unread_count AS "totalUnreadCount"
+         CAST(NULL AS VARCHAR) AS "parentChannelId",
+         t.total_unread_count AS "unreadCount"
        FROM ${totalsView} t
        WHERE t.receiver_id = $1
          AND t.receiver_type = 'user'
-         AND t.server_id = ANY($2)`,
+         AND t.server_id = ANY($2)
+       UNION ALL
+       SELECT
+         i.server_id AS "serverId",
+         i.parent_channel_id AS "parentChannelId",
+         CAST(SUM(i.unread_count) AS INT) AS "unreadCount"
+       FROM ${UNIFIED_CHAIN_VIEWS.serving} i
+       WHERE i.receiver_id = $1
+         AND i.receiver_type = 'user'
+         AND i.server_id = ANY($2)
+         AND i.kind = 'thread'
+         AND NOT i.mention_only
+         AND i.unread_count > 0
+         AND i.parent_channel_id IS NOT NULL
+       GROUP BY i.server_id, i.parent_channel_id`,
       [userId, serverIds],
     ),
-    (queryRead) => ({
-      ...inboxTraceAttrs("rw_mv", "activity_totals", "none"),
-      server_count: serverIds.length,
-      row_count: queryRead.result.rows.length,
-      // Every (user, server) membership has a totals row, so a missing row is not
-      // an ordinary zero: the membership has not reached RisingWave. Counted, not
-      // hidden; the badge still reads 0 for it.
-      missing_row_count: serverIds.length - queryRead.result.rows.length,
-      rw_inbox_items_serving_view: totalsView,
-      rw_inbox_items_derivation_chain: true,
-      rw_inbox_unified_chain: true,
-    }),
+    (queryRead) => {
+      const totalRows = queryRead.result.rows.filter((row) => row.parentChannelId == null).length;
+      return {
+        ...inboxTraceAttrs("rw_mv", "activity_totals", "none"),
+        server_count: serverIds.length,
+        row_count: totalRows,
+        thread_parent_row_count: queryRead.result.rows.length - totalRows,
+        // Every (user, server) membership has a totals row, so a missing row is not
+        // an ordinary zero: the membership has not reached RisingWave. Counted, not
+        // hidden; the badge still reads 0 for it.
+        missing_row_count: serverIds.length - totalRows,
+        rw_inbox_items_serving_view: totalsView,
+        rw_inbox_items_derivation_chain: true,
+        rw_inbox_unified_chain: true,
+      };
+    },
   );
-  for (const row of read.result.rows) {
-    const count = Number(row.totalUnreadCount);
-    totals.set(String(row.serverId), { totalUnreadCount: count, activeUnreadCount: count });
+  const totalRows = read.result.rows.filter((row) => row.parentChannelId == null);
+  const parentRows = read.result.rows.filter((row) => row.parentChannelId != null);
+  const invisibleParents = new Set(await findInvisibleThreadParentChannelIds(
+    userId,
+    parentRows.map((row) => String(row.parentChannelId)),
+    traceQuery,
+    getDb(),
+  ));
+  const hiddenUnreadByServer = new Map<string, number>();
+  for (const row of parentRows) {
+    if (!invisibleParents.has(String(row.parentChannelId))) continue;
+    const serverId = String(row.serverId);
+    hiddenUnreadByServer.set(serverId, (hiddenUnreadByServer.get(serverId) ?? 0) + Number(row.unreadCount));
+  }
+  if (hiddenUnreadByServer.size > 0) {
+    addTraceEvent("inbox.rw.invisible_thread_parents_excluded", {
+      ...inboxTraceAttrs("rw_mv", "activity_totals", "none"),
+      excluded_thread_parent_count: invisibleParents.size,
+      server_count: hiddenUnreadByServer.size,
+    });
+  }
+  for (const row of totalRows) {
+    const serverId = String(row.serverId);
+    const count = Math.max(0, Number(row.unreadCount) - (hiddenUnreadByServer.get(serverId) ?? 0));
+    totals.set(serverId, { totalUnreadCount: count, activeUnreadCount: count });
   }
   return totals;
 }
@@ -11448,6 +11962,7 @@ export async function getInboxItems(
       historyCutoff,
       includeMentionOnlyInAllAndUnread: humanActivityMuteEnabled,
       traceQuery,
+      executor: db,
     });
     recordInboxBackendSelected(
       "rw_mv",
@@ -12796,6 +13311,18 @@ export async function markInboxReadLatest(serverId: string, userId: string): Pro
   return { markedCount: rows.length, scopes: rows };
 }
 
+/** Read this sidebar conversation and its active followed threads, at one captured frontier. */
+export async function markConversationReadLatest(serverId: string, userId: string, channelId: string): Promise<InboxReadLatestResult> {
+  const ack = await executeCompatibilityReadMutation({
+    serverId,
+    principalId: userId,
+    mutation: { kind: "conversation_read_all", scopeId: channelId },
+  });
+  const scopes = ack.scopes.map(readStateResultFromAckScope);
+  recordInboxReadRebuildRequested(userId, scopes.filter((scope) => scope.changed));
+  return { markedCount: scopes.filter((scope) => scope.changed).length, scopes };
+}
+
 export type ThreadFollowReason = "replied" | "authored" | "mentioned" | "manual";
 
 /**
@@ -13691,7 +14218,94 @@ export async function getUnreadSummary(
       console.error(formatInboxScopeCorruptionLine(channelId, corruption));
     },
   );
+  // The view only carries followed, not-done threads under a live parent the
+  // user can see. Only those with unread replies reach the badge, so only
+  // they are resolved: the lookup scales with unread threads, not follows.
+  const threadIds = rows
+    .filter((row) => row.kind === "thread" && row.subscribed && row.unreadCount > 0)
+    .map((row) => row.targetId);
+  if (threadIds.length > 0) {
+    const parentByThread = await loadLocalThreadParentChannelIds(serverId, threadIds, traceQuery);
+    for (const threadId of threadIds) {
+      const parentChannelId = parentByThread.get(threadId);
+      const entry = summary[threadId];
+      if (parentChannelId && entry) entry.parentChannelId = parentChannelId;
+    }
+  }
   return summary;
+}
+
+/**
+ * Threads of this server whose unread replies mention the user, from the same
+ * read as the sidebar summary. Never throws: on failure no thread is marked
+ * (hasMention only orders the jump pill) and the failure is traced.
+ */
+async function loadFollowedThreadMentionIds(
+  serverId: string,
+  userId: string,
+  traceQuery: DbQueryTracer,
+): Promise<Set<string>> {
+  try {
+    const rows = await loadConversationUnreadSummaryRows(serverId, userId, false, traceQuery);
+    return new Set(rows.filter((row) => row.kind === "thread" && row.mentionUnread > 0).map((row) => row.targetId));
+  } catch (error) {
+    addTraceEvent("followed_threads.mentions.failed", { error_class: errorClassOf(error) });
+    return new Set();
+  }
+}
+
+/**
+ * The local parent channel of each thread, in one primary-key read. A thread
+ * of this server's own channel has it in channels.parent_channel_id. A joint
+ * thread's local projection has no parent message (it lives on the canonical
+ * thread), so its parent is this server's projection of the canonical parent
+ * channel -- the same mapping as rw_followed_threads_v5's joint_parent_channel_id.
+ */
+async function loadLocalThreadParentChannelIds(
+  serverId: string,
+  threadIds: string[],
+  traceQuery: DbQueryTracer,
+): Promise<Map<string, string>> {
+  const result = await traceQuery(
+    "channels.unread_summary.thread_parents",
+    () => getDb().execute(sql`
+      SELECT
+        t.id::text AS "threadId",
+        COALESCE(
+          CASE WHEN own_parent.server_id = ${serverId} THEN t.parent_channel_id END,
+          parent_projection.local_channel_id
+        )::text AS "parentChannelId"
+      FROM channels t
+      LEFT JOIN channels own_parent ON own_parent.id = t.parent_channel_id
+      LEFT JOIN joint_channel_servers thread_projection
+        ON thread_projection.local_channel_id = t.id
+       AND thread_projection.status = 'active'
+      LEFT JOIN joint_channels thread_joint
+        ON thread_joint.id = thread_projection.joint_channel_id
+       AND thread_joint.status = 'active'
+      LEFT JOIN channels canonical_thread
+        ON canonical_thread.id = thread_joint.canonical_channel_id
+       AND canonical_thread.type = 'thread'
+      LEFT JOIN joint_channels parent_joint
+        ON parent_joint.canonical_channel_id = canonical_thread.parent_channel_id
+       AND parent_joint.status = 'active'
+      LEFT JOIN joint_channel_servers parent_projection
+        ON parent_projection.joint_channel_id = parent_joint.id
+       AND parent_projection.server_id = ${serverId}
+       AND parent_projection.status = 'active'
+      WHERE t.id IN (${sql.join(threadIds.map((id) => sql`${id}::uuid`), sql`, `)})
+        AND t.type = 'thread'
+    `),
+    (result) => ({
+      input_count: threadIds.length,
+      resolved_count: (result.rows as Array<{ parentChannelId: string | null }>).filter((row) => row.parentChannelId).length,
+    }),
+  );
+  const parentByThread = new Map<string, string>();
+  for (const row of result.rows as Array<{ threadId: string; parentChannelId: string | null }>) {
+    if (row.parentChannelId) parentByThread.set(row.threadId, row.parentChannelId);
+  }
+  return parentByThread;
 }
 
 export interface UnreadSummaryReadStateRow {
@@ -14301,7 +14915,9 @@ export async function resolveAgentFacingDmRefs(
         (SELECT a.name FROM ${channelAgents} AS ca INNER JOIN ${agents} AS a ON a.id = ca.agent_id
           WHERE ca.channel_id = c.id AND ca.agent_id <> ${agentId} LIMIT 1) AS legacy_agent,
         (SELECT s.kind FROM ${agentPrivateSurfaces} AS s
-          WHERE s.channel_id = c.id AND s.agent_id = ${agentId} LIMIT 1) AS private_surface_kind
+          WHERE s.channel_id = c.id AND s.agent_id = ${agentId} LIMIT 1) AS private_surface_kind,
+        (SELECT 'yes' FROM ${agentMigrationReceiptChannels} AS r
+          WHERE r.channel_id = c.id AND r.agent_id = ${agentId} LIMIT 1) AS migration_receipt
       FROM ${channels} AS c
       INNER JOIN ${channelAgents} AS me ON me.channel_id = c.id AND me.agent_id = ${agentId}
       LEFT JOIN ${dmChannelIdentities} AS i ON i.channel_id = c.id AND i.server_id = c.server_id
@@ -14322,6 +14938,9 @@ export async function resolveAgentFacingDmRefs(
       let peer: { name: string; kind: DmPeerKind | null } | null = null;
       if (row.private_surface_kind === "reminders") {
         peer = { name: AGENT_REMINDERS_DM_PEER, kind: null };
+      } else if (row.migration_receipt === "yes") {
+        // Mirrors resolveAgentFacingChannelRef: the receipt DM is named by its channel.
+        peer = { name: String(row.channel_name), kind: null };
       } else if (row.identity_kind) {
         // Mirrors resolveAgentFacingChannelRef: an identity row is authoritative;
         // the agent must be one of its participants.
@@ -14388,6 +15007,7 @@ export function formatAgentInboxTarget(row: AgentInboxChainRow, dmRefs: Readonly
  * the unified chain's rows (read once for this resume by
  * selectAgentInboxChainRows). Returns target -> offered unread. The chain gates
  * the free-plan history window per target (rw_target_eligible_v1), not per message.
+ * A DM with no addressable peer is skipped, as in listAgentInbox: no target opens it.
  */
 export async function getAgentUnreadCounts(
   agentId: string,
@@ -14397,6 +15017,7 @@ export async function getAgentUnreadCounts(
   const counts: Record<string, number> = {};
   for (const row of chain) {
     if (row.offeredUnread <= 0) continue;
+    if (row.kind === "dm" && !dmRefs.has(row.targetId)) continue;
     const target = formatAgentInboxTarget(row, dmRefs);
     counts[target] = (counts[target] ?? 0) + row.offeredUnread;
   }

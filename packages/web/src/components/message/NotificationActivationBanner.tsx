@@ -10,7 +10,7 @@ import {
   recordWebPushPromptEvent,
 } from "../../utils/pushNotifications";
 import Banner from "../ui/Banner";
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import type { MessageId } from "../../i18n/messages";
 
 export const NOTIFICATION_ACTIVATION_DISMISSED_SESSION_KEY =
@@ -224,13 +224,13 @@ export default function NotificationActivationBanner({
         <button
           type="button"
           onClick={() => nav.toSettings("notifications")}
-          className="font-bold underline"
+          className="font-semibold underline decoration-[1.5px] underline-offset-[3px]"
         >
           {formatMessage({ id: "message.notificationActivation.settingsNotifications" })}
         </button>
         <div
           aria-hidden="true"
-          className="notification-activation-progress absolute inset-x-0 bottom-0 h-1 bg-brutal-black"
+          className="notification-activation-progress absolute inset-x-0 bottom-0 h-1 bg-foreground"
         />
         {/* Functional clock: this hidden animation's end event is the only
             three-second auto-dismiss path. Do not remove it as decoration. */}
@@ -248,7 +248,7 @@ export default function NotificationActivationBanner({
     <div className="flex items-center gap-2">
       <Button
         size="sm"
-        variant="accent"
+        variant="outline"
         disabled={busy}
         onClick={handleEnable}
       >
@@ -257,7 +257,7 @@ export default function NotificationActivationBanner({
       <CloseButton
         type="button"
         onClick={handleDismiss}
-        className="inline-flex size-7 shrink-0 items-center justify-center"
+        className="shrink-0"
         aria-label={formatMessage({ id: "message.notificationActivation.hideReminderAria" })}
       >
         <X size={16} />
@@ -281,7 +281,7 @@ export default function NotificationActivationBanner({
         ? formatMessage({ id: "message.notificationActivation.mobileBody" })
         : formatMessage({ id: "message.notificationActivation.desktopBody" })}
       {errorId ? (
-        <div role="alert" className="mt-1 font-bold text-brutal-red">
+        <div role="alert" className="mt-1 font-semibold text-danger-strong">
           {formatMessage({ id: errorId })}
         </div>
       ) : null}

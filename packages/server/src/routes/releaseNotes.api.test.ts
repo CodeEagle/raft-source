@@ -2,7 +2,7 @@ import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
 import { eq } from "drizzle-orm";
 import { getDb } from "../db/index";
-import { releaseNotes, releaseNoteRevisions, releaseNoteDrafts } from "../db/schema";
+import { releaseNotes, releaseNoteRevisions, releaseNoteRevisionItems, releaseNoteDrafts } from "../db/schema";
 
 /**
  * Integration tests for the public release-notes read surface
@@ -63,6 +63,42 @@ test("published state is public, retracted state hides entries, drafts are never
   assert.equal(byKey["rn-2.0.0"], undefined);
   assert.equal(byKey["rn-1.0.0"].state, "published");
   assert.equal(byKey["rn-1.0.1"].state, "retracted");
+});
+
+test("list batches entries per page: current revision only, ordinal order, retracted empty", async ({ app }) => {
+  const db = getDb();
+  const [a, b, r] = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()];
+  await db.insert(releaseNotes).values([
+    {id: a, releaseKey: "rn-3.0.0", version: "3.0.0", tag: "v3.0.0", date: "2026-09-10", currentRevision: 2},
+    {id: b, releaseKey: "rn-3.0.1", version: "3.0.1", tag: "v3.0.1", date: "2026-09-11", currentRevision: 1},
+    {id: r, releaseKey: "rn-3.0.2", version: "3.0.2", tag: "v3.0.2", date: "2026-09-12", currentRevision: 1, retractedAt: new Date()},
+  ]);
+  await db.insert(releaseNoteRevisions).values([
+    {releaseId: a, revision: 1, snapshotHash: "c".repeat(64)},
+    {releaseId: a, revision: 2, snapshotHash: "d".repeat(64)},
+    {releaseId: b, revision: 1, snapshotHash: "e".repeat(64)},
+    {releaseId: r, revision: 1, snapshotHash: "f".repeat(64)},
+  ]);
+  const item = (releaseId: string, revision: number, ordinal: number, text: string) =>
+    ({releaseId, revision, entryId: crypto.randomUUID(), ordinal, type: "fix" as const, text, emphasis: false});
+  await db.insert(releaseNoteRevisionItems).values([
+    item(a, 1, 0, "a old revision"),
+    item(a, 2, 1, "a second"),
+    item(a, 2, 0, "a first"),
+    item(b, 1, 0, "b only"),
+    item(r, 1, 0, "retracted hidden"),
+  ]);
+
+  const res = await fetch(`${app.baseUrl}/api/release-notes?limit=10`);
+  assert.equal(res.status, 200);
+  const {items} = await res.json();
+  const texts = Object.fromEntries(items.map((i: {releaseKey: string; entries: Array<{text: string}>}) =>
+    [i.releaseKey, i.entries.map(e => e.text)]));
+  assert.deepEqual(texts["rn-3.0.0"], ["a first", "a second"]);
+  assert.deepEqual(texts["rn-3.0.1"], ["b only"]);
+  assert.deepEqual(texts["rn-3.0.2"], []);
+  assert.deepEqual(Object.keys(items.find((i: {releaseKey: string}) => i.releaseKey === "rn-3.0.1").entries[0]),
+    ["entryId", "type", "text", "emphasis", "ordinal"]);
 });
 
 test("release_note_revisions rows are DB-immutable (trigger rejects update and delete)", async ({ app }) => {

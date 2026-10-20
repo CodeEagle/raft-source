@@ -32,18 +32,18 @@ export default function DeleteServerConfirmDialog({ onClose, layer }: { onClose:
       message={(
         <div className="space-y-4">
           <p>
-            {formatMessage({ id: "settings.dangerZone.deleteWarningPrefix" })}<span className="font-bold">{server.name}</span>{formatMessage({ id: "settings.dangerZone.deleteWarningSuffix" })}
+            {formatMessage({ id: "settings.dangerZone.deleteWarningPrefix" })}<span className="font-semibold text-foreground">{server.name}</span>{formatMessage({ id: "settings.dangerZone.deleteWarningSuffix" })}
           </p>
           <div>
-            <p className="text-sm text-foreground-muted theme-brutal:text-black/60 mb-2">
-              {formatMessage({ id: "settings.dangerZone.typeToConfirmPrefix" })}<span className="font-mono font-bold text-foreground-strong theme-brutal:text-black">{server.slug}</span>{formatMessage({ id: "settings.dangerZone.typeToConfirmSuffix" })}
+            <p className="mb-2 text-footnote font-semibold text-foreground">
+              {formatMessage({ id: "settings.dangerZone.typeToConfirmPrefix" })}<code className="rounded-sticker bg-fill-muted px-1 font-mono text-mono-code text-foreground">{server.slug}</code>{formatMessage({ id: "settings.dangerZone.typeToConfirmSuffix" })}
             </p>
             <SlugInput
               data-testid="server-delete-slug-input"
               type="text"
               value={confirmSlug}
               onChange={handleConfirmSlugChange}
-              inputClassName="text-sm font-mono"
+              inputClassName="font-mono"
               placeholder={server.slug}
               autoFocus
             />

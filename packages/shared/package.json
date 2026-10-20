@@ -59,9 +59,17 @@
       "types": "./src/agentApiRouteMeta.ts",
       "default": "./src/agentApiRouteMeta.ts"
     },
+    "./src/agentCliSurface": {
+      "types": "./src/agentCliSurface.ts",
+      "default": "./src/agentCliSurface.ts"
+    },
     "./src/agentMessageText": {
       "types": "./src/agentMessageText.ts",
       "default": "./src/agentMessageText.ts"
+    },
+    "./src/agentMigrationBundleReader": {
+      "types": "./src/agentMigrationBundleReader.ts",
+      "default": "./src/agentMigrationBundleReader.ts"
     },
     "./src/agentOps/hint.testkit": {
       "types": "./src/agentOps/hint.testkit.ts",
@@ -133,6 +141,10 @@
     "./announcement-presentation": {
       "types": "./announcement-presentation.ts",
       "default": "./announcement-presentation.ts"
+    },
+    "./announcement-audience": {
+      "types": "./announcement-audience.ts",
+      "default": "./announcement-audience.ts"
     }
   },
   "scripts": {
@@ -155,12 +167,18 @@
   },
   "dependencies": {
     "@botiverse/raft-sync-core": "workspace:*",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "micromark-extension-gfm": "^3.0.0",
+    "tar-stream": "2.2.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@oxc-node/core": "^0.1.6",
     "@redocly/cli": "2.40.0",
+    "@types/mdast": "^4.0.4",
     "@types/node": "^25.5.0",
+    "@types/tar-stream": "3.1.4",
     "openapi-typescript": "7.13.0",
     "typescript": "^6.0.3",
     "vitest": "^5.0.3",

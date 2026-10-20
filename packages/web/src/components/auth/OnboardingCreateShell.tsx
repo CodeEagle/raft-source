@@ -15,10 +15,13 @@ export const ONBOARDING_CREATE_GRID_CLASS =
   "grid w-full flex-1 lg:grid-cols-[minmax(320px,2fr)_minmax(0,3fr)]";
 
 export const ONBOARDING_CREATE_FORM_PANEL_CLASS =
-  "relative flex w-full flex-col justify-center overflow-y-auto bg-layer-canvas px-6 py-10 sm:px-10 lg:border-r lg:border-line-hairline theme-brutal:lg:border-r-2 theme-brutal:lg:border-black";
+  "relative flex w-full flex-col justify-center overflow-y-auto bg-layer-canvas px-6 py-10 sm:px-10 lg:border-r lg:border-line-seam";
 
+// The brand pane is the onboarding's yellow frame (DS ScreenOnboarding): the
+// frame colour with a halftone behind the tilted preview stickers. In dark the
+// frame token goes neutral, the stickers keep their colours.
 export const ONBOARDING_CREATE_DOT_GRID_CLASS =
-  "absolute inset-0 opacity-60 [background-image:radial-gradient(var(--line-strong)_1px,transparent_1px)] [background-size:16px_16px]";
+  "absolute inset-0 opacity-70 [background-image:radial-gradient(var(--line-seam)_1.5px,transparent_1.5px)] [background-size:14px_14px]";
 
 // Narrow screens render the onboarding flow as a plain auth form page — the
 // same yellow brand bar as sign in / sign up, and no demo pane. Wide screens
@@ -59,9 +62,9 @@ export function OnboardingSessionFooter() {
   if (!user) return null;
 
   return (
-    <p className="text-center text-sm text-foreground-muted" data-testid="onboarding-session-footer">
+    <p className="text-center text-footnote text-foreground-muted" data-testid="onboarding-session-footer">
       <SignedInAs user={user} nameClassName="font-normal" suffix=". " />
-      <TextLink variant="muted" inline onClick={handleLogout} disabled={loading}>
+      <TextLink variant="muted" onClick={handleLogout} disabled={loading}>
         {formatMessage({ id: "pages.serverSelector.logOut" })}
       </TextLink>
     </p>
@@ -77,7 +80,7 @@ export function OnboardingCreateDotPane({
 }) {
   return (
     <aside
-      className="relative hidden overflow-hidden bg-layer-canvas-muted lg:flex theme-brutal:bg-brutal-cream"
+      className="relative hidden overflow-hidden bg-layer-frame text-foreground-on-frame lg:flex"
       data-testid={testId}
     >
       <div className={ONBOARDING_CREATE_DOT_GRID_CLASS} aria-hidden="true" />

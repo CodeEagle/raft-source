@@ -111,6 +111,8 @@ function sourceContext(detect: () => Promise<RuntimeModelSourceOutcome>, routing
     sourceId,
     machineId: "machine-1",
     machine: {},
+    // The v2 endpoint; the capability test below also resolves as v1.
+    sourceStatus: true,
     agentOrchestrator: {
       detectMachineRuntimeModels: async (_machineId: string, runtime: string) => {
         calls.push(runtime);
@@ -265,15 +267,23 @@ test("status, customValueAllowed and choices appear only on forms that list the 
       capabilities.has("choice.labels"),
       `${runtime}: choices iff choice.labels`,
     );
-    if (capabilities.has("option_source.status")) {
-      assert.equal(runtimeFormV1Entry(runtime), null, `${runtime}: status is served only on v2, so the runtime has no v1 form`);
-    }
+    // A runtime that also has a v1 form must keep status off its v1 bodies:
+    // v1 clients parse strictly and never asked for it.
+    const hasV1 = runtimeFormV1Entry(runtime) !== null;
     for (const sourceId of Object.keys(form.optionSources ?? {})) {
       for (const [detect, routing] of outcomes) {
         const context = sourceContext(detect, routing, sourceId).context;
         (context.agentOrchestrator as unknown as Record<string, unknown>).detectMachineRuntimeModelsWithAuthority = async () => {
           throw new RouteFailureError("daemon_offline", "offline");
         };
+        if (hasV1) {
+          const v1Resolution = await entry.resolveOptionSource({ ...context, sourceStatus: false }).catch(() => null);
+          if (v1Resolution?.kind === "source" && v1Resolution.source) {
+            for (const key of ["status", "reason", "retryable"]) {
+              assert.equal(key in v1Resolution.source, false, `${runtime}/${sourceId}: no ${key} on v1`);
+            }
+          }
+        }
         let resolution;
         try {
           resolution = await entry.resolveOptionSource(context);

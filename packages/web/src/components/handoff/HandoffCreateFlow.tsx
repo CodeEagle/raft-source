@@ -12,16 +12,28 @@ import { useMachineStore } from "../../store/machineStore";
 import { useServerStore } from "../../store/serverStore";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import {
+  Badge,
   Banner,
   BannerDescription,
   Button,
+  Card,
+  DescriptionDetails,
+  DescriptionItem,
+  DescriptionList,
+  DescriptionTerm,
   Input,
   InputGroup,
   InputGroupAddon,
   InputGroupInput,
   SegmentedControl,
   Spinner,
-} from "raft-ui";
+  ListRow,
+  ListRowBody,
+  ListRowGroup,
+  ListRowIcon,
+  ListRowMeta,
+  ListRowTitle,
+} from "@botiverse/raft-ui";
 import {
   dirBasename,
   getHandoffBridge,
@@ -351,16 +363,16 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
 
   if (!bridge) {
     return (
-      <div className="flex items-center justify-center p-8 text-sm text-foreground-muted theme-brutal:text-black/50" data-testid="handoff-desktop-only">
+      <div className="flex items-center justify-center p-8 text-callout text-foreground-muted" data-testid="handoff-desktop-only">
         {formatMessage({ id: "handoff.desktopOnly" })}
       </div>
     );
   }
 
   const cancelButton = (
-    <Button
+    <Button size="lg"
       type="button"
-      variant="outline"
+      variant="ghost"
       onClick={onClose}
       disabled={creating}
     >
@@ -371,13 +383,13 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
   if (selected) {
     return (
       <div data-testid="handoff-create-form" className="flex flex-col">
-        <div className="mb-3 flex items-start justify-between gap-3 border border-line-muted bg-primary-soft/50 px-3 py-2 theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal/30">
+        <Card className="mb-3 flex-row items-start justify-between gap-3 px-3 py-2">
           <div className="min-w-0">
             <SectionEyebrow as="div" className="mb-0.5">{formatMessage({ id: "handoff.selectedSession" })}</SectionEyebrow>
-            <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">
+            <div className="truncate text-subhead font-semibold text-foreground">
               {selected.title ?? formatMessage({ id: "handoff.untitledSession" })}
             </div>
-            <div className="truncate text-xs text-foreground-muted theme-brutal:text-black/60">
+            <div className="truncate font-mono text-mono-meta text-foreground-hint">
               {TOOL_LABEL[selected.tool]} · {selected.cwd ?? "-"}
             </div>
           </div>
@@ -388,11 +400,11 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
             onClick={chooseAnother}
             disabled={creating}
             data-testid="handoff-choose-another"
-            className="shrink-0 text-xs font-bold text-foreground-muted underline-offset-2 hover:text-foreground-strong hover:underline disabled:opacity-50"
+            className="shrink-0"
           >
             {formatMessage({ id: "handoff.wizard.chooseAnother" })}
           </Button>
-        </div>
+        </Card>
 
         {selected.activeRecently && (
           <Banner status="warning" className="mb-3">
@@ -402,7 +414,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
           </Banner>
         )}
 
-        <label className="mb-1 block text-xs font-bold text-foreground-muted theme-brutal:text-black/60" htmlFor="handoff-agent-name">
+        <label className="mb-1 block text-footnote font-semibold text-foreground-muted" htmlFor="handoff-agent-name">
           {formatMessage({ id: "handoff.wizard.agentName" })}
         </label>
         <Input
@@ -413,14 +425,32 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
           className="mb-3 w-full"
         />
 
-        <div className="mb-3 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-foreground-muted theme-brutal:text-black/60">
-          <span className="font-bold">{formatMessage({ id: "handoff.wizard.model" })}</span>
-          <span className="truncate">{selected.model ?? formatMessage({ id: "handoff.wizard.modelUnknown" })}</span>
-          <span className="font-bold">{formatMessage({ id: "handoff.wizard.directory" })}</span>
-          <span className="truncate">{selected.cwd ?? "-"}</span>
-          <span className="font-bold">{formatMessage({ id: "handoff.wizard.computer" })}</span>
-          <span className="truncate">{localMachine ? (localMachine.name || localMachine.hostname) : formatMessage({ id: "handoff.wizard.computerMissing" })}</span>
-        </div>
+        {/* DS PropertyList: what the session fixes (model, directory, Computer)
+            is read-only; its machine values are Space Mono. */}
+        <DescriptionList direction="horizontal" className="mb-3">
+          <DescriptionItem>
+            <DescriptionTerm>{formatMessage({ id: "handoff.wizard.model" })}</DescriptionTerm>
+            <DescriptionDetails>
+              {selected.model
+                ? <span className="min-w-0 truncate font-mono text-mono-meta">{selected.model}</span>
+                : <span className="min-w-0 truncate text-foreground-hint">{formatMessage({ id: "handoff.wizard.modelUnknown" })}</span>}
+            </DescriptionDetails>
+          </DescriptionItem>
+          <DescriptionItem>
+            <DescriptionTerm>{formatMessage({ id: "handoff.wizard.directory" })}</DescriptionTerm>
+            <DescriptionDetails>
+              <span className="min-w-0 truncate font-mono text-mono-meta">{selected.cwd ?? "-"}</span>
+            </DescriptionDetails>
+          </DescriptionItem>
+          <DescriptionItem>
+            <DescriptionTerm>{formatMessage({ id: "handoff.wizard.computer" })}</DescriptionTerm>
+            <DescriptionDetails>
+              {localMachine
+                ? <span className="min-w-0 truncate font-mono text-mono-meta">{localMachine.name || localMachine.hostname}</span>
+                : <span className="min-w-0 truncate text-footnote font-semibold text-warning-strong">{formatMessage({ id: "handoff.wizard.computerMissing" })}</span>}
+            </DescriptionDetails>
+          </DescriptionItem>
+        </DescriptionList>
 
         {excerptFailed && (
           <Banner status="warning" className="mb-2">
@@ -429,10 +459,10 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
             </BannerDescription>
           </Banner>
         )}
-        <label className="mb-1 block text-xs font-bold text-foreground-muted theme-brutal:text-black/60">
+        <label className="mb-1 block text-footnote font-semibold text-foreground-muted">
           {formatMessage({ id: "handoff.wizard.briefingPreview" })}
         </label>
-        <pre className="mb-3 max-h-48 overflow-y-auto whitespace-pre-wrap border border-line-muted theme-brutal:border-2 theme-brutal:border-black/20 bg-layer-canvas-muted p-2.5 text-xs leading-5 text-foreground-strong theme-brutal:text-black/80">
+        <pre className="mb-3 max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-container border border-line-hairline bg-layer-code px-3 py-2 font-mono text-mono-code text-foreground">
           {excerpt === null ? formatMessage({ id: "handoff.loading" }) : briefing}
         </pre>
 
@@ -446,7 +476,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
 
         <div className="flex justify-end gap-2">
           {cancelButton}
-          <Button
+          <Button size="lg"
             type="button"
             variant="primary"
             disabled={creating || excerpt === null || !localMachine}
@@ -468,7 +498,7 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
     <div data-testid="handoff-session-picker" className="flex flex-col">
       <InputGroup className="mb-3 w-full">
         <InputGroupAddon align="inline-start">
-          <Search size={15} className="text-foreground-muted" />
+          <Search size={18} className="text-foreground-muted" aria-hidden="true" />
         </InputGroupAddon>
         <InputGroupInput
           value={query}
@@ -495,16 +525,16 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
       )}
 
       {sessions === null && !loadError && (
-        <div className="flex items-center gap-2 py-6 text-sm text-foreground-muted theme-brutal:text-black/50">
+        <div className="flex items-center gap-2 py-6 text-callout text-foreground-muted">
           <Spinner size="sm" aria-label={formatMessage({ id: "handoff.loading" })} />
           {formatMessage({ id: "handoff.loading" })}
         </div>
       )}
       {loadError && (
-        <div className="py-6 text-sm text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "handoff.loadError" })}</div>
+        <div className="py-6 text-footnote font-semibold text-warning-strong">{formatMessage({ id: "handoff.loadError" })}</div>
       )}
       {sessions !== null && filtered.length === 0 && !loadError && (
-        <div className="py-6 text-sm text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "handoff.empty" })}</div>
+        <div className="py-6 text-center text-callout text-foreground-hint">{formatMessage({ id: "handoff.empty" })}</div>
       )}
 
       {sessions !== null && !loadError && (
@@ -528,40 +558,19 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
       {sessions !== null && !loadError && filtered.length > 0 && (
         <div className="max-h-[50vh] overflow-y-auto" data-testid={`handoff-tool-list-${activeTool}`}>
           {grouped[activeTool].length === 0 ? (
-            <div className="border border-dashed border-line-muted px-3 py-4 text-xs text-foreground-muted theme-brutal:border-2 theme-brutal:border-black/20 theme-brutal:text-black/40">
+            <div className="rounded-container bg-fill-muted px-3 py-4 text-center text-callout text-foreground-hint">
               {formatMessage({ id: "handoff.toolEmpty" }, { tool: TOOL_LABEL[activeTool] })}
             </div>
           ) : (
-            <div className="card-brutal divide-y divide-line-muted theme-brutal:divide-y-2 theme-brutal:divide-black/10">
+            // Raft Design System › ListRow (raft-ui) in an inset list: a 20px
+            // folder icon, the session's title and where it ran (machine
+            // type), then the time. `plain`: the hairline between rows starts
+            // at the row's 16px edge.
+            <ListRowGroup>
               {grouped[activeTool].map((session) => (
-                <button
-                  key={session.transcriptPath}
-                  type="button"
-                  data-testid="handoff-session-row"
-                  onClick={() => selectSession(session)}
-                  className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-primary-soft theme-brutal:hover:bg-soft-signal/40"
-                >
-                  <FolderOpen size={16} className="shrink-0 text-foreground-muted theme-brutal:text-black/50" />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm font-medium text-foreground-strong theme-brutal:text-black">
-                      {session.title ?? formatMessage({ id: "handoff.untitledSession" })}
-                    </span>
-                    <span className="block truncate text-xs text-foreground-muted theme-brutal:text-black/45">
-                      {session.cwd ?? "-"}{session.model ? ` · ${session.model}` : ""}
-                    </span>
-                  </span>
-                  {session.activeRecently && (
-                    <span className="flex shrink-0 items-center gap-1 border border-line-muted bg-warning-soft px-1.5 py-0.5 text-[10px] font-bold text-foreground-strong theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
-                      <TriangleAlert size={11} />
-                      {formatMessage({ id: "handoff.activeRecently" })}
-                    </span>
-                  )}
-                  <span className="shrink-0 text-xs text-foreground-muted theme-brutal:text-black/40">
-                    {formatSessionAge(session.lastActiveAt)}
-                  </span>
-                </button>
+                <HandoffSessionRow key={session.transcriptPath} session={session} age={formatSessionAge(session.lastActiveAt)} onSelect={selectSession} />
               ))}
-            </div>
+            </ListRowGroup>
           )}
         </div>
       )}
@@ -570,5 +579,34 @@ export default function HandoffCreateFlow({ onClose, onStateChange }: {
         {cancelButton}
       </div>
     </div>
+  );
+}
+
+/** One local session to hand off: a raft-ui `plain` ListRow (a 20px folder
+ *  icon, the title, where it ran in machine type, then how long ago). */
+function HandoffSessionRow({ session, age, onSelect }: { session: LocalSession; age: string; onSelect: (session: LocalSession) => void }) {
+  const { formatMessage } = useIntl();
+  const handleClick = useCallback(() => onSelect(session), [onSelect, session]);
+  return (
+    <ListRow variant="plain" data-testid="handoff-session-row" onClick={handleClick}>
+      <ListRowIcon>
+        <FolderOpen />
+      </ListRowIcon>
+      <ListRowBody>
+        <ListRowTitle>
+          {session.title ?? formatMessage({ id: "handoff.untitledSession" })}
+        </ListRowTitle>
+        <span className="truncate font-mono text-mono-meta text-foreground-hint">
+          {session.cwd ?? "-"}{session.model ? ` · ${session.model}` : ""}
+        </span>
+      </ListRowBody>
+      {session.activeRecently && (
+        <Badge appearance="soft" variant="warning">
+          <TriangleAlert aria-hidden="true" />
+          {formatMessage({ id: "handoff.activeRecently" })}
+        </Badge>
+      )}
+      <ListRowMeta>{age}</ListRowMeta>
+    </ListRow>
   );
 }

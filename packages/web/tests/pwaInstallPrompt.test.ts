@@ -86,7 +86,7 @@ test("PWA install UI is wired into mobile layout and Browser settings only", () 
   assert.match(notifications, /id: pwaInstallBusy \? "layout\.systemNotifications\.opening" : "layout\.systemNotifications\.install"/);
   assert.match(notifications, /variant: "primary"/);
   assert.match(prompt, /if \(standalone\) return null/);
-  assert.doesNotMatch(prompt, /NativeInstallBanner[\s\S]*bg-soft-signal/);
+  assert.doesNotMatch(prompt, /NativeInstallBanner[\s\S]*bg-palette-yellow/);
   assert.match(prompt, /data-pwa-install-settings-card[\s\S]*md:hidden/);
   assert.match(prompt, /PWA_INSTALL_SESSION_DISMISSED_KEY/);
   assert.match(notifications, /PWA_INSTALL_SESSION_DISMISSED_KEY/);

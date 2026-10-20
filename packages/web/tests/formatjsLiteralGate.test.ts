@@ -218,7 +218,7 @@ test("isIgnorableStructuralLiteral: keep protocol, B markers, prose, MessageId, 
     '"agent.scopes.group.action.label"',
     "@theme",
     "#E08585",
-    "bg-brutal-lavender/40",
+    "bg-palette-lavender/40",
     "`${formatMessage({ id: \"channel.edit.thisServer\" })} · ${email}`",
     "` · ${formatMessage({ id: \"channel.edit.thisServer\" })}`",
     "`${getAdminPrincipalLabel(principal, formatMessage)} · ${principal.email}`",
@@ -2364,7 +2364,22 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
   // `{pageIndex + 1} / {totalPages}` separator: 72 -> 71.
   // MachineDetailPanel's workspace path left JSX for a helper (slock#9190),
   // taking its `/` template glue with it: 71 -> 70.
-  assert.equal(filteredKeys, 70, `audited structural key count; got ${filteredKeys}`);
+  // AttachmentMetaText moved out of MessageItem into its own module so the
+  // public read-only attachment list can reuse it; its `·` separator is now a
+  // key in that file as well. Keys are per file, so 70 -> 71; no literal was
+  // added and the hit total is unchanged.
+  // ActionCard's field rows moved out of JSX into useActionCardDetail (task
+  // #752, raft-ui MessageActionCard), dropping one audited key in
+  // ActionCard.tsx: 71 -> 70.
+  // RaftBench's overview has three audited per-file delimiter keys
+  // (RaftBenchPage's JSX space and middle dot, ManagerOverview's cost slash);
+  // TaskOverview and CostOverview are gone. The Raft Design System rewrite
+  // drops five structural keys (the inline replies' ` ›` chevron, the thread
+  // header's `—`, the channel overflow's `+` and the palette audit's `/` and
+  // `100` swatch labels) and adds three (the channel header's `·` and the
+  // thread header's `" "` and `" · "` subtitle glue). No business text is
+  // exempted.
+  assert.equal(filteredKeys, 71, `audited structural key count; got ${filteredKeys}`);
   assert.ok(filteredHits > 100, `hits must exceed prior 100; got ${filteredHits}`);
   // HandoffCreateFlow's `· ${session.model}` suffix is dynamic metadata glue, the
   // same shape as EditChannelDialog's `· ${…}` suffixes.
@@ -2382,14 +2397,17 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
   // surface.
   // 15 -> 14 (2026-10-04): #8831 deleted the fresh-install upgrade block, and with it
   // MachineDetailPanel's `` ` ${formatMessage(pinnedVersion)}` `` suffix glue.
+  // 14 -> 15 (2026-10-14): channelKindIcon's sr-only `` `${label}, ` `` (#9826): a
+  // translated sentence plus the comma that keeps it a separate spoken phrase
+  // before the channel name. Glue, not user copy.
   assert.equal(
     glueFilteredOut.length,
-    14,
+    15,
     `audited dynamic/translated template-glue key count; got ${JSON.stringify(glueFilteredOut)}`,
   );
   assert.equal(
     glueFilteredOut.reduce((n, e) => n + e.count, 0),
-    14,
+    15,
     "each audited glue key currently occurs once",
   );
   // Structural drops 75 (including the two compatibility source paths);
@@ -2448,7 +2466,9 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
     // row's "→ v{targetVersion}" arrow literal (2026-10-04): 13 -> 12.
     // Task #709 moved one of AgentDetailPanel's two "=" into EnvVarEntryRow;
     // keys are per file, so the same two hits are now two keys: 12 -> 13.
-    13,
+    // The Raft Design System replies summary drops its `" ›"` chevron (the DS
+    // `rf-replies` block has none): 13 -> 12.
+    12,
     `expected 13 former-gap keys filtered; got ${JSON.stringify(formerGapFiltered)}`,
   );
 
@@ -2470,7 +2490,7 @@ test("real corpus: structural, catalog-id, and template-glue filters remove audi
     "translated punctuation-only template glue must be filtered",
   );
   assert.ok(
-    bySource((s) => s === "@theme" || s === "#E08585" || s.includes("bg-brutal-lavender")).length >= 3,
+    bySource((s) => s === "@theme" || s === "file:line" || s === "packages/web/src/index.css").length >= 3,
     "technical-token research bucket must remain",
   );
 });
@@ -2509,7 +2529,7 @@ test("reactionSpriteManifest label debts are baselined, not suppressed by disabl
   );
 });
 
-test("PaletteAuditPage keeps exactly nine reviewed technical literals with reasons", () => {
+test("PaletteAuditPage keeps exactly three reviewed technical literals with reasons", () => {
   const baseline = JSON.parse(
     readFileSync(resolve(WEB_ROOT, "scripts/i18n-literal-baseline.json"), "utf8"),
   ) as Array<{
@@ -2522,14 +2542,8 @@ test("PaletteAuditPage keeps exactly nine reviewed technical literals with reaso
   assert.deepEqual(
     technical.map((entry) => entry.source).sort(),
     [
-      "#E08585",
       "@theme",
-      "MentionLink.tsx:27",
-      "bg-brutal-lavender/40",
-      "brutal-pink",
-      "brutal-red",
       "file:line",
-      "getActivityDotClass()",
       "packages/web/src/index.css",
     ].sort(),
   );
@@ -2575,7 +2589,13 @@ test("baseline disposition counts match reviewed exception decisions", () => {
     // 2026-10-10: -26 keys / -32 hits. Removing the Workspace grid layout deleted its
     // panel-title protocol literals (#channel / @name / task #N) across MainLayout,
     // Sidebar, member rows, MessageSearchPage and src/components/workspace.
-    protocol: { keys: 42, hits: 52 },
+    // 2026-10-14: -2 hits. The Sidebar channel row's two "99+" caps moved out of
+    // JSX into one helper (thread-unread badge segments).
+    // 2026-10-15: -2 keys / -3 hits. ActionCard's `@` and `#` prefixes moved from JSX
+    // into template strings in useActionCardDetail (task #752).
+    // 2026-10-18: -1 hit. The Sidebar DM and pinned-agent rows draw through one
+    // SidebarPeerRowBody, so their two "99+" unread caps are one.
+    protocol: { keys: 40, hits: 46 },
     // 2026-08-24: -7 keys / -9 hits. RuntimeConfigFields' ten legacy inputs moved to
     // raft-ui <Input>; the jsx literal rule only sees intrinsic elements, so those
     // placeholders (sk-..., gateway URLs, claude) left the baseline entirely.
@@ -2584,15 +2604,22 @@ test("baseline disposition counts match reviewed exception decisions", () => {
     // elements, so `name@company.com` left the baseline the same way.
     // 2026-10-08: -1 key / -1 hit. MachineDetailPanel's `~/.slock/agents/`
     // workspace path moved out of JSX into a helper (slock#9190).
-    code_example: { keys: 8, hits: 8 },
+    // 2026-10-18: -3 keys / -3 hits. PaletteAuditPage was rebuilt to audit the
+    // Raft DS tokens; its brutal-palette Notes section (and the quoted
+    // "destructive" / "CTA" / "@mentioned" asides in it) is gone.
+    code_example: { keys: 5, hits: 5 },
     user_data_example: { keys: 4, hits: 4 },
     // 2026-09-24: -4 keys / -4 hits. 11fc52292 removed the dormant PostHog
     // integration, taking src/analytics/flagRegistry.ts ("Chat grid layout",
     // "Sync-core messages", "Auto", "Feature flags") and two App.tsx entries.
     // The baseline was pruned in that commit; only this count was missed.
-    internal_dev: { keys: 25, hits: 25 },
+    // 2026-10-18: -1 key / -1 hit, and technical -6 / -6. The PaletteAuditPage
+    // Raft DS rebuild dropped the brutal-palette Notes section ("The …",
+    // getActivityDotClass(), MentionLink.tsx:27, bg-palette-lavender/40,
+    // brutal-pink, brutal-red, #E08585).
+    internal_dev: { keys: 24, hits: 24 },
     legacy: { keys: 22, hits: 34 },
-    technical: { keys: 9, hits: 9 },
+    technical: { keys: 3, hits: 3 },
     owner_managed: { keys: 0, hits: 0 },
   };
 
@@ -2646,17 +2673,11 @@ test("baseline disposition counts match reviewed exception decisions", () => {
   assert.deepEqual(
     technical.map((e) => e.source).sort(),
     [
-      "#E08585",
       "@theme",
-      "MentionLink.tsx:27",
-      "bg-brutal-lavender/40",
-      "brutal-pink",
-      "brutal-red",
       "file:line",
-      "getActivityDotClass()",
       "packages/web/src/index.css",
     ].sort(),
-    "technical must be exactly the approved nine PaletteAudit identifiers",
+    "technical must be exactly the approved three PaletteAudit identifiers",
   );
   assert.ok(
     technical.every((e) => e.path === "src/pages/PaletteAuditPage.tsx"),
@@ -2788,14 +2809,8 @@ test("baseline disposition identities pin reviewed edge-case classifications", (
   assert.deepEqual(
     technical,
     [
-      "#E08585",
       "@theme",
-      "MentionLink.tsx:27",
-      "bg-brutal-lavender/40",
-      "brutal-pink",
-      "brutal-red",
       "file:line",
-      "getActivityDotClass()",
       "packages/web/src/index.css",
     ].sort(),
   );

@@ -41,7 +41,7 @@
 import type { Readable } from "node:stream";
 import type { Command } from "commander";
 
-import { actionCardActionSchema, validateActionCardAction } from "@botiverse/raft-shared";
+import { actionCardActionSchema, validateActionCardAction } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

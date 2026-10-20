@@ -15,8 +15,8 @@ import {
   MessageQuotedPreviewThread,
   MessageQuotedPreviewTimestamp,
   MessageQuotedPreviewUnavailable,
-} from "raft-ui";
-import type { BadgeProps } from "raft-ui";
+} from "@botiverse/raft-ui";
+import type { BadgeProps } from "@botiverse/raft-ui";
 import AvatarSlot from "../AvatarSlot";
 import InlineMarkdownPreview from "../../markdown/InlineMarkdownPreview";
 import PreviewShell from "../PreviewShell";
@@ -50,17 +50,19 @@ export function Tag({
   variant?: BadgeProps["variant"];
 }) {
   return (
-    <Badge appearance="soft" variant={variant} uppercase={false} className={className}>
+    <Badge appearance="soft" variant={variant} className={className}>
       {children}
     </Badge>
   );
 }
 
+/** "Thread" marker in a preview header. A hint, not a signal: it takes the
+ *  part's ink-3 type (raft-ui `MessageQuotedPreviewThread`), no pink. */
 export function ThreadMarker() {
   const intl = useIntl();
   return (
-    <span className="inline-flex items-center gap-1 font-bold text-accent-strong theme-brutal:text-brutal-pink">
-      <MessageSquare size={10} className="shrink-0" />
+    <span className="inline-flex items-center gap-1">
+      <MessageSquare size={14} className="shrink-0" aria-hidden="true" />
       {intl.formatMessage({ id: "ui.quotedMessage.thread" })}
     </span>
   );
@@ -94,8 +96,9 @@ export default function QuotedMessageCard({
   if (unavailable) {
     return (
       <PreviewShell variant="muted" onClick={onClick} data-testid="quoted-message-card" className="group block w-full text-left">
-        <MessageQuotedPreviewUnavailable className="px-2.5 py-2 sm:px-3 sm:py-2.5">
-          <div className="text-[13px] leading-snug">{intl.formatMessage({ id: "ui.quotedMessage.unavailable" })}</div>
+        {/* The card is the frame here, so the part's own quote bar is dropped. */}
+        <MessageQuotedPreviewUnavailable className="border-l-0 px-3 py-2.5">
+          <div>{intl.formatMessage({ id: "ui.quotedMessage.unavailable" })}</div>
         </MessageQuotedPreviewUnavailable>
       </PreviewShell>
     );
@@ -103,21 +106,21 @@ export default function QuotedMessageCard({
 
   return (
     <PreviewShell onClick={onClick} data-testid="quoted-message-card" className="group block w-full text-left">
-      <div className="px-2.5 py-2 sm:px-3 sm:py-2.5">
-        <MessageQuotedPreviewHeader className="mb-1 flex items-start gap-2 sm:mb-1.5">
-          <div className="min-w-0 flex flex-1 flex-wrap items-center gap-x-1.5 gap-y-1 text-xs leading-none">
-            <MessageQuotedPreviewChannel className="inline-flex items-center gap-1 font-bold text-foreground-strong">
-              {channelKind === "dm" ? null : <Hash size={11} className="shrink-0" />}
+      <div className="px-3 py-2.5">
+        <MessageQuotedPreviewHeader className="mb-1 flex items-start gap-2">
+          <div className="min-w-0 flex flex-1 flex-wrap items-center gap-x-1.5 gap-y-1">
+            <MessageQuotedPreviewChannel className="inline-flex items-center gap-1">
+              {channelKind === "dm" ? null : <Hash size={14} className="shrink-0" aria-hidden="true" />}
               {channelKind === "dm" ? `@${channelName}` : channelName}
             </MessageQuotedPreviewChannel>
             <span className="text-foreground-hint">·</span>
             <MessageQuotedPreviewAuthor className="inline-flex min-w-0 items-center gap-1.5">
               <CompactUserAvatar author={author} />
-              <MessageQuotedPreviewAuthorName className="min-w-0 truncate font-bold text-foreground-strong">
+              <MessageQuotedPreviewAuthorName className="min-w-0 truncate">
                 {author.name}
               </MessageQuotedPreviewAuthorName>
               {author.subtitle ? (
-                <MessageQuotedPreviewAuthorMeta className="min-w-0 flex-1 max-w-fit truncate font-mono text-[10px] text-foreground-hint">
+                <MessageQuotedPreviewAuthorMeta className="min-w-0 flex-1 max-w-fit truncate">
                   {author.subtitle}
                 </MessageQuotedPreviewAuthorMeta>
               ) : null}
@@ -133,27 +136,29 @@ export default function QuotedMessageCard({
             {isArchived ? (
               <>
                 <span className="text-foreground-hint">·</span>
-                <Tag variant="warning">
+                {/* Archived is a stopped state, not a problem: stone, not orange. */}
+                <Tag variant="muted">
                   {intl.formatMessage({ id: "ui.quotedMessage.archived" })}
                 </Tag>
               </>
             ) : null}
           </div>
-          <MessageQuotedPreviewTimestamp className="shrink-0 font-mono text-[10px] text-foreground-hint">
+          <MessageQuotedPreviewTimestamp className="shrink-0">
             {timestamp}
           </MessageQuotedPreviewTimestamp>
         </MessageQuotedPreviewHeader>
         <MessageQuotedPreviewContent className="min-w-0">
-          <MessageQuotedPreviewText className="line-clamp-2 text-xs leading-snug text-foreground-strong sm:text-[13px]">
+          <MessageQuotedPreviewText className="line-clamp-2">
             <InlineMarkdownPreview markdown={content} />
           </MessageQuotedPreviewText>
           {attachments?.length ? (
-            <MessageQuotedPreviewAttachments className="mt-2 flex flex-wrap gap-1.5">
+            <MessageQuotedPreviewAttachments className="flex flex-wrap gap-1.5">
+              {/* The raft-ui attachment part is itself the DS token chip
+                  (22px, sunken fill, Space Mono), so the label sits in it
+                  directly rather than in a second badge. */}
               {attachments.map((attachment) => (
                 <MessageQuotedPreviewAttachment key={attachment.label}>
-                  <Tag className="font-mono text-[10px] font-bold">
-                    {attachment.label}
-                  </Tag>
+                  {attachment.label}
                 </MessageQuotedPreviewAttachment>
               ))}
             </MessageQuotedPreviewAttachments>
