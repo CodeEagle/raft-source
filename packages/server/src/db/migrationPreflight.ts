@@ -124,6 +124,7 @@ export function classifyAdmission(
   dbHead: DbHead,
   effective: unknown,
   requiredMs: number,
+  appliedRows: Exclude<DbHead, null>[] = [],
 ): AdmissionVerdict {
   if (manifest.length === 0) return { admit: false, code: "MANIFEST_EMPTY" };
   const target = manifest[manifest.length - 1];
@@ -154,6 +155,16 @@ export function classifyAdmission(
 
   if (atTarget) {
     return { admit: true, code: "AT_TARGET_NOOP" };
+  }
+
+  // A legacy branch may have already applied a now-retimed pending migration.
+  // Looking only at the maximum timestamp can hide that row behind an upstream
+  // head. Refuse to hand it to Drizzle, which would execute the SQL twice.
+  const alreadyApplied = manifest.slice(headIdx + 1).find((entry) =>
+    appliedRows.some((row) => row.hash === entry.hash
+      && !manifest.some((known) => known.hash === row.hash && known.folderMillis === Number(row.createdAt))));
+  if (alreadyApplied) {
+    return { admit: false, code: "PENDING_ALREADY_APPLIED", detail: `pending=${alreadyApplied.tag ?? alreadyApplied.hash.slice(0, 12)}` };
   }
 
   // Behind. drizzle's migrator applies an entry only when its folderMillis is
@@ -228,9 +239,11 @@ export async function runPreflight(
     // Last-applied migration (db head). A missing bookkeeping table = fresh DB
     // (behind), not an error.
     let dbHead: DbHead = null;
+    let appliedRows: Exclude<DbHead, null>[] = [];
     try {
-      const r = await client.query(`SELECT hash, created_at FROM ${QT} ORDER BY created_at DESC LIMIT 1`);
-      dbHead = r.rows[0] ? { hash: r.rows[0].hash, createdAt: r.rows[0].created_at } : null;
+      const r = await client.query(`SELECT hash, created_at FROM ${QT} ORDER BY created_at DESC`);
+      appliedRows = r.rows.map((row) => ({ hash: row.hash, createdAt: row.created_at }));
+      dbHead = appliedRows[0] ?? null;
     } catch (e) {
       const code = pgSqlState(e);
       if (code === "42P01" || code === "3F000") dbHead = null; // undefined_table / undefined_schema
@@ -238,7 +251,7 @@ export async function runPreflight(
     }
 
     const eff = await client.query("SELECT setting FROM pg_settings WHERE name = 'statement_timeout'");
-    verdict = classifyAdmission(manifest, dbHead, eff.rows[0]?.setting, cfg.requiredMs);
+    verdict = classifyAdmission(manifest, dbHead, eff.rows[0]?.setting, cfg.requiredMs, appliedRows);
   } catch (e) {
     // Fail-closed. Never print the error message (it can carry the DSN).
     const code = pgSqlState(e);

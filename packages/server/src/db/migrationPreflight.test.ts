@@ -193,3 +193,23 @@ test("subprocess (tooth 5): connection error -> exit 2, no DSN/credential leak",
     assert.doesNotMatch(combined, new RegExp(s), `must not leak "${s}"`);
   }
 });
+
+test("retimed pending SQL already present below the ledger head is rejected", () => {
+  const manifest: ManifestEntry[] = [
+    { hash: h("a"), folderMillis: 3000, tag: "0373_upstream" },
+    { hash: h("b"), folderMillis: 3001, tag: "0374_retimed" },
+    { hash: h("c"), folderMillis: 4000, tag: "0378_unchanged" },
+  ];
+  const applied = [{ hash: h("a"), createdAt: 3000 }, { hash: h("b"), createdAt: 2000 }];
+  assert.equal(classifyAdmission(manifest, applied[0], "0", REQUIRED, applied).code, "PENDING_ALREADY_APPLIED");
+  assert.equal(classifyAdmission(manifest, { hash: h("c"), createdAt: 4000 }, "0", REQUIRED, applied).code, "AT_TARGET_NOOP");
+});
+
+test("a known earlier migration with identical SQL does not masquerade as retimed pending SQL", () => {
+  const manifest: ManifestEntry[] = [
+    { hash: h("a"), folderMillis: 1000 },
+    { hash: h("a"), folderMillis: 2000 },
+  ];
+  const applied = [{ hash: h("a"), createdAt: 1000 }];
+  assert.equal(classifyAdmission(manifest, applied[0], "0", REQUIRED, applied).code, "BEHIND_MIGRATE");
+});
