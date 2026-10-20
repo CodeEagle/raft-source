@@ -1,3 +1,5 @@
+export * from "./secureInput";
+import type { SecureInputRequest, SecureInputResult } from "./secureInput";
 export * from "./delegation";
 import type { DelegationRecord, DelegationOutcome } from "./delegation";
 export { normalizeAppSetupUrl, normalizeAppSetupDescription, projectAppSetup, asAppSetupInstallationId, AppSetupValidationError } from "./appSetup";
@@ -928,6 +930,8 @@ export type ServerToMachineMessage =
    */
   | { type: "agent:activity_probe"; agentId: string; probeId: string; purpose: "sweep" | "manual" }
   | { type: "machine:workspace:scan" }
+  | { type: "machine:secure_input:request"; request: SecureInputRequest }
+  | { type: "machine:secure_input:cancel"; requestId: string }
   | { type: "machine:workspace:validate_path"; requestId: string; path: string }
   | { type: "machine:workspace:delete"; directoryName: string }
   /**
@@ -1369,6 +1373,7 @@ export const isDeviceClass = (value: unknown): value is DeviceClass =>
   typeof value === "string" && (DEVICE_CLASSES as readonly string[]).includes(value);
 
 export type MachineToServerMessage =
+  | { type: "machine:secure_input:result"; result: SecureInputResult }
   /**
    * Reply to `machine:host_identity:request`: HMAC(key = this machine's
    * hardware ID, "raft-host-id-v1:" + serverId), 32 hex chars. Equal for every

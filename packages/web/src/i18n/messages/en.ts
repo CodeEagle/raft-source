@@ -14,6 +14,26 @@
 // from the foundation, before any real plural/currency copy is migrated.
 
 export const en = {
+  "secureInput.nameRules": "Start with an English letter; use letters, numbers, _ or - (64 characters maximum).",
+  "secureInput.title": "Secure input",
+  "secureInput.description": "Enter the value in a private window on the selected Computer. Only its local file reference is sent to the selected agent in a direct message.",
+  "secureInput.protectedUnavailable": "Available mode: local private file. A model-unreadable credential vault is not supported yet.",
+  "secureInput.recipient": "Agent and Computer",
+  "secureInput.choose": "Choose a recipient",
+  "secureInput.noTargets": "No eligible Computer. This requires an updated, connected macOS Computer attached by you and an agent in this conversation.",
+  "secureInput.name": "Name only, not the secret (for example DEPLOY_TOKEN)",
+  "secureInput.consent": "I understand that the agent can read the local file and may send its contents to its model.",
+  "secureInput.retention": "The file expires after one hour. An offline Computer cleans it up when it resumes. Deletion cannot undo prior reads or copies.",
+  "secureInput.openNative": "Open local input window",
+  "secureInput.waiting": "Waiting for local input…",
+  "secureInput.saved": "Saved locally. Reference sent privately.",
+  "secureInput.expiry": "Expires: {time}",
+  "secureInput.delete": "Delete local file",
+  "secureInput.deleted": "Local file deleted.",
+  "secureInput.notStored": "Input was not saved. Check the local window before retrying.",
+  "secureInput.error": "Could not confirm completion. Check the Computer; retry with the same name to confirm the result.",
+  "secureInput.closePending": "Closing stops waiting and requests cancellation. If saving already finished, the local file may remain until expiry.",
+
 
   "auth.accountLink.mismatch": "You signed in to a different account than {email}, so {provider} wasn't connected. Please sign in with {email}.",
   "auth.accountLink.providerConflict": "This {provider} account is already connected to another Raft account, so it couldn't be connected here.",
