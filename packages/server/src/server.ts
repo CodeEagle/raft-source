@@ -1,3 +1,4 @@
+import { parseDeploymentConfig } from "./config/deployment";
 import { startRaftbenchWorker } from "./raftbench/worker";
 import { getChannelConversionAudienceCutover, applyChannelConversionAudienceRealtimeCutover } from "./services/channelConversionService";
 import { startChannelConversionWorker } from "./services/channelConversionWorker";
