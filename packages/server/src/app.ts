@@ -1,3 +1,4 @@
+import { secureInputRouter } from "./routes/secureInput";
 import { parseDeploymentConfig } from "./config/deployment";
 import express, { type Express, type Request, type RequestHandler } from "express";
 import helmet from "helmet";
@@ -718,6 +719,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
     requireServer,
     channelRouter,
   );
+  app.use("/api/secure-input", requireAuth, requireVerified, requireServer, secureInputRouter);
   app.use("/api/read-mutations", requireAuth, requireVerified, requireServer, readMutationRouter);
   app.use(
     "/api/messages",

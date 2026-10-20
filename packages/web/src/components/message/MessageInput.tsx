@@ -1,3 +1,4 @@
+import SecureInputButton from "./SecureInputButton";
 import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
@@ -3126,9 +3127,10 @@ export default function MessageInput({
           />
           <ComposerToolbar>
             {variant === "compact" ? (
-              <div />
+              <ComposerActions><SecureInputButton channelId={channelId} /></ComposerActions>
             ) : (
               <ComposerActions>
+                <SecureInputButton channelId={channelId} />
                 <Tooltip content={formatMessage({ id: "message.composer.attachImage" })}>
                 <ComposerIconButton
                   onPointerDown={preventToolbarButtonPointerDownBlur}

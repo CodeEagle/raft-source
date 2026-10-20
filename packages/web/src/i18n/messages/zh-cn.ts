@@ -9,6 +9,26 @@
 import type { MessageId } from "./en";
 
 export const zhCn: Record<MessageId, string> = {
+  "secureInput.nameRules": "名称须以英文字母开头，只能包含字母、数字、_ 或 -，最多 64 个字符。",
+  "secureInput.title": "安全输入",
+  "secureInput.description": "在所选 Computer 的本地隐藏窗口输入内容。仅将本地文件引用私信给所选 agent。",
+  "secureInput.protectedUnavailable": "当前支持本地私有文件模式，暂不支持模型不可读取的凭据库。",
+  "secureInput.recipient": "接收 agent 与 Computer",
+  "secureInput.choose": "选择接收者",
+  "secureInput.noTargets": "没有可用的 Computer。需要由你连接、已更新且在线的 macOS Computer，以及当前会话中的本地 agent。",
+  "secureInput.name": "只填名称，不填敏感值（如 DEPLOY_TOKEN）",
+  "secureInput.consent": "我理解 agent 可以读取本地文件，并可能将内容发送给模型。",
+  "secureInput.retention": "文件一小时后到期；Computer 离线时会在恢复后清理。删除无法撤回已经读取或复制的内容。",
+  "secureInput.openNative": "唤起本地输入窗口",
+  "secureInput.waiting": "等待本地输入…",
+  "secureInput.saved": "已保存到本地，引用已通过私信发送。",
+  "secureInput.expiry": "到期时间：{time}",
+  "secureInput.delete": "删除本地文件",
+  "secureInput.deleted": "本地文件已删除。",
+  "secureInput.notStored": "输入未保存，请核对本地窗口后重试。",
+  "secureInput.error": "未能确认完成状态。请检查 Computer；使用同一名称重试以确认结果。",
+  "secureInput.closePending": "关闭窗口会停止等待并请求取消。如果保存已完成，本地文件可能保留到期。",
+
 
   "auth.accountLink.mismatch": "你登录的不是 {email} 的账户，没有连接 {provider}。请用 {email} 登录。",
   "auth.accountLink.providerConflict": "这个 {provider} 账号已经连接到另一个 Raft 账户，没能连接到这里。",

@@ -1,3 +1,5 @@
+import { SecureInputStore } from "./secureInput";
+import { SECURE_INPUT_CAPABILITY } from "@botiverse/raft-shared";
 export { verifyBundledPiOAuth } from "./bundledPiOAuth";
 export { verifyBundledKimiSdk } from "./drivers/index";
 import {
@@ -168,6 +170,8 @@ import {
   createRuntimeAccountUsageCollector,
   type RuntimeAccountUsageCollector,
 } from "./runtimeAccountUsage/collector";
+
+const secureInputStore = new SecureInputStore();
 
 /**
  * Default endpoint for daemon trace bundle uploads. Always baked as the
@@ -1777,6 +1781,7 @@ function raftHomeEnvIsExplicit(): boolean {
 }
 
 export class DaemonCore {
+  private secureInputCleanup: NodeJS.Timeout | null = null;
   private readonly options: DaemonCoreOptions;
   private readonly daemonVersion: string;
   private readonly daemonInstanceId = randomUUID();
@@ -2179,6 +2184,9 @@ export class DaemonCore {
   }
 
   start() {
+    this.secureInputCleanup ??= setInterval(() => { void secureInputStore.cleanup().catch(() => {}); }, 60_000);
+    this.secureInputCleanup.unref();
+    void secureInputStore.cleanup().catch(() => {});
     logger.info("[Slock Daemon] Starting...");
     void hostDeviceClass();
     // The shared contract schemas stay lazy here (built on first use). Do not
@@ -2256,6 +2264,9 @@ export class DaemonCore {
   }
 
   async stop(options: DaemonStopOptions = {}) {
+    if (this.secureInputCleanup) clearInterval(this.secureInputCleanup);
+    this.secureInputCleanup = null;
+    secureInputStore.stop();
     // task #1268: a detection child must not outlive the daemon.
     this.abandonDetectionRound("stop");
     logger.info("[Slock Daemon] Shutting down...");
@@ -4822,6 +4833,14 @@ export class DaemonCore {
         });
         break;
 
+      case "machine:secure_input:request":
+        void secureInputStore.collect(msg.request).then((result) => {
+          this.connection.send({ type: "machine:secure_input:result", result });
+        });
+        break;
+      case "machine:secure_input:cancel":
+        secureInputStore.cancel(msg.requestId);
+        break;
       case "machine:workspace:validate_path":
         void this.agentManager.validateWorkspacePath(msg.path).then((result) => {
           this.connection.send({
@@ -5498,6 +5517,7 @@ export class DaemonCore {
         "agent:stop",
         "agent:deliver",
         "workspace:files",
+        ...(process.platform === "darwin" ? [SECURE_INPUT_CAPABILITY] : []),
         DAEMON_CAPABILITY_SEQUENCED_STATUS,
         // RFC 071: agent:runtime:outcome v1, process spawned/exited, rebind
         // ack processInstanceId, catchupBatchId echo.

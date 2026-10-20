@@ -1,3 +1,4 @@
+import { SECURE_INPUT_CAPABILITY, type SecureInputRequest, type SecureInputResult } from "@botiverse/raft-shared";
 import { DAEMON_CAPABILITY_DELEGATION_V1, delegationRecordSchema, delegationOutcomeSchema } from "@botiverse/raft-shared";
 import { EventEmitter } from "node:events";
 import { closeConnectionsForDrain, MACHINE_DRAIN_CLOSE_CODE, MACHINE_DRAIN_CLOSE_REASON } from "./machineDrain";
@@ -2875,6 +2876,7 @@ function agentDeliverySloLabels(pending: PendingAgentDeliveryAck): {
 const WORKSPACE_DELETE_TIMED_OUT = "Delete timed out";
 
 export class AgentOrchestrator extends EventEmitter {
+  private secureInputRequests = new Map<string, { signature: string; result: Promise<SecureInputResult> }>();
   private io: SocketServer | null = null;
   private machineConnections = new Map<string, MachineConnection>();
   private machineCatalogAuthority = new MachineCatalogAuthority((machineId) => {
@@ -10911,6 +10913,7 @@ export class AgentOrchestrator extends EventEmitter {
       case "agent:workspace:file_content":
       case "agent:workspace:wiki_ensured":
       case "machine:workspace:scan_result":
+      case "machine:secure_input:result":
       case "machine:workspace:validate_path_result":
       case "machine:workspace:delete_result":
       case "machine:migration:source_workspace_archive_result":
@@ -16171,6 +16174,41 @@ export class AgentOrchestrator extends EventEmitter {
         reject(new Error("Failed to send request — machine WebSocket not ready"));
       }
     });
+  }
+
+  async requestSecureInput(machineId: string, request: SecureInputRequest, signal: AbortSignal): Promise<SecureInputResult> {
+    if (!this.hasMachineCapability(machineId, SECURE_INPUT_CAPABILITY)) throw new Error("Secure input unavailable");
+    const key = `${machineId}:${request.requestId}`;
+    const signature = JSON.stringify(request);
+    const previous = this.secureInputRequests.get(key);
+    if (previous) {
+      if (previous.signature !== signature) throw new Error("Secure input request conflict");
+      return previous.result;
+    }
+    const result = new Promise<SecureInputResult>((resolve, reject) => {
+      const finish = () => {
+        clearTimeout(timer); signal.removeEventListener("abort", abort);
+        this.removeListener(`machine:response:${machineId}`, handler);
+      };
+      const abort = () => {
+        finish();
+        void this.sendRequiredToMachine(machineId, { type: "machine:secure_input:cancel", requestId: request.requestId }).catch(() => {});
+        reject(new Error("Secure input cancelled"));
+      };
+      const handler = (msg: MachineToServerMessage) => {
+        if (msg.type !== "machine:secure_input:result" || msg.result.requestId !== request.requestId) return;
+        finish(); resolve(msg.result);
+      };
+      const timer = setTimeout(abort, 130_000);
+      this.on(`machine:response:${machineId}`, handler);
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) { abort(); return; }
+      void this.sendRequiredToMachine(machineId, { type: "machine:secure_input:request", request }).catch(() => {
+        finish(); reject(new Error("Secure input unavailable"));
+      });
+    });
+    this.secureInputRequests.set(key, { signature, result });
+    try { return await result; } finally { this.secureInputRequests.delete(key); }
   }
 
   async validateMachineWorkspacePath(machineId: string, requestedPath: string): Promise<WorkspacePathValidationResult> {
