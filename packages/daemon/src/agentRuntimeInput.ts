@@ -165,10 +165,12 @@ function formatIncomingMessage(message: AgentMessage, options: IncomingMessageFo
         "Parent message:",
         formatThreadContextMessage(message.thread_join_context.parent_message),
         "",
-        `Recent thread context${message.thread_join_context.history_truncated ? " (truncated)" : ""}:`,
+        `Earlier thread context${message.thread_join_context.history_truncated ? " (selected original messages; history omitted)" : ""}:`,
         message.thread_join_context.recent_messages.length > 0
           ? message.thread_join_context.recent_messages.map(formatThreadContextMessage).join("\n")
-          : "- (no earlier thread replies)",
+          : message.thread_join_context.history_truncated
+            ? "- (earlier replies omitted; read the thread history)"
+            : "- (no earlier thread replies)",
         "",
       ].join("\n")
     : "";
