@@ -186,7 +186,7 @@ test("A: mention into a not-yet-followed thread attaches thread_join_context wit
   assert.deepEqual(
     got.payload.thread_join_context.recent_messages.map((message: any) => message.content),
     [
-      "earlier unseen reply 3",
+      "earlier unseen reply 1",
       "earlier unseen reply 4",
       "earlier unseen reply 5",
       "earlier unseen reply 6",
@@ -319,4 +319,29 @@ test("sender_timezone is persisted on direct sends and forced to null for agent 
   const toListener = agentDelivered.find((delivery) => delivery.agentId === listener.id);
   assert.ok(toListener, "the other agent must receive the agent's message");
   assert.equal(toListener.payload.sender_timezone, null);
+});
+
+
+test("late mention keeps the user's request through status noise and ignores an out-of-thread reference", async ({ db: _database }) => {
+  stubIoAndPushDeps();
+  const {db, owner, agent, parentMessage, threadChannel} = await seed("tjc-select");
+  for (let i=0; i<20; i++) await db.insert(messages).values({
+    channelId:threadChannel.id, threadId:threadChannel.id, senderType:"agent", senderId:agent.id, content:`status update ${i}`,
+  });
+  const [outside] = await db.insert(messages).values({channelId:parentMessage.channelId, senderType:"user",senderId:owner.id,content:"unrelated parent-channel discussion"}).returning();
+  const delivered: Array<{agentId:string;payload:any}> = [];
+  await broadcastAndDeliver(io, orchestratorSink(delivered), {
+    channelId:threadChannel.id,senderType:"user",senderId:owner.id,senderName:owner.name,
+    content:`@${agent.name} continue; reference ${outside.id}`, mentions:[{type:"agent",id:agent.id,name:agent.name}] as any,
+  });
+  await settle();
+  const got = delivered.find(d=>d.agentId===agent.id)!.payload;
+  const context = got.thread_join_context;
+  assert.equal(context.parent_message.message_id,parentMessage.id);
+  assert.ok(context.recent_messages.some((m:any)=>m.content==="earlier unseen reply 8"),"latest human request survives 20 agent updates");
+  assert.ok(context.recent_messages.some((m:any)=>m.content==="earlier unseen reply 1"),"opening human context survives");
+  assert.ok(context.recent_messages.some((m:any)=>m.content==="status update 19"),"latest progress survives");
+  assert.equal(context.recent_messages.some((m:any)=>m.message_id===outside.id),false);
+  assert.ok(context.recent_messages.every((m:any)=>m.seq<got.seq));
+  assert.equal(context.history_truncated,true);
 });

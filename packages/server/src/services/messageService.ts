@@ -1,3 +1,4 @@
+import { THREAD_CONTEXT_CANDIDATE_LIMIT, selectThreadContextMessages } from "./threadContextSelection";
 import {
   conversionReadChannelPredicate,
   resolveConversionReadChannelIds,
@@ -144,7 +145,6 @@ import { resolveSlackOutboundMessageSurface } from "./slackBridgeDatabaseOutboun
 import { getComputerLinkedMachineIds } from "./computerCredentialService";
 import { getInstalledApp } from "./rapRegistryStore";
 import { isAppId, type AppId } from "./rapRegistry";
-const THREAD_JOIN_CONTEXT_WINDOW = 6;
 const AGENT_FORWARDED_ITEM_CONTENT_CHAR_LIMIT = 2_000;
 const AGENT_FORWARDED_BUNDLE_CHAR_LIMIT = 12_000;
 
@@ -6518,6 +6518,7 @@ async function buildThreadJoinContextBase(
   threadChannelId: string,
   parentMessageId: string,
   beforeSeq: number,
+  triggerContent: string,
 ): Promise<ThreadJoinContextBase | undefined> {
   // First-time thread entrants miss the semantic anchor completely if we only
   // deliver the triggering @mention, so we always include the parent/root message.
@@ -6525,26 +6526,28 @@ async function buildThreadJoinContextBase(
   const parentMessage = parentContext?.messages[0];
   if (!parentMessage) return undefined;
 
-  // Keep the window intentionally small: the goal is to prevent blind replies,
-  // not to silently inject the full thread backlog into every delivery.
-  const recentWindow = await listMessages(
+  // A bounded lookback lets an earlier human request survive status noise.
+  // Keep the extra row to report honestly that there is still older history.
+  // This query is the existing thread scope, not a relevance-driven ACL.
+  const candidates = await listMessages(
     threadChannelId,
-    THREAD_JOIN_CONTEXT_WINDOW + 1,
+    THREAD_CONTEXT_CANDIDATE_LIMIT + 1,
     beforeSeq,
     undefined,
     undefined,
     { includeSenderTimezone: true },
   );
-  const historyTruncated = recentWindow.length > THREAD_JOIN_CONTEXT_WINDOW;
-  const recentMessages = historyTruncated
-    ? recentWindow.slice(recentWindow.length - THREAD_JOIN_CONTEXT_WINDOW)
-    : recentWindow;
-
+  const selection = selectThreadContextMessages({
+    candidates: candidates.map(toThreadContextMessage),
+    beforeSeq,
+    triggerContent,
+    rootMessageId: parentMessage.id,
+  });
   return {
     reason: "mentioned",
     parent_message: toThreadContextMessage(parentMessage),
-    recent_messages: recentMessages.map(toThreadContextMessage),
-    history_truncated: historyTruncated,
+    recent_messages: selection.messages,
+    history_truncated: selection.historyTruncated,
   };
 }
 
@@ -8104,6 +8107,7 @@ async function handleJointThreadPostBroadcastSideEffects(input: {
         canonicalThreadChannelId,
         canonicalParentMessageId,
         message.seq,
+        content,
       );
     }
 
@@ -10183,6 +10187,7 @@ export async function broadcastAndDeliver(
           channelId,
           channel.parentMessageId,
           message.seq,
+          content,
         );
       }
     }

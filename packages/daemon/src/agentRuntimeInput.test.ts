@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 
 import type { AgentMessage } from "@botiverse/raft-shared";
 import { AGENT_BODY_LINE_SEPARATOR } from "@botiverse/raft-shared";
-import { formatConcreteMessagesRuntimeInput } from "./agentRuntimeInput";
+import { formatConcreteMessagesRuntimeInput, projectThreadJoinContextsForRuntimeInput, groupThreadJoinContextReceiptMessages } from "./agentRuntimeInput";
 import { formatSystemNoticeRuntimeInput, formatInboxUpdateRuntimeInput } from "./agentRuntimeInput";
 import type { ChannelWorkspaceContext } from "./channelWorkspaceContext";
 
@@ -237,4 +237,48 @@ test("#362 a newline in an attachment filename cannot forge a header line", () =
   ], driver);
   assert.equal(countLines(output, isHeaderLine), 1);
   assert.match(output, /  │ \[target=#general/);
+});
+
+function selectedThreadMessage(): AgentMessage {
+  const contextRow = (seq: number) => ({message_id: `row-${seq}`, sender_name: "alice", sender_type: "human" as const, content: `source ${seq}`, timestamp: "2026-10-20T00:00:00.000Z", seq});
+  return message({thread_join_context: {
+    reason: "mentioned", parent_target: "#proj-chat", thread_target: "#proj-chat:deadbeef",
+    suggested_read_history_target: "#proj-chat:deadbeef", parent_message: contextRow(1),
+    recent_messages: [contextRow(3), contextRow(8)], history_truncated: true,
+  }});
+}
+
+test("selected context identifies omitted history, preserves original sources and gives the exact expansion target", () => {
+  const input = selectedThreadMessage();
+  const output = formatConcreteMessagesRuntimeInput([input], driver);
+  assert.match(output, /selected original messages; history omitted/);
+  assert.match(output, /raft message read --target "#proj-chat:deadbeef"/);
+  assert.match(output, /source 3/);
+  assert.match(output, /source 8/);
+  assert.doesNotMatch(output, /source 4|source 5|source 6|source 7/);
+  const receipts = groupThreadJoinContextReceiptMessages([input]);
+  assert.deepEqual(receipts.get("#proj-chat")?.map(m=>m.seq), [1]);
+  assert.deepEqual(receipts.get("#proj-chat:deadbeef")?.map(m=>m.seq), [3,8]);
+});
+
+test("an omitted oversize context never claims there were no earlier replies", () => {
+  const input = selectedThreadMessage(); input.thread_join_context!.recent_messages = [];
+  const output = formatConcreteMessagesRuntimeInput([input], driver);
+  assert.match(output, /earlier replies omitted; read the thread history/);
+  assert.doesNotMatch(output, /no earlier thread replies/);
+});
+
+test("startup, catch-up and live projection preserve selected source receipts only when actually rendered", () => {
+  const input = selectedThreadMessage();
+  for (const batch of [[input], [input, {...input, content: "later mention"}]]) {
+    const fresh = projectThreadJoinContextsForRuntimeInput(batch, () => undefined);
+    assert.equal(fresh.renderedContextMessages.length, 1);
+    assert.equal(fresh.messages.filter(m=>m.thread_join_context).length, 1);
+    assert.deepEqual(groupThreadJoinContextReceiptMessages(fresh.renderedContextMessages).get("#proj-chat:deadbeef")?.map(m=>m.seq), [3,8]);
+    const resumed = projectThreadJoinContextsForRuntimeInput(batch, () => 8);
+    assert.equal(resumed.renderedContextMessages.length, 0);
+    assert.equal(resumed.messages.some(m=>m.thread_join_context), false);
+    assert.equal(groupThreadJoinContextReceiptMessages(resumed.renderedContextMessages).size, 0);
+    assert.equal(projectThreadJoinContextsForRuntimeInput(batch, ()=>undefined, false).renderedContextMessages.length, 0);
+  }
 });
