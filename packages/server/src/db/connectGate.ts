@@ -101,10 +101,40 @@ type SocketLike = {
 
 type ConnectCallback = ((err: Error) => void) | ((err: null, client: pg.Client) => void);
 
+/**
+ * Low-cardinality category of a failed connect, for traces (never the message):
+ * the driver/socket code when there is one, else what the message says.
+ */
+export function connectErrorCategory(err: unknown): string {
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === "string" && /^[A-Z0-9_]{2,32}$/.test(code)) return code;
+  const message = err instanceof Error ? err.message : "";
+  if (/waiting for a connect permit/i.test(message)) return "permit_wait_timeout";
+  // pg-pool's own deadline ("timeout exceeded when trying to connect") or the
+  // client's ("Connection terminated due to connection timeout").
+  if (/timeout exceeded when trying to connect|due to connection timeout/i.test(message)) return "pool_connect_timeout";
+  if (/connection terminated/i.test(message)) return "connection_terminated";
+  if (/too many connections|remaining connection slots/i.test(message)) return "too_many_connections";
+  return "other";
+}
+
+/**
+ * One connect that did not produce a client. `stage` says where it stopped:
+ * queued for a permit (the gate was full) or in the handshake itself.
+ */
+export interface ConnectAttemptFailure {
+  stage: "permit_wait" | "handshake";
+  permitWaitMs: number;
+  /** Time in the handshake; 0 when it never got a permit. */
+  handshakeMs: number;
+  errorCategory: string;
+}
+
 /** A pg.Client subclass for `new pg.Pool({ Client })` whose connect() goes through `gate`. */
 export function gatedClientClass(
   gate: ConnectGate,
   onPermit: (waitMs: number) => void = () => {},
+  onAttemptFailed: (failure: ConnectAttemptFailure) => void = () => {},
 ): typeof pg.Client {
   return class GatedClient extends pg.Client {
     // pg-pool constructs the client right before starting its connect timer,
@@ -124,6 +154,14 @@ export function gatedClientClass(
       const onClose = () => queued.abort(new Error("Connection timed out while waiting for a connect permit"));
       stream?.once?.("close", onClose);
       const permitted = gate.acquire(queued.signal).finally(() => stream?.removeListener?.("close", onClose));
+      permitted.catch((err: unknown) => {
+        onAttemptFailed({
+          stage: "permit_wait",
+          permitWaitMs: Date.now() - this.#createdAtMs,
+          handshakeMs: 0,
+          errorCategory: connectErrorCategory(err),
+        });
+      });
       const connecting = permitted.then(async (permit) => {
         (this as { [CONNECT_PERMIT_WAIT_MS]?: number })[CONNECT_PERMIT_WAIT_MS] = permit.waitMs;
         onPermit(permit.waitMs);
@@ -137,9 +175,22 @@ export function gatedClientClass(
           };
           const timeoutMs = self._connectionTimeoutMillis ?? 0;
           if (self.connection?.stream?.destroyed || (timeoutMs > 0 && Date.now() - this.#createdAtMs >= timeoutMs)) {
-            throw new Error("Connection timed out while waiting for a connect permit");
+            const late = new Error("Connection timed out while waiting for a connect permit");
+            onAttemptFailed({ stage: "permit_wait", permitWaitMs: permit.waitMs, handshakeMs: 0, errorCategory: connectErrorCategory(late) });
+            throw late;
           }
-          return await super.connect();
+          const handshakeStartedAt = Date.now();
+          try {
+            return await super.connect();
+          } catch (err) {
+            onAttemptFailed({
+              stage: "handshake",
+              permitWaitMs: permit.waitMs,
+              handshakeMs: Date.now() - handshakeStartedAt,
+              errorCategory: connectErrorCategory(err),
+            });
+            throw err;
+          }
         } finally {
           permit.release();
         }

@@ -51,14 +51,17 @@ test("the permanent rail Bell opens an empty drawer without an unread dot", () =
   assert.equal(trigger.getAttribute("data-has-unread"), "false");
   assert.equal(railUnreadDot(), null);
   assert.match(trigger.className, /border-transparent/);
-  assert.doesNotMatch(trigger.className, /shadow-brutal-sm/);
+  // The resting rail item draws no shadow (only the focus ring is one).
+  assert.doesNotMatch(trigger.className, /(?:^|\s)shadow-/);
 
   fireEvent.click(trigger);
 
   assert.equal(trigger.getAttribute("aria-expanded"), "true");
   assert.equal(trigger.getAttribute("data-state"), "open");
-  assert.match(trigger.className, /border-black/);
-  assert.match(trigger.className, /shadow-brutal-sm/);
+  // Open is the frame's "you are here" sticker (Raft DS Rail), never a shadow.
+  assert.match(trigger.className, /bg-layer-frame-active/);
+  assert.match(trigger.className, /border-line-frame-active/);
+  assert.doesNotMatch(trigger.className, /(?:^|\s)shadow-/);
   assert.ok(screen.getByRole("dialog", { name: "Notification center" }));
   assert.ok(screen.getByText("No notifications right now"));
   assert.ok(screen.getByText("You'll see things here that need your attention."));
@@ -66,19 +69,17 @@ test("the permanent rail Bell opens an empty drawer without an unread dot", () =
 
 test("the rail Bell icon follows the rail item icon recipe (size + state-following color)", () => {
   // task #720: cindyz flagged the Bell icon itself looking different from the
-  // other rail icons. Siblings are 16px foreground-icon (brightening on item
-  // hover) in elegant and 18px foreground-strong in brutal; the Bell used to
-  // be a hardcoded 18px foreground-muted/black that never changed state.
+  // other rail icons. Raft DS › Rail: every rail glyph is 20px and takes the
+  // item's on-frame ink (currentColor), so it follows the item's state; the
+  // Bell used to be a hardcoded colour that never changed state.
   try {
     renderTrigger("rail-bottom", []);
-    const svg = document.querySelector('[data-testid="notification-trigger-rail"] svg');
+    const trigger = screen.getByTestId("notification-trigger-rail");
+    const svg = trigger.querySelector("svg");
     assert.ok(svg, "the Bell icon renders");
-    assert.match(svg.getAttribute("class") ?? "", /text-\[var\(--foreground-icon\)\]/, "elegant color comes from the rail recipe var");
-    assert.match(svg.getAttribute("class") ?? "", /group-hover:text-\[var\(--foreground-strong\)\]/, "color follows the button's hover state");
-    assert.match(svg.getAttribute("class") ?? "", /theme-brutal:text-\[var\(--foreground-strong\)\]/, "brutal color comes from the rail recipe var");
-    assert.match(svg.getAttribute("class") ?? "", /theme-brutal:size-\[18px\]/, "brutal keeps the 18px rail icon size");
-    assert.match(svg.getAttribute("class") ?? "", /(^|\s)size-4(\s|$)/, "elegant uses the 16px rail icon size");
-    assert.doesNotMatch(svg.getAttribute("class") ?? "", /text-black/, "no hardcoded color that ignores theme state");
+    assert.match(svg.getAttribute("class") ?? "", /(^|\s)size-5(\s|$)/, "the 20px rail glyph");
+    assert.doesNotMatch(svg.getAttribute("class") ?? "", /(^|\s)text-/, "the glyph inherits the item's colour");
+    assert.match(trigger.className, /text-foreground-on-frame/, "the item carries the on-frame ink");
   } finally {
     cleanup();
   }
@@ -93,22 +94,20 @@ test("unread attention and open disclosure remain independent states", () => {
   assert.equal(trigger.getAttribute("data-state"), "closed");
   assert.equal(trigger.getAttribute("data-has-unread"), "true");
   assert.match(trigger.className, /border-transparent/);
-  assert.doesNotMatch(trigger.className, /shadow-brutal-sm/);
+  // The resting rail item draws no shadow (only the focus ring is one).
+  assert.doesNotMatch(trigger.className, /(?:^|\s)shadow-/);
 
   const dot = railUnreadDot();
   assert.ok(dot, "unread renders the shared rail indicator");
   assert.equal(dot.getAttribute("aria-hidden"), "true");
-  // task #720: the rail dot must ride the rail's shared attention composite —
-  // the same AppRailItemAttention (mask + indicator + sr-only title) every
-  // other rail item uses, not a one-off Status dot with a hand-set offset.
-  assert.match(dot.className, /-right-1/);
-  assert.match(dot.className, /top-\[-2px\]/);
+  // The rail dot rides the rail's shared attention composite — the same
+  // AppRailItemAttention (indicator + sr-only title) every other rail item
+  // uses, not a one-off Status dot with a hand-set offset. raft-ui's
+  // indicator recipe places it on the icon's top-right corner.
+  assert.match(dot.className, /(?:^| )-right-1(?: |$)/);
+  assert.match(dot.className, /(?:^| )-top-1(?: |$)/);
   const iconAnchor = dot.parentElement;
   assert.equal(iconAnchor?.classList.contains("relative"), true, "dot anchors to the Bell, not the button edge");
-  assert.ok(
-    iconAnchor?.querySelector('[data-slot="app-rail-item-attention-mask"]'),
-    "the rail attention mask accompanies the indicator (elegant notch recipe)",
-  );
   assert.ok(
     iconAnchor?.querySelector('span.sr-only'),
     "the composite keeps the sr-only unread announcement like LeftRail's dots",
@@ -152,7 +151,7 @@ test("mobile keeps the Bell but not Help semantics, and RTL keeps the dot inside
   const dot = screen.getByTestId("notification-trigger-mobile-unread-dot");
   assert.equal(trigger.getAttribute("data-state"), "closed");
   assert.equal(trigger.getAttribute("data-has-unread"), "true");
-  assert.match(trigger.className, /size-8/);
+  assert.match(trigger.className, /size-11/, "the phone home bar's 44px frame icon button");
   assert.match(dot.className, /-end-1/);
   assert.doesNotMatch(dot.className, /-(?:left|right)-/);
   assert.equal(dot.parentElement?.parentElement, trigger, "dot remains inside the viewport-safe button box");

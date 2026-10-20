@@ -313,9 +313,8 @@ test("the Sidebar archive confirm dialog renders the finalized Chinese WITH its 
 
   fireEvent.contextMenu(screen.getByText(PROBE_CHANNEL_NAME));
   // The row context menu is a portal-rendered RUI ContextMenuPopup, located by
-  // its data-slot contract or w-48 popup container.
-  const menu = document.querySelector<HTMLElement>('[data-slot="context-menu-content"].w-48')
-    ?? document.querySelector<HTMLElement>("div.card-brutal.w-48");
+  // its data-slot contract and the DS menu width (240px, w-60).
+  const menu = document.querySelector<HTMLElement>('[data-slot="context-menu-content"].w-60');
   assert.ok(menu, "channel context menu");
   // `layout.sidebar.markAsUnread` / `pin` / `archive` all live in this menu.
   assert.ok(within(menu).getByText("标为未读"), "mark as unread action");

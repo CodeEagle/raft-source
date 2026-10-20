@@ -5,7 +5,12 @@ import { resolve } from "node:path";
 import { afterEach, test, vi } from "vitest";
 import { z } from "zod";
 
-const CONTRACT_MODULES = ["./agentApiContract", "./agentApiMessageContract", "./daemonApiContract"] as const;
+const SCRIPT = resolve(__dirname, "../scripts/lazy-contract-schemas.mjs");
+
+// Every module the rewrite wrapped (scripts/lazy-contract-schemas.mjs --list).
+const CONTRACT_MODULES: string[] = (JSON.parse(
+  spawnSync(process.execPath, [SCRIPT, "--list"], { encoding: "utf8" }).stdout,
+) as string[]).map((module) => `./${module}`);
 
 async function importContracts(): Promise<Record<string, unknown>[]> {
   return Promise.all(CONTRACT_MODULES.map((path) => import(path) as Promise<Record<string, unknown>>));
@@ -32,7 +37,8 @@ function contractJsonSchemas(modules: Record<string, unknown>[]): Map<string, un
       if (value instanceof z.ZodType) out.set(`${CONTRACT_MODULES[index]}:${name}`, jsonSchemaOf(value));
     }
   });
-  const routes = modules[0]!.agentApiContract as Record<string, { request: Record<string, z.ZodType>; response: Record<string, unknown> }>;
+  const agentApi = modules[CONTRACT_MODULES.indexOf("./agentApiContract")]!;
+  const routes = agentApi.agentApiContract as Record<string, { request: Record<string, z.ZodType>; response: Record<string, unknown> }>;
   for (const [key, route] of Object.entries(routes)) {
     for (const [part, schema] of Object.entries(route.request)) out.set(`route:${key}:request.${part}`, jsonSchemaOf(schema));
     for (const [part, schema] of Object.entries(route.response)) {
@@ -47,17 +53,19 @@ afterEach(() => {
   vi.resetModules();
 });
 
-test("the contract files are fully rewritten by scripts/lazy-contract-schemas.mjs", () => {
-  const result = spawnSync(process.execPath, [resolve(__dirname, "../scripts/lazy-contract-schemas.mjs"), "--check"], { encoding: "utf8" });
+test("the shared sources are fully rewritten by scripts/lazy-contract-schemas.mjs", () => {
+  assert.ok(CONTRACT_MODULES.includes("./agentApiContract") && CONTRACT_MODULES.length >= 20, CONTRACT_MODULES.join(", "));
+  const result = spawnSync(process.execPath, [SCRIPT, "--check"], { encoding: "utf8" });
   assert.equal(result.status, 0, result.stderr);
 });
 
 test("importing the contracts builds no schema until one is used", async () => {
   vi.resetModules();
-  const [agentApi] = await importContracts();
+  const modules = await importContracts();
+  const agentApi = modules[CONTRACT_MODULES.indexOf("./agentApiContract")];
   const { lazySchemaStats } = await import("./lazySchema");
   const before = lazySchemaStats();
-  assert.ok(before.registered >= 250, `expected the contract schemas to be lazy, got ${before.registered}`);
+  assert.ok(before.registered >= 360, `expected the contract schemas to be lazy, got ${before.registered}`);
   assert.equal(before.built, 0, "an import-time access forces schemas; keep top-level code off schema properties");
 
   const route = (agentApi!.agentApiContract as Record<string, { request: { query: z.ZodType } }>).historyRead;

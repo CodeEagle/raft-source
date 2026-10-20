@@ -5,6 +5,7 @@
 // CLI's offset/limit and `More:` line.
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient, AgentApiClientResult } from "../agentApiClient";
 import {
@@ -47,17 +48,17 @@ export interface ServerInfoRequest {
   query?: string;
 }
 
-export const serverInfoRequestSchema = requestSchema<ServerInfoRequest>()(z.object({
+export const serverInfoRequestSchema = lazySchema("serverInfoRequestSchema", () => requestSchema<ServerInfoRequest>()(z.object({
   view: z.enum(["summary", "full", "channels", "agents", "humans"]).optional().describe("summary (default): counts; full: the whole overview; channels / agents / humans: one paged section."),
   offset: z.number().optional().describe("Section paging: rows to skip."),
   limit: z.number().optional().describe("Section paging: rows per page (default 50)."),
   joined: z.boolean().optional().describe("channels view only: only channels you have joined."),
   query: z.string().optional().describe("channels / agents / humans view only: keep rows whose name, description, or other visible text contains this (case-insensitive)."),
-}));
+})));
 
-export const showProfileRequestSchema = requestSchema<{ target?: string }>()(z.object({
+export const showProfileRequestSchema = lazySchema("showProfileRequestSchema", () => requestSchema<{ target?: string }>()(z.object({
   target: z.string().optional().describe("`@handle` of someone else; omit for your own profile."),
-}));
+})));
 
 /** The Agent API's profile body schema; at least one field is required (checked by the operation). */
 export const updateProfileRequestSchema = agentApiProfileUpdateBodySchema;
@@ -164,11 +165,11 @@ export interface UserInfoRequest {
   limit?: number;
 }
 
-export const userInfoRequestSchema = requestSchema<UserInfoRequest>()(z.object({
+export const userInfoRequestSchema = lazySchema("userInfoRequestSchema", () => requestSchema<UserInfoRequest>()(z.object({
   name: z.string().describe("The human or agent, `@handle` (or the bare handle)."),
   offset: z.number().int().nonnegative().optional().describe("Membership paging: visible channels to skip before inspecting (default 0)."),
   limit: z.number().int().positive().max(AGENT_API_USER_CHANNELS_MAX_LIMIT).optional().describe(`Membership paging: visible channels to inspect (default ${AGENT_API_USER_CHANNELS_DEFAULT_LIMIT}, at most ${AGENT_API_USER_CHANNELS_MAX_LIMIT}).`),
-}));
+})));
 
 export type RaftUserRef = { kind: "agent"; value: AgentAgentInfo } | { kind: "human"; value: AgentHumanInfo };
 

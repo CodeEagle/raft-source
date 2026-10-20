@@ -14,6 +14,7 @@
 // `ack: "immediate"` is the pre-1.0 behaviour and is a destructive read.
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import { formatAgentInboxHint, formatAgentMessages } from "../agentMessageText";
@@ -44,7 +45,7 @@ const inboxPullFields = {
   ack: z.enum(["cursor", "immediate"]).optional().describe("cursor (default): a batch is acknowledged by the next pull; immediate: acknowledged as it is returned."),
 };
 
-export const checkInboxRequestSchema = requestSchema<CheckInboxRequest>()(z.object(inboxPullFields));
+export const checkInboxRequestSchema = lazySchema("checkInboxRequestSchema", () => requestSchema<CheckInboxRequest>()(z.object(inboxPullFields)));
 
 export interface RaftInboxBatch {
   messages: RaftMessage[];
@@ -142,7 +143,7 @@ export interface DrainInboxRequest {
   ack?: RaftAckMode;
 }
 
-export const drainInboxRequestSchema = requestSchema<DrainInboxRequest>()(z.object(inboxPullFields));
+export const drainInboxRequestSchema = lazySchema("drainInboxRequestSchema", () => requestSchema<DrainInboxRequest>()(z.object(inboxPullFields)));
 
 export interface RaftInboxDrainSummary {
   /** Cursor of the last batch handed out; pass it as `since` on the next pull to acknowledge that batch. */
@@ -258,11 +259,11 @@ export interface ListInboxRequest {
   limit?: number;
 }
 
-export const listInboxRequestSchema = requestSchema<ListInboxRequest>()(z.object({
+export const listInboxRequestSchema = lazySchema("listInboxRequestSchema", () => requestSchema<ListInboxRequest>()(z.object({
   view: z.enum(["unread", "mentions"]).optional().describe("unread (default): every unread conversation; mentions: only those that @mention you."),
   before: z.number().int().nonnegative().optional().describe("Next page: the nextBeforeSeq of the previous page."),
   limit: z.number().int().positive().optional().describe("Conversations per page, 1..50 (Server default 20)."),
-}));
+})));
 
 export interface RaftInboxConversation {
   target: string;

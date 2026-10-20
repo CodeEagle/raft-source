@@ -401,7 +401,9 @@ test("feedback image attachments open an authenticated Lightbox before download"
   assert.ok(await screen.findByRole("button", { name: "Download" }));
   const toolbar = document.querySelector('[data-slot="lightbox-toolbar"]');
   assert.ok(toolbar instanceof HTMLElement);
-  assert.ok(toolbar.className.includes("bg-white"));
+  // The attachment header is raft-ui's opaque panel toolbar, on a semantic
+  // layer so it follows light/dark.
+  assert.ok(toolbar.classList.contains("bg-layer-canvas"));
 
   assert.equal(clicked, null);
   assert.deepEqual(calls, [

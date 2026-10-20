@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import api from "../api/client";
 import { useAuthStore } from "../store/authStore";
 import AuthPageFrame, { AuthPageIntro } from "../components/auth/AuthPageFrame";
@@ -111,7 +111,7 @@ export default function AppLoginPage() {
           <Button
             type="button"
             onClick={openApp}
-            size="md"
+            size="xl"
             variant="accent"
             className="w-full"
             data-testid="app-login-open-app"
@@ -128,9 +128,9 @@ export default function AppLoginPage() {
       <AuthPageFrame>
         <div className="w-full" data-testid="app-login-unusable">
           <AuthPageIntro title={formatMessage({ id: "pages.appLogin.title" })} />
-          <Banner intent="warning" className="mb-4 font-bold">{formatMessage({ id: state.messageId })}</Banner>
+          <Banner intent="warning" className="mb-4">{formatMessage({ id: state.messageId })}</Banner>
           {redirectUrl ? (
-            <Button type="button" onClick={backToApp} size="md" variant="outline" className="w-full">
+            <Button type="button" onClick={backToApp} size="lg" variant="outline" className="w-full">
               {formatMessage({ id: "pages.appLogin.backToApp" })}
             </Button>
           ) : null}
@@ -150,7 +150,7 @@ export default function AppLoginPage() {
           type="button"
           onClick={approve}
           disabled={state.kind !== "ready" || submitting}
-          size="md"
+          size="xl"
           variant="accent"
           className="w-full"
           data-testid="app-login-approve"
@@ -161,7 +161,7 @@ export default function AppLoginPage() {
           type="button"
           onClick={handleUseAnotherAccount}
           disabled={submitting}
-          size="md"
+          size="lg"
           variant="outline"
           className="mt-3 w-full"
         >
@@ -171,7 +171,7 @@ export default function AppLoginPage() {
           type="button"
           onClick={deny}
           disabled={state.kind !== "ready" || submitting}
-          size="md"
+          size="lg"
           variant="ghost"
           className="mt-3 w-full"
           data-testid="app-login-deny"

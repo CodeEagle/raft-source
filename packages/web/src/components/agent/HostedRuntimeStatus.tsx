@@ -1,7 +1,11 @@
 import { useCallback, useState } from "react";
 import { useIntl } from "react-intl";
-import { Button } from "raft-ui";
+import { Badge, Button } from "@botiverse/raft-ui";
+import type { Presence } from "@botiverse/raft-ui";
+import { Cloud } from "lucide-react";
 import type { AgentHostedRuntimeSummary } from "@botiverse/raft-shared";
+import StatusDot from "../ui/StatusDot";
+import { HostedModelChoice, useHostedRuntimeModels } from "./HostedModelChoice";
 
 export type HostedRuntimeStateLabelId =
   | "agent.detail.hostedRuntime.state.provisioning"
@@ -33,60 +37,116 @@ export function describeHostedRuntime(summary: AgentHostedRuntimeSummary): {
   }
 }
 
+/**
+ * Each provisioning state as a DS status chip: one of the fixed presence
+ * lights plus its word (setting up / syncing / removing = busy, running =
+ * online, setup failed = error, removed = offline).
+ */
+const STATE_CHIP: Record<HostedRuntimeStateLabelId, { variant: "success" | "warning" | "primary" | "muted"; presence: Presence }> = {
+  "agent.detail.hostedRuntime.state.provisioning": { variant: "primary", presence: "busy" },
+  "agent.detail.hostedRuntime.state.active": { variant: "success", presence: "online" },
+  "agent.detail.hostedRuntime.state.syncing": { variant: "primary", presence: "busy" },
+  "agent.detail.hostedRuntime.state.failed": { variant: "warning", presence: "error" },
+  "agent.detail.hostedRuntime.state.deleting": { variant: "primary", presence: "busy" },
+  "agent.detail.hostedRuntime.state.deleted": { variant: "muted", presence: "offline" },
+};
+
 export function HostedRuntimeStatus({
   summary,
   onRetry,
 }: {
   summary: AgentHostedRuntimeSummary;
-  onRetry: () => Promise<void>;
+  onRetry: (options?: { model?: string | null }) => Promise<void>;
 }) {
   const { formatMessage } = useIntl();
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState(false);
   const view = describeHostedRuntime(summary);
+  // After the provider refused the picked model, a retry names the model again (never silently the default).
+  const needsModel = view.canRetry && summary.retryNeedsModel;
+  const models = useHostedRuntimeModels(summary.provider, needsModel);
+  const modelsView = models.state.kind === "ready" ? models.state.view : null;
+  const [modelPick, setModelPick] = useState<string | null>(null);
+  const pickedModel = modelsView?.locked ? null : modelPick;
+  const pickedLabel = pickedModel === null
+    ? modelsView?.defaultLabel
+      ? formatMessage({ id: "agent.detail.hostedModel.default" }, { label: modelsView.defaultLabel })
+      : formatMessage({ id: "agent.detail.hostedModel.defaultUnnamed" })
+    : modelsView?.models.find((option) => option.id === pickedModel)?.label ?? pickedModel;
+  const reloadModels = models.reload;
+  const handleModelsReload = useCallback(() => { void reloadModels(); }, [reloadModels]);
   const retry = useCallback(async () => {
     setRetrying(true);
     setRetryError(false);
     try {
-      await onRetry();
+      await onRetry(needsModel ? { model: pickedModel } : undefined);
     } catch {
       setRetryError(true);
     } finally {
       setRetrying(false);
     }
-  }, [onRetry]);
+  }, [onRetry, needsModel, pickedModel]);
   const handleRetryClick = useCallback(() => void retry(), [retry]);
+  const chip = STATE_CHIP[view.labelId];
   return (
     <div className="space-y-2" data-testid="agent-hosted-runtime-status" data-state={summary.state}>
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="inline-flex border theme-brutal:border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-2 py-0.5 text-xs font-bold uppercase text-foreground-strong theme-brutal:text-black">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <Badge appearance="soft" variant={chip.variant}>
+          <StatusDot presence={chip.presence} />
           {formatMessage({ id: view.labelId })}
-        </span>
-        <span className="text-xs text-foreground-muted theme-brutal:text-black/60">
-          {formatMessage({ id: "agent.detail.hostedRuntime.provider" }, { provider: "antiproton" })}
+        </Badge>
+        {/* The provider's name is not shown to people: a cloud agent "runs in the cloud". */}
+        <Badge appearance="soft" variant="information" data-testid="hosted-runtime-location">
+          <Cloud size={14} aria-hidden="true" />
+          {formatMessage({ id: "agent.detail.hostedRuntime.provider" })}
+        </Badge>
+        <span className="text-caption text-foreground-hint" data-testid="hosted-runtime-free">
+          {formatMessage({ id: "agent.detail.hostedRuntime.freeForLimitedTime" })}
         </span>
       </div>
       {summary.state === "active" && summary.push && !summary.push.registered && (
-        <p className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">
+        <p className="text-footnote font-semibold text-warning-strong">
           {formatMessage({ id: "agent.detail.hostedRuntime.pushNotRegistered" })}
           {summary.push.error ? <span className="ml-1">{summary.push.error}</span> : null}
         </p>
       )}
       {summary.lastError && (
-        <p className="break-words text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange" data-testid="agent-hosted-runtime-error">
+        <p className="break-words text-footnote font-semibold text-warning-strong" data-testid="agent-hosted-runtime-error">
           {formatMessage(
             { id: "agent.detail.hostedRuntime.lastError" },
             { code: summary.lastError.code, message: summary.lastError.message || summary.lastError.code },
           )}
         </p>
       )}
+      {needsModel && (
+        <div className="space-y-1.5" data-testid="agent-hosted-runtime-retry-model">
+          <p className="text-callout text-foreground-muted">
+            {formatMessage({ id: "agent.detail.hostedRuntime.retryNeedsModel" })}
+          </p>
+          <HostedModelChoice
+            state={models.state}
+            value={pickedModel}
+            onChange={setModelPick}
+            onReload={handleModelsReload}
+            testId="agent-hosted-runtime-retry-model-select"
+          />
+        </div>
+      )}
       {view.canRetry && (
-        <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" type="button" disabled={retrying} onClick={handleRetryClick}>
-            {formatMessage({ id: "agent.detail.hostedRuntime.retry" })}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button
+            variant="outline"
+            size="sm"
+            type="button"
+            disabled={retrying || (needsModel && models.state.kind === "loading")}
+            onClick={handleRetryClick}
+          >
+            {needsModel
+              ? formatMessage({ id: "agent.detail.hostedRuntime.retryWithModel" }, { model: pickedLabel })
+              : formatMessage({ id: "agent.detail.hostedRuntime.retry" })}
           </Button>
           {retryError && (
-            <span className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">
+            <span className="text-footnote font-semibold text-warning-strong">
               {formatMessage({ id: "agent.detail.hostedRuntime.retryFailed" })}
             </span>
           )}

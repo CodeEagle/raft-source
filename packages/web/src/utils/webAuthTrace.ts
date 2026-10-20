@@ -89,6 +89,10 @@ export type WebHttpClientTraceEventName = "web.http.client";
 // forever while silently leaving the registry.
 export type UploadCapabilityFallbackTraceEventName = "slock.attachment.upload_capability_fallback";
 
+// Inline media preview load failures (bug-triage task #14) — see
+// utils/mediaPreviewErrorTrace.ts.
+export type MediaPreviewErrorTraceEventName = "slock.media_preview.error";
+
 // Names the web may emit as point in time events.
 export type WebEventName =
   | AuthTraceEventName
@@ -97,7 +101,8 @@ export type WebEventName =
   | StateViolationTraceEventName
   | ClientErrorTraceEventName
   | UpdateGateTraceEventName
-  | UploadCapabilityFallbackTraceEventName;
+  | UploadCapabilityFallbackTraceEventName
+  | MediaPreviewErrorTraceEventName;
 
 // Names the web may emit as spans with a real duration.
 export type WebSpanName = AuthTraceSpanName | WebHttpClientTraceEventName;

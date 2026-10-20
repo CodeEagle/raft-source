@@ -3,18 +3,18 @@ import type { CSSProperties } from "react";
 /**
  * Desktop search-overlay anchor contract (WAWQAQ, 2026-09-24: "Slack 的锚点是挂
  * 在上面的搜索框那里"). In Slack the search panel grows out of the top search
- * field: the panel's top edge sits on the field's top edge, the panel is centred
- * on the field, and the panel header IS the input. The desktop shell owns the top
- * bar (raft-desktop DesktopTopBar), so it publishes the field's geometry as CSS
- * custom properties on <html>; the overlay consumes them here. Anything without
- * the variables — the web app, an older desktop shell — falls back to the
- * previous centred placement, so this is a pure CSS contract with no gating.
+ * field: the panel's top edge sits on the field's top edge and the panel header
+ * IS the input. Horizontally the panel is centred on the window on both the
+ * desktop and the web (WAWQAQ 2026-10-13), so it sits in the same place in both. Whoever renders the top
+ * bar publishes the field's geometry as CSS custom properties on <html>: the
+ * web's AppTopBar at desktop width (task #753), the desktop shell's title bar.
+ * The overlay consumes them here. Anything without the variables — the
+ * host-shell embed, an older desktop shell — falls back to the placements
+ * below, so this is a pure CSS contract with no gating.
  */
 export const DESKTOP_SEARCH_ANCHOR_VARS = {
   /** px from the viewport top to the search field's top edge */
   top: "--desktop-search-anchor-top",
-  /** px from the viewport left to the search field's horizontal centre */
-  centerX: "--desktop-search-anchor-center-x",
   /** px width of the search field (informational; the panel keeps a readable minimum) */
   width: "--desktop-search-anchor-width",
 } as const;
@@ -31,16 +31,50 @@ export const SEARCH_OVERLAY_FALLBACK_TOP = `max(calc(8vh + 16px), calc((100vh - 
 
 /**
  * Inline style for the overlay card. Fixed to the anchor: top on the field's top
- * edge, horizontally centred on the field, width the same readable panel width
+ * edge, horizontally centred on the window, width the same readable panel width
  * as before, height bounded by the space below the anchor. The `var()` fallbacks
  * reproduce the old centred card (see SEARCH_OVERLAY_FALLBACK_TOP).
  */
-export function searchOverlayCardStyle(): CSSProperties {
+/**
+ * Column placement (task #143), for a web surface WITHOUT the top bar: today
+ * that is the host-shell embed at desktop width (the signed-in web app has the
+ * bar since task #753 and anchors to its field instead). There is no search
+ * field to grow out of, and the centred fallback landed mid-way through the
+ * channel header's tab row, so the panel's top sits at the top of the content column — its
+ * input where the channel title is, the same "search lives at the top" read as
+ * Slack and the desktop. Horizontally it is centred on the whole window, like
+ * the desktop's panel (WAWQAQ 2026-10-13), so both apps put it in the same
+ * place; it may overlap the sidebar's edge, as any transient overlay does.
+ */
+export type SearchOverlayColumn = { top: number };
+
+/** Gap between the content column's top edge and the panel. */
+export const SEARCH_OVERLAY_COLUMN_INSET_PX = 8;
+
+export function searchOverlayColumnFromRect(rect: { top: number }): SearchOverlayColumn {
+  return { top: rect.top + SEARCH_OVERLAY_COLUMN_INSET_PX };
+}
+
+export function searchOverlayCardStyle(column?: SearchOverlayColumn | null): CSSProperties {
+  if (column) {
+    const top = `${column.top}px`;
+    return {
+      position: "fixed",
+      top,
+      left: "50%",
+      transform: "translateX(-50%)",
+      width: "min(720px, 92vw)",
+      height: `min(${SEARCH_OVERLAY_FALLBACK_HEIGHT}, calc(100vh - ${top} - 24px))`,
+    };
+  }
   const top = `var(${DESKTOP_SEARCH_ANCHOR_VARS.top}, ${SEARCH_OVERLAY_FALLBACK_TOP})`;
   return {
     position: "fixed",
     top,
-    left: `var(${DESKTOP_SEARCH_ANCHOR_VARS.centerX}, 50%)`,
+    // Centred on the window, not on the field (WAWQAQ 2026-10-13): the field
+    // sits a little right of centre (the traffic lights pad the bar's left),
+    // and the panel is wider than the field, so it still covers it.
+    left: "50%",
     transform: "translateX(-50%)",
     // As wide as the anchor field when the shell publishes one (the panel reads
     // as the field expanding, Slack), never narrower than the readable minimum.

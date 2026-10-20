@@ -13,7 +13,7 @@ const chatPanelSource = readFileSync(
 test("mobile activation slot is first in MessageInput and only ChatPanel opts into it", () => {
   assert.match(
     messageInputSource,
-    /<div className="flex w-full flex-col gap-2">\s*\{activationBanner\}\s*\{error/,
+    /<div className="relative flex w-full flex-col gap-2">\s*\{activationBanner\}\s*\{error/,
   );
   assert.match(
     chatPanelSource,
@@ -63,7 +63,8 @@ test("dismiss progress is 4px, three seconds, and static under reduced motion", 
   assert.match(bannerSource, /web_push_subscription_failed/);
   assert.match(bannerSource, /window\.addEventListener\("focus", handleFocus\)/);
   assert.match(bannerSource, /document\.addEventListener\("visibilitychange", handleVisibilityChange\)/);
-  assert.match(bannerSource, /h-1 bg-brutal-black/);
+  // 4px ink bar (Raft DS: ink on the soft banner, no brutal palette).
+  assert.match(bannerSource, /h-1 bg-foreground/);
   assert.match(cssSource, /notification-activation-progress 3000ms linear forwards/);
   assert.match(cssSource, /notification-activation-dismiss-timer 3000ms linear forwards/);
   assert.match(

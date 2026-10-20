@@ -6,7 +6,7 @@ import {
   Router,
   type Router as RouterType,
 } from "express";
-import { currentTimeMs } from "@botiverse/raft-shared";
+import { asServerId, currentTimeMs } from "@botiverse/raft-shared";
 import type { Server as SocketServer } from "socket.io";
 import { requireAuth, requireVerified } from "../middleware/auth";
 import { UUID_RE } from "../lib/messageId";
@@ -42,6 +42,12 @@ announcementRouter.get("/active", requireAuth, requireVerified, async (req, res)
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
+  const rawServer = req.query.server_id;
+  if (rawServer !== undefined && (typeof rawServer !== "string" || !UUID_RE.test(rawServer))) {
+    res.status(400).json({ error: "server_id must be a Server UUID" });
+    return;
+  }
+  const serverId = typeof rawServer === "string" ? asServerId(rawServer.toLowerCase()) : undefined;
   const rawAfter = req.query.after;
   if (rawAfter !== undefined && typeof rawAfter !== "string") {
     res.status(400).json({ error: "after must be an announcement UUID" });
@@ -57,6 +63,7 @@ announcementRouter.get("/active", requireAuth, requireVerified, async (req, res)
     req.sessionFamilyId,
     undefined,
     afterAnnouncementId,
+    serverId,
   );
   res.json({ announcements: items });
 });
@@ -67,7 +74,13 @@ announcementRouter.post("/:id/dismiss", requireAuth, requireVerified, async (req
     res.status(401).json({ error: "Unauthorized" });
     return;
   }
-  const ok = await announcementService.dismiss(userId, req.params.id as string);
+  const rawServer = req.query.server_id;
+  if (rawServer !== undefined && (typeof rawServer !== "string" || !UUID_RE.test(rawServer))) {
+    res.status(400).json({ error: "server_id must be a Server UUID" });
+    return;
+  }
+  const serverId = typeof rawServer === "string" ? asServerId(rawServer.toLowerCase()) : undefined;
+  const ok = await announcementService.dismiss(userId, req.params.id as string, undefined, serverId);
   if (!ok) {
     res.status(404).json({ error: "Announcement not found" });
     return;

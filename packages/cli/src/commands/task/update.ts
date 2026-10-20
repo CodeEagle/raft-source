@@ -2,7 +2,7 @@
 // → POST /internal/agent-api/tasks/update-status
 
 import type { Command } from "commander";
-import { type AgentApiTaskUpdateStatusBody } from "@botiverse/raft-shared";
+import type { AgentApiTaskUpdateStatusBody } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

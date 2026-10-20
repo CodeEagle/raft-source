@@ -2,7 +2,11 @@ import { formatDmPeerRef } from "@botiverse/raft-shared";
 
 import { AGENT_REMINDERS_NOT_SENDABLE_MESSAGE } from "./agentPrivateSurfaces";
 
-export type DmTargetResolutionErrorCode = "DM_TARGET_AMBIGUOUS" | "DM_TARGET_INVALID_PEER_KIND" | "DM_TARGET_NOT_SENDABLE";
+export type DmTargetResolutionErrorCode =
+  | "DM_TARGET_AMBIGUOUS"
+  | "DM_TARGET_INVALID_PEER_KIND"
+  | "DM_TARGET_NOT_SENDABLE"
+  | "MIGRATION_RECEIPT_READ_ONLY";
 
 /**
  * A DM target that cannot be resolved to one conversation for a reason the
@@ -22,7 +26,7 @@ export class DmTargetResolutionError extends Error {
   ) {
     super(message);
     this.name = "DmTargetResolutionError";
-    this.status = code === "DM_TARGET_AMBIGUOUS" ? 409 : code === "DM_TARGET_NOT_SENDABLE" ? 403 : 400;
+    this.status = code === "DM_TARGET_AMBIGUOUS" || code === "MIGRATION_RECEIPT_READ_ONLY" ? 409 : code === "DM_TARGET_NOT_SENDABLE" ? 403 : 400;
   }
 
   /** The JSON body every route answers with. */
@@ -48,6 +52,16 @@ export class DmTargetResolutionError extends Error {
       "DM_TARGET_NOT_SENDABLE",
       AGENT_REMINDERS_NOT_SENDABLE_MESSAGE,
       "send to the reminder's anchor target instead of dm:@reminders",
+    );
+  }
+
+  /** A migration receipt is a one-way notice: read it, but there is no one there to reply to. */
+  static migrationReceiptReadOnly(target: string): DmTargetResolutionError {
+    return new DmTargetResolutionError(
+      "MIGRATION_RECEIPT_READ_ONLY",
+      `${target} is a migration receipt: a one-way notice from Raft about your move, with no one on the other side. `
+        + "No reply is needed. To tell your owner something, send it to their DM.",
+      "send to your owner's DM (dm:@<owner>) instead of the migration receipt",
     );
   }
 

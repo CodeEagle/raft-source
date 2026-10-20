@@ -45,6 +45,7 @@ test("agent.context returns the bound agent, server slug and name, and capabilit
       server: { id: "server-1", slug: "botiverse", name: "Botiverse" },
       capabilities: ["send", "read"],
       guide: "# Guide",
+      features: { reminderApp: false, vaultApp: false },
     },
   });
 });
@@ -110,4 +111,19 @@ test("agent.context carries assistantOf (RFC 074): the owner when set, null when
   assert.deepEqual(await contextWith({ assistantOf: { userId: owner } }), { userId: owner });
   assert.equal(await contextWith({ assistantOf: null }), null);
   assert.equal(await contextWith({}), null, "older Servers omit it");
+});
+
+test("agent.context carries the Server's app rollout features; older Servers read as both off", async () => {
+  const featuresFrom = async (extra: Record<string, unknown>) => {
+    const client = createRaftClient({
+      serverUrl: "https://raft.example",
+      credential,
+      fetch: async () => Response.json({ ...body, ...extra }),
+    });
+    const result = await client.agent.context();
+    assert.equal(result.ok, true);
+    return result.ok ? result.data.features : "unreached";
+  };
+  assert.deepEqual(await featuresFrom({ features: { reminderApp: true, vaultApp: false } }), { reminderApp: true, vaultApp: false });
+  assert.deepEqual(await featuresFrom({}), { reminderApp: false, vaultApp: false });
 });

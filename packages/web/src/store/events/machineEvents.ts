@@ -6,7 +6,7 @@
  * owns the status/capabilities/Computer-operation state transforms.
  */
 
-import type { ComputerOperationProgress, Machine } from "../machineStore";
+import type { ComputerOperationProgress, Machine, MachineRuntimeDetection } from "../machineStore";
 
 export interface MachineDomainState {
   machines: Machine[];
@@ -33,12 +33,15 @@ export type MachineEvent =
   | {
       kind: "capabilities";
       machineId: string;
-      runtimes: string[];
+      /** task #1268: absent when the server fans out detection state without an inventory (previous list unknown). */
+      runtimes?: string[];
       runtimeVersions?: Record<string, string>;
       hostname?: string;
       os?: string;
       daemonVersion?: string;
       computerVersion?: string | null;
+      /** task #1268: explicit detection state; absent = complete (leave as is). */
+      runtimeDetection?: MachineRuntimeDetection | null;
     }
   | {
       kind: "operation-set";
@@ -218,10 +221,19 @@ function applyCapabilities(
     if (machine.id !== event.machineId) return machine;
     const next: Machine = {
       ...machine,
-      runtimes: event.runtimes,
+      ...(event.runtimes !== undefined ? { runtimes: event.runtimes } : {}),
       ...(event.runtimeVersions !== undefined
         ? { runtimeVersions: event.runtimeVersions }
         : {}),
+      // task #1268: explicit state wins; an inventory-bearing event WITHOUT a
+      // state is an authoritative synchronous inventory and ends any earlier
+      // detecting / did-not-finish state; an inventory-less status event
+      // never touches the inventory.
+      ...(event.runtimeDetection !== undefined
+        ? { runtimeDetection: event.runtimeDetection }
+        : event.runtimes !== undefined && machine.runtimeDetection != null
+          ? { runtimeDetection: null }
+          : {}),
       ...(event.hostname !== undefined ? { hostname: event.hostname } : {}),
       ...(event.os !== undefined ? { os: event.os } : {}),
       ...(event.daemonVersion !== undefined

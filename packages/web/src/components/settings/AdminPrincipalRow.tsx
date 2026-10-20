@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import { useCallback } from "react";
 import type { ServerRole } from "@botiverse/raft-shared";
 import { useIntl } from "react-intl";
@@ -45,7 +45,7 @@ export function AdminPrincipalRow({
         // the right stays vertically centered. self-start on
         // the avatar achieves that without disrupting the
         // shared row alignment.
-        renderPrincipalAvatar(admin, "surface-list")
+        renderPrincipalAvatar(admin, "list-row")
       }
       name={label}
       subtitle={subtitle}
@@ -61,7 +61,7 @@ export function AdminPrincipalRow({
             {savingPrincipalKey === key ? formatMessage({ id: "settings.common.saving" }) : admin.role === "owner" ? formatMessage({ id: "settings.admins.removeOwner" }) : formatMessage({ id: "settings.admins.removeAdmin" })}
           </Button>
         ) : (
-          <span className="shrink-0 text-[10px] font-mono text-foreground-muted theme-brutal:text-black/40">
+          <span className="shrink-0 text-footnote text-foreground-hint">
             {admin.role === "owner" && ownerCount <= 1 ? formatMessage({ id: "settings.admins.lastOwner" }) : formatMessage({ id: "settings.admins.ownerOnly" })}
           </span>
         )

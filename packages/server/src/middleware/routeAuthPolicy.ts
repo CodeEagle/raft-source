@@ -77,6 +77,8 @@ export const routeAuthPolicy: readonly RouteAuthPolicyEntry[] = [
   // credential row — there is NO `:id` path param. All active routes
   // act on the credential's bound agent identity.
   // ---------------------------------------------------------------------------
+  { method: "GET", path: "/internal/agent-api/raftbench/context", principal: "sk_agent", note: "Staging-only bound RaftBench source context" },
+  { method: "POST", path: "/internal/agent-api/raftbench/submit", principal: "sk_agent", note: "Staging-only bound RaftBench result submission" },
   {
     method: "GET",
     path: "/internal/agent-api",

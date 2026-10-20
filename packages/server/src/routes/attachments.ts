@@ -12,6 +12,7 @@ import { eq, inArray, and, isNull, isNotNull } from "drizzle-orm";
 import {
   FREE_SINGLE_FILE_UPLOAD_LIMIT_BYTES,
   PRO_SINGLE_FILE_UPLOAD_LIMIT_BYTES,
+  type AttachmentPreviewResponse,
 } from "@botiverse/raft-shared";
 import { getDb } from "../db/index";
 import { attachments, messages } from "../db/schema";
@@ -21,7 +22,9 @@ import * as attachmentCommentService from "../services/attachmentCommentService"
 import { parseStructuredMentions } from "./messages";
 import { isChannelReadOnlyByBillingFeature, isChannelReadOnlyByQuota } from "../services/planService";
 import type { AgentOrchestrator } from "../services/agentOrchestrator";
-import { buildAttachmentPreviewResponse } from "../services/attachmentPreviews/registry";
+import { getAttachmentPreviewProvider } from "../services/attachmentPreviews/registry";
+import { getAttachmentPreviewWithCache, type AttachmentPreviewCacheOutcome } from "../services/attachmentPreviews/previewCache";
+import { withTraceChildSpan } from "../tracing/semanticTrace";
 import { getStorage, getCdnStorage, isStorageNotFoundError, isStorageTimeoutError, resolvePublicAssetUrl } from "../services/storageService";
 import {
   streamStorageResponse,
@@ -59,6 +62,13 @@ const SVG_RASTER_MAX_PIXELS = 4096 * 4096;
 const HEIC_DECODE_MAX_PIXELS = 64 * 1024 * 1024;
 const HTML_PREVIEW_TOKEN_TTL_SECONDS = 300;
 export const ATTACHMENT_PRESIGNED_URL_TTL_SECONDS = 300;
+// Inline video/audio previews use the presigned URL as a long-lived
+// <video>/<audio> src: the browser keeps sending range requests to it for as
+// long as the page is open, and an expired link surfaces as a broken preview
+// (bug-triage task #14). Only those get the longer window; downloads and every
+// other type keep the 5-minute TTL. Access is still checked when the link is
+// issued (`GET /:id/url`), so this widens the window, not who can view.
+export const ATTACHMENT_MEDIA_PREVIEW_PRESIGNED_URL_TTL_SECONDS = 3600;
 
 interface HtmlPreviewTokenClaims {
   sub: string;
@@ -316,7 +326,7 @@ async function getRequestAttachmentTooLargeResponse(req: Request): Promise<Retur
 }
 
 
-function isPreviewableImageMimeType(mimeType: string | null | undefined): boolean {
+export function isPreviewableImageMimeType(mimeType: string | null | undefined): boolean {
   return !!mimeType && PREVIEWABLE_IMAGE_MIME_TYPES.has(mimeType);
 }
 
@@ -519,6 +529,14 @@ function shouldUseInlinePreviewDisposition(req: Request, filename: string, mimeT
 
 function shouldUseDownloadDisposition(req: Request): boolean {
   return req.query.disposition === "attachment" || req.query.download === "1";
+}
+
+function attachmentUrlTtlSecondsForRequest(req: Request, filename: string, mimeType: string | null | undefined): number {
+  if (shouldUseDownloadDisposition(req) || req.query.disposition !== "inline") return ATTACHMENT_PRESIGNED_URL_TTL_SECONDS;
+  const resolvedMimeType = resolveAttachmentMimeType(filename, mimeType);
+  return isVideoPreviewAttachmentMimeType(resolvedMimeType) || isAudioPreviewAttachmentMimeType(resolvedMimeType)
+    ? ATTACHMENT_MEDIA_PREVIEW_PRESIGNED_URL_TTL_SECONDS
+    : ATTACHMENT_PRESIGNED_URL_TTL_SECONDS;
 }
 
 export function shouldStreamAttachmentThroughServerForRequest(
@@ -1262,7 +1280,7 @@ attachmentPublicRouter.get("/:id/url", async (req, res) => {
     }
 
     if (storage.getPresignedUrl && !shouldStreamAttachmentThroughServerForRequest(req)) {
-      const expiresIn = ATTACHMENT_PRESIGNED_URL_TTL_SECONDS;
+      const expiresIn = attachmentUrlTtlSecondsForRequest(req, attachment.filename, attachment.mimeType);
       const url = await storage.getPresignedUrl(attachment.storageKey, {
         expiresIn,
         responseContentDisposition: buildAttachmentContentDispositionForRequest(req, attachment.filename, attachment.mimeType),
@@ -1298,6 +1316,20 @@ attachmentPublicRouter.get("/:id/url", async (req, res) => {
   }
 });
 
+/** Coarse source-size class for preview traces: no ids, names or exact sizes. */
+function attachmentPreviewSizeBucket(sizeBytes: number): string {
+  if (sizeBytes < 100 * 1024) return "<100KB";
+  if (sizeBytes < 1024 * 1024) return "100KB-1MB";
+  if (sizeBytes <= 10 * 1024 * 1024) return "1-10MB";
+  return ">10MB";
+}
+
+/** generated / cache_hit / capped (over a size limit) / unsupported. */
+function attachmentPreviewTraceOutcome(response: AttachmentPreviewResponse, cache: AttachmentPreviewCacheOutcome): string {
+  if (response.status === "unsupported") return response.reason === "too_large" ? "capped" : "unsupported";
+  return cache === "hit" || cache === "shared" ? "cache_hit" : "generated";
+}
+
 attachmentPublicRouter.get("/:id/preview", async (req, res) => {
   if (rejectMalformedAttachmentId(req, res)) return;
   try {
@@ -1319,7 +1351,23 @@ attachmentPublicRouter.get("/:id/preview", async (req, res) => {
     }
 
     res.setHeader("Cache-Control", "private, no-store");
-    res.json(await buildAttachmentPreviewResponse(attachment));
+    // Access is checked above; the cache below only saves CPU (task #19).
+    const previewKind = getAttachmentPreviewProvider(attachment)?.kind ?? "unsupported";
+    const result = await withTraceChildSpan(
+      "server.attachment_preview.build",
+      { surface: "server", kind: "internal", attrs: { preview_kind: previewKind, size_bucket: attachmentPreviewSizeBucket(attachment.sizeBytes) } },
+      () => getAttachmentPreviewWithCache(attachment),
+      {
+        onSuccess: (built) => ({
+          outcome: attachmentPreviewTraceOutcome(built.response, built.cache),
+          cache: built.cache,
+          ...(built.computeMs === null ? {} : { compute_ms: built.computeMs }),
+          ...(built.fetchMs === undefined ? {} : { fetch_ms: built.fetchMs }),
+          ...(built.parseMs === undefined ? {} : { parse_ms: built.parseMs }),
+        }),
+      },
+    );
+    res.json(result.response);
   } catch (err) {
     // A missing storage object is a 404, not a server fault: the attachment
     // row outlived its object (lifecycle sweep, manual bucket edit, staging

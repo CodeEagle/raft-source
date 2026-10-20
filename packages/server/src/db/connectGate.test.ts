@@ -4,7 +4,9 @@ import pg from "pg";
 import { afterEach, test } from "vitest";
 import {
   DEFAULT_PG_CONNECT_CONCURRENCY,
+  connectErrorCategory,
   connectPermitWaitMs,
+  type ConnectAttemptFailure,
   createConnectGate,
   gatedClientClass,
   resolveConnectConcurrency,
@@ -195,4 +197,57 @@ test("an aborted acquire leaves the queue without taking a permit", async () => 
   held.release();
   (await next).release();
   assert.deepEqual(gate.state(), { connecting: 0, queued: 0 });
+});
+
+test("a failed connect reports whether it stalled in the handshake or behind full permits", async () => {
+  // o11y 2026-10-15: a task's new connects all failed at the 10 s pool timeout
+  // and the trace could not say which side they were stuck on.
+  const server = await hangingServer();
+  cleanups.push(server.close);
+  const gate = createConnectGate(1);
+  const failures: ConnectAttemptFailure[] = [];
+  const pool = new pg.Pool({
+    connectionString: server.url,
+    max: 10,
+    connectionTimeoutMillis: 300,
+    Client: gatedClientClass(gate, () => {}, (failure) => failures.push(failure)),
+  });
+  cleanups.push(() => pool.end().catch(() => {}));
+
+  // One handshake holds the only permit and hangs; two more queue behind it.
+  const errors = await Promise.all(Array.from({ length: 3 }, () => pool.connect().then(() => null, (err: Error) => err)));
+  assert.ok(errors.every((err) => err instanceof Error));
+  // What the checkout sees is the pool's deadline, or (for a queued client
+  // whose permit deadline lands first) the permit deadline: a timer race, so
+  // the checkout error alone cannot say where it was stuck. The attempt
+  // report below can.
+  for (const err of errors) {
+    assert.ok(["pool_connect_timeout", "permit_wait_timeout"].includes(connectErrorCategory(err)));
+  }
+  await until(() => failures.length === 3);
+
+  // The client that held the permit hung in the handshake until the pool gave up.
+  const longHandshakes = failures.filter((failure) => failure.stage === "handshake" && failure.handshakeMs >= 250);
+  assert.equal(longHandshakes.length, 1);
+  assert.equal(longHandshakes[0]!.errorCategory, "connection_terminated");
+  // The others spent their time queued behind the full gate: permitWaitMs
+  // says so whether they were reported at the permit deadline or (timer
+  // race) handed the permit at their own deadline and dialed for a few ms.
+  const rest = failures.filter((failure) => !longHandshakes.includes(failure));
+  assert.equal(rest.length, 2);
+  for (const failure of rest) {
+    assert.ok(failure.permitWaitMs >= 250, JSON.stringify(failure));
+    if (failure.stage === "permit_wait") assert.equal(failure.handshakeMs, 0);
+  }
+});
+
+test("connect error categories are codes or fixed labels, never message text", () => {
+  assert.equal(connectErrorCategory(Object.assign(new Error("connect ETIMEDOUT 1.2.3.4:5432"), { code: "ETIMEDOUT" })), "ETIMEDOUT");
+  assert.equal(connectErrorCategory(Object.assign(new Error("sorry, too many clients already"), { code: "53300" })), "53300");
+  assert.equal(connectErrorCategory(new Error("timeout exceeded when trying to connect")), "pool_connect_timeout");
+  assert.equal(connectErrorCategory(new Error("Connection terminated due to connection timeout")), "pool_connect_timeout");
+  assert.equal(connectErrorCategory(new Error("Connection terminated unexpectedly")), "connection_terminated");
+  assert.equal(connectErrorCategory(new Error("remaining connection slots are reserved")), "too_many_connections");
+  assert.equal(connectErrorCategory(new Error("something with a secret host db.internal")), "other");
+  assert.equal(connectErrorCategory("not an error"), "other");
 });

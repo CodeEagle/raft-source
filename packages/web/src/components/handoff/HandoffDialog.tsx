@@ -23,7 +23,7 @@ export default function HandoffDialog({ onClose }: { onClose: () => void }) {
       maxWidthClass="max-w-2xl"
       testId="handoff-dialog"
     >
-      <p className="mb-4 text-sm text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "handoff.dialog.subtitle" })}</p>
+      <p className="mb-4 text-subhead text-foreground-muted">{formatMessage({ id: "handoff.dialog.subtitle" })}</p>
       <HandoffCreateFlow onClose={closeDialog} onStateChange={setFlowState} />
     </DialogCard>
   );

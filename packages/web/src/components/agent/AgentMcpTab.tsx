@@ -1,4 +1,5 @@
-import { Input,
+import {
+  Input,
   Button,
   Select,
   SelectContent,
@@ -8,7 +9,10 @@ import { Input,
   SelectItemText,
   SelectList,
   SelectTrigger,
-  SelectValue, Textarea } from "raft-ui";
+  SelectValue,
+  Textarea,
+  ListRowGroup,
+} from "@botiverse/raft-ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { useIntl } from "react-intl";
@@ -404,9 +408,9 @@ export function AgentMcpTab({
     : catalog?.servers ?? [];
 
   return (
-    <div className={scope === "server" ? "" : "flex-1 overflow-y-auto bg-layer-panel px-5 py-4 text-foreground-strong theme-brutal:bg-white theme-brutal:text-black"}>
+    <div className={scope === "server" ? "" : "flex-1 overflow-y-auto bg-layer-canvas px-5 py-4 text-foreground"}>
       <div className="space-y-6">
-        {error && <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>}
+        {error && <Banner intent="warning" density="sm">{error}</Banner>}
 
         <section className="space-y-3">
           <div>
@@ -418,14 +422,14 @@ export function AgentMcpTab({
               action={
                 scope === "server" && canManageServer ? (
                   <Button variant="outline" size="sm" onClick={beginAdd}>
-                    <Plus size={13} /> {formatMessage({ id: "agent.mcp.addServer" })}
+                    <Plus size={16} /> {formatMessage({ id: "agent.mcp.addServer" })}
                   </Button>
                 ) : loading ? (
-                  <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "common.loading" })}</span>
+                  <span className="text-caption text-foreground-hint">{formatMessage({ id: "common.loading" })}</span>
                 ) : null
               }
             />
-            <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">
+            <p className="mt-1 text-callout text-foreground-muted">
               {scope === "server"
                 ? formatMessage({ id: "agent.mcp.serverDescription" })
                 : formatMessage({ id: "agent.mcpUsage.description" })}
@@ -433,9 +437,10 @@ export function AgentMcpTab({
           </div>
 
           {loading ? (
-            <div className="font-mono text-xs text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "agent.mcp.loadingServers" })}</div>
+            <div className="text-callout text-foreground-hint">{formatMessage({ id: "agent.mcp.loadingServers" })}</div>
           ) : visibleServers.length > 0 ? (
-            <div className="space-y-3">
+            /* Raft Design System › ListRow `rf-list--inset`: one card holding the rows, hairlines between them. */
+            <ListRowGroup>
               {visibleServers.map((server) => (
                 <McpServerListItem
                   key={server.id}
@@ -455,7 +460,7 @@ export function AgentMcpTab({
                   formatTime={formatTime}
                 />
               ))}
-            </div>
+            </ListRowGroup>
           ) : (
             <EmptyState
               icon={<Blocks size={36} />}
@@ -468,8 +473,8 @@ export function AgentMcpTab({
                 ? formatMessage({ id: "agent.mcp.emptyServerDescription" })
                 : formatMessage({ id: "agent.mcpUsage.emptyDescription" })}
               action={scope === "server" && canManageServer ? (
-                <Button onClick={beginAdd}>
-                  <Plus size={13} /> {formatMessage({ id: "agent.mcp.addServer" })}
+                <Button variant="outline" size="sm" onClick={beginAdd}>
+                  <Plus size={16} /> {formatMessage({ id: "agent.mcp.addServer" })}
                 </Button>
               ) : undefined}
             />
@@ -480,9 +485,9 @@ export function AgentMcpTab({
           <section className="space-y-3">
             <div>
               <SectionHeader label={formatMessage({ id: "agent.mcp.recommendedTitle" })} count={catalog.recommendations.length} />
-              <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "agent.mcp.recommendedDescription" })}</p>
+              <p className="mt-1 text-callout text-foreground-muted">{formatMessage({ id: "agent.mcp.recommendedDescription" })}</p>
             </div>
-            <div className="space-y-3">
+            <ListRowGroup>
               {catalog.recommendations.map((recommendation) => (
                 <McpRecommendationItem
                   key={recommendation.id}
@@ -492,14 +497,14 @@ export function AgentMcpTab({
                   formatMessage={formatMessage}
                 />
               ))}
-            </div>
+            </ListRowGroup>
           </section>
         )}
       </div>
 
       {scope === "server" && canManageServer && draft && (
         <DialogCard
-          title={draft.id ? draft.name || formatMessage({ id: "agent.mcp.serverFallbackTitle" }) : formatMessage({ id: "agent.mcp.newServerTitle" })}
+          title={draft.id ? formatMessage({ id: "agent.mcp.editTitle" }, { name: draft.name || formatMessage({ id: "agent.mcp.serverFallbackTitle" }) }) : formatMessage({ id: "agent.mcp.newServerTitle" })}
           titleId="mcp-server-form-title"
           onClose={closeEditor}
           maxWidthClass="max-w-2xl"
@@ -509,16 +514,16 @@ export function AgentMcpTab({
             className="space-y-4"
             aria-labelledby="mcp-server-form-title"
           >
-            <p className="text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "agent.mcp.formDescription" })}</p>
+            <p className="text-subhead text-foreground-muted">{formatMessage({ id: "agent.mcp.formDescription" })}</p>
 
             {editorError && (
-              <Banner intent="warning" density="sm" className="font-bold">
+              <Banner intent="warning" density="sm">
                 {editorError}
               </Banner>
             )}
 
             <div className="grid gap-3 sm:grid-cols-2">
-              <FormField label={formatMessage({ id: "agent.mcp.providerLabel" })} labelStyle="plain" size="compact" required>
+              <FormField label={formatMessage({ id: "agent.mcp.providerLabel" })} size="compact" required>
                 <Select
                   value={draft.provider}
                   disabled={draft.id !== null}
@@ -534,7 +539,7 @@ export function AgentMcpTab({
                   </SelectContent>
                 </Select>
               </FormField>
-              <FormField label={formatMessage({ id: "agent.mcp.authenticationLabel" })} labelStyle="plain" size="compact" required>
+              <FormField label={formatMessage({ id: "agent.mcp.authenticationLabel" })} size="compact" required>
                 <Select
                   value={draft.authMode}
                   disabled={draft.provider !== "custom"}
@@ -550,16 +555,16 @@ export function AgentMcpTab({
                   </SelectContent>
                 </Select>
               </FormField>
-              <FormField label={formatMessage({ id: "agent.mcp.nameLabel" })} labelStyle="plain" size="compact" required>
-                <Input required maxLength={120} className="w-full text-sm" value={draft.name} onChange={handleDraftNameChange} />
+              <FormField label={formatMessage({ id: "agent.mcp.nameLabel" })} size="compact" required>
+                <Input required maxLength={120} className="w-full" value={draft.name} onChange={handleDraftNameChange} />
               </FormField>
-              <FormField label={formatMessage({ id: "agent.mcp.serverUrlLabel" })} labelStyle="plain" size="compact" required>
-                <Input required type="url" disabled={draft.provider !== "custom"} className="w-full text-sm disabled:bg-fill-muted theme-brutal:disabled:bg-gray-100" value={draft.endpointUrl} onChange={handleDraftEndpointChange} />
+              <FormField label={formatMessage({ id: "agent.mcp.serverUrlLabel" })} size="compact" required>
+                <Input required type="url" disabled={draft.provider !== "custom"} className="w-full" value={draft.endpointUrl} onChange={handleDraftEndpointChange} />
               </FormField>
             </div>
 
-            <FormField label={formatMessage({ id: "agent.mcp.descriptionLabel" })} labelStyle="plain" size="compact" optional>
-              <Textarea rows={2} className="resize-y text-sm" value={draft.description} onChange={handleDraftDescriptionChange} />
+            <FormField label={formatMessage({ id: "agent.mcp.descriptionLabel" })} size="compact" optional>
+              <Textarea rows={2} className="resize-y" value={draft.description} onChange={handleDraftDescriptionChange} />
             </FormField>
 
             {draft.authMode === "oauth" && (
@@ -569,14 +574,14 @@ export function AgentMcpTab({
             )}
 
             {draft.authMode === "headers" && (
-              <FormField label={formatMessage({ id: "agent.mcp.credentialHeadersLabel" })} labelStyle="plain" size="compact" optional>
+              <FormField label={formatMessage({ id: "agent.mcp.credentialHeadersLabel" })} size="compact" optional>
                 <div className="mt-3 space-y-2">
                   {draft.headers.map((header) => (
                     <McpHeaderRow key={header.id} header={header} draft={draft} updateDraft={updateDraft} formatMessage={formatMessage} />
                   ))}
                   <KeyValueAddButton label={formatMessage({ id: "agent.mcp.addHeader" })} onClick={handleAddHeader} />
                   {draft.headers.length === 0 && (
-                    <p className="text-xs text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "agent.mcp.noCredentialHeaders" })}</p>
+                    <p className="text-caption text-foreground-hint">{formatMessage({ id: "agent.mcp.noCredentialHeaders" })}</p>
                   )}
                 </div>
               </FormField>
@@ -584,11 +589,12 @@ export function AgentMcpTab({
 
             {draft.authMode !== "oauth" && <div className="flex justify-start">
               <Button
+                variant="outline"
                 size="sm"
                 disabled={connectionTest?.status === "testing" || !draft.endpointUrl.trim() || draftHeadersIncomplete}
                 onClick={handleTestConnectionClick}
               >
-                <FlaskConical size={13} /> {formatMessage({ id: connectionTest?.status === "testing" ? "agent.mcp.testingConnection" : "agent.mcp.testConnection" })}
+                <FlaskConical size={16} /> {formatMessage({ id: connectionTest?.status === "testing" ? "agent.mcp.testingConnection" : "agent.mcp.testConnection" })}
               </Button>
             </div>}
 
@@ -601,10 +607,10 @@ export function AgentMcpTab({
               <Banner intent="warning" density="sm" withIcon>{connectionTest.message}</Banner>
             )}
 
-            <div className="flex items-center justify-end gap-2 border-t border-line-muted pt-4 theme-brutal:border-t-2 theme-brutal:border-black">
-              <Button variant="outline" size="md" onClick={closeEditor}>{formatMessage({ id: "common.confirm.cancel" })}</Button>
-              <Button type="submit" variant="success" size="md" disabled={busyId !== null}>
-                <Check size={14} /> {formatMessage({ id: busyId === (draft.id ?? "new") ? "agent.mcp.saving" : "agent.mcp.save" })}
+            <div className="flex items-center justify-end gap-2 border-t border-line-hairline pt-4">
+              <Button variant="ghost" size="lg" onClick={closeEditor}>{formatMessage({ id: "common.confirm.cancel" })}</Button>
+              <Button type="submit" variant="primary" size="lg" disabled={busyId !== null}>
+                <Check size={16} /> {formatMessage({ id: busyId === (draft.id ?? "new") ? "agent.mcp.saving" : "agent.mcp.save" })}
               </Button>
             </div>
           </form>
@@ -620,7 +626,8 @@ export function AgentMcpTab({
           )}
           confirmLabel={formatMessage({ id: "agent.mcp.deleteConfirmLabel" })}
           loadingLabel={formatMessage({ id: "agent.mcp.deleting" })}
-          confirmIcon={<Trash2 size={14} />}
+          confirmVariant="danger"
+          confirmIcon={<Trash2 size={16} />}
           onConfirm={handleDeleteConfirm}
           onClose={handleDeleteClose}
         />

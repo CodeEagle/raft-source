@@ -28,13 +28,65 @@ export default defineConfig({
       if (forbidden.length) this.error(`Standalone feedback imported application startup: ${forbidden.join(", ")}`);
     },
     writeBundle() {
-      const directory = resolve(root, "dist/feedback/assets");
-      const sizes = { js: 0, css: 0 };
+      const distDir = resolve(root, "dist/feedback");
+      const directory = resolve(distDir, "assets");
+      // Totals across every emitted asset: the deferred markdown chunk counts
+      // here, so "on demand" cannot silently grow the entry without bound.
+      const totals = { js: 0, css: 0 };
       for (const name of readdirSync(directory)) {
-        if (name.endsWith(".js")) sizes.js += statSync(resolve(directory, name)).size;
-        if (name.endsWith(".css")) sizes.css += statSync(resolve(directory, name)).size;
+        if (name.endsWith(".js")) totals.js += statSync(resolve(directory, name)).size;
+        if (name.endsWith(".css")) totals.css += statSync(resolve(directory, name)).size;
       }
-      if (sizes.js > 1_000_000 || sizes.css > 750_000) this.error(`Feedback entry size budget exceeded: ${JSON.stringify(sizes)}`);
+      // First-paint graph: the entry plus everything it statically imports
+      // (dynamic imports are deferred and only count toward the totals). This
+      // line is what keeps the webview first paint fast — currently the
+      // markdown renderer is loaded on demand and stays out of this number.
+      const manifest = JSON.parse(
+        readFileSync(resolve(distDir, ".vite/manifest.json"), "utf8"),
+      ) as Record<string, { file?: string; css?: string[]; imports?: string[] }>;
+      const firstPaint = { js: 0, css: 0 };
+      const visited = new Set<string>();
+      const walk = (key: string) => {
+        if (visited.has(key)) return;
+        visited.add(key);
+        const item = manifest[key];
+        if (!item) return;
+        if (item.file?.endsWith(".js")) firstPaint.js += statSync(resolve(distDir, item.file)).size;
+        for (const css of item.css ?? []) firstPaint.css += statSync(resolve(distDir, css)).size;
+        for (const imp of item.imports ?? []) walk(imp);
+      };
+      // Resolve the entry from the manifest instead of hardcoding a key, and
+      // refuse to pass the first-paint line blindly: a renamed entry or a
+      // failed walk must fail the build, not silently read 0 (review).
+      const entryKey = Object.keys(manifest).find((key) => manifest[key]?.isEntry);
+      if (!entryKey) {
+        this.error(
+          "Feedback entry manifest has no isEntry item; refusing to check the first-paint budget blindly",
+        );
+      }
+      walk(entryKey as string);
+      if (firstPaint.js === 0) {
+        this.error(
+          "Feedback entry first-paint size resolved to 0 bytes; the static graph walk failed; refusing to pass blindly",
+        );
+      }
+      // Raft Design System (2026-10): every raft-ui recipe gained a `raft`
+      // branch and the foundation a raft scope, while the legacy brutal and
+      // elegant families are still shipped. Measured on the same tree:
+      // first-paint 941,681 -> 1,030,638 B, total 1,101,407 -> 1,190,364 B,
+      // css 659,766 -> 806,269 B. The budgets keep ~4% headroom over that and
+      // come back down once raft-ui retires the legacy families.
+      const budget = { firstPaintJs: 1_075_000, totalJs: 1_240_000, css: 840_000 };
+      console.log(
+        `feedback entry sizes: first-paint js ${firstPaint.js}, total js ${totals.js}, css ${totals.css} ` +
+          `(budget first-paint ${budget.firstPaintJs}, total ${budget.totalJs}, css ${budget.css})`,
+      );
+      if (firstPaint.js > budget.firstPaintJs)
+        this.error(`Feedback entry first-paint budget exceeded: ${firstPaint.js} > ${budget.firstPaintJs}`);
+      if (totals.js > budget.totalJs)
+        this.error(`Feedback entry total js budget exceeded: ${totals.js} > ${budget.totalJs}`);
+      if (totals.css > budget.css)
+        this.error(`Feedback entry css budget exceeded: ${totals.css} > ${budget.css}`);
     },
   }],
   build: { outDir: resolve(root, "dist/feedback"), emptyOutDir: true, manifest: true, rolldownOptions: { input: resolve(root, "feedback/index.html") } },

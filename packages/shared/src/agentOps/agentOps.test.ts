@@ -440,7 +440,10 @@ test("held messages without conversation fields are projected under the send tar
   assert.deepEqual(short.interrupt.resume, { idempotencyKey: "k-1" }, "resume is still offered (in-process: the key to call again with)");
   assert.deepEqual(short.next?.args, { target: "dm:@cody" });
   assert.match(short.next?.why ?? "", /not all of them are shown here; read the conversation/);
-  assert.match(short.text, /Not all of them are shown here; read the conversation before sending again\./);
+  // The held text is the CLI's (formatAgentHold): the count, then the command for the full text.
+  assert.match(short.text, /^Held — 1 unread message in dm:@cody\. Your message was not sent\./);
+  assert.match(short.text, /Full text: raft message read --target "dm:@cody"/);
+  assert.match(short.text, /Not all of them are shown here: read the conversation first \(raft message read --target "dm:@cody"\), then send it again with idempotencyKey "k-1"\./);
   assert.equal(frontier.recordHeld(short.interrupt), false, "an incomplete preview is never attested");
   assert.deepEqual(frontier.attestation("dm:@cody"), { seenExactSeqs: [] });
 });
@@ -522,7 +525,8 @@ test("claimTasks surfaces a freshness hold as an interrupt: resume is the identi
   assert.equal("cancel" in outcome.interrupt, false, "a held claim saved nothing: no cancel");
   assert.equal(outcome.next?.kind, "retry_claim");
   assert.deepEqual(outcome.next?.args, { target: "#proj-sdk" });
-  assert.equal(outcome.text, 'Held — 4 unread messages in #proj-sdk. Your task claim was not applied.\nRead them with: raft message read --target "#proj-sdk"\nAfter reviewing, rerun the claim if it is still correct.');
+  // Reviewer isolation: the CLI's count-only line, then (SDK only: its text is all a model sees) what happened and the way forward.
+  assert.equal(outcome.text, "Reviewer-isolation freshness hold: 4 newer messages withheld.\n\nYour task claim was not applied. After reviewing, rerun the claim if it is still correct.");
   assert.equal(outcome.interrupt.context, outcome.text);
   const again = await claimTasks(api, { target: "#proj-sdk", taskNumbers: [1] });
   assert.equal(again.ok && again.state, "claimed");

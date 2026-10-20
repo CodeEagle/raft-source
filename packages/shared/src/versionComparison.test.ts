@@ -74,7 +74,7 @@ test("bothComputerVersionsKnown: positive proof both sides parse as semver", () 
   assert.equal(bothComputerVersionsKnown("0.0.62-rc1", "0.0.62"), false);
 });
 
-test("isRemoteUpgradeSupported: null when unknown, false below the first v2-capable release, true at or above", () => {
+test("isRemoteUpgradeSupported: null when unknown, false below the threshold release, true at or above", () => {
   // Unknown version is a distinct answer: the web shows neither the button
   // state nor the local-upgrade hint for it.
   assert.equal(isRemoteUpgradeSupported(null), null);
@@ -82,23 +82,26 @@ test("isRemoteUpgradeSupported: null when unknown, false below the first v2-capa
   assert.equal(isRemoteUpgradeSupported(""), null);
   assert.equal(isRemoteUpgradeSupported("  "), null);
   assert.equal(isRemoteUpgradeSupported("1.0.36"), false);
+  // 1.0.37–1.0.44 speak v2 but their own upgrade path proved unreliable.
+  assert.equal(isRemoteUpgradeSupported("1.0.37"), false);
+  assert.equal(isRemoteUpgradeSupported("1.0.44"), false);
   assert.equal(isRemoteUpgradeSupported("0.9.99"), false);
   assert.equal(isRemoteUpgradeSupported(COMPUTER_REMOTE_UPGRADE_MIN_VERSION), true, "the threshold release itself is supported");
-  assert.equal(isRemoteUpgradeSupported("1.0.38"), true);
+  assert.equal(isRemoteUpgradeSupported("1.0.46"), true);
   assert.equal(isRemoteUpgradeSupported("2.0.0"), true);
 });
 
 test("isRemoteUpgradeSupported reads full SemVer and fails closed: a prerelease sorts below its release", () => {
   // Below the threshold, with or without a prerelease suffix.
-  assert.equal(isRemoteUpgradeSupported("1.0.36-rc.1"), false);
-  assert.equal(isRemoteUpgradeSupported("1.0.36-staging.20260901000000.sha.0123456789ab"), false);
-  // 1.0.37-rc.1 precedes 1.0.37, the first v2-capable release.
-  assert.equal(isRemoteUpgradeSupported("1.0.37-rc.1"), false);
-  assert.equal(isRemoteUpgradeSupported("1.0.37"), true);
-  assert.equal(isRemoteUpgradeSupported(" 1.0.37 "), true, "surrounding whitespace is not a different version");
-  assert.equal(isRemoteUpgradeSupported("1.0.38-rc.1"), true);
-  assert.equal(isRemoteUpgradeSupported("1.0.41-staging.20261003090435.sha.4f9786e3e10a"), true);
-  assert.equal(isRemoteUpgradeSupported("1.0.37+build.5"), true);
+  assert.equal(isRemoteUpgradeSupported("1.0.44-rc.1"), false);
+  assert.equal(isRemoteUpgradeSupported("1.0.44-staging.20260901000000.sha.0123456789ab"), false);
+  // 1.0.45-rc.1 precedes 1.0.45, the threshold release.
+  assert.equal(isRemoteUpgradeSupported("1.0.45-rc.1"), false);
+  assert.equal(isRemoteUpgradeSupported("1.0.45"), true);
+  assert.equal(isRemoteUpgradeSupported(" 1.0.45 "), true, "surrounding whitespace is not a different version");
+  assert.equal(isRemoteUpgradeSupported("1.0.46-rc.1"), true);
+  assert.equal(isRemoteUpgradeSupported("1.0.48-staging.20261003090435.sha.4f9786e3e10a"), true);
+  assert.equal(isRemoteUpgradeSupported("1.0.45+build.5"), true);
   // Not SemVer: never supported.
   for (const garbage of ["abc", "1.0", "1.0.x", "01.0.40", "1.0.40-", "1.0.40-rc.01", "v1.0.40"]) {
     assert.equal(isRemoteUpgradeSupported(garbage), false, garbage);

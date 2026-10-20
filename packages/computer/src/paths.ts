@@ -272,6 +272,15 @@ export function serverConnectedMarkerPath(slockHome: string, serverId: string): 
   return path.join(serverDir(slockHome, serverId), "runner.connected");
 }
 
+/** The runner's latest memory sample (daemon processMemory.ts), shown by doctor. */
+export function serverRunnerMemoryPath(slockHome: string, serverId: string): string {
+  return path.join(serverDir(slockHome, serverId), "runner.memory.json");
+}
+
+export function serverRunnerStopIntentPath(slockHome: string, serverId: string): string {
+  return path.join(serverDir(slockHome, serverId), "runner.stop-intent");
+}
+
 export function serverLifecycleOperationsPath(slockHome: string, serverId: string): string {
   return path.join(serverDir(slockHome, serverId), "lifecycle-operations.json");
 }
@@ -303,6 +312,11 @@ export function serviceRunDir(slockHome: string): string {
 // `running` without killing any runners (§1.3 invariant).
 export function serviceStatePath(slockHome: string): string {
   return path.join(serviceRunDir(slockHome), "service.state.json");
+}
+
+/** The service's latest memory sample (serviceMemory.ts), shown by doctor. */
+export function serviceMemoryPath(slockHome: string): string {
+  return path.join(serviceRunDir(slockHome), "service.memory.json");
 }
 
 export function servicePidPath(slockHome: string): string {

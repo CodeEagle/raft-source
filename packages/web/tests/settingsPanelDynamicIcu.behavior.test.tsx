@@ -308,7 +308,7 @@ test("connectedApps.byLine threads {category},{developer} in list + detail modal
 
   // Occurrence 2 — marketplace listing detail modal.
   fireEvent.click(screen.getByText(APP_NAME));
-  const modal = (await screen.findByText("Profile")).closest('[data-slot="card"]') as HTMLElement;
+  const modal = (await screen.findByText("Profile")).closest('[data-slot="dialog-surface"]') as HTMLElement;
   const modalByLine = within(modal).getByText(byLine);
   assertResolved(modalByLine.textContent, {
     contains: [APP_CATEGORY, APP_DEVELOPER],

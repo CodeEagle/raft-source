@@ -164,10 +164,17 @@ export async function getServerBillingUsage(
     .select({ count: sql<number>`count(*)::int` })
     .from(serverMembers)
     .where(and(eq(serverMembers.serverId, serverId), ne(serverMembers.role, "guest")));
+  // App-owned Bots carry no seat (design-v3 §zero-seats): a managed Bot is
+  // still a directory/channel member, but not billable. Exclusion is a
+  // server-side durable binding, not a caller-controlled label.
   const [agentRow] = await executor
     .select({ count: sql<number>`count(*)::int` })
     .from(agents)
-    .where(and(eq(agents.serverId, serverId), isNull(agents.deletedAt)));
+    .where(and(
+      eq(agents.serverId, serverId),
+      isNull(agents.deletedAt),
+      isNull(agents.managedByAppInstallId),
+    ));
   return getBillingUsage(humanRow?.count ?? 0, agentRow?.count ?? 0);
 }
 

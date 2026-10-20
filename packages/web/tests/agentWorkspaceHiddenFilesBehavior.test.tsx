@@ -48,7 +48,8 @@ test("Agent Workspace exposes hidden files with a direct eye toggle and reloads 
   );
   assert.equal(toggle.tagName, "BUTTON");
   assert.equal(toggle.getAttribute("aria-pressed"), "false");
-  assert.match(toggle.className, /text-black\/40/);
+  // Off state: the quiet ink-3 icon (DS: hints have no colour); no frame of its own.
+  assert.match(toggle.className, /text-foreground-hint/);
   assert.doesNotMatch(toggle.className, /\bborder\b/);
   assert.doesNotMatch(toggle.className, /\bbg-white\b/);
   assert.deepEqual(calls.at(-1), {

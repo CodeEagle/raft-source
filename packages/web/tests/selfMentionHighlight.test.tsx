@@ -17,8 +17,13 @@ const EXPECTED_SELF_MENTION_BOX_TOKENS = [
   "inline-flex",
   "max-w-full",
   "truncate",
-  "border",
-  "px-1",
+  // Raft sticker: the ink edge is an inset shadow plus the die-cut ring, not
+  // a CSS border, so it adds nothing to the chip's box.
+  "rounded-sticker",
+  "inset-ring-[1.5px]",
+  "inset-ring-sticker-ink",
+  "ring-[1.5px]",
+  "px-[3px]",
   "py-0",
   "[font-size:inherit]",
   "leading-[1.2em]",
@@ -49,8 +54,8 @@ test("self mention uses the inbox mention-you yellow treatment", () => {
   const chip = screen.getByText("@self");
   assert.match(
     chip.className,
-    /(^|\s)bg-primary(\s|$)/,
-    "self mention must use the semantic primary-soft fill",
+    /(^|\s)bg-brand(\s|$)/,
+    "self mention must use the semantic primary fill",
   );
   for (const token of EXPECTED_SELF_MENTION_BOX_TOKENS) {
     assert.match(
@@ -66,12 +71,12 @@ test("agent mentions never use the self-mention highlight", () => {
   useAuthStore.setState({ user: { id: "user-self", name: "self" } } as never);
   renderMention("agent", "user-self", "@agent");
   const agent = screen.getByText("@agent");
-  assert.doesNotMatch(agent.className, /(^|\s)bg-soft-signal(\s|$)/, "agent mentions must not pick up the self-mention fill");
+  assert.doesNotMatch(agent.className, /(^|\s)bg-brand(\s|$)/, "agent mentions must not pick up the self-mention fill");
   assert.match(agent.className, /underline/);
   cleanup();
 
   renderMention("user", "user-other", "@other");
   const other = screen.getByText("@other");
-  assert.doesNotMatch(other.className, /(^|\s)bg-soft-signal(\s|$)/, "other-human mentions stay underlined, not yellow");
+  assert.doesNotMatch(other.className, /(^|\s)bg-brand(\s|$)/, "other-human mentions stay underlined, not yellow");
   assert.match(other.className, /underline/);
 });

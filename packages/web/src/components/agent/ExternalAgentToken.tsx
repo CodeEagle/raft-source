@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useIntl } from "react-intl";
-import { Button } from "raft-ui";
+import { Button, Separator } from "@botiverse/raft-ui";
 import api from "../../api/client";
 import { copyTextToClipboard } from "../../utils/selectMarkdown";
+import SectionEyebrow from "../ui/SectionEyebrow";
 import { CredentialRow } from "./CredentialRow";
 
 export type Credential = {
@@ -103,16 +104,16 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
 
   return (
     <div className="min-w-0 space-y-2" data-testid="external-agent-token">
-      <p className="text-xs text-foreground-muted">{formatMessage({ id: "agent.detail.externalTokenDescription" })}</p>
+      <p className="text-callout text-foreground-muted">{formatMessage({ id: "agent.detail.externalTokenDescription" })}</p>
       {token ? (
         <>
-          <label className="block text-xs font-bold">
+          <label className="block text-footnote font-semibold text-foreground-muted">
             {formatMessage({ id: "agent.detail.externalTokenLabel" })}
             <input type="text" readOnly value={`${token.slice(0, 14)}***${token.slice(-7)}`} autoComplete="off" spellCheck={false}
-              className="mt-1 block w-full min-w-0 rounded-md border border-line-muted bg-layer-panel p-2 font-mono text-xs text-foreground-strong theme-brutal:rounded-none theme-brutal:border-black/20 theme-brutal:bg-white"
+              className="mt-1.5 block h-10 w-full min-w-0 truncate rounded-control border border-line-hairline bg-layer-code px-3 font-mono text-mono-code text-foreground outline-none focus-visible:shadow-focus"
               data-private="true" data-ph-mask="true" />
           </label>
-          <p className="text-xs text-foreground-muted">{formatMessage({ id: "agent.detail.externalTokenOnce" })}</p>
+          <p className="text-caption text-foreground-hint">{formatMessage({ id: "agent.detail.externalTokenOnce" })}</p>
           <Button type="button" size="sm" variant="outline" className="whitespace-normal"
             onClick={handleCopy}>
             {formatMessage({ id: copied ? "agent.detail.copied" : "agent.detail.externalTokenCopy" })}
@@ -124,19 +125,20 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
           {formatMessage({ id: pending ? "agent.detail.externalTokenGenerating" : "agent.detail.externalTokenGenerate" })}
         </Button>
       )}
-      {error && <p role="alert" className="text-xs text-brutal-orange">{formatMessage({ id: "agent.detail.externalTokenError" })}</p>}
-      <div className="min-w-0 space-y-2 border-t border-line-muted pt-2">
+      {error && <p role="alert" className="text-footnote font-semibold text-warning-strong">{formatMessage({ id: "agent.detail.externalTokenError" })}</p>}
+      <div className="min-w-0 space-y-2">
+        <Separator className="mb-2" />
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs font-bold">{formatMessage({ id: "agent.detail.externalTokenList" })}</p>
+          <SectionEyebrow as="div">{formatMessage({ id: "agent.detail.externalTokenList" })}</SectionEyebrow>
           <Button type="button" size="sm" variant="outline" disabled={loading || pending || revokingId !== null}
             onClick={handleRefreshClick}
             className="whitespace-normal">
             {formatMessage({ id: "agent.detail.externalTokenRefresh" })}
           </Button>
         </div>
-        {loading && <p role="status" className="text-xs">{formatMessage({ id: "agent.detail.externalTokenLoading" })}</p>}
-        {listError && <p role="alert" className="text-xs text-brutal-orange">{formatMessage({ id: "agent.detail.externalTokenListError" })}</p>}
-        {!loading && !listError && credentials.length === 0 && <p className="text-xs">{formatMessage({ id: "agent.detail.externalTokenEmpty" })}</p>}
+        {loading && <p role="status" className="text-caption text-foreground-hint">{formatMessage({ id: "agent.detail.externalTokenLoading" })}</p>}
+        {listError && <p role="alert" className="text-footnote font-semibold text-warning-strong">{formatMessage({ id: "agent.detail.externalTokenListError" })}</p>}
+        {!loading && !listError && credentials.length === 0 && <p className="text-caption text-foreground-hint">{formatMessage({ id: "agent.detail.externalTokenEmpty" })}</p>}
         {!loading && !listError && credentials.map((credential) => (
           <CredentialRow
             key={credential.id}
@@ -149,7 +151,7 @@ export function ExternalAgentToken({ agentId }: { agentId: string }) {
             onStartRevoke={handleStartRevoke}
           />
         ))}
-        {revokeError && <p role="alert" className="text-xs text-brutal-orange">{formatMessage({ id: "agent.detail.externalTokenRevokeError" })}</p>}
+        {revokeError && <p role="alert" className="text-footnote font-semibold text-warning-strong">{formatMessage({ id: "agent.detail.externalTokenRevokeError" })}</p>}
       </div>
     </div>
   );

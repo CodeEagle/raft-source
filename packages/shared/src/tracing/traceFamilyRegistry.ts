@@ -22,6 +22,7 @@ export type TraceFamilyName =
   | "slock.state.transition"
   | "slock.state.violation"
   | "slock.client_error"
+  | "slock.media_preview.error"
   | "server.db.query";
 
 export const TRACE_JOIN_KEYS = ["clientEventId"] as const;
@@ -71,6 +72,19 @@ export const TRACE_FAMILY_REGISTRY = [
         how: "otel.logs query over throttled client-error events grouped by source/error/component",
         whoRuns: "Manjusaka",
         runbook: "Manjusaka daily-scan liveness ledger",
+      },
+    ],
+  },
+  {
+    family: "slock.media_preview.error",
+    privacyTier: "client-error",
+    entityFilterableDimensions: [],
+    consumers: [
+      {
+        what: "Daily count of inline media preview failures, checking that expired-link failures no longer show the codec warning (bug-triage task #14)",
+        how: "otel.logs query over throttled media-preview error events (message = 'slock.media_preview.error') grouped by error_class/browser_family/url_refreshed",
+        whoRuns: "AndyLok",
+        runbook: "docs/observability/reading-telemetry.md",
       },
     ],
   },

@@ -1,4 +1,10 @@
 import { toPng } from "html-to-image";
+import {
+  planScreenshotPixelRatio,
+  ScreenshotNeedsPaginationError,
+  validateScreenshotPng,
+} from "./screenshotBudget";
+import type { ValidatedScreenshot } from "./screenshotBudget";
 import { clearClockTimeout, errorClassOf, setClockTimeout } from "@botiverse/raft-shared";
 import { DEFAULT_AVATAR_KEY, pixelAvatarDataUrl } from "../components/agent/PixelAvatar";
 import { useServerStore } from "../store/serverStore";
@@ -257,19 +263,11 @@ function sanitizeClone(clone: HTMLElement): void {
     clone.querySelectorAll(sel).forEach((n) => n.remove());
   }
 
-  // Strip border / shadow / highlight state from the row container so
-  // the exported version has a calm, neutral chrome. Drop `group` /
-  // `cursor-*` too — they're interactive affordances.
-  clone.classList.remove(
-    "group",
-    "relative",
-    "hover:border-black",
-    "hover:bg-white",
-    "active:bg-white",
-    "active:border-black",
-  );
-  // Border rings vary by selection / hover state; force a clean
-  // transparent border so clones stack without double lines.
+  // Drop the row container's interactive affordance (`group`) and its
+  // positioning context.
+  clone.classList.remove("group", "relative");
+  // Border and wash vary by selection / hover / jump-highlight state; force a
+  // clean transparent frame so clones stack calmly without double lines.
   clone.style.border = "2px solid transparent";
   clone.style.marginBottom = "4px";
   clone.style.background = "transparent";
@@ -571,17 +569,31 @@ export function findSelectedMessageRows(messageIds: readonly string[], scope?: P
   });
 }
 
+/**
+ * Render the selected messages to one PNG that has passed
+ * `validateScreenshotPng`. Throws `ScreenshotNeedsPaginationError` when even
+ * 1x is over the pixel budget (no over-budget render is attempted) and
+ * `ScreenshotInvalidOutputError` when the engine returned an unusable image.
+ */
+export async function captureSelectedMessageImage(
+  messageIds: string[],
+  options: CaptureOptions = {},
+): Promise<ValidatedScreenshot> {
+  return withCaptureTimeout(captureSelectedMessagesUnsafe(messageIds, options), options.timeoutMs);
+}
+
+/** Data-URL form of `captureSelectedMessageImage`, for the e2e test hook. */
 export async function captureSelectedMessages(
   messageIds: string[],
   options: CaptureOptions = {},
 ): Promise<string> {
-  return withCaptureTimeout(captureSelectedMessagesUnsafe(messageIds, options), options.timeoutMs);
+  return (await captureSelectedMessageImage(messageIds, options)).dataUrl;
 }
 
 async function captureSelectedMessagesUnsafe(
   messageIds: string[],
   options: CaptureOptions = {},
-): Promise<string> {
+): Promise<ValidatedScreenshot> {
   if (messageIds.length === 0) {
     throw new Error("captureSelectedMessages: no message ids");
   }
@@ -755,9 +767,15 @@ async function captureSelectedMessagesUnsafe(
     // which reads as "blank" on small outputs.
     const liveHeight = container.offsetHeight;
 
-    return await toPng(container, {
+    // Over an engine's canvas budget the render does not fail, it comes back
+    // empty. Pick the highest ratio that fits the shared budget, and never
+    // attempt a render that does not fit (task #1302).
+    const plan = planScreenshotPixelRatio(liveWidth, liveHeight, resolveCapturePixelRatio(options.pixelRatio));
+    if (plan.kind === "needsPagination") throw new ScreenshotNeedsPaginationError(plan);
+
+    const dataUrl = await toPng(container, {
       backgroundColor: bg,
-      pixelRatio: resolveCapturePixelRatio(options.pixelRatio),
+      pixelRatio: plan.pixelRatio,
       // `cacheBust: true` re-fetches every img/font URL with a unique
       // query string, which defeats the decode() wait above (the new
       // URL gets a fresh pending fetch). Turn it off — we've already
@@ -778,6 +796,7 @@ async function captureSelectedMessagesUnsafe(
         top: "0",
       },
     });
+    return await validateScreenshotPng(dataUrl, plan.pixelRatio);
   } finally {
     container.remove();
     for (const dispose of disposeSnapshots.reverse()) dispose();

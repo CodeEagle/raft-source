@@ -91,12 +91,6 @@ test.skipIf(inSourceSnapshot)("server package exposes concurrent create and veri
       "@botiverse/raft-server",
       "db:verify-message-random-id-index",
     ],
-    "Verify inbox serving receiver/server/activity index": [
-      "pnpm",
-      "--filter",
-      "@botiverse/raft-server",
-      "db:verify-inbox-serving-rows-receiver-server-index",
-    ],
     "Create messages sender/created_at index": [
       "pnpm",
       "--filter",

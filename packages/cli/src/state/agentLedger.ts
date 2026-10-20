@@ -38,7 +38,11 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { CLI_READ_STATE_FILENAME, CLI_READ_STATE_NAMESPACE, configuredCliReadStateBase } from "@botiverse/raft-shared";
+import {
+  CLI_READ_STATE_FILENAME,
+  CLI_READ_STATE_NAMESPACE,
+  configuredCliReadStateBase,
+} from "@botiverse/raft-shared/src/agentCliSurface";
 import {
   isTrustedCanonicalTarget,
   MAX_EXACT_SEQS_PER_TARGET,

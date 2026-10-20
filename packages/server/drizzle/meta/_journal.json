@@ -2357,36 +2357,302 @@
     {
       "idx": 336,
       "version": "7",
-      "when": 1792336010434,
-      "tag": "0336_channel_workspace_management",
+      "when": 1791874936285,
+      "tag": "0336_retire_unused_referral_ledger",
       "breakpoints": true
     },
     {
       "idx": 337,
       "version": "7",
-      "when": 1792336989784,
-      "tag": "0337_agent_request_acknowledgements",
+      "when": 1791881039131,
+      "tag": "0337_agent_archives",
       "breakpoints": true
     },
     {
       "idx": 338,
       "version": "7",
-      "when": 1792342433404,
-      "tag": "0338_channel_workspace_task_runs",
+      "when": 1791882985303,
+      "tag": "0338_agent_credentials_api_key_hmac",
       "breakpoints": true
     },
     {
       "idx": 339,
       "version": "7",
-      "when": 1792343294410,
-      "tag": "0339_channel_workspace_task_path_snapshot",
+      "when": 1791884989202,
+      "tag": "0339_slack_agent_mention_sync",
       "breakpoints": true
     },
     {
       "idx": 340,
       "version": "7",
+      "when": 1791886695811,
+      "tag": "0340_joint_invite_accepted_via",
+      "breakpoints": true
+    },
+    {
+      "idx": 341,
+      "version": "7",
+      "when": 1791898609053,
+      "tag": "0341_mention_delivery_agent_open_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 342,
+      "version": "7",
+      "when": 1791911218318,
+      "tag": "0342_agent_runtime_provision_model",
+      "breakpoints": true
+    },
+    {
+      "idx": 343,
+      "version": "7",
+      "when": 1791931998711,
+      "tag": "0343_agent_runtime_provision_import",
+      "breakpoints": true
+    },
+    {
+      "idx": 344,
+      "version": "7",
+      "when": 1791935610872,
+      "tag": "0344_server_member_owner_opener_claim",
+      "breakpoints": true
+    },
+    {
+      "idx": 345,
+      "version": "7",
+      "when": 1791955626947,
+      "tag": "0345_agent_runtime_provision_setup_retry",
+      "breakpoints": true
+    },
+    {
+      "idx": 346,
+      "version": "7",
+      "when": 1791965271523,
+      "tag": "0346_app_bot_identity",
+      "breakpoints": true
+    },
+    {
+      "idx": 347,
+      "version": "7",
+      "when": 1791976427341,
+      "tag": "0347_public_server_search",
+      "breakpoints": true
+    },
+    {
+      "idx": 348,
+      "version": "7",
+      "when": 1791985159975,
+      "tag": "0348_hosted_runtime_server_plans",
+      "breakpoints": true
+    },
+    {
+      "idx": 349,
+      "version": "7",
+      "when": 1791986762222,
+      "tag": "0349_pre_auth_feature_flags",
+      "breakpoints": true
+    },
+    {
+      "idx": 350,
+      "version": "7",
+      "when": 1791988356488,
+      "tag": "0350_hosted_runtime_spend_pulls",
+      "breakpoints": true
+    },
+    {
+      "idx": 351,
+      "version": "7",
+      "when": 1791991910995,
+      "tag": "0351_attachment_preview_cache",
+      "breakpoints": true
+    },
+    {
+      "idx": 352,
+      "version": "7",
+      "when": 1792007942510,
+      "tag": "0352_hosted_runtime_model_picker_sync",
+      "breakpoints": true
+    },
+    {
+      "idx": 353,
+      "version": "7",
+      "when": 1792009711798,
+      "tag": "0353_thread_unread_badge_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 354,
+      "version": "7",
+      "when": 1792027880048,
+      "tag": "0354_public_search_service_keys",
+      "breakpoints": true
+    },
+    {
+      "idx": 355,
+      "version": "7",
+      "when": 1792057533980,
+      "tag": "0355_announcement_targeting",
+      "breakpoints": true
+    },
+    {
+      "idx": 356,
+      "version": "7",
+      "when": 1792122128343,
+      "tag": "0356_agent_activity_summary_v2",
+      "breakpoints": true
+    },
+    {
+      "idx": 357,
+      "version": "7",
+      "when": 1792131143942,
+      "tag": "0357_computers_api_key_hmac",
+      "breakpoints": true
+    },
+    {
+      "idx": 358,
+      "version": "7",
+      "when": 1792134067677,
+      "tag": "0358_conversation_read_all",
+      "breakpoints": true
+    },
+    {
+      "idx": 359,
+      "version": "7",
+      "when": 1792137731214,
+      "tag": "0359_mobile_push_outbox_active_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 360,
+      "version": "7",
+      "when": 1792143189318,
+      "tag": "0360_app_installation_setup",
+      "breakpoints": true
+    },
+    {
+      "idx": 361,
+      "version": "7",
+      "when": 1792178846451,
+      "tag": "0361_daemons_first_connected_at",
+      "breakpoints": true
+    },
+    {
+      "idx": 362,
+      "version": "7",
+      "when": 1792247934695,
+      "tag": "0362_activity_conversation_list_flag",
+      "breakpoints": true
+    },
+    {
+      "idx": 363,
+      "version": "7",
+      "when": 1792255482698,
+      "tag": "0363_daemons_device_class",
+      "breakpoints": true
+    },
+    {
+      "idx": 364,
+      "version": "7",
+      "when": 1792257562008,
+      "tag": "0364_computer_host_identities",
+      "breakpoints": true
+    },
+    {
+      "idx": 365,
+      "version": "7",
+      "when": 1792299034409,
+      "tag": "0365_agent_migration_hosted_target",
+      "breakpoints": true
+    },
+    {
+      "idx": 366,
+      "version": "7",
+      "when": 1792310766165,
+      "tag": "0366_raftbench_latest_run",
+      "breakpoints": true
+    },
+    {
+      "idx": 367,
+      "version": "7",
+      "when": 1792311384448,
+      "tag": "0367_raftbench_service_profile",
+      "breakpoints": true
+    },
+    {
+      "idx": 368,
+      "version": "7",
+      "when": 1792312946114,
+      "tag": "0368_raftbench_run_continuation",
+      "breakpoints": true
+    },
+    {
+      "idx": 369,
+      "version": "7",
+      "when": 1792320409316,
+      "tag": "0369_mobile_push_fcm_provider",
+      "breakpoints": true
+    },
+    {
+      "idx": 370,
+      "version": "7",
+      "when": 1792330141853,
+      "tag": "0370_raftbench_service_binding_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 371,
+      "version": "7",
+      "when": 1792346358535,
+      "tag": "0371_raftbench_progressive_analysis",
+      "breakpoints": true
+    },
+    {
+      "idx": 372,
+      "version": "7",
+      "when": 1792350140073,
+      "tag": "0372_raftbench_canary_target",
+      "breakpoints": true
+    },
+    {
+      "idx": 373,
+      "version": "7",
+      "when": 1792360939359,
+      "tag": "0373_raftbench_service_agents",
+      "breakpoints": true
+    },
+    {
+      "idx": 374,
+      "version": "7",
+      "when": 1792336010434,
+      "tag": "374_channel_workspace_management",
+      "breakpoints": true
+    },
+    {
+      "idx": 375,
+      "version": "7",
+      "when": 1792336989784,
+      "tag": "375_agent_request_acknowledgements",
+      "breakpoints": true
+    },
+    {
+      "idx": 376,
+      "version": "7",
+      "when": 1792342433404,
+      "tag": "376_channel_workspace_task_runs",
+      "breakpoints": true
+    },
+    {
+      "idx": 377,
+      "version": "7",
+      "when": 1792343294410,
+      "tag": "377_channel_workspace_task_path_snapshot",
+      "breakpoints": true
+    },
+    {
+      "idx": 378,
+      "version": "7",
       "when": 1792395629764,
-      "tag": "0340_delegation_records",
+      "tag": "378_delegation_records",
       "breakpoints": true
     }
   ]

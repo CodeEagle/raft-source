@@ -265,6 +265,7 @@ test("flag on: a route binding failure answers 503 and logs its reason without a
         headers: { Authorization: `Bearer ${token}`, "X-Raft-Client-Kind": "android" },
       });
       assert.equal(listed.status, 503);
+      assert.equal(listed.headers.get("retry-after"), "5", "a binding failure tells clients when to retry");
       assert.equal((await listed.json() as { code: string }).code, "feedback_integration_unavailable");
     } finally {
       console.warn = originalWarn;

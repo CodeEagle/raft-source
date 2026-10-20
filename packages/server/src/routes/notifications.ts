@@ -18,6 +18,7 @@ import {
   revokeNativeNotificationDevice,
   rotateNativeCredential,
 } from "../services/nativeNotificationService";
+import { clientIpForRateLimit } from "../lib/clientIpForRateLimit";
 
 export const notificationRouter: RouterType = Router();
 
@@ -35,7 +36,7 @@ const enrollmentGrantLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: () => process.env.NODE_ENV === "test",
-  keyGenerator: (req) => ipKeyGenerator(req.ip ?? "unknown"),
+  keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
   message: { error: "Too many native notification enrollment attempts", code: "native_notification_rate_limited" },
 });
 
@@ -45,7 +46,7 @@ const enrollmentExchangeLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   skip: () => process.env.NODE_ENV === "test",
-  keyGenerator: (req) => ipKeyGenerator(req.ip ?? "unknown"),
+  keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
   message: { error: "Too many native notification exchange attempts", code: "native_notification_rate_limited" },
 });
 

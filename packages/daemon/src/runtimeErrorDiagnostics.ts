@@ -5,6 +5,7 @@ import type {
   RuntimeErrorClass,
   RuntimeErrorReason,
   RuntimeErrorReasonProvenance,
+  RuntimeErrorRequiredAction,
 } from "@botiverse/raft-shared";
 
 const MAX_RUNTIME_ERROR_MESSAGE_EXCERPT_CHARS = 4096;
@@ -152,6 +153,7 @@ export function buildRuntimeErrorActivityDiagnostic(
 ): RuntimeErrorActivityDiagnostic {
   const envelope = buildRuntimeErrorDiagnosticEnvelope(message);
   const errorClass = metadata.errorClass ?? normalizeRuntimeErrorClass(envelope.spanAttrs.runtime_error_class);
+  const requiredAction = classifyRuntimeErrorAction(errorClass, message);
   return {
     errorClass,
     errorReason: metadata.errorClass
@@ -162,6 +164,7 @@ export function buildRuntimeErrorActivityDiagnostic(
     ...(typeof metadata.nativeReasonPresent === "boolean"
       ? { nativeReasonPresent: metadata.nativeReasonPresent }
       : {}),
+    ...(requiredAction !== "none" ? { requiredAction } : {}),
   };
 }
 
@@ -381,7 +384,7 @@ function classifyRuntimeError(message: string, httpStatus: number | null): strin
   return "RuntimeError";
 }
 
-export type RuntimeErrorAction = "none" | "user_reauth" | "user_model_access";
+export type RuntimeErrorAction = "none" | RuntimeErrorRequiredAction;
 
 function classifyRuntimeErrorAction(runtimeErrorClass: string, message: string): RuntimeErrorAction {
   if (runtimeErrorClass === "AuthError") {

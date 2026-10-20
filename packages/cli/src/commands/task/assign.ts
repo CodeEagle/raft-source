@@ -4,7 +4,7 @@
 // Clearing is `raft task unassign`, a verb of its own — see unassign.ts.
 
 import type { Command } from "commander";
-import { type AgentApiTaskAssignBody } from "@botiverse/raft-shared";
+import type { AgentApiTaskAssignBody } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

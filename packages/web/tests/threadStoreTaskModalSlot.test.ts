@@ -249,3 +249,144 @@ test("retryTaskModal re-runs the slot lookup after an error", async () => {
     resetStore();
   }
 });
+
+const originalPost = api.post.bind(api);
+
+function restorePost() {
+  api.post = originalPost;
+}
+
+test("task #750: ensureTaskModalThreadChannel resolves from the modal slot anchor, not the side thread", async () => {
+  resetStore();
+  // A side thread being open underneath must not matter: the old code read
+  // the side open* slots for a modal send, which threw "No open thread to
+  // resolve" whenever they were empty. Pin both directions: with NO side
+  // thread open the modal ensure still resolves.
+  const postCalls: Array<{ url: string; body: unknown }> = [];
+  api.get = (async () => ({ data: {} })) as typeof api.get;
+  api.post = (async (url: string, body?: unknown) => {
+    postCalls.push({ url, body });
+    return { data: { threadChannelId: "thread-created-from-modal" } };
+  }) as typeof api.post;
+
+  try {
+    await useThreadStore.getState().openTaskModal({
+      parentChannelId: "channel-task",
+      parentMessageId: "parent-task",
+    });
+    assert.equal(useThreadStore.getState().taskModal?.threadChannelId, null, "zero-reply task: no thread yet");
+
+    const resolved = await useThreadStore.getState().ensureTaskModalThreadChannel();
+    assert.equal(resolved, "thread-created-from-modal");
+    assert.deepEqual(postCalls, [{
+      url: "/channels/channel-task/threads",
+      body: { parentMessageId: "parent-task" },
+    }]);
+    // Same discipline as the side thread: resolution alone stays local; the
+    // slot is bound on durable accept (ThreadPanel's onChannelResolved).
+    assert.equal(
+      useThreadStore.getState().taskModal?.threadChannelId,
+      null,
+      "resolution alone does not bind the slot",
+    );
+  } finally {
+    restorePost();
+    restoreApi();
+    resetStore();
+  }
+});
+
+test("task #750: an already-bound modal slot resolves without a second POST", async () => {
+  resetStore();
+  useThreadStore.setState({ summaries: { "parent-task": makeSummary("thread-task") } });
+  let postCalled = false;
+  api.post = (async () => {
+    postCalled = true;
+    return { data: {} };
+  }) as typeof api.post;
+
+  try {
+    await useThreadStore.getState().openTaskModal({
+      parentChannelId: "channel-task",
+      parentMessageId: "parent-task",
+    });
+    assert.equal(useThreadStore.getState().taskModal?.threadChannelId, "thread-task");
+
+    const resolved = await useThreadStore.getState().ensureTaskModalThreadChannel();
+    assert.equal(resolved, "thread-task");
+    assert.equal(postCalled, false, "known thread id short-circuits the writer");
+  } finally {
+    restorePost();
+    resetStore();
+  }
+});
+
+test("task #750: modal ensure with no slot open fails without touching the side thread", async () => {
+  resetStore();
+  openSideThread();
+
+  await assert.rejects(
+    () => useThreadStore.getState().ensureTaskModalThreadChannel(),
+    /No open task modal to resolve/,
+  );
+  assertSideThreadUntouched();
+});
+
+test("task #750 follow-up: a server switch mid-flight is caught by the slot guard", async () => {
+  resetStore();
+  api.get = (async () => ({ data: {} })) as typeof api.get;
+  api.post = (async () => {
+    // The slot's server changes while the create call is in flight — the
+    // guard must compare the server slug like it compares the anchor.
+    useThreadStore.setState((prev) => ({
+      taskModal: prev.taskModal ? { ...prev.taskModal, serverSlug: "other-server" } : null,
+    }));
+    return { data: { threadChannelId: "thread-late" } };
+  }) as typeof api.post;
+
+  try {
+    await useThreadStore.getState().openTaskModal({
+      parentChannelId: "channel-task",
+      parentMessageId: "parent-task",
+    });
+    await assert.rejects(
+      () => useThreadStore.getState().ensureTaskModalThreadChannel(),
+      /Thread context changed while creating the thread/,
+    );
+    assert.equal(
+      useThreadStore.getState().taskModal?.threadChannelId,
+      null,
+      "a cross-server stale accept must not bind the slot",
+    );
+  } finally {
+    restorePost();
+    restoreApi();
+    resetStore();
+  }
+});
+
+test("task #750: a stale resolution (anchor changed mid-flight) throws and writes nothing", async () => {
+  resetStore();
+  api.get = (async () => ({ data: {} })) as typeof api.get;
+  api.post = (async () => {
+    // The modal is closed while the create call is in flight.
+    useThreadStore.getState().closeTaskModal();
+    return { data: { threadChannelId: "thread-late" } };
+  }) as typeof api.post;
+
+  try {
+    await useThreadStore.getState().openTaskModal({
+      parentChannelId: "channel-task",
+      parentMessageId: "parent-task",
+    });
+    await assert.rejects(
+      () => useThreadStore.getState().ensureTaskModalThreadChannel(),
+      /Thread context changed while creating the thread/,
+    );
+    assert.equal(useThreadStore.getState().taskModal, null);
+  } finally {
+    restorePost();
+    restoreApi();
+    resetStore();
+  }
+});

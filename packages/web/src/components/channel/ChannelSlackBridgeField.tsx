@@ -3,6 +3,7 @@ import { useIntl } from "react-intl";
 import { SLACK_BRIDGE_FEATURE_FLAG_KEYS } from "@botiverse/raft-shared";
 import {
   Badge,
+  FormSection,
   Select,
   SelectContent,
   SelectIcon,
@@ -12,7 +13,7 @@ import {
   SelectList,
   SelectTrigger,
   SelectValue,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import type { SlackBridgeProvisioningProvider, SlackBridgeSetupSnapshot, SlackBridgeSetupStage } from "../settings/slackBridgeProvisioning";
 import { isSlackBridgePreflightPassed } from "../settings/slackBridgeProvisioning";
 import { slackBridgeProvisioningProvider } from "../settings/slackBridgeProvisioningApi";
@@ -131,14 +132,20 @@ export function useChannelSlackBridgeEditor(input: {
   );
 }
 
+/** The channel's Slack Bridge pick as a raft-ui FormSection (DS
+ *  `rf-drawer__section`): heading with the provider badge, a line on what it
+ *  does, then the Slack channel field. `className` adjusts the section's own
+ *  spacing for a host that is not a run of sections (the create dialog). */
 export function ChannelSlackBridgeField({
   editor,
   visibility,
   disabled,
+  className,
 }: {
   editor: SlackBridgeEditor;
   visibility: "public" | "private";
   disabled?: boolean;
+  className?: string;
 }) {
   const { formatMessage } = useIntl();
   const options = useMemo(() => editor.snapshot?.slackChannels.filter((channel) =>
@@ -181,16 +188,19 @@ export function ChannelSlackBridgeField({
   if (!editor.available) return null;
 
   return (
-    <section className="space-y-3 border-t border-line-muted pt-4 theme-brutal:border-t-2 theme-brutal:border-black" data-testid="channel-slack-bridge-field">
-      <div>
-        <div className="flex items-center gap-2 text-xs font-bold text-foreground-muted theme-brutal:uppercase theme-brutal:tracking-wide theme-brutal:text-black/65">
-          <Badge appearance="soft" variant="muted" data-testid="channel-slack-bridge-provider-badge">
+    <FormSection
+      className={className}
+      data-testid="channel-slack-bridge-field"
+      title={(
+        <span className="flex items-center gap-2">
+          <Badge appearance="outline" data-testid="channel-slack-bridge-provider-badge">
             {formatMessage({ id: "settings.slackBridge.providerBadge" })}
           </Badge>
           {formatMessage({ id: "channel.bridge.fieldTitle" })}
-        </div>
-        <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "channel.bridge.fieldDescription" })}</p>
-      </div>
+        </span>
+      )}
+      description={formatMessage({ id: "channel.bridge.fieldDescription" })}
+    >
       <FormField label={formatMessage({ id: "channel.bridge.slackChannel" })}>
         <Select
           value={editor.selectedSlackChannelId || NOT_CONNECTED_VALUE}
@@ -214,6 +224,6 @@ export function ChannelSlackBridgeField({
           </SelectContent>
         </Select>
       </FormField>
-    </section>
+    </FormSection>
   );
 }

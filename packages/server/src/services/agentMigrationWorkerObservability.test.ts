@@ -17,6 +17,7 @@ import {
 const BUILD_IDENTITY = {
   ok: true as const,
   identity: {
+    version: "1.21.13",
     sha: "0123456789abcdef0123456789abcdef01234567",
     builtAt: "2026-08-21T20:00:00.000Z",
     branch: "staging",

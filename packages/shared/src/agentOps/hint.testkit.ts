@@ -26,6 +26,18 @@ export const RAFT_HINT_SAMPLES: Record<RaftHintBuilderName, RaftHintSample[]> = 
       tool: `messages_read({ target: "dm:@richard:1234abcd", around: "${MSG}" })`,
     },
   ],
+  messageSearch: [
+    {
+      hint: RAFT_HINTS.messageSearch({ query: "invoice", cursor: "CUR" }),
+      cli: `raft message search --query 'invoice' --sort recent --cursor 'CUR'`,
+      tool: `messages_search({ query: "invoice", sort: "recent", cursor: "CUR" })`,
+    },
+    {
+      hint: RAFT_HINTS.messageSearch({ query: "it's due", target: "#billing", sender: "alice", after: "2026-09-16T00:00:00.000+00:00", limit: 5, cursor: "CUR" }),
+      cli: `raft message search --query 'it'\\''s due' --target '#billing' --sender 'alice' --after '2026-09-16T00:00:00.000+00:00' --limit 5 --sort recent --cursor 'CUR'`,
+      tool: `messages_search({ query: "it's due", target: "#billing", sender: "alice", after: "2026-09-16T00:00:00.000+00:00", limit: 5, sort: "recent", cursor: "CUR" })`,
+    },
+  ],
   messageSend: [
     { hint: RAFT_HINTS.messageSend({ target: "#ops:abcd1234" }), cli: `raft message send --target "#ops:abcd1234"`, tool: `messages_send({ target: "#ops:abcd1234", content: … })` },
     { hint: RAFT_HINTS.messageSend({ target: "dm:@name" }), cli: `raft message send --target "dm:@name"`, tool: `messages_send({ target: "dm:@name", content: … })` },
@@ -38,6 +50,11 @@ export const RAFT_HINT_SAMPLES: Record<RaftHintBuilderName, RaftHintSample[]> = 
       hint: RAFT_HINTS.messageSend({ attachmentId: "att-1" }),
       cli: `raft message send --attachment-id att-1`,
       tool: `messages_send({ attachmentIds: ["att-1"], target: …, content: … })`,
+    },
+    {
+      hint: RAFT_HINTS.messageSend({ target: "#ops", targetConfirmed: true }),
+      cli: `raft message send --target "#ops" --target-confirmed`,
+      tool: `messages_send({ target: "#ops", targetConfirmed: true, content: … })`,
     },
   ],
   messageSendName: [{ hint: RAFT_HINTS.messageSendName(), cli: "raft message send", tool: "messages_send({ target: …, content: … })" }],
@@ -69,7 +86,10 @@ export const RAFT_HINT_SAMPLES: Record<RaftHintBuilderName, RaftHintSample[]> = 
     { hint: RAFT_HINTS.userInfo(), cli: "raft user info <name>", tool: "users_info({ name: … })" },
     { hint: RAFT_HINTS.userInfo({ name: "richard", offset: 50, limit: 50 }), cli: "raft user info @richard --offset 50 --limit 50", tool: `users_info({ name: "@richard", offset: 50, limit: 50 })` },
   ],
-  channelInfo: [{ hint: RAFT_HINTS.channelInfo(), cli: "raft channel info <name>", tool: "channels_info({ target: … })" }],
+  channelInfo: [
+    { hint: RAFT_HINTS.channelInfo(), cli: "raft channel info <name>", tool: "channels_info({ target: … })" },
+    { hint: RAFT_HINTS.channelInfo("#ops"), cli: `raft channel info "#ops"`, tool: `channels_info({ target: "#ops" })` },
+  ],
   channelMembers: [{ hint: RAFT_HINTS.channelMembers("#general"), cli: `raft channel members "#general"`, tool: `channels_members({ target: "#general" })` }],
   channelJoinName: [{ hint: RAFT_HINTS.channelJoinName(), cli: "raft channel join", tool: "channels_join({ target: … })" }],
   channelLeaveName: [{ hint: RAFT_HINTS.channelLeaveName(), cli: "raft channel leave", tool: "channels_leave({ target: … })" }],

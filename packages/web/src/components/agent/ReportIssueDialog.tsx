@@ -1,4 +1,4 @@
-import { Checkbox, Textarea, Button } from "raft-ui";
+import { Card, Checkbox, Textarea, Button } from "@botiverse/raft-ui";
 import { useCallback, useMemo, useState } from "react";
 import { Bug, CheckCircle } from "lucide-react";
 import { useIntl } from "react-intl";
@@ -510,36 +510,36 @@ export default function ReportIssueDialog({
     return (
       <DialogCard title={formatMessage({ id: "agent.reportIssue.submittedTitle" })} onClose={onClose} maxWidthClass="max-w-sm">
           <div className="flex flex-col items-center gap-4 py-4">
-            <div className="flex size-12 items-center justify-center border-2 border-line-muted theme-brutal:border-black bg-brutal-lime">
-              <CheckCircle size={24} />
+            <div className="flex size-12 items-center justify-center rounded-sticker border-[1.5px] border-sticker-ink bg-success text-sticker-ink">
+              <CheckCircle size={24} aria-hidden="true" />
             </div>
             <div className="text-center">
-              <p className="font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "agent.reportIssue.uploaded" })}</p>
-              <p className="mt-1 text-sm text-foreground-muted theme-brutal:text-black/60">
+              <p className="text-subhead font-bold text-foreground">{formatMessage({ id: "agent.reportIssue.uploaded" })}</p>
+              <p className="mt-1 text-callout text-foreground-muted">
                 {formatMessage({ id: submittedReport?.ticketId ? "agent.reportIssue.ticketFiled" : "agent.reportIssue.uploadedDescription" })}
               </p>
             </div>
             {submittedReport && !submittedReport.ticketId && (
-              <div className="w-full border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white p-3 text-left">
+              <Card className="block w-full p-3 text-left">
                 <Banner intent="warning" density="sm" className="mb-3" role="alert">
                   {formatMessage({ id: "agent.reportIssue.ticketFailed" })}
                 </Banner>
                 <SectionEyebrow as="div" className="mb-1">{formatMessage({ id: "agent.reportIssue.reportReference" })}</SectionEyebrow>
-                <dl className="space-y-1 text-xs">
+                <dl className="space-y-1">
                   <div>
-                    <dt className="font-bold uppercase text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "agent.reportIssue.reportId" })}</dt>
-                    <dd className="break-all font-mono text-foreground-strong theme-brutal:text-black">{submittedReport.reportId}</dd>
+                    <dt className="text-caption font-semibold text-foreground-muted">{formatMessage({ id: "agent.reportIssue.reportId" })}</dt>
+                    <dd className="break-all font-mono text-mono-meta text-foreground">{submittedReport.reportId}</dd>
                   </div>
                   <div>
-                    <dt className="font-bold uppercase text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "agent.reportIssue.serverId" })}</dt>
-                    <dd className="break-all font-mono text-foreground-strong theme-brutal:text-black">{submittedReport.serverId}</dd>
+                    <dt className="text-caption font-semibold text-foreground-muted">{formatMessage({ id: "agent.reportIssue.serverId" })}</dt>
+                    <dd className="break-all font-mono text-mono-meta text-foreground">{submittedReport.serverId}</dd>
                   </div>
                 </dl>
                 <Button size="sm"
                   variant="outline"
                   type="button"
                   onClick={handleCopyReportReference}
-                  className="mt-3 px-3 py-1 text-xs"
+                  className="mt-3"
                 >
                   {formatMessage({ id: reportRefCopied ? "agent.reportIssue.copied" : "agent.reportIssue.copyReference" })}
                 </Button>
@@ -548,30 +548,29 @@ export default function ReportIssueDialog({
                   type="button"
                   onClick={handleRetryTicket}
                   disabled={ticketRetrying}
-                  className="mt-3 ml-2 px-3 py-1 text-xs"
+                  className="mt-3 ml-2"
                 >
                   {formatMessage({ id: ticketRetrying ? "agent.reportIssue.retryingTicket" : "agent.reportIssue.retryTicket" })}
                 </Button>
-              </div>
+              </Card>
             )}
             {submittedReport?.transcriptAttachmentRequested && transcriptRequestState && (
-              <p className="text-xs text-foreground-muted theme-brutal:text-black/60" role="status">
+              <p className="text-caption text-foreground-hint" role="status">
                 {formatMessage({ id: TRANSCRIPT_REQUEST_STATE_COPY[transcriptRequestState] })}
               </p>
             )}
           </div>
           <div className="flex justify-end gap-2">
             {ticketPath && (
-              <Button size="sm"
+              <Button size="lg"
                 variant="outline"
                 type="button"
                 onClick={handleViewTicket}
-                className="px-4 py-2 text-sm"
               >
                 {formatMessage({ id: "agent.reportIssue.viewTicket" })}
               </Button>
             )}
-            <Button size="sm" variant="success" type="button" onClick={onClose} className="px-4 py-2 text-sm">
+            <Button size="lg" variant="primary" type="button" onClick={onClose}>
               {formatMessage({ id: "agent.reportIssue.done" })}
             </Button>
           </div>
@@ -583,7 +582,7 @@ export default function ReportIssueDialog({
     <DialogCard
       title={(
         <span className="flex items-center gap-2">
-          <Bug size={18} />
+          <Bug size={18} aria-hidden="true" />
           {formatMessage({ id: "agent.reportIssue.title" })}
         </span>
       )}
@@ -591,14 +590,14 @@ export default function ReportIssueDialog({
       maxWidthClass="max-w-sm"
     >
 
-        <div className="mb-4 border-2 border-line-muted theme-brutal:border-black bg-layer-panel theme-brutal:bg-white px-3 py-2">
+        <Card className="mb-4 block px-3 py-2">
           <SectionEyebrow>{formatMessage({ id: "agent.reportIssue.agentLabel" })}</SectionEyebrow>
-          <p className="mt-0.5 font-bold text-foreground-strong theme-brutal:text-black">{agent.displayName || agent.name}</p>
-        </div>
+          <p className="mt-0.5 text-subhead font-semibold text-foreground">{agent.displayName || agent.name}</p>
+        </Card>
 
         <FormField label={formatMessage({ id: "agent.reportIssue.describeLabel" })} optional className="mb-4">
           <Textarea
-            className="w-full resize-none p-2 text-sm"
+            className="w-full resize-none"
             rows={3}
             placeholder={formatMessage({ id: "agent.reportIssue.describePlaceholder" })}
             value={description}
@@ -609,60 +608,60 @@ export default function ReportIssueDialog({
 
         <div className="mb-4">
           <SectionEyebrow as="div" className="mb-1">{formatMessage({ id: "agent.reportIssue.includeLabel" })}</SectionEyebrow>
-          <p className="mb-2 text-xs text-foreground-muted theme-brutal:text-black/60">
+          <p className="mb-2 text-caption text-foreground-hint">
             {formatMessage({ id: "agent.reportIssue.defaultIncludedDisclosure" })}
           </p>
-          <p className="mb-2 text-xs text-foreground-muted theme-brutal:text-black/60">
+          <p className="mb-2 text-caption text-foreground-hint">
             {formatMessage({ id: "agent.reportIssue.structuredSummaryDisclosure" })}
           </p>
-          <div className="flex flex-col gap-1.5">
-            <label className="flex select-none items-center gap-2">
+          <div className="flex flex-col gap-1">
+            <label className="flex min-h-8 select-none items-center gap-2 has-[[data-disabled]]:text-foreground-disabled">
               <Checkbox
                 checked={includeRecentMessages}
                 onCheckedChange={handleRecentMessagesChange}
                 disabled={loading}
               />
-              <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeRecentMessages" })}</span>
+              <span className="text-callout font-semibold">{formatMessage({ id: "agent.reportIssue.includeRecentMessages" })}</span>
             </label>
-            <label className="flex select-none items-center gap-2">
+            <label className="flex min-h-8 select-none items-center gap-2 has-[[data-disabled]]:text-foreground-disabled">
               <Checkbox
                 checked={includeActivityLog}
                 onCheckedChange={handleActivityLogChange}
                 disabled={loading}
               />
-              <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeLiveActivity" })}</span>
+              <span className="text-callout font-semibold">{formatMessage({ id: "agent.reportIssue.includeLiveActivity" })}</span>
             </label>
-            <label className="flex select-none items-center gap-2">
+            <label className="flex min-h-8 select-none items-center gap-2 has-[[data-disabled]]:text-foreground-disabled">
               <Checkbox
                 checked={includeTrajectoryLog}
                 onCheckedChange={handleTrajectoryLogChange}
                 disabled={loading}
               />
-              <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeActivityHistory" })}</span>
+              <span className="text-callout font-semibold">{formatMessage({ id: "agent.reportIssue.includeActivityHistory" })}</span>
             </label>
-            <label className="flex select-none items-center gap-2">
+            <label className="flex min-h-8 select-none items-center gap-2 has-[[data-disabled]]:text-foreground-disabled">
               <Checkbox
                 checked={includeSessionTranscript}
                 onCheckedChange={handleSessionTranscriptChange}
                 disabled={loading || !agent.machineId}
               />
-              <span className="text-sm">{formatMessage({ id: "agent.reportIssue.includeRuntimeTranscript" })}</span>
+              <span className="text-callout font-semibold">{formatMessage({ id: "agent.reportIssue.includeRuntimeTranscript" })}</span>
             </label>
             {includeSessionTranscript && agent.machineId && (
-              <p className="ml-6 text-xs text-foreground-muted theme-brutal:text-black/60">
+              <p className="ml-7 text-caption text-foreground-hint">
                 {formatMessage({ id: "agent.reportIssue.runtimeTranscriptHint" })}
               </p>
             )}
             {canIncludeMachineLog && (
-              <label className="flex select-none items-start gap-2">
+              <label className="flex min-h-8 select-none items-start gap-2 py-1.5 has-[[data-disabled]]:text-foreground-disabled">
                 <Checkbox
                   checked={includeMachineLogTail}
                   onCheckedChange={handleMachineLogTailChange}
                   disabled={loading || !includeSessionTranscript}
                 />
-                <span className="text-sm">
+                <span className="text-callout font-semibold">
                   {formatMessage({ id: "agent.reportIssue.includeMachineLogTail" })}
-                  <span className="block text-xs text-foreground-muted theme-brutal:text-black/60">
+                  <span className="block text-caption font-normal text-foreground-hint">
                     {formatMessage({ id: "agent.reportIssue.machineLogTailDisclosure" })}
                   </span>
                 </span>
@@ -670,51 +669,49 @@ export default function ReportIssueDialog({
             )}
           </div>
           {!agent.machineId && (
-            <p className="mt-1 text-xs text-foreground-muted theme-brutal:text-black/60">
+            <p className="mt-1 text-caption text-foreground-hint">
               {formatMessage({ id: "agent.reportIssue.runtimeTranscriptUnavailable" })}
             </p>
           )}
         </div>
 
         <Banner intent="warning" withIcon density="sm" className="mb-5">
-          <p className="mb-2 text-foreground-muted theme-brutal:text-black/80">
+          <p className="mb-2">
             {formatMessage(
               { id: "agent.reportIssue.sensitiveDataWarning" },
               { strong: (chunks) => <strong key="strong">{chunks}</strong> },
             )}
           </p>
-          <label className="flex select-none items-center gap-2">
+          <label className="flex min-h-8 select-none items-center gap-2 has-[[data-disabled]]:text-foreground-disabled">
             <Checkbox
               checked={consented}
               onCheckedChange={handleConsentedChange}
               disabled={loading}
             />
-            <span className="text-xs font-bold">{formatMessage({ id: "agent.reportIssue.consent" })}</span>
+            <span className="text-callout font-semibold">{formatMessage({ id: "agent.reportIssue.consent" })}</span>
           </label>
         </Banner>
 
         {error && (
-          <Banner intent="warning" className="mb-4 font-bold">
+          <Banner intent="warning" className="mb-4">
             {error}
           </Banner>
         )}
 
-        <div className="flex justify-end gap-3">
-          <Button size="sm"
-            variant="outline"
+        <div className="flex justify-end gap-2">
+          <Button size="lg"
+            variant="ghost"
             type="button"
             onClick={onClose}
             disabled={loading}
-            className="px-4 py-2 text-sm disabled:opacity-50"
           >
             {formatMessage({ id: "common.confirm.cancel" })}
           </Button>
-          <Button size="sm"
-            variant="accent"
+          <Button size="lg"
+            variant="primary"
             type="button"
             onClick={handleSubmit}
             disabled={loading || !consented}
-            className="px-4 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
           >
             {formatMessage({ id: loading ? "agent.reportIssue.submitting" : "agent.reportIssue.title" })}
           </Button>

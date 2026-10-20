@@ -131,7 +131,8 @@ test("the external dot renders working like a managed agent while seen", () => {
   );
   const [ext, managed] = Array.from(view.container.children);
   assert.equal(ext!.className, managed!.className);
-  assert.doesNotMatch(ext!.className, /(^|\s)bg-brutal-cyan(\s|$)/);
+  assert.equal(ext!.getAttribute("data-presence"), managed!.getAttribute("data-presence"));
+  assert.notEqual(ext!.getAttribute("data-presence"), "external");
 });
 
 test("managed agents ignore lastSeenAt and keep runtime-activity presence", () => {
@@ -182,13 +183,14 @@ test("the dot flips from online to neutral external tone as time passes, without
       <AgentActivityDot agentId="ext" />
     </TestIntlProvider>,
   );
-  const dotClass = () => view.container.firstElementChild?.className ?? "";
-  assert.match(dotClass(), /(^|\s)bg-brutal-lime(\s|$)/, "seen 100 s ago → online (lime)");
+  // raft-ui Status publishes its presence light as data-presence.
+  const dotPresence = () => view.container.firstElementChild?.getAttribute("data-presence") ?? null;
+  assert.equal(dotPresence(), "online", "seen 100 s ago → online (lime)");
 
   act(() => {
     vi.advanceTimersByTime(2 * PRESENCE_CLOCK_TICK_MS);
   });
-  assert.match(dotClass(), /(^|\s)bg-brutal-cyan(\s|$)/, "130 s since seen → neutral external tone");
+  assert.equal(dotPresence(), "external", "130 s since seen → neutral external tone");
 });
 
 test("an online external agent offers no Start/Stop in the agent profile", () => {

@@ -218,10 +218,57 @@ export class RisingWaveNotConfiguredError extends Error {
  * trace classification still reads it as rw_acquire_timeout.
  */
 export class RisingWaveOverloadedError extends Error {
-  constructor(cause: unknown) {
-    super(`RisingWave pool saturated: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+  readonly reason: RisingWaveOverloadReason;
+  constructor(cause: unknown, reason: RisingWaveOverloadReason = "pool_acquire_timeout") {
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    super(reason === "pool_acquire_timeout"
+      ? `RisingWave pool saturated: ${detail}`
+      : reason === "rw_unreachable"
+        ? `RisingWave unreachable: ${detail}`
+        : `RisingWave internally overloaded: ${detail}`, { cause });
     this.name = "RisingWaveOverloadedError";
+    this.reason = reason;
   }
+}
+
+/**
+ * pool_acquire_timeout: our pool had no free connection in time.
+ * rw_internal_resets: RisingWave itself shed the query ("resource has been
+ * exhausted ... too_many_internal_resets" from its internal batch gRPC), the
+ * same overload seen from inside the cluster (o11y 2026-10-15 04:24Z).
+ * rw_unreachable: RisingWave is briefly not there at all (process restart).
+ * Prod 2026-10-17 19:00:21-19:01:36Z the single node restarted ("bootstrap");
+ * the proxy answered "could not reach instance [E_UPSTREAM_UNREACHABLE]" and
+ * in-flight queries died with "Connection terminated unexpectedly": 592 inbox
+ * 5xx in that bucket, where a recent stale body would have served.
+ */
+export type RisingWaveOverloadReason = "pool_acquire_timeout" | "rw_internal_resets" | "rw_unreachable";
+
+// Exact phrase only: a broad "exhausted" match would turn other failures into
+// retryable overloads and let the stale-body fallback hide them (Tenny).
+const RW_INTERNAL_RESETS_RE = /\btoo_many_internal_resets\b/;
+
+/** True when RisingWave shed the query itself (internal reset limit), anywhere in the cause chain. */
+export function isRisingWaveInternalResetsError(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 5; depth += 1) {
+    if (current instanceof Error && RW_INTERNAL_RESETS_RE.test(current.message)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+// Exact signals of "RisingWave is not there right now", nothing broader: a
+// query error must stay a query error (Tenny's rule above).
+const RW_UNREACHABLE_RE = /\bE_UPSTREAM_UNREACHABLE\b|^Connection terminated unexpectedly$/;
+
+/** True when RisingWave could not be reached (restart window), anywhere in the cause chain. */
+export function isRisingWaveUnreachableError(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 5; depth += 1) {
+    if ((current as { code?: unknown }).code === "ECONNREFUSED") return true;
+    if (current instanceof Error && RW_UNREACHABLE_RE.test(current.message)) return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 /** True when `error` (or its cause chain) is a RisingWaveOverloadedError. */
@@ -255,11 +302,18 @@ export function asRisingWaveReadError(error: unknown): unknown {
     : new RisingWaveReadError(error);
 }
 
-/** Rethrow a RisingWave pool acquire timeout as RisingWaveOverloadedError. */
+/**
+ * Rethrow a RisingWave overload as RisingWaveOverloadedError: a pool acquire
+ * timeout, RisingWave shedding the query itself (internal reset limit), or
+ * RisingWave briefly unreachable (restart). All are retryable and may serve a
+ * recent stale body (routes/rwStaleRead.ts).
+ */
 export function asRisingWaveOverload(error: unknown): unknown {
-  return isPoolAcquireTimeoutError(error) && !(error instanceof RisingWaveOverloadedError)
-    ? new RisingWaveOverloadedError(error)
-    : error;
+  if (error instanceof RisingWaveOverloadedError) return error;
+  if (isPoolAcquireTimeoutError(error)) return new RisingWaveOverloadedError(error);
+  if (isRisingWaveInternalResetsError(error)) return new RisingWaveOverloadedError(error, "rw_internal_resets");
+  if (isRisingWaveUnreachableError(error)) return new RisingWaveOverloadedError(error, "rw_unreachable");
+  return error;
 }
 
 export function getRisingWaveConnectionTimeoutMillis(env: NodeJS.ProcessEnv = process.env): number {
@@ -300,7 +354,7 @@ export async function queryRisingWave<T extends pg.QueryResultRow = any>(
     return { result, acquireWaitMs, poolState };
   } catch (error) {
     observeStatement("risingwave", statementKindFromText(queryText), statementStartMs, error);
-    throw error;
+    throw asRisingWaveOverload(error);
   } finally {
     client.release();
   }

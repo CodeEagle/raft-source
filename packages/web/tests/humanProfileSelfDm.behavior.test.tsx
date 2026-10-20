@@ -251,8 +251,14 @@ test("human profile Message action stays icon-only at desktop widths", () => {
     messageButton.querySelector("svg"),
     "the icon remains the visible affordance",
   );
-  assert.match(messageButton.className, /\bsize-7\b/);
-  assert.doesNotMatch(messageButton.className, /\bmd:w-auto\b|\bmd:px-/);
+  // DS header icon button: raft-ui's PanelAction (a fixed square target). On
+  // desktop it is the DS small 32px square (`md:h-8 md:min-w-8`, its
+  // `md:px-[5px]` only centres the 18px glyph); no breakpoint widens it into a
+  // labelled button.
+  assert.equal(messageButton.getAttribute("data-slot"), "panel-action");
+  assert.ok(messageButton.classList.contains("md:h-8"));
+  assert.ok(messageButton.classList.contains("md:min-w-8"));
+  assert.doesNotMatch(messageButton.className, /\bmd:w-auto\b|\bmd:px-(?!\[5px\](?:\s|$))/);
 });
 
 test("remote joint human profile still hides Message", () => {

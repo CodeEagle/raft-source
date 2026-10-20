@@ -19,7 +19,7 @@ test("mark read/unread menu actions use conversation bubble icons", () => {
   assert.match(sidebarParent, /<SidebarReadToggleMenuItem\b/);
   assert.match(
     sidebar,
-    /hasUnread \? <MessageSquareCheck size=\{14\} \/> : <MessageSquareDot size=\{14\} \/>/u,
+    /anyUnread \? <MessageSquareCheck size=\{14\} \/> : <MessageSquareDot size=\{14\} \/>/u,
   );
 
   for (const source of [threadsInbox, inboxContextMenu]) {
@@ -31,7 +31,7 @@ test("mark read/unread menu actions use conversation bubble icons", () => {
   for (const source of [sidebar, sidebarParent]) {
     assert.doesNotMatch(
       source,
-      /hasUnread \? <MailOpen size=\{14\} \/> : <Mail size=\{14\} \/>/u,
+      /anyUnread \? <MailOpen size=\{14\} \/> : <Mail size=\{14\} \/>/u,
     );
   }
 });

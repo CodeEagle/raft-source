@@ -1,4 +1,4 @@
-import type { MachineDiskStatus } from "@botiverse/raft-shared";
+import { isDeviceClass, type MachineDiskStatus } from "@botiverse/raft-shared";
 import type { AgentOrchestrator } from "./agentOrchestrator";
 import type {
   ComputerSourceFactProvenance,
@@ -14,6 +14,8 @@ type MachineReadModelInput = {
   runtimes: string[] | null;
   hostname: string | null;
   os: string | null;
+  // Coarse machine kind for the icon; null = unknown (older daemon or undetected).
+  deviceClass?: string | null;
   daemonVersion: string | null;
   lastHeartbeat: Date | null;
   createdAt: Date;
@@ -27,6 +29,12 @@ export type MachineReadModel = MachineReadModelInput & {
   statusVersion: number;
   runtimes: string[];
   runtimeVersions: Record<string, string>;
+  /**
+   * task #1268: the daemon's runtime detection state. `pending` / `incomplete`
+   * mean `runtimes` is the last confirmed list (unconfirmed, not unavailable);
+   * null for synchronous daemons and offline machines.
+   */
+  runtimeDetection: { status: "pending" | "complete" | "incomplete"; unfinishedRuntimes?: string[]; reason?: "deadline" | "child_failed" | "cancelled"; updatedAtMs: number } | null;
   daemonVersion: string | null;
   // Managed-Computer bundle version (`@botiverse/raft-computer`), live from the
   // connection's `ready`. Null for raw daemons / when not reported.
@@ -63,7 +71,7 @@ export async function buildMachineReadModel(
   agentOrchestrator: Pick<
     AgentOrchestrator,
     "getMachineStatus" | "getMachineStatusVersion" | "getMachineDaemonVersion"
-  > & Partial<Pick<AgentOrchestrator, "getMachineComputerVersion" | "getMachineComputerVersionFact" | "getMachineRuntimeVersions" | "getMachineDiskStatus">>,
+  > & Partial<Pick<AgentOrchestrator, "getMachineComputerVersion" | "getMachineComputerVersionFact" | "getMachineRuntimeVersions" | "getMachineDiskStatus" | "getMachineRuntimeDetection">>,
   opts?: { isComputer?: boolean; computerAttachedByCurrentUser?: boolean; agentCount?: number },
 ): Promise<MachineReadModel> {
   const liveDaemonVersion = agentOrchestrator.getMachineDaemonVersion(machine.id);
@@ -84,15 +92,19 @@ export async function buildMachineReadModel(
   const runtimeVersionsPromise = agentOrchestrator.getMachineRuntimeVersions
     ? agentOrchestrator.getMachineRuntimeVersions(machine.id)
     : Promise.resolve({});
+  const runtimeDetectionPromise = agentOrchestrator.getMachineRuntimeDetection
+    ? agentOrchestrator.getMachineRuntimeDetection(machine.id)
+    : Promise.resolve(null);
   const diskStatusPromise = agentOrchestrator.getMachineDiskStatus
     ? agentOrchestrator.getMachineDiskStatus(machine.id)
     : Promise.resolve(null);
-  const [status, statusVersion, liveComputerFact, runtimeVersions, diskStatus] = await Promise.all([
+  const [status, statusVersion, liveComputerFact, runtimeVersions, diskStatus, runtimeDetection] = await Promise.all([
     agentOrchestrator.getMachineStatus(machine.id),
     agentOrchestrator.getMachineStatusVersion(machine.id),
     liveComputerFactPromise,
     runtimeVersionsPromise,
     diskStatusPromise,
+    runtimeDetectionPromise,
   ]);
   return {
     ...machine,
@@ -100,8 +112,10 @@ export async function buildMachineReadModel(
     statusVersion,
     runtimes: machine.runtimes || [],
     runtimeVersions,
+    runtimeDetection: status === "online" ? (runtimeDetection ?? null) : null,
     hostname: machine.hostname ?? null,
     os: machine.os ?? null,
+    deviceClass: isDeviceClass(machine.deviceClass) ? machine.deviceClass : null,
     lastHeartbeat: machine.lastHeartbeat ?? null,
     daemonVersion: liveDaemonVersion ?? machine.daemonVersion ?? null,
     ...computerVersionFields(status, liveComputerFact, machine),

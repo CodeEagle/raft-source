@@ -122,6 +122,39 @@ function decodeServerTasksCursor(raw: string): { channelId: string; taskNumber: 
   }
 }
 
+// Period metrics use source aggregation, not the task-list pagination cap.
+taskRouter.get("/server/snapshot-metrics", async (req, res) => {
+  try {
+    const role = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+    if (role !== "owner" && role !== "admin") { res.status(403).json({ error: "Server administrator required" }); return; }
+    const { channelId } = req.query;
+    if (channelId !== undefined && (typeof channelId !== "string" || !UUID_RE.test(channelId))) {
+      res.status(400).json({ error: "A valid channel is required" }); return;
+    }
+    if (typeof channelId === "string" && await rejectIfNoTaskReadAccess(channelId, req.userId!, req.serverId!, res)) return;
+    res.json(await taskService.getServerTaskSnapshot(req.serverId!, req.userId!, channelId as string | undefined));
+  } catch { res.status(500).json({ error: "Failed to aggregate task snapshot" }); }
+});
+
+// Period metrics use source aggregation, not the task-list pagination cap.
+taskRouter.get("/server/period-metrics", async (req, res) => {
+  try {
+    const role = await getActorServerRoleInServer(req.serverId!, "user", req.userId!);
+    if (role !== "owner" && role !== "admin") { res.status(403).json({ error: "Server administrator required" }); return; }
+    const { from, midpoint, to, channelId } = req.query;
+    const validDate = (value: unknown): value is string => typeof value === "string" && Number.isFinite(Date.parse(value));
+    if (!validDate(from) || !validDate(midpoint) || !validDate(to) ||
+      Date.parse(midpoint) - Date.parse(from) !== Date.parse(to) - Date.parse(midpoint) ||
+      Date.parse(from) >= Date.parse(midpoint) || Date.parse(to) - Date.parse(from) > 180 * 86_400_000 ||
+      (channelId !== undefined && (typeof channelId !== "string" || !UUID_RE.test(channelId)))) {
+      res.status(400).json({ error: "Two equal positive periods and a valid channel are required" }); return;
+    }
+    if (typeof channelId === "string" && await rejectIfNoTaskReadAccess(channelId, req.userId!, req.serverId!, res)) return;
+    const metrics = await taskService.getServerTaskPeriodMetrics(req.serverId!, req.userId!, new Date(from), new Date(midpoint), new Date(to), channelId as string | undefined);
+    res.json({ ...metrics, from, midpoint, to, fetchedAt: new Date().toISOString() });
+  } catch { res.status(500).json({ error: "Failed to aggregate task metrics" }); }
+});
+
 // List all channel tasks for the current server
 taskRouter.get("/server", async (req, res) => {
   try {

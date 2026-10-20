@@ -4,8 +4,6 @@ import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor, within }
 import api from "../src/api/client";
 import {
   ARCHIVED_CHANNEL_ICON_CLASS,
-  ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
-  ARCHIVED_CHANNEL_TEXT_CLASS,
 } from "../src/components/channel/channelArchiveVisual";
 import type { Agent } from "../src/store/agentStore";
 import type { User } from "../src/store/authStore";
@@ -275,10 +273,11 @@ test("archived channel search results render with the shared muted visual treatm
   const archivedResult = screen.getByTestId("search-channel-result-channel-archived");
   const activeResult = screen.getByTestId("search-channel-result-channel-active");
 
-  assertElementHasClasses(screen.getByText("design-archive"), ARCHIVED_CHANNEL_TEXT_CLASS);
-  assert.doesNotMatch(
-    screen.getByText("design").className,
-    /text-black\/45/,
+  // Archived rows use the row recipe's muted state (DS ListRow) for their text.
+  assert.equal(screen.getByText("design-archive").hasAttribute("data-muted"), true);
+  assert.equal(
+    screen.getByText("design").hasAttribute("data-muted"),
+    false,
     "active channel search result title should keep the active visual treatment",
   );
   assertElementHasClasses(
@@ -287,8 +286,8 @@ test("archived channel search results render with the shared muted visual treatm
   );
   assert.doesNotMatch(
     activeResult.querySelector("svg")?.closest("div")?.className ?? "",
-    /bg-black\/5/,
-    "active channel search result icon should keep the yellow hash treatment",
+    new RegExp(ARCHIVED_CHANNEL_ICON_CLASS),
+    "active channel search result icon should keep the neutral channel tile glyph",
   );
   // Both tags on the archived row are the same rui Badge the active row uses,
   // not a hand-written span. How they look is measured in a real browser.
@@ -299,10 +298,8 @@ test("archived channel search results render with the shared muted visual treatm
   for (const badge of archivedBadges) {
     assert.equal(badge.className, activeTypeBadge.className, `${badge.textContent} tag matches the active row's Badge`);
   }
-  assertElementHasClasses(
-    within(archivedResult).getAllByText("Channel").find((element) => element.getAttribute("data-slot") !== "badge" && element.className.includes("text-xs")),
-    ARCHIVED_CHANNEL_MUTED_TEXT_CLASS,
-  );
+  const archivedSubtitle = within(archivedResult).getAllByText("Channel").find((element) => element.getAttribute("data-slot") !== "badge");
+  assert.equal(archivedSubtitle?.hasAttribute("data-muted"), true, "archived subtitle is muted too");
 });
 
 test("global Search renders a Chinese entity found through the shared pinyin matcher", async () => {

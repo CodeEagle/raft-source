@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { AlertTriangle, Download, HardDrive, MessageSquare, Monitor, WifiOff } from "lucide-react";
+import { AlertTriangle, Download, GitBranch, HardDrive, MessageSquare, Monitor, WifiOff } from "lucide-react";
 import {
   PLAN_CONFIG,
   DOWNGRADE_GRACE_PERIOD_DAYS,
@@ -43,8 +43,11 @@ import {
   formatComputerAttentionCounts,
   summarizeComputerAttention,
 } from "../../utils/computerUpgradeIndicator";
-import { isJointChannelReadOnly } from "../../utils/jointChannelLimit";
+import { isJointChannelReadOnly, jointInviteAcceptErrorMessage } from "../../utils/jointChannelLimit";
 import { useUsageLimitAttention } from "./useUsageLimitAttention";
+import { usePendingJointInvites } from "./usePendingJointInvites";
+import api from "../../api/client";
+import { showToast } from "../toastBridge";
 export { compareNotificationKind, topNotificationKind } from "./notificationKind";
 export type { NotificationKind } from "./notificationKind";
 
@@ -102,6 +105,8 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
   const nav = useAppNavigate();
   const feedbackUnread = useFeedbackUnread();
   const usageLimitAttention = useUsageLimitAttention();
+  const { invites: pendingJointInvites, refresh: refreshPendingJointInvites } = usePendingJointInvites();
+  const [acceptingJointInviteId, setAcceptingJointInviteId] = useState<string | null>(null);
 
   const serverId = server?.id ?? null;
   const [pwaPlatform, setPwaPlatform] = useState<PwaInstallPlatform>("other");
@@ -242,8 +247,52 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
     window.dispatchEvent(new CustomEvent(PWA_INSTALL_OPEN_EVENT, { detail: { source: "notification_center" } }));
   }, [handleDismissPwaInstall, pwaDeferredPrompt, pwaPlatform, trackPwaInstall]);
 
+  // Same endpoint as the email link (App.tsx `?jointInvite=`), so accept
+  // authority and limit checks are identical on both paths.
+  const acceptJointInvite = useCallback(async (inviteId: string) => {
+    if (!serverId) return;
+    setAcceptingJointInviteId(inviteId);
+    try {
+      const { data } = await api.post(`/channels/joint-invites/${encodeURIComponent(inviteId)}/accept`, undefined, {
+        headers: { "X-Server-Id": serverId },
+      });
+      const channelId = typeof data?.id === "string" ? data.id : null;
+      if (channelId) {
+        await useChannelStore.getState().ensureChannel(channelId);
+        nav.toChannel(channelId);
+      }
+    } catch (err) {
+      showToast({ title: jointInviteAcceptErrorMessage(err, formatMessage), type: "error" });
+    } finally {
+      setAcceptingJointInviteId(null);
+      void refreshPendingJointInvites();
+    }
+  }, [formatMessage, nav, refreshPendingJointInvites, serverId]);
+
   return useMemo<NotificationEntry[]>(() => {
     const out: NotificationEntry[] = [];
+
+    // ── 0a. Pending joint channel invites (RFC 075 §4.5) ─────────────────
+    for (const invite of pendingJointInvites) {
+      out.push({
+        id: `joint-invite:${invite.id}`,
+        kind: "info",
+        icon: <GitBranch size={16} className="text-foreground" />,
+        dismissalKey: `joint-invite:${invite.id}`,
+        title: formatMessage({ id: "layout.systemNotifications.jointInviteTitle" }, { channel: invite.channelName }),
+        body: (
+          <span className="text-foreground-muted">
+            {formatMessage({ id: "layout.systemNotifications.jointInviteBody" }, { server: invite.fromServerName })}
+          </span>
+        ),
+        action: {
+          label: formatMessage({ id: "layout.systemNotifications.jointInviteAccept" }),
+          onClick: () => void acceptJointInvite(invite.id),
+          variant: "primary",
+          disabled: acceptingJointInviteId !== null,
+        },
+      });
+    }
 
     // ── 0. Authoritative runtime-account usage limits ───────────────────
     // These rows come from the durable server projection. Never infer them
@@ -263,7 +312,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
       out.push({
         id: `usage-limit:${notification.id}`,
         kind: "warning",
-        icon: <AlertTriangle size={16} className="text-foreground-strong theme-brutal:text-black" />,
+        icon: <AlertTriangle size={16} className="text-foreground" />,
         unread: notification.seenAt === null,
         onSeen: () => { void usageLimitAttention.markSeen(notification.id); },
         title: formatMessage(
@@ -271,7 +320,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
           { provider },
         ),
         body: (
-          <span className="text-foreground-muted theme-brutal:text-black/60">
+          <span className="text-foreground-muted">
             {formatMessage(
               { id: reset
                 ? "layout.systemNotifications.usageLimitBodyWithReset"
@@ -317,7 +366,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
       out.push({
         id: "plan-downgrade",
         kind: graceExpired ? "error" : "warning",
-        icon: <AlertTriangle size={16} className="text-foreground-strong theme-brutal:text-black" />,
+        icon: <AlertTriangle size={16} className="text-foreground" />,
         // Dismissal fingerprint: anchor on which phase + how much of an excess
         // remains so the notification re-surfaces if the user adds more resources
         // or grace expires.
@@ -378,7 +427,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
         out.push({
           id: `joint-over-limit:${joint.id}`,
           kind: locked ? "error" : "warning",
-          icon: <AlertTriangle size={16} className="text-foreground-strong theme-brutal:text-black" />,
+          icon: <AlertTriangle size={16} className="text-foreground" />,
           dismissalKey: `joint-over-limit:${joint.id}:${joint.jointOverLimitGraceEndsAt}:${locked ? "locked" : "grace"}`,
           title: formatMessage(
             { id: locked ? "layout.systemNotifications.jointOverLimitLockedTitle" : "layout.systemNotifications.jointOverLimitTitle" },
@@ -421,10 +470,10 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
         out.push({
           id: "computer-attention",
           kind: "warning",
-          icon: <Monitor size={16} className="text-foreground-strong theme-brutal:text-black" />,
+          icon: <Monitor size={16} className="text-foreground" />,
           dismissalKey: `computer-attention:${versionFingerprint}:${problemIds}:${computerAttention.upgradeCount}:${computerAttention.offlineCount}`,
           title: formatMessage({ id: "layout.systemNotifications.computersNeedAttention" }),
-          body: <span className="text-foreground-muted theme-brutal:text-black/60">{counts}</span>,
+          body: <span className="text-foreground-muted">{counts}</span>,
           action: {
             label: formatMessage({ id: "layout.systemNotifications.view" }),
             onClick: () => {
@@ -462,7 +511,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
         out.push({
           id: "machine-offline",
           kind: offlineKind,
-          icon: <WifiOff size={16} className="text-foreground-strong theme-brutal:text-black" />,
+          icon: <WifiOff size={16} className="text-foreground" />,
           // Fingerprint = which machines are offline. If a different set goes
           // offline (different machine id, or the count changes), the
           // dismissal no longer matches and the notification shows again.
@@ -473,14 +522,14 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
           ),
           body:
             activeAgentsOnOffline.length > 0 ? (
-              <span className="text-foreground-muted theme-brutal:text-black/60">
+              <span className="text-foreground-muted">
                 {formatMessage(
                   { id: "layout.systemNotifications.machineOfflineActiveAgentsBody" },
                   { count: activeAgentsOnOffline.length },
                 )}
               </span>
             ) : (
-              <span className="text-foreground-muted theme-brutal:text-black/60">
+              <span className="text-foreground-muted">
                 {formatMessage({ id: "layout.systemNotifications.machineOfflineNoActiveAgentsBody" })}
               </span>
             ),
@@ -505,7 +554,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
         out.push({
           id: "machine-disk-low",
           kind: "warning",
-          icon: <HardDrive size={16} className="text-foreground-strong theme-brutal:text-black" />,
+          icon: <HardDrive size={16} className="text-foreground" />,
           dismissalKey: `machine-disk-low:${diskLowMachines
             .map(({ machine, diskLow }) => `${machine.id}=${diskLow.band}`)
             .sort()
@@ -515,7 +564,7 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
             { count: diskLowMachines.length },
           ),
           body: (
-            <span className="text-foreground-muted theme-brutal:text-black/60">
+            <span className="text-foreground-muted">
               {formatMessage(
                 { id: "layout.systemNotifications.machineDiskLowBody" },
                 { free: first.diskLow.free, percent: first.diskLow.freePercent },
@@ -542,9 +591,9 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
       out.push({
         id: "pwa-install",
         kind: "info",
-        icon: <Download size={16} className="text-foreground-strong theme-brutal:text-black" />,
+        icon: <Download size={16} className="text-foreground" />,
         title: formatMessage({ id: "layout.systemNotifications.installRaftTitle" }),
-        body: <span className="text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "layout.systemNotifications.installRaftBody" })}</span>,
+        body: <span className="text-foreground-muted">{formatMessage({ id: "layout.systemNotifications.installRaftBody" })}</span>,
         action: {
           label: formatMessage({ id: pwaInstallBusy ? "layout.systemNotifications.opening" : "layout.systemNotifications.install" }),
           onClick: () => {
@@ -594,6 +643,9 @@ export function useSystemNotifications(surface: SystemNotificationSurface = "des
     formatMessage,
     formatDate,
     usageLimitAttention,
+    pendingJointInvites,
+    acceptingJointInviteId,
+    acceptJointInvite,
   ]);
 }
 

@@ -2872,6 +2872,8 @@ function cmdStart(args: string[]): void {
     serverCmd += `${envAssign("DEPLOYMENT_ENV", "slockdev")} `;
     serverCmd += `${envAssign("DATABASE_URL", e.DATABASE_URL)} `;
     serverCmd += `${envAssign("JWT_SECRET", e.JWT_SECRET)} `;
+    // Stable per env so keys minted earlier keep verifying on the HMAC path.
+    serverCmd += `${envAssign("AGENT_API_KEY_HMAC_SECRET", `raftdev-agent-key-hmac-${name}-0123456789abcdef`)} `;
     // task #30 — opt-in Raft Computer path. Default OFF (zero behaviour
     // change for non-Computer envs). `RAFTDEV_COMPUTER=1 ./raftdev start`
     // enables the device-code login surface + the >=32-char bootstrap

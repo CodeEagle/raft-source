@@ -256,7 +256,10 @@ test("a timed-out Windows PATH lookup is reported as lookup_timed_out, not as no
   const error = launchFailureError(() => resolveRuntimeLaunch("codex", "codex", [], failingLookupDeps({ code: "ETIMEDOUT" })));
   assert.equal(error.reason, "lookup_timed_out");
   assert.equal(error.code, "runtime_not_found");
-  assert.match(error.message, /did not finish within 1000 ms/);
+  assert.match(error.message, /did not finish within 5000 ms/);
+  // task #1240: the log text carries the lookup timing (phase, ms, budget, outcome), nothing else.
+  assert.match(error.message, /\[lookup: .*get-command \d+ ms timeout \(truncated\) \(budget 5000 ms\)\]$/);
+  assert.doesNotMatch(error.message, /AppData|C:\\\\Users/);
   assert.match(error.message, /not evidence that codex is missing/);
   assert.doesNotMatch(error.message, /Install it/);
   assert.doesNotMatch(error.message, /was not found on PATH/);

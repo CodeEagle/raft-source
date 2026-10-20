@@ -470,6 +470,35 @@ test("R2 single flight: a second scan while one runs waits within its own budget
   });
 });
 
+test("R2 single flight: a scan whose trace directory cannot be listed gives its queued slot back", async () => {
+  await withTempDir(async (dir) => {
+    await bigRotatingFile(dir, 10);
+    assert.deepEqual((await collect(path.join(dir, "missing"))).collection, { status: "failed", failure: "corpus_unreadable" });
+    const next = await collect(dir, { timeBudgetMs: 1_000 }) as FeedbackAgentEventTailOk;
+    assert.equal(next.scan.status, "complete", "the next scan is not left busy behind it");
+  });
+});
+
+test("R2 single flight: the slot goes to the scan that was called first, even when its directory listing is slower", async () => {
+  // CI 38761287677: the first scan was still listing its trace directory when
+  // the second one, already listed, took the free slot and ran out of its 0 ms
+  // budget (time_budget instead of busy). Here the first corpus has thousands of
+  // entries, so its listing finishes after the second one's.
+  await withTempDir(async (slowDir) => {
+    await withTempDir(async (fastDir) => {
+      await bigRotatingFile(slowDir, 20_000);
+      for (let batch = 0; batch < 5_000; batch += 200) {
+        await Promise.all(Array.from({ length: 200 }, (_, i) => writeFile(path.join(slowDir, "traces", `noise-${batch + i}.txt`), "")));
+      }
+      await bigRotatingFile(fastDir, 10);
+      const first = collectFeedbackAgentEventTail({ machineDir: slowDir, agentId: AGENT, feedbackReportId: REPORT, requestId: REQUEST, window: windowNow() });
+      const second = await collect(fastDir, { timeBudgetMs: 0 }) as FeedbackAgentEventTailOk;
+      assert.deepEqual([second.scan.status, second.scan.stopReason, second.scan.filesScanned], ["incomplete", "busy", 0]);
+      assert.equal((await first).ok, true);
+    });
+  });
+});
+
 test("R5 a cancelled scan never keeps the single-flight slot: pre-aborted, and aborted while waiting for the slot", async () => {
   await withTempDir(async (dir) => {
     await bigRotatingFile(dir, 2_000);

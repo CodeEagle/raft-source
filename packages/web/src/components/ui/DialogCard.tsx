@@ -1,10 +1,20 @@
+import { DialogSurface } from "@botiverse/raft-ui";
 import CloseButton from "./CloseButton";
 import { X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { Card, CardHeader, CardTitle } from "raft-ui";
 import Modal from "../Modal";
 
+/**
+ * Product dialog shell for small forms (Create Agent, Add/Edit MCP, …) on the
+ * shared Modal backdrop.
+ *
+ * Raft Design System › Dialog (`rf-dialog`): raft-ui's DialogSurface (the
+ * popover layer, dialog radius, seam edge and float shadow, no motion) with
+ * 20px padding, a sentence-case headline title (17/22 700) and a quiet ghost
+ * close in the top right. The surface rather than raft-ui's Dialog parts
+ * because these callers own the Modal lifecycle (backdrop / Escape / layer).
+ */
 export default function DialogCard({
   title,
   titleId,
@@ -35,19 +45,25 @@ export default function DialogCard({
   const { formatMessage } = useIntl();
   return (
     <Modal onClose={onClose} closeOnBackdrop={closeOnBackdrop} {...(layer !== undefined ? { layer } : {})}>
-      <Card className={`w-full ${maxWidthClass} p-6`} data-testid={testId}>
-        <CardHeader className="mb-4 flex items-center justify-between border-b-0 p-0">
-          <CardTitle render={<h2 id={titleId}>{title}</h2>} className="text-lg font-bold uppercase" />
+      <DialogSurface
+        data-slot="dialog-card"
+        className={`w-full p-5 ${maxWidthClass}`}
+        data-testid={testId}
+      >
+        <div className="mb-4 flex items-start justify-between gap-2">
+          <h2 id={titleId} className="min-w-0 font-sans text-headline text-foreground">{title}</h2>
           <CloseButton
             type="button"
+            size="icon-sm"
             onClick={onClose}
             aria-label={formatMessage({ id: "common.close" })}
+            className="-my-1.5 -mr-1.5 shrink-0"
           >
-            <X size={20} />
+            <X size={18} />
           </CloseButton>
-        </CardHeader>
+        </div>
         {children}
-      </Card>
+      </DialogSurface>
     </Modal>
   );
 }

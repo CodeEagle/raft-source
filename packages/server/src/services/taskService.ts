@@ -536,16 +536,14 @@ export async function allocateTaskNumber(channelId: string): Promise<{ taskStatu
       .from(messages)
       .where(eq(messages.channelId, channelId));
 
-    let maxLegacyNum = 0;
-    try {
-      const [row] = await tx
-        .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
-        .from(tasks)
-        .where(eq(tasks.channelId, channelId));
-      maxLegacyNum = row?.maxLegacyNum ?? 0;
-    } catch (err) {
-      console.error("[taskService] legacy tasks query failed:", err);
-    }
+    // No catch: inside this transaction a failed query has already aborted it
+    // in Postgres, so continuing could only fail later with 25P02 (and the
+    // tasks table is canonical now, so "legacy table missing" cannot happen).
+    const [row] = await tx
+      .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
+      .from(tasks)
+      .where(eq(tasks.channelId, channelId));
+    const maxLegacyNum = row?.maxLegacyNum ?? 0;
 
     return { taskStatus: "todo" as const, taskNumber: Math.max(maxMsgNum ?? 0, maxLegacyNum) + 1 };
   });
@@ -1678,16 +1676,14 @@ export async function createTasks(
       .from(messages)
       .where(eq(messages.channelId, channelId));
 
-    let maxLegacyNum = 0;
-    try {
-      const [row] = await tx
-        .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
-        .from(tasks)
-        .where(eq(tasks.channelId, channelId));
-      maxLegacyNum = row?.maxLegacyNum ?? 0;
-    } catch (err) {
-      console.error("[taskService] legacy tasks query failed:", err);
-    }
+    // No catch: inside this transaction a failed query has already aborted it
+    // in Postgres, so continuing could only fail later with 25P02 (and the
+    // tasks table is canonical now, so "legacy table missing" cannot happen).
+    const [row] = await tx
+      .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
+      .from(tasks)
+      .where(eq(tasks.channelId, channelId));
+    const maxLegacyNum = row?.maxLegacyNum ?? 0;
 
     let nextNum = Math.max(maxMsgNum ?? 0, maxLegacyNum) + 1;
 
@@ -1852,16 +1848,14 @@ export async function createTasksWithAssignmentReceipt(
       .from(messages)
       .where(eq(messages.channelId, channelId));
 
-    let maxLegacyNum = 0;
-    try {
-      const [row] = await tx
-        .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
-        .from(tasks)
-        .where(eq(tasks.channelId, channelId));
-      maxLegacyNum = row?.maxLegacyNum ?? 0;
-    } catch (err) {
-      console.error("[taskService] legacy tasks query failed:", err);
-    }
+    // No catch: inside this transaction a failed query has already aborted it
+    // in Postgres, so continuing could only fail later with 25P02 (and the
+    // tasks table is canonical now, so "legacy table missing" cannot happen).
+    const [row] = await tx
+      .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
+      .from(tasks)
+      .where(eq(tasks.channelId, channelId));
+    const maxLegacyNum = row?.maxLegacyNum ?? 0;
 
     let nextNum = Math.max(maxMsgNum ?? 0, maxLegacyNum) + 1;
     const startsAssignedWork = assignee.type === createdByType && assignee.id === createdById;
@@ -2374,16 +2368,14 @@ export async function convertMessageToTask(
       .from(messages)
       .where(eq(messages.channelId, msg.channelId));
 
-    let maxLegacyNum = 0;
-    try {
-      const [legacyRow] = await tx
-        .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
-        .from(tasks)
-        .where(eq(tasks.channelId, msg.channelId));
-      maxLegacyNum = legacyRow?.maxLegacyNum ?? 0;
-    } catch (err) {
-      console.error("[taskService] legacy tasks query failed:", err);
-    }
+    // No catch: inside this transaction a failed query has already aborted it
+    // in Postgres, so continuing could only fail later with 25P02 (and the
+    // tasks table is canonical now, so "legacy table missing" cannot happen).
+    const [legacyRow] = await tx
+      .select({ maxLegacyNum: sql<number>`COALESCE(MAX(${tasks.taskNumber}), 0)` })
+      .from(tasks)
+      .where(eq(tasks.channelId, msg.channelId));
+    const maxLegacyNum = legacyRow?.maxLegacyNum ?? 0;
 
     const nextNum = Math.max(maxMsgNum ?? 0, maxLegacyNum) + 1;
 
@@ -3102,4 +3094,73 @@ export async function enrichSingleLegacyTask(row: TaskRow) {
 export async function enrichSingleTask(row: MessageRow) {
   const [enriched] = await enrichWithNames([row]);
   return enriched;
+}
+
+/** Aggregate at the ACL-filtered source: never infer period totals from a capped page. */
+export async function getServerTaskPeriodMetrics(serverId: string, userId: string, from: Date, midpoint: Date, to: Date, channelId?: string) {
+  const candidates = await getDb().select({ id: channels.id }).from(channels).where(and(
+    eq(channels.serverId, serverId), inArray(channels.type, ["channel", "joint", "private"]),
+    isNull(channels.deletedAt), isNull(channels.archivedAt), channelId ? eq(channels.id, channelId) : undefined,
+  )).orderBy(asc(channels.name), asc(channels.id));
+  const surfaces = await resolveVisibleServerTaskSurfaces(serverId, userId, candidates.map((channel) => channel.id));
+  const emptyPeriod = { completed: 0, meanHours: null as number | null, medianHours: null as number | null, durationSamples: 0 };
+  if (!surfaces.length) return { current: emptyPeriod, previous: emptyPeriod, surfaces: 0 };
+  const storageIds = sql.join(surfaces.map((surface) => sql`${surface.storageChannelId}::uuid`), sql`, `);
+  const facts = getDb().selectDistinct({ id: tasks.id, createdAt: tasks.createdAt, completedAt: tasks.completedAt })
+    .from(sql`unnest(ARRAY[${storageIds}]) AS surface(storage_id)
+      CROSS JOIN LATERAL (${conversionReadChannelIdsQuery(sql`surface.storage_id`)}) AS read_scope(id)`)
+    .innerJoin(tasks, eq(tasks.channelId, sql`read_scope.id`))
+    .where(and(eq(tasks.status, "done"), sql`${tasks.completedAt} >= ${from.toISOString()}::timestamptz`, sql`${tasks.completedAt} < ${to.toISOString()}::timestamptz`)).as("visible_task_facts");
+  const elapsed = sql`EXTRACT(EPOCH FROM (${facts.completedAt} - ${facts.createdAt})) / 3600.0`;
+  const period = sql<string>`CASE WHEN ${facts.completedAt} >= ${midpoint.toISOString()}::timestamptz THEN 'current' ELSE 'previous' END`;
+  const rows = await getDb().select({
+    period,
+    completed: sql<number>`count(*)`.mapWith(Number),
+    samples: sql<number>`count(*) FILTER (WHERE ${elapsed} >= 0)`.mapWith(Number),
+    mean: sql<number | null>`avg(${elapsed}) FILTER (WHERE ${elapsed} >= 0)`.mapWith(Number),
+    median: sql<number | null>`percentile_cont(0.5) WITHIN GROUP (ORDER BY ${elapsed}) FILTER (WHERE ${elapsed} >= 0)`.mapWith(Number),
+  }).from(facts).groupBy(sql`1`);
+  const select = (name: string) => {
+    const row = rows.find((item) => item.period === name);
+    return row ? { completed: row.completed, durationSamples: row.samples, meanHours: row.mean, medianHours: row.median } : emptyPeriod;
+  };
+  return { current: select("current"), previous: select("previous"), surfaces: surfaces.length };
+}
+
+/** Current task facts across the viewer's accessible task surfaces, independent of AI analysis. */
+export async function getServerTaskSnapshot(serverId: string, userId: string, channelId?: string) {
+  const candidates = await getDb().select({ id: channels.id }).from(channels).where(and(
+    eq(channels.serverId, serverId), inArray(channels.type, ["channel", "joint", "private"]),
+    isNull(channels.deletedAt), isNull(channels.archivedAt), channelId ? eq(channels.id, channelId) : undefined,
+  )).orderBy(asc(channels.name), asc(channels.id));
+  const surfaces = await resolveVisibleServerTaskSurfaces(serverId, userId, candidates.map((channel) => channel.id));
+  const empty = { surfaces: surfaces.length, total: 0, todo: 0, inProgress: 0, inReview: 0, done: 0, closed: 0,
+    humanCreated: 0, agentCreated: 0, durationSamples: 0, medianHours: null as number | null, p90Hours: null as number | null,
+    firstCreatedAt: null as Date | null, latestCreatedAt: null as Date | null, latestUpdatedAt: null as Date | null };
+  if (!surfaces.length) return empty;
+  const storageIds = sql.join(surfaces.map((surface) => sql`${surface.storageChannelId}::uuid`), sql`, `);
+  const facts = getDb().selectDistinct({ id: tasks.id, status: tasks.status, createdByType: tasks.createdByType,
+    createdAt: tasks.createdAt, updatedAt: tasks.updatedAt, completedAt: tasks.completedAt })
+    .from(sql`unnest(ARRAY[${storageIds}]) AS surface(storage_id)
+      CROSS JOIN LATERAL (${conversionReadChannelIdsQuery(sql`surface.storage_id`)}) AS read_scope(id)`)
+    .innerJoin(tasks, eq(tasks.channelId, sql`read_scope.id`)).as("visible_task_snapshot");
+  const elapsed = sql`EXTRACT(EPOCH FROM (${facts.completedAt} - ${facts.createdAt})) / 3600.0`;
+  const validDuration = sql`${facts.status} = 'done' AND ${facts.completedAt} IS NOT NULL AND ${elapsed} >= 0`;
+  const [row] = await getDb().select({
+    total: sql<number>`count(*)`.mapWith(Number),
+    todo: sql<number>`count(*) FILTER (WHERE ${facts.status} = 'todo')`.mapWith(Number),
+    inProgress: sql<number>`count(*) FILTER (WHERE ${facts.status} = 'in_progress')`.mapWith(Number),
+    inReview: sql<number>`count(*) FILTER (WHERE ${facts.status} = 'in_review')`.mapWith(Number),
+    done: sql<number>`count(*) FILTER (WHERE ${facts.status} = 'done')`.mapWith(Number),
+    closed: sql<number>`count(*) FILTER (WHERE ${facts.status} = 'closed')`.mapWith(Number),
+    humanCreated: sql<number>`count(*) FILTER (WHERE ${facts.createdByType} = 'user')`.mapWith(Number),
+    agentCreated: sql<number>`count(*) FILTER (WHERE ${facts.createdByType} = 'agent')`.mapWith(Number),
+    durationSamples: sql<number>`count(*) FILTER (WHERE ${validDuration})`.mapWith(Number),
+    medianHours: sql<number | null>`percentile_cont(0.5) WITHIN GROUP (ORDER BY ${elapsed}) FILTER (WHERE ${validDuration})`.mapWith(Number),
+    p90Hours: sql<number | null>`percentile_cont(0.9) WITHIN GROUP (ORDER BY ${elapsed}) FILTER (WHERE ${validDuration})`.mapWith(Number),
+    firstCreatedAt: sql<Date | null>`min(${facts.createdAt})`.mapWith((value) => value === null ? null : new Date(String(value))),
+    latestCreatedAt: sql<Date | null>`max(${facts.createdAt})`.mapWith((value) => value === null ? null : new Date(String(value))),
+    latestUpdatedAt: sql<Date | null>`max(${facts.updatedAt})`.mapWith((value) => value === null ? null : new Date(String(value))),
+  }).from(facts);
+  return { ...row, surfaces: surfaces.length };
 }

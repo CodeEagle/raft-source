@@ -1,4 +1,4 @@
-import { Button, Checkbox, Input, Spinner } from "raft-ui";
+import { Button, Checkbox, Input, Spinner } from "@botiverse/raft-ui";
 import { Pencil } from "lucide-react";
 import { useCallback, useState } from "react";
 import type { ChangeEvent, FormEvent } from "react";
@@ -8,6 +8,7 @@ import type {
   ProviderConnectionSummary,
 } from "@botiverse/raft-shared";
 import api from "../../api/client";
+import Banner from "../ui/Banner";
 import DialogCard from "../ui/DialogCard";
 import FormField from "../ui/FormField";
 
@@ -122,7 +123,7 @@ export default function EditProviderConnectionModal({
           />
         </FormField>
         {gateway && (
-          <label htmlFor={imageInputId} className="flex items-center gap-2 text-sm font-medium">
+          <label htmlFor={imageInputId} className="flex items-center gap-2 text-callout font-semibold text-foreground">
             <Checkbox
               id={imageInputId}
               checked={supportsImageInput}
@@ -131,13 +132,14 @@ export default function EditProviderConnectionModal({
             {formatMessage({ id: "settings.providers.imageInput" })}
           </label>
         )}
-        {error && <div className="text-sm font-medium text-red-700">{error}</div>}
+        {error && <Banner intent="warning" density="sm">{error}</Banner>}
         <div className="flex justify-end gap-2">
-          <Button type="button" onClick={onClose}>
+          <Button size="lg" type="button" variant="ghost" onClick={onClose}>
             {formatMessage({ id: "settings.common.cancel" })}
           </Button>
-          <Button
+          <Button size="lg"
             type="submit"
+            variant="primary"
             disabled={submitting || !name.trim() || (gateway && !endpointUrl.trim())}
           >
             {submitting ? <Spinner size="sm" aria-hidden="true" /> : <Pencil size={16} />}

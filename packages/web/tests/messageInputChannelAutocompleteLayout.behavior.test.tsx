@@ -247,21 +247,30 @@ test("Computer and App rows use the same compact avatar footprint as people and 
   const appRow = screen.getByText("Reminder").closest("button");
   assert.ok(humanRow && computerRow && appRow);
 
-  const humanAvatar = humanRow.querySelector('[class~="size-5"]');
+  const humanAvatar = humanRow.querySelector('[data-slot="avatar"][data-avatar-context="compact-list"]');
   const computerAvatar = computerRow.querySelector('[data-mention-candidate-avatar="computer"]');
   const appAvatar = appRow.querySelector('[data-mention-candidate-avatar="app"]');
   assert.ok(humanAvatar && computerAvatar && appAvatar);
 
-  for (const avatar of [humanAvatar, computerAvatar, appAvatar]) {
-    hasClasses(avatar, ["size-5", "border"]);
-    assert.equal(avatar.classList.contains("size-8"), false);
-    assert.equal(avatar.classList.contains("border-2"), false);
-  }
+  // Every candidate is the same raft-ui suggestion option row.
   for (const row of [humanRow, computerRow, appRow]) {
-    hasClasses(row, ["items-center", "px-3", "py-2", "text-sm"]);
+    assert.equal(row.getAttribute("data-slot"), "composer-suggestion-option");
+    hasClasses(row, ["items-center", "min-h-9"]);
   }
   assert.ok(appRow.textContent?.includes("@system.reminder"), "the stable App id remains visible as the handle");
   assert.equal(screen.queryByText("system.canary"), null, "internal Apps are absent from the mounted picker");
+
+  // One footprint for every candidate: the Raft compact avatar step, 19px
+  // (16 + 2 x 1.5 border), which the people rows take from AvatarSlot's
+  // compact-list context. Computer and App tiles must sit in the same box.
+  for (const avatar of [humanAvatar, computerAvatar, appAvatar]) {
+    assert.match(
+      avatar.className,
+      /(?:^| )!?size-\[19px\](?: |$)/,
+      `${avatar.getAttribute("data-mention-candidate-avatar") ?? "human"} avatar keeps the 19px compact footprint`,
+    );
+    assert.equal(avatar.classList.contains("size-8"), false);
+  }
 });
 
 test("human and agent mention rows render live avatar identity and scoped activity", async () => {

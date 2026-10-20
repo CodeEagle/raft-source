@@ -22,9 +22,16 @@ import type { AgentApiHeldFreshnessResponse } from "../agentApiMessageContract";
 import { projectRaftMessagesInTarget, type RaftMessage } from "./message";
 import type { RaftHintStyle } from "./hint";
 import type { RaftNextStep } from "./outcome";
+import type { ChannelCard, PeerCard } from "./passiveResources";
 
-/** Why the call stopped. */
-export type RaftInterruptReason = "unread_messages";
+/**
+ * Why the call stopped: `unread_messages` (newer messages in the conversation;
+ * any unseen cards ride along in `cards`), `unseen_card` (no new messages:
+ * this context has not seen the conversation's card, `conversationCards`), or
+ * `thread_target` (a top-level send right after this context read one of the
+ * target's threads: `threadTarget`; nothing was sent).
+ */
+export type RaftInterruptReason = "unread_messages" | "unseen_card" | "thread_target";
 
 export interface RaftInterruptResume {
   /**
@@ -37,6 +44,8 @@ export interface RaftInterruptResume {
   argv?: string[];
   /** The interrupted call's original idempotency key, when it has one (a send); resuming reuses it. */
   idempotencyKey?: string;
+  /** Fields to add to the original input when resuming (`thread_target`: `targetConfirmed: true`). */
+  with?: { targetConfirmed?: true };
 }
 
 export interface RaftInterruptCancel {
@@ -58,6 +67,16 @@ export interface RaftInterrupt {
   cancel?: RaftInterruptCancel;
   /** The conversation the unread messages are in. */
   target: string;
+  /** Cards this context has not seen (`conversationCards`), shown in `context`; `frontier.recordHeld` books them. */
+  cards?: { channel?: ChannelCard; peer?: PeerCard };
+  /** `thread_target`: the thread under `target` this context read most recently. */
+  threadTarget?: string;
+  /**
+   * The model context the call was made in (`setContext`, or `invoke`'s
+   * `contextId`), when there was one: `frontier.recordHeld(interrupt)` books
+   * under it whichever view it is called on.
+   */
+  contextId?: string;
   /** How many newer messages the agent has not seen in this conversation. */
   newMessageCount: number;
   /** The newest of them, previewed; the Server may omit older ones. Empty when withheld. */

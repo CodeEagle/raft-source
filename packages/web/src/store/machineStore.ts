@@ -16,6 +16,13 @@ import type { AcceptedComputerUpgrade } from "../utils/computerUpgradeInFlight";
 import { currentTimeMs, normalizeComputerReleaseNotes } from "@botiverse/raft-shared";
 import type { ComputerReleaseNotes, MachineDiskStatus } from "@botiverse/raft-shared";
 
+export interface MachineRuntimeDetection {
+  status: "pending" | "complete" | "incomplete";
+  unfinishedRuntimes?: string[];
+  reason?: "deadline" | "child_failed" | "cancelled";
+  updatedAtMs?: number;
+}
+
 export interface Machine {
   id: string;
   name: string;
@@ -26,6 +33,12 @@ export interface Machine {
   runtimes: string[];
   /** Live runtime binary/package versions reported by the connected daemon. */
   runtimeVersions?: Record<string, string>;
+  /**
+   * task #1268: the daemon's runtime detection state, sent explicitly by the
+   * server. `pending` / `incomplete` mean `runtimes` is the last confirmed
+   * list (unconfirmed, not unavailable). Absent/null = complete.
+   */
+  runtimeDetection?: MachineRuntimeDetection | null;
   hostname: string | null;
   os: string | null;
   daemonVersion: string | null;
@@ -182,12 +195,13 @@ interface MachineState {
   ) => boolean;
   updateMachineCapabilities: (
     machineId: string,
-    runtimes: string[],
+    runtimes: string[] | undefined,
     hostname?: string,
     os?: string,
     daemonVersion?: string,
     computerVersion?: string | null,
     runtimeVersions?: Record<string, string>,
+    runtimeDetection?: MachineRuntimeDetection | null,
   ) => void;
   rotateApiKey: (machineId: string) => Promise<string>;
   clearPendingApiKey: () => void;
@@ -445,12 +459,13 @@ export const useMachineStore = create<MachineState>((set, get) => {
 
     updateMachineCapabilities: (
       machineId: string,
-      runtimes: string[],
+      runtimes: string[] | undefined,
       hostname?: string,
       os?: string,
       daemonVersion?: string,
       computerVersion?: string | null,
       runtimeVersions?: Record<string, string>,
+      runtimeDetection?: MachineRuntimeDetection | null,
     ) => {
       dispatchMachineEvent({
         kind: "capabilities",
@@ -461,6 +476,7 @@ export const useMachineStore = create<MachineState>((set, get) => {
         os,
         daemonVersion,
         computerVersion,
+        runtimeDetection,
       });
     },
 

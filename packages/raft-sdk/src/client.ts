@@ -136,9 +136,10 @@ export function requireAgentCredential(value: string): string {
 }
 
 /**
- * Create a typed client for the credential-derived `/internal/agent-api/*`
- * surface. The SDK does not read CLI profiles, environment variables, or the
- * host user's home directory: the caller chooses and supplies the credential.
+ * Create the program-layer client for the credential-derived
+ * `/internal/agent-api/*` surface: typed calls with plain API results, for
+ * programs and bots. Stable under semver. The agent layer
+ * (`createRaftAgent`, `@botiverse/raft-sdk/agent`) is built on it.
  */
 export function createRaftClient(options: CreateRaftClientOptions): RaftClient {
   const serverUrl = requireServerUrl(options.serverUrl);

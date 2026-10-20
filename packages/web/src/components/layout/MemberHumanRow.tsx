@@ -1,6 +1,6 @@
 import { memo, useCallback } from "react";
 import { useIntl } from "react-intl";
-import { SidebarItem } from "raft-ui";
+import { SidebarItem, SidebarItemContent, SidebarItemSubtitle, SidebarItemTitle } from "@botiverse/raft-ui";
 import type { ServerMember } from "../../store/serverStore";
 import Tooltip from "../ui/Tooltip";
 import AvatarSlot from "../ui/AvatarSlot";
@@ -44,7 +44,7 @@ export const MemberHumanRow = memo(function MemberHumanRow({
   );
   return (
     <Tooltip content={isSelf ? formatMessage({ id: "layout.sidebar.youTitle" }) : `${human.displayName || human.name}`}>
-    <SidebarItem variant="accent"
+    <SidebarItem
       type="button"
       onClick={handleClick}
       onDoubleClick={handleDoubleClick}
@@ -55,21 +55,23 @@ export const MemberHumanRow = memo(function MemberHumanRow({
       className={sidebarItemClass(selected, menuOpen)}
     >
       <AvatarSlot context="sidebar-list" type="human" humanAvatarUrl={human.avatarUrl} gravatarHash={human.gravatarHash} />
-      <div className="flex min-w-0 flex-1 items-baseline gap-1 text-left">
-        <span className="min-w-0 truncate text-sm">
+      {/* raft-ui's row content, as every sidebar row: one line, an ellipsis. */}
+      <SidebarItemContent>
+        <SidebarItemTitle>
           {human.displayName || human.name}
-          {isSelf && <span className="text-foreground-placeholder ml-1 theme-brutal:text-black/40">{formatMessage({ id: "layout.sidebar.youSuffix" })}</span>}
-        </span>
-        {/* Only Guest is labeled: it is the rare role whose access differs. Same chip as ChannelMemberList. */}
+          {isSelf && <span className="ml-1 font-normal text-foreground-hint group-data-active/sidebar-item:text-sticker-ink">{formatMessage({ id: "layout.sidebar.youSuffix" })}</span>}
+        </SidebarItemTitle>
+        {/* Only Guest is labeled: it is the rare role whose access differs.
+            DS `rf-tag`: a neutral machine label — hairline inset edge, mono, ink-2. */}
         {human.role === "guest" && (
-          <span className="shrink-0 self-center rounded-sm border border-line-muted bg-info-soft px-1.5 py-0.5 font-mono text-[10px] leading-3 text-foreground-strong theme-brutal:rounded-none theme-brutal:border-[1.5px] theme-brutal:border-black theme-brutal:bg-brutal-cyan theme-brutal:text-black">
+          <span className="inline-flex h-5 shrink-0 self-center items-center rounded-chip px-1.5 font-mono text-mono-meta font-normal text-foreground-muted ring-1 ring-inset ring-line-hairline group-data-active/sidebar-item:text-sticker-ink group-data-active/sidebar-item:ring-sticker-ink">
             {formatMessage({ id: "layout.sidebar.guestLabel" })}
           </span>
         )}
         {human.description && (
-          <span className="min-w-0 flex-1 truncate text-xs text-foreground-muted theme-brutal:text-black/40">{human.description}</span>
+          <SidebarItemSubtitle data-sidebar-row-description="">{human.description}</SidebarItemSubtitle>
         )}
-      </div>
+      </SidebarItemContent>
     </SidebarItem>
     </Tooltip>
   );

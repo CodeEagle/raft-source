@@ -7,8 +7,7 @@ import {
   NotificationCenter,
   PopoverTrigger,
   Status,
-  useThemeFamily,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import ConnectedNotificationCenter from "./NotificationCenter";
 import Tooltip from "../ui/Tooltip";
 import { useVisibleNotifications } from "./useSystemNotifications";
@@ -17,7 +16,8 @@ import type { NotificationEntry } from "./useSystemNotifications";
 const MOBILE_TOOLTIP_CONTENT_PROPS = { side: "bottom" } as const;
 
 export interface NotificationTriggerProps {
-  flavor: "rail-bottom" | "mobile-navbar";
+  /** "top-bar": the desktop-width Bell in the top bar's right region (task #753). */
+  flavor: "rail-bottom" | "mobile-navbar" | "top-bar";
   notifications?: NotificationEntry[];
 }
 
@@ -50,30 +50,21 @@ export default function NotificationTrigger({
       open={open}
       hasUnread={hasUnread}
       ariaLabel={ariaLabel}
-      testId={flavor === "rail-bottom" ? "notification-trigger-rail" : "notification-trigger-mobile"}
+      testId={flavor === "rail-bottom" ? "notification-trigger-rail" : flavor === "top-bar" ? "notification-trigger-top-bar" : "notification-trigger-mobile"}
       flavor={flavor}
-      sizeClass={flavor === "rail-bottom" ? "size-10" : "size-8"}
-      // task #720: the rail-bottom Bell icon itself must read like every
-      // other rail item's icon — elegant 16px foreground-icon that brightens
-      // on (button) hover, brutal 18px foreground-strong — instead of a
-      // hardcoded 18px foreground-muted/black that never follows state. The
-      // colors reference RUI's CSS vars directly because the rail's recipe
-      // computes them through RUI utilities, not slock theme tokens.
-      icon={flavor === "rail-bottom" ? (
-        <Bell
-          size={18}
-          className="size-4 text-[var(--foreground-icon)] group-hover:text-[var(--foreground-strong)] theme-brutal:size-[18px] theme-brutal:text-[var(--foreground-strong)]"
-        />
-      ) : (
-        <Bell size={16} className="text-foreground-muted theme-brutal:text-black" />
-      )}
+      // Rail and top bar: a 40px frame item (36 in short windows) with the
+      // rail's 20px glyph; phone home bar: a 44px frame icon button (22px glyph).
+      // The rail's 40px item (36 in short windows), the top bar's 36px item,
+      // the phone nav bar's 44px button.
+      sizeClass={flavor === "mobile-navbar" ? "size-11" : flavor === "top-bar" ? "size-9" : "size-10 [@media(max-height:600px)]:size-9"}
+      icon={<Bell aria-hidden="true" className={flavor === "mobile-navbar" ? "size-[22px]" : "size-5"} />}
     />
   );
 
   return (
     <NotificationCenter open={open} onOpenChange={handleOpenChange}>
-      <div className={`relative ${flavor === "rail-bottom" ? "flex h-11 w-full items-center justify-center" : "shrink-0"}`}>
-        {flavor === "mobile-navbar" ? (
+      <div className={`relative ${flavor === "rail-bottom" ? "flex w-full justify-center" : "shrink-0"}`}>
+        {flavor !== "rail-bottom" ? (
           <Tooltip
             content={formatMessage({ id: "layout.notifications.centerTooltip" })}
             contentProps={MOBILE_TOOLTIP_CONTENT_PROPS}
@@ -87,7 +78,7 @@ export default function NotificationTrigger({
         )}
         <ConnectedNotificationCenter
           notifications={notifications}
-          flavor={flavor === "rail-bottom" ? "desktop" : "mobile"}
+          flavor={flavor === "rail-bottom" ? "desktop" : flavor === "top-bar" ? "top-bar" : "mobile"}
         />
       </div>
     </NotificationCenter>
@@ -99,7 +90,7 @@ type NotificationTriggerButtonProps = Omit<ComponentPropsWithoutRef<"button">, "
   hasUnread: boolean;
   ariaLabel: string;
   testId: string;
-  flavor: "rail-bottom" | "mobile-navbar";
+  flavor: "rail-bottom" | "mobile-navbar" | "top-bar";
   sizeClass: string;
   icon: ReactNode;
 };
@@ -115,7 +106,13 @@ const NotificationTriggerButton = forwardRef<HTMLButtonElement, NotificationTrig
   className = "",
   ...buttonProps
 }, ref) {
-  const theme = useThemeFamily();
+  // Raft Design System: the bell always sits on the frame (the rail, the phone
+  // Home bar, the top bar), so it is a frame item: on-frame ink, the frame's
+  // pressed wash, and the white (dark: yellow) "you are here" sticker while
+  // its list is open.
+  const stateClass = open
+    ? "border-line-frame-active bg-layer-frame-active text-foreground-on-frame-active"
+    : "border-transparent text-foreground-on-frame hover:bg-fill-frame-pressed active:bg-fill-frame-pressed";
   return (
     <button
       {...buttonProps}
@@ -125,29 +122,24 @@ const NotificationTriggerButton = forwardRef<HTMLButtonElement, NotificationTrig
       data-state={open ? "open" : "closed"}
       data-has-unread={hasUnread ? "true" : "false"}
       data-testid={testId}
-      className={`group relative inline-flex ${sizeClass} items-center justify-center rounded-md border border-transparent transition-colors theme-brutal:rounded-none theme-brutal:border-2 ${
-        open
-          ? "bg-fill-muted shadow-raft-sm theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
-          : "bg-transparent hover:bg-fill-muted theme-brutal:hover:border-black theme-brutal:hover:bg-white"
-      } ${className}`}
+      className={`group relative inline-flex ${sizeClass} items-center justify-center rounded-control border-[1.5px] outline-none transition-colors focus-visible:shadow-focus ${stateClass} ${className}`}
     >
       <span className="relative inline-flex items-center justify-center">
         {icon}
         {hasUnread ? (
           flavor === "rail-bottom" ? (
             // task #720: the rail Bell's unread dot rides the SAME composite
-            // every other rail item uses (AppRailItemAttention = attention
-            // mask + indicator + sr-only title) instead of a one-off Status
+            // every other rail item uses (AppRailItemAttention = indicator +
+            // sr-only title) instead of a one-off Status
             // dot with a hand-set offset — same size, same position, same
             // theme mapping, same AT announcement, and it tracks future rail
             // recipe changes automatically.
-            <AppRailItemAttention title={ariaLabel}>{icon}</AppRailItemAttention>
+            <AppRailItemAttention title={ariaLabel} />
           ) : (
             <Status
               aria-hidden
-              attention
               size="md"
-              variant={theme === "elegant" ? "primary" : "accent"}
+              variant="accent"
               className="pointer-events-none absolute -top-1 -end-1"
               data-testid={`${testId}-unread-dot`}
             />

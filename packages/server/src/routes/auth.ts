@@ -5,7 +5,7 @@ import type { Server as SocketServer } from "socket.io";
 import multer from "multer";
 import { z } from "zod";
 import * as userService from "../services/userService";
-import { getDb } from "../db/index";
+import { getDb, type DatabaseExecutor } from "../db/index";
 import { setProductAnalyticsOptOut } from "../services/productAnalyticsGate";
 import * as sessionService from "../services/sessionService";
 import * as inviteService from "../services/inviteService";
@@ -70,6 +70,13 @@ import {
   getMobileOAuthCompletion,
   getSocialAuthCompletion,
   getSocialAuthProvider,
+  assertPendingSocialLinkFor,
+  cancelPendingSocialLink,
+  claimPendingSocialLink,
+  exchangeMobileConflictCompletionForPendingLink,
+  exchangeWebConflictCompletionForPendingLink,
+  PendingSocialLinkError,
+  type PendingSocialLink,
   isNativeAppleSignInConfigured,
   isSocialAuthProviderConfigured,
   markMobileOAuthCompletionConsumed,
@@ -156,6 +163,76 @@ function getProviderParam(value: string | string[] | undefined): string {
 function getSocialAuthCallbackParam(req: Request, key: "code" | "error" | "state"): string {
   const value = req.method === "POST" ? req.body?.[key] : req.query[key];
   return typeof value === "string" ? value : "";
+}
+
+/** `undefined` = not sent; `null` = invalid, and a 400 was sent. */
+function parsePendingLinkToken(body: unknown, res: Response): string | undefined | null {
+  const value = (body as { pendingLinkToken?: unknown } | undefined)?.pendingLinkToken;
+  if (value === undefined || value === null || value === "") return undefined;
+  if (typeof value !== "string" || value.length > 256) {
+    res.status(400).json({ code: "pending_link_token_invalid", error: "pendingLinkToken must be a string" });
+    return null;
+  }
+  return value;
+}
+
+async function sendAccountLinkRequired(res: Response, pending: PendingSocialLink, extra: { returnTo?: string; returnUri?: string }) {
+  const methods = await userService.getUserAuthMethods(pending.userId);
+  res.status(409).json({
+    code: "account_link_required",
+    error: "An account with this email already exists. Sign in to it to connect this provider.",
+    pendingLinkToken: pending.token,
+    provider: pending.provider,
+    email: pending.email,
+    expiresAt: pending.expiresAt.toISOString(),
+    signInMethods: {
+      // "Known to be set": a few legacy accounts with a provider have a working
+      // password but no recorded credential; they can use `providers`.
+      password: methods?.passwordConfigured ?? false,
+      providers: (methods?.identities ?? []).map((identity) => identity.provider),
+    },
+    ...extra,
+  });
+}
+
+/** Link the pending identity to the account that just signed in. No session exists yet. */
+async function completePendingSocialLink(token: string, userId: string): Promise<SocialAuthProvider> {
+  const profile = await claimPendingSocialLink(token, userId);
+  await userService.linkSocialIdentity(userId, profile);
+  return profile.provider;
+}
+
+/**
+ * Password sign-in: check the token and fetch the avatar now, then claim and
+ * link inside the locked login transaction, so a password rejected by the
+ * locked revalidation never links the provider or spends the token.
+ */
+async function preparePendingSocialLinkInLock(
+  token: string,
+  userId: string,
+  onLinked: (provider: SocialAuthProvider) => void,
+) {
+  const profile = await assertPendingSocialLinkFor(token, userId);
+  const prepared = await userService.prepareSocialLink(userId, profile);
+  return async (tx: DatabaseExecutor) => {
+    const claimed = await claimPendingSocialLink(token, userId, tx);
+    const { afterCommit } = await userService.linkSocialIdentityTx(tx, userId, claimed, prepared);
+    onLinked(claimed.provider);
+    return afterCommit;
+  };
+}
+
+function pendingSocialLinkErrorResponse(res: Response, err: unknown): boolean {
+  if (err instanceof PendingSocialLinkError) {
+    res.status(err.code === "pending_link_expired" ? 410 : 403).json({ code: err.code, error: err.message });
+    return true;
+  }
+  const message = errorMessage(err);
+  if (message.includes("already linked to another") || message.includes("belongs to another")) {
+    res.status(409).json({ code: "provider_conflict", error: message });
+    return true;
+  }
+  return false;
 }
 
 function errorMessage(err: unknown, fallback = ""): string {
@@ -356,6 +433,7 @@ async function startMobileOAuthResponse(req: Request, res: Response, params: {
   returnUri: unknown;
   codeChallenge: unknown;
   authenticatedUserId?: string;
+  linkOnConflict?: boolean;
 }) {
   const provider = getSocialAuthProvider(params.providerId);
   if (!provider) {
@@ -381,6 +459,7 @@ async function startMobileOAuthResponse(req: Request, res: Response, params: {
     returnUri: params.returnUri,
     codeChallenge: params.codeChallenge,
     userId: userId ?? undefined,
+    linkOnConflict: params.linkOnConflict,
   });
   res.status(201).json({
     requestId: started.requestId,
@@ -469,6 +548,7 @@ async function completeMobileOAuthResponse(req: Request, res: Response, params: 
   code: string;
   codeVerifier: string;
   authenticatedUserId?: string;
+  pendingLinkToken?: string;
 }) {
   const completion = await getMobileOAuthCompletion(params.code, params.codeVerifier);
   if (params.providerId && completion.provider !== params.providerId) {
@@ -478,6 +558,16 @@ async function completeMobileOAuthResponse(req: Request, res: Response, params: 
   if (params.expectedMode && completion.mode !== params.expectedMode) {
     res.status(400).json({ code: "mode_mismatch", error: "Mobile OAuth code does not match the requested mode" });
     return;
+  }
+
+  if (completion.mode === "login" && completion.intendedAction === "link") {
+    const pending = await exchangeMobileConflictCompletionForPendingLink(completion.requestId);
+    await sendAccountLinkRequired(res, pending, { returnUri: completion.returnUri });
+    return;
+  }
+  // Refuse a wrong account before anything one-time is spent.
+  if (completion.mode === "login" && params.pendingLinkToken) {
+    await assertPendingSocialLinkFor(params.pendingLinkToken, completion.userId);
   }
 
   if (completion.mode === "link") {
@@ -519,6 +609,9 @@ async function completeMobileOAuthResponse(req: Request, res: Response, params: 
     );
   }
 
+  const linkedProvider = params.pendingLinkToken
+    ? await completePendingSocialLink(params.pendingLinkToken, user.id)
+    : undefined;
   const { sessionId, familyId, refreshToken } = await sessionService.createSession(user.id);
   const accessToken = signAccessToken(user.id, familyId);
   attachAuthTraceIdentity(req, { userId: user.id, sessionId, source: "mobile_oauth" });
@@ -531,6 +624,7 @@ async function completeMobileOAuthResponse(req: Request, res: Response, params: 
     returnUri: completion.returnUri,
     accessToken,
     refreshToken,
+    ...(linkedProvider ? { linkedProvider } : {}),
   });
 }
 
@@ -751,6 +845,7 @@ authRouter.post("/mobile/oauth/start", async (req, res) => {
       mode: req.body?.mode,
       returnUri: req.body?.returnUri,
       codeChallenge: req.body?.codeChallenge,
+      linkOnConflict: req.body?.linkOnConflict === true,
     });
   } catch (err: unknown) {
     if (mobileOAuthErrorResponse(res, err, "start")) return;
@@ -790,10 +885,13 @@ authRouter.post("/mobile/oauth/:provider/link/start", requireAuth, async (req, r
 });
 
 authRouter.post("/mobile/oauth/complete", async (req, res) => {
+  const pendingLinkToken = parsePendingLinkToken(req.body, res);
+  if (pendingLinkToken === null) return;
   try {
     await completeMobileOAuthResponse(req, res, {
       code: req.body?.code,
       codeVerifier: req.body?.codeVerifier,
+      pendingLinkToken,
     });
   } catch (err: unknown) {
     const legalResponse = legalAcceptanceService.legalAcceptanceErrorResponse(err);
@@ -801,6 +899,7 @@ authRouter.post("/mobile/oauth/complete", async (req, res) => {
       res.status(legalResponse.status).json(legalResponse.body);
       return;
     }
+    if (pendingSocialLinkErrorResponse(res, err)) return;
     if (mobileOAuthErrorResponse(res, err, "complete")) return;
     sendJsonServerError(req, res, {
       error: "Failed to complete mobile OAuth",
@@ -856,6 +955,7 @@ authRouter.get("/:provider/start", async (req, res, next) => {
     mode: "login",
     nonce,
     returnTo,
+    ...(req.query.linkOnConflict === "1" ? { linkOnConflict: true } : {}),
   });
 
   res.setHeader("Set-Cookie", buildStateCookie(provider.id, nonce));
@@ -974,11 +1074,20 @@ async function handleSocialAuthCallback(req: Request, res: Response, next: NextF
       return;
     }
 
-    const user = await userService.findExistingSocialLoginUser(profile);
+    let user: Awaited<ReturnType<typeof userService.findExistingSocialLoginUser>> = null;
+    let emailConflict = false;
+    try {
+      user = await userService.findExistingSocialLoginUser(profile);
+    } catch (err) {
+      if (!(err instanceof userService.SocialEmailConflictError) || !state.linkOnConflict) throw err;
+      emailConflict = true;
+    }
     const completionCode = await createSocialAuthCompletion({
       provider: provider.id,
       mode: "login",
-      intendedAction: "login",
+      // A conflict completion carries no userId, so a server that predates
+      // pending links cannot read it as "sign in to the existing account".
+      intendedAction: emailConflict ? "link" : "login",
       userId: user?.id,
       providerUserId: profile.providerUserId,
       providerEmail: profile.email,
@@ -1026,7 +1135,19 @@ authRouter.post("/:provider/complete", async (req, res, next) => {
       return;
     }
 
+    const pendingLinkToken = parsePendingLinkToken(req.body, res);
+    if (pendingLinkToken === null) return;
+
     const pendingCompletion = await getSocialAuthCompletion(provider.id, code);
+    if (pendingCompletion.mode === "login" && pendingCompletion.intendedAction === "link") {
+      const pending = await exchangeWebConflictCompletionForPendingLink(provider.id, code);
+      await sendAccountLinkRequired(res, pending, { returnTo: pendingCompletion.returnTo });
+      return;
+    }
+    // Refuse a wrong account before the one-time completion code is spent.
+    if (pendingCompletion.mode === "login" && pendingLinkToken) {
+      await assertPendingSocialLinkFor(pendingLinkToken, pendingCompletion.userId);
+    }
     if (pendingCompletion.mode === "login" && !pendingCompletion.userId) {
       legalAcceptanceService.requireCurrentLegalAcceptance(parseLegalAcceptance(req.body));
     }
@@ -1084,6 +1205,9 @@ authRouter.post("/:provider/complete", async (req, res, next) => {
       return;
     }
 
+    const linkedProvider = pendingLinkToken
+      ? await completePendingSocialLink(pendingLinkToken, completion.userId)
+      : undefined;
     const { sessionId, familyId, refreshToken } = await sessionService.createSession(completion.userId);
     const accessToken = signAccessToken(completion.userId, familyId);
     attachAuthTraceIdentity(req, { userId: completion.userId, sessionId, source: "social_oauth" });
@@ -1094,6 +1218,7 @@ authRouter.post("/:provider/complete", async (req, res, next) => {
       returnTo: completion.returnTo,
       accessToken,
       refreshToken,
+      ...(linkedProvider ? { linkedProvider } : {}),
     });
   } catch (err: any) {
     const legalResponse = legalAcceptanceService.legalAcceptanceErrorResponse(err);
@@ -1101,6 +1226,7 @@ authRouter.post("/:provider/complete", async (req, res, next) => {
       res.status(legalResponse.status).json(legalResponse.body);
       return;
     }
+    if (pendingSocialLinkErrorResponse(res, err)) return;
     const message = err?.message || "";
     if (message.includes("Invalid") || message.includes("expired") || message.includes("mismatch")) {
       res.status(400).json({ error: message });
@@ -1120,17 +1246,24 @@ authRouter.post("/login", async (req, res) => {
   if (!body) return;
   req.body = body;
 
+  const pendingLinkToken = parsePendingLinkToken(body, res);
+  if (pendingLinkToken === null) return;
+
   try {
     const { email, password } = body;
 
-    const { user, session } = await userService.authenticateUser(email, password);
+    let linkedProvider: SocialAuthProvider | undefined;
+    const { user, session } = await userService.authenticateUser(email, password, pendingLinkToken
+      ? { prepareLink: (userId) => preparePendingSocialLinkInLock(pendingLinkToken, userId, (provider) => { linkedProvider = provider; }) }
+      : {});
     const { sessionId, familyId, refreshToken } = session;
     const accessToken = signAccessToken(user.id, familyId);
     attachAuthTraceIdentity(req, { userId: user.id, sessionId, source: "email_login" });
     recordAuthSessionIssuedTrace({ flow: "email_login", userId: user.id, sessionId });
 
-    res.json({ user, accessToken, refreshToken });
+    res.json({ user, accessToken, refreshToken, ...(linkedProvider ? { linkedProvider } : {}) });
   } catch (err: any) {
+    if (pendingSocialLinkErrorResponse(res, err)) return;
     if (err instanceof userService.EmailLoginRejectedError) {
       attachAuthTraceIdentity(req, { source: "email_login", reason: err.reason });
       const traceId = recordEmailLoginRejectedTrace(err.reason);
@@ -1145,6 +1278,26 @@ authRouter.post("/login", async (req, res) => {
         err,
       });
     }
+  }
+});
+
+// Drop a pending social link (the person chose not to connect the provider).
+authRouter.post("/pending-link/cancel", async (req, res) => {
+  const pendingLinkToken = parsePendingLinkToken(req.body, res);
+  if (pendingLinkToken === null) return;
+  if (!pendingLinkToken) {
+    res.status(400).json({ code: "pending_link_token_invalid", error: "pendingLinkToken is required" });
+    return;
+  }
+  try {
+    await cancelPendingSocialLink(pendingLinkToken);
+    res.status(204).end();
+  } catch (err) {
+    sendJsonServerError(req, res, {
+      error: "Failed to cancel the pending link",
+      logPrefix: "Pending social link cancel error:",
+      err,
+    });
   }
 });
 

@@ -5,6 +5,7 @@
 // join/leave/mute targets.
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import { joinRaftChannelByTarget, parseRaftRegularChannelTarget } from "../agentApiChannelJoin";
@@ -16,21 +17,21 @@ import { failureFromClientResult, failureOutcome, opError, validateOpRequest, ty
 import { requestSchema } from "./requestSchema";
 
 /** `{ target }` of a regular channel (join, leave, mute, unmute). */
-export const channelTargetRequestSchema = requestSchema<{ target: string }>()(z.object({
+export const channelTargetRequestSchema = lazySchema("channelTargetRequestSchema", () => requestSchema<{ target: string }>()(z.object({
   target: z.string().describe("A regular channel, `#channel-name`. DMs and threads are not accepted."),
-}));
+})));
 
-export const channelMembersRequestSchema = requestSchema<{ target: string }>()(z.object({
+export const channelMembersRequestSchema = lazySchema("channelMembersRequestSchema", () => requestSchema<{ target: string }>()(z.object({
   target: z.string().describe("A channel, DM, or thread target."),
-}));
+})));
 
 /** `threads.list` takes no arguments. */
-export const listThreadsRequestSchema = z.object({});
+export const listThreadsRequestSchema = lazySchema("listThreadsRequestSchema", () => z.object({}));
 
-export const unfollowThreadRequestSchema = requestSchema<{ target: string; reason?: string }>()(z.object({
+export const unfollowThreadRequestSchema = lazySchema("unfollowThreadRequestSchema", () => requestSchema<{ target: string; reason?: string }>()(z.object({
   target: z.string().describe("The thread, for example `#channel:shortid` or `dm:@peer:shortid`."),
   reason: z.string().optional().describe("Short reason, kept with the unfollow."),
-}));
+})));
 
 const INVALID_CHANNEL_TARGET = "Target must be a regular channel in the form '#channel-name'. DMs and thread targets are not supported.";
 
@@ -215,9 +216,9 @@ export async function unfollowThread(
   };
 }
 
-export const channelInfoRequestSchema = requestSchema<{ target: string }>()(z.object({
+export const channelInfoRequestSchema = lazySchema("channelInfoRequestSchema", () => requestSchema<{ target: string }>()(z.object({
   target: z.string().describe("A regular channel, `#channel-name` (the `#` may be omitted). DMs and threads are not accepted."),
-}));
+})));
 
 export interface RaftChannelInfo {
   /** The channel as `server.info` lists it (`joined` and the attention flags are yours). */

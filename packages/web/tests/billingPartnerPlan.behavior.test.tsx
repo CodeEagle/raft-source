@@ -128,6 +128,7 @@ test("billing plan presentation keeps Partner distinct from Founder, Pro, and Fr
       "billing.limitedTimeFreeJointChannel",
     ],
     notIncludedFeatures: [
+      "billing.agentMigration",
       "billing.higherFileUploadLimits",
       "billing.unlimitedMessageHistory",
       "billing.moreProfessionalFeaturesComingSoon",
@@ -158,6 +159,7 @@ test("billing plan presentation keeps Partner distinct from Founder, Pro, and Fr
     description: "billing.forBuildersAndTeamsScalingAgentCollaboration",
     includedFeatures: [
       "billing.everythingInFree",
+      "billing.agentMigration",
       "billing.unlimitedMessageHistory",
       "billing.higherFileUploadLimits",
       "billing.unlimitedJointChannels",
@@ -182,6 +184,7 @@ test("billing plan presentation keeps Partner distinct from Founder, Pro, and Fr
     descriptionValues: { count: 1, fraction: "0.1" },
     includedFeatures: [
       "billing.everythingInFree",
+      "billing.agentMigration",
       "billing.unlimitedMessageHistory",
       "billing.higherFileUploadLimits",
       "billing.unlimitedJointChannels",

@@ -7,7 +7,7 @@ import {
   FilesList,
   FilesPanel,
   FilesViewport,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import api from "../../api/client";
 import type { Channel } from "../../store/channelStore";
 import type { MessageAttachment } from "../../store/messageStore";
@@ -213,9 +213,9 @@ export default function ChannelFilesPanel({ channel }: { channel: Channel }) {
     <FilesPanel>
       <FilesViewport onScroll={handleViewportScroll}>
         {loading ? (
-          <div className="flex h-full items-center justify-center text-sm font-mono text-foreground-muted">{formatMessage({ id: "message.channelFilesPanel.loading" })}</div>
+          <div className="flex h-full items-center justify-center font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "message.channelFilesPanel.loading" })}</div>
         ) : error ? (
-          <div className="flex h-full items-center justify-center text-sm font-bold text-danger">{error}</div>
+          <div className="flex h-full items-center justify-center text-callout font-semibold text-danger-strong">{error}</div>
         ) : files.length === 0 ? (
           <EmptyState
             className="h-full"
@@ -238,7 +238,7 @@ export default function ChannelFilesPanel({ channel }: { channel: Channel }) {
             {(loadingMore || nextCursor) && (
               <div className="flex justify-center p-4">
                 {loadingMore ? (
-                  <div className="font-mono text-xs text-foreground-muted">{formatMessage({ id: "message.channelFilesPanel.loadingMore" })}</div>
+                  <div className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "message.channelFilesPanel.loadingMore" })}</div>
                 ) : (
                   <Button
                     type="button"

@@ -85,6 +85,9 @@ try {
         }, type);
         await page.goto(origin + '/feedback/');
         await page.getByRole('button', { name: 'New feedback', exact: true }).click();
+        // FeedbackWorkspace schedules focus on the new form's heading. Let
+        // that navigation finish before WebKit's fill focuses and inserts text.
+        await page.waitForFunction(() => document.activeElement?.matches('section:not([hidden]) h2'));
         await page.locator('textarea').fill('Synthetic feedback');
         await page.getByRole('button', { name: 'Submit', exact: true }).click();
         await page.waitForFunction(() => window.__starts.length === 1);

@@ -233,7 +233,7 @@ test("experimental labels remain on explicit experimental features and stay off 
   assert.equal(existsSync(resolve(repoRoot, "src/components/ui/ExperimentalBadge.tsx")), false);
 
   const graphSource = readSource("src/components/layout/MainLayout.tsx");
-  assert.match(graphSource, /from "raft-ui";/);
+  assert.match(graphSource, /from "@botiverse\/raft-ui";/);
   assert.match(graphSource, /<Badge\.Experimental\b/);
   assert.doesNotMatch(graphSource, /ExperimentalBadge/);
 
@@ -246,26 +246,18 @@ test("experimental labels remain on explicit experimental features and stay off 
 
   const settingsSource = readSource("src/components/settings/SettingsPanel.tsx");
   assert.doesNotMatch(settingsSource, /ExperimentalBadge/, "SettingsPanel should not use the deleted adapter");
-  assert.match(settingsSource, /from "raft-ui";/);
+  assert.match(settingsSource, /from "@botiverse\/raft-ui";/);
   const appNotificationsLabel = sourceSlice(
     settingsSource,
     "function AppNotificationsLabel()",
-    "function AppNotificationsEditorRailLabel()",
+    "function ConnectedAppEditorSection(",
   );
   assert.match(appNotificationsLabel, /<Badge\.Experimental\s*\/>/);
   assert.match(settingsSource, /sectionId="notifications"[\s\S]*title=\{<AppNotificationsLabel \/>}/);
 
-  const editorRailLabel = sourceSlice(
-    settingsSource,
-    "function AppNotificationsEditorRailLabel()",
-    "function ConnectedAppEditorSection(",
-  );
-  assert.doesNotMatch(editorRailLabel, /<Badge\.Experimental\b/);
-  assert.match(settingsSource, /id: "notifications", label: <AppNotificationsEditorRailLabel \/>/);
-
   const appNotificationsControlsSource = readSource("src/components/settings/AppNotificationsControls.tsx");
   assert.doesNotMatch(appNotificationsControlsSource, /ExperimentalBadge/);
-  assert.match(appNotificationsControlsSource, /from "raft-ui";/);
+  assert.match(appNotificationsControlsSource, /from "@botiverse\/raft-ui";/);
   const appNotificationsEyebrow = sourceSlice(
     appNotificationsControlsSource,
     "function AppNotificationsEyebrow()",

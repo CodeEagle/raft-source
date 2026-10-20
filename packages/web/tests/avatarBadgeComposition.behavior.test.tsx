@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { cleanup, render } from "@testing-library/react";
-import { ThemeProvider } from "raft-ui";
+import { ThemeProvider } from "@botiverse/raft-ui";
 import type { AvatarSlotProps } from "../src/components/ui/AvatarSlot";
 import AvatarSlot from "../src/components/ui/AvatarSlot";
 
@@ -40,33 +40,32 @@ const identities: AvatarSlotProps[] = [
   { context: "compact-list", type: "agent", agentAvatarUrl: "pixel:mug" },
   { context: "sidebar-list", type: "agent", badge: <OpaqueStatusIndicator /> },
   { context: "account-tile", type: "server", serverInitial: "S" },
-  { context: "surface-list", type: "app", appInitials: "AP" },
+  { context: "list-row", type: "app", appInitials: "AP" },
 ];
 
-for (const theme of ["brutal", "elegant"] as const) {
-  test(`all ${theme} identities share the themed frame and clip content without clipping badges`, () => {
-    const { container, rerender } = render(
-      <ThemeProvider theme={theme} mode="light" syncDom={false}>
+for (const mode of ["light", "dark"] as const) {
+  test(`all ${mode} identities share the raft sticker frame and clip content without clipping badges`, () => {
+    const { container } = render(
+      <ThemeProvider mode={mode} syncDom={false}>
         {identities.map((props, i) => <AvatarSlot key={i} {...props} />)}
       </ThemeProvider>,
     );
     const avatars = container.querySelectorAll('[data-slot="avatar"]');
     assert.equal(avatars.length, identities.length);
     for (const avatar of avatars) {
+      // Every identity is the same square sticker: ink edge, never a circle.
+      assert.ok(avatar.classList.contains("rounded-sticker"));
+      assert.ok(avatar.classList.contains("border-sticker-ink"));
+      assert.equal(avatar.classList.contains("rounded-full"), false);
+      // The content clips inside the frame...
       const content = avatar.querySelector('[data-slot="avatar-fallback"]');
       assert.ok(content);
-      assert.equal(content.parentElement, avatar);
+      assert.ok(content.parentElement === avatar, "the fallback is the frame's direct child");
       assert.ok(content.classList.contains("overflow-hidden"));
-      assert.equal(avatar.classList.contains("rounded-full"), theme === "elegant");
-      assert.equal(content.classList.contains("rounded-full"), theme === "elegant");
+      assert.equal(content.classList.contains("rounded-full"), false);
+      // ...while the badge sits beside it on the frame, so it is never clipped.
       const badge = avatar.querySelector('[data-slot="avatar-badge"]');
-      if (badge) assert.equal(badge.parentElement, avatar);
+      if (badge) assert.ok(badge.parentElement === avatar, "the badge is the frame's direct child");
     }
-    rerender(
-      <ThemeProvider theme="elegant" mode="dark" syncDom={false}>
-        {identities.map((props, i) => <AvatarSlot key={i} {...props} />)}
-      </ThemeProvider>,
-    );
-    assert.equal(container.querySelectorAll('[data-slot="avatar"].rounded-full').length, identities.length);
   });
 }

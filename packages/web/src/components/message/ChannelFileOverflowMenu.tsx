@@ -6,7 +6,7 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import AttachmentTooltip from "./attachmentTooltip";
 import type { ChannelFileEntry } from "./ChannelFilesPanel";
 
@@ -32,6 +32,7 @@ export function ChannelFileOverflowMenu({
           render={(
             <Button
               size="icon-sm"
+              variant="ghost"
               aria-label={menuLabel}
               data-testid="channel-file-overflow-trigger"
               data-file-id={file.id}

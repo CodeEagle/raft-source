@@ -1,6 +1,6 @@
-import CloseButton from "../ui/CloseButton";
 import { Bot, TriangleAlert, X } from "lucide-react";
 import { useMemo } from "react";
+import { PanelAction } from "@botiverse/raft-ui";
 import { useIntl } from "react-intl";
 import { useMobileBack } from "../../hooks/useAppNavigate";
 import { useServerStore } from "../../store/serverStore";
@@ -21,22 +21,21 @@ export default function AgentUnavailablePanel({ onClose }: { onClose?: () => voi
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-layer-panel theme-brutal:bg-white">
+    <div className="flex min-h-0 flex-1 flex-col bg-layer-canvas">
       <PanelHeader
         title={formatMessage({ id: "agent.detail.unavailableTitle" })}
         onMobileBack={onMobileBack}
         mobileBackProps={mobileBackProps}
         icon={<Bot size={18} />}
-        iconBg="bg-fill-muted text-foreground-strong theme-brutal:bg-gray-200 theme-brutal:text-black"
         actions={onClose ? (
           <Tooltip content={formatMessage({ id: "common.close" })}>
-            <CloseButton
-              type="button"
+            <PanelAction
               onClick={onClose}
-              className=" hidden size-7 items-center justify-center md:flex"
+              className="hidden md:flex"
+              aria-label={formatMessage({ id: "common.close" })}
             >
-              <X size={14} />
-            </CloseButton>
+              <X />
+            </PanelAction>
           </Tooltip>
         ) : null}
       />

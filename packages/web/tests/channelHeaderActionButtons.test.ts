@@ -261,7 +261,8 @@ test("channel header text and count actions use the shared button size contract"
     channelMembers,
     /<Button[\s\S]*?size="sm"[\s\S]*?className="min-w-7 gap-1 px-1\.5"/,
   );
-  assert.match(channelMembers, /text-\[11px\][^"]*tabular-nums/);
+  // The count is machine text (Space Mono 12/16), tabular so it never jitters.
+  assert.match(channelMembers, /font-mono text-mono-meta[^"]*tabular-nums/);
   assert.doesNotMatch(channelMembers, /h-8 min-w-8/);
   assert.doesNotMatch(memberCountButton, /badge=/);
   assert.equal(existsSync(resolve(repoRoot, "src/components/ui/Button.tsx")), false);
@@ -275,12 +276,16 @@ test("Channel settings uses the raft-ui right-side full-height Drawer shell", ()
   );
   assert.match(editDialog, /function ChannelSettingsSheet/);
   assert.match(editDialog, /const isDirty = name !== initialName/);
-  assert.match(editDialog, /import \{[\s\S]*?Drawer,[\s\S]*?DrawerClose,[\s\S]*?DrawerContent,[\s\S]*?DrawerDescription,[\s\S]*?DrawerTitle,[\s\S]*?\} from "raft-ui"/);
+  assert.match(editDialog, /import \{[\s\S]*?Drawer,[\s\S]*?DrawerClose,[\s\S]*?DrawerContent,[\s\S]*?DrawerDescription,[\s\S]*?DrawerTitle,[\s\S]*?\} from "@botiverse\/raft-ui"/);
   assert.match(editDialog, /<Drawer[\s\S]*?swipeDirection="right"[\s\S]*?disablePointerDismissal=\{isDirty\}/);
   assert.match(editDialog, /eventDetails\.reason === "outside-press"[\s\S]*?eventDetails\.reason === "swipe"[\s\S]*?eventDetails\.cancel\(\)/);
   assert.match(editDialog, /handleOpenChangeComplete = useCallback\(\(nextOpen: boolean\) => \{[\s\S]*?if \(!nextOpen\) onClose\(\);[\s\S]*?onOpenChangeComplete=\{handleOpenChangeComplete\}/);
   assert.match(editDialog, /data-testid="channel-settings-sheet"/);
-  assert.match(editDialog, /inset-y-0 right-0 h-dvh w-full max-w-\[min\(100vw,34rem\)\]/);
+  assert.match(editDialog, /inset-y-0 right-0 h-dvh w-full \[--drawer-content-height:100dvh\]/);
+  // DS Sheet: raft-ui's drawer recipe caps the width (420; the whole width on
+  // a phone) and draws the surface, so the call site sets neither.
+  assert.doesNotMatch(editDialog, /data-testid="channel-settings-sheet"\s+className="[^"]*(?:max-w-|bg-|border-l)/);
+  assert.match(editDialog, /<DrawerHeader[\s\S]*?<DrawerBody[\s\S]*?<DrawerFooter/);
   assert.match(editDialog, /\[--drawer-content-height:100dvh\] \[--drawer-inset:0px\]/);
   assert.match(editDialog, /min-h-0 flex-1 overflow-y-auto/);
   assert.match(editDialog, /id=\{CHANNEL_SETTINGS_FORM_ID\}/);

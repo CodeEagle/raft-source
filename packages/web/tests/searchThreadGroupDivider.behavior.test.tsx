@@ -122,7 +122,7 @@ afterEach(() => {
   cleanup();
 });
 
-test("thread search result groups render only one divider between the pink header and first hit", async () => {
+test("thread search result groups never stack a divider between the thread header and first hit", async () => {
   const originalGet = api.get;
   api.get = async (url: string) => {
     assert.equal(url, "/messages/search");
@@ -185,9 +185,13 @@ test("thread search result groups render only one divider between the pink heade
     const title = screen.getByText("Parent thread title for visual testing");
     const header = title.closest('[data-slot="search-thread-result-header"]') ?? title.parentElement;
     assert.ok(header instanceof HTMLElement);
-    assert.ok(
-      header.classList.contains("border-b-2") || header.classList.contains("border-b"),
-      "The rendered pink thread header keeps the strong header divider.",
+    // Raft DS: the thread header is the group's heading, sitting tight
+    // (pb-1) above its hits; it draws no divider of its own. Hairlines run
+    // only between sibling hits and between thread groups.
+    assert.equal(
+      [...header.classList].some((name) => /^border-b(?:-|$)/.test(name)),
+      false,
+      "The thread header draws no bottom divider of its own.",
     );
 
     const hitsWrapper = header.nextElementSibling;
@@ -203,8 +207,19 @@ test("thread search result groups render only one divider between the pink heade
     const secondHit = buttons.find((button) => button.textContent?.includes("visual testing second hit"));
     assert.ok(firstHit instanceof HTMLElement);
     assert.ok(secondHit instanceof HTMLElement);
-    assert.equal(firstHit.classList.contains("border-t-2"), true);
-    assert.equal(secondHit.classList.contains("border-t-2"), true);
+    // The hit separators belong to the rui hit recipe (DS rf-hit: a hairline
+    // between sibling hits, drawn by `not-first:` so the first hit under the
+    // header gets none). The web row must not add its own top border, or it
+    // would draw a divider under the thread header.
+    assert.ok(hitsWrapper.firstElementChild === firstHit, "the first hit leads the hit list");
+    assert.ok(secondHit.classList.contains("not-first:before:border-t"), "sibling hits are split by the recipe hairline");
+    for (const hit of [firstHit, secondHit]) {
+      assert.equal(
+        [...hit.classList].some((name) => /^border-t(?:-|$)/.test(name)),
+        false,
+        "MessageHitRow adds no border of its own",
+      );
+    }
   } finally {
     api.get = originalGet;
   }

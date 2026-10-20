@@ -24,11 +24,11 @@
 // Policy, by the consequence of missing a change:
 // - hold: the action waits until the current version has been delivered.
 // - once: nothing waits; the full form is delivered the first time in a
-//   context (or after the version moved) and a short form after that.
-// A lighter tier (one hint line naming the active command when the version
-// moved) lands with its first user, the channel description type.
+//   context (or after the version moved) and a short form, or nothing,
+//   after that.
 
-import { formatHint, RAFT_HINTS } from "./hint";
+import { agentChannelRef, channelVisibility } from "../agentText/server";
+import { formatHint, RAFT_HINTS, type RaftHintStyle } from "./hint";
 
 export type PassiveResourcePolicy = "hold" | "once";
 
@@ -37,19 +37,20 @@ export interface PassiveResourceSpec {
   revSource: "server-seq" | "content-hash";
   /** Consequence tier of acting without having seen the current version. */
   policy: PassiveResourcePolicy;
-  /** The active command that shows the resource; printed verbatim where it is pointed to. */
-  activeCommand: (id: string) => string;
+  /** The active command that shows the resource, in the caller's hint style; every renderer that points to it uses this. */
+  activeCommand: (id: string, style?: RaftHintStyle) => string;
   /** What touches the resource. */
   touchedBy: readonly string[];
 }
 
 export const PASSIVE_RESOURCES = {
   // A conversation's messages. Version: the highest message seq the agent
-  // has read in full. Enforced by the send freshness hold (server decides).
+  // has read in full. Enforced by the send freshness hold (server decides),
+  // which shows the conversation in its window form, `renderThreadWindow`.
   thread: {
     revSource: "server-seq",
     policy: "hold",
-    activeCommand: (id) => formatHint(RAFT_HINTS.messageRead({ target: id })),
+    activeCommand: (id, style) => formatHint(RAFT_HINTS.messageRead({ target: id }), style),
     touchedBy: ["message send"],
   },
   // A consequential command's usage guidance (RFC 072 §7). Version: hash of
@@ -61,6 +62,18 @@ export const PASSIVE_RESOURCES = {
     activeCommand: (id) => `raft ${id} --help`,
     touchedBy: ["the command itself", "--help"],
   },
+  // A channel's card: its name, visibility, archived state and description.
+  // Version: `channelCardRev`. The first read of the channel, or of a thread
+  // in it, in a context carries the card, and so does the first read after
+  // the card changed. A send names the version its context has: never seen
+  // holds the send once, an older version comes back with the reply.
+  // Id: the channel ref (`#name`), the base of every target in the channel.
+  channel: {
+    revSource: "content-hash",
+    policy: "once",
+    activeCommand: (id, style) => formatHint(RAFT_HINTS.channelInfo(id), style),
+    touchedBy: ["message read", "message send"],
+  },
   // Who sent a message: the sender's profile description and, for a human web
   // sender, the time zone the message was sent from, shown next to the name in
   // agent-facing message text. Version: hash of both.
@@ -69,7 +82,7 @@ export const PASSIVE_RESOURCES = {
   sender: {
     revSource: "content-hash",
     policy: "once",
-    activeCommand: (id) => formatHint(RAFT_HINTS.userInfo({ name: id.slice(id.indexOf(":") + 1) })),
+    activeCommand: (id, style) => formatHint(RAFT_HINTS.userInfo({ name: id.slice(id.indexOf(":") + 1) }), style),
     touchedBy: ["daemon message delivery", "message read", "message check", "message resolve", "message send (missed messages)"],
   },
 } as const satisfies Record<string, PassiveResourceSpec>;
@@ -160,4 +173,276 @@ export function elideSeenSenderDescriptions<T>(
     return m;
   });
   return { messages: out, claimed };
+}
+
+// ---- thread (policy "hold") ----
+
+/** One message as the window form shows it. */
+export interface ThreadWindowMessage {
+  seq?: number;
+  sender?: string | null;
+  /** ISO time, shown as UTC `HH:MM`. */
+  timestamp?: string | null;
+  content?: string | null;
+}
+
+export interface ThreadWindow {
+  target: string;
+  /** A thread's first message; shown only when it is older than the window. */
+  start?: ThreadWindowMessage & { seq: number };
+  /** Messages between the start and the window that are not shown. */
+  omittedCount: number;
+  /** Lowest seq in the window, the `--before` anchor for older messages; derived from `messages` when absent. */
+  firstShownSeq?: number;
+  /** The count the "Latest N" rule names; defaults to the number of messages. */
+  shownCount?: number;
+  /** The latest messages, in the order given. */
+  messages: readonly ThreadWindowMessage[];
+}
+
+/**
+ * Preview cap per message, counted in code points so CJK and Latin text
+ * truncate comparably. A display budget, not a secret: every truncated
+ * preview says how much it hides.
+ */
+export const THREAD_WINDOW_PREVIEW_CHARS = 160;
+
+function threadWindowPreview(message: ThreadWindowMessage): string {
+  const raw = (message.content ?? "").replace(/\s+/g, " ").trim();
+  const points = Array.from(raw);
+  const shown = points.slice(0, THREAD_WINDOW_PREVIEW_CHARS).join("");
+  const hidden = points.length - Math.min(points.length, THREAD_WINDOW_PREVIEW_CHARS);
+  const date = message.timestamp ? new Date(message.timestamp) : null;
+  const time = date && !Number.isNaN(date.getTime()) ? date.toISOString().slice(11, 16) : "";
+  const head = [message.sender ? `@${message.sender}` : "", time].filter(Boolean).join(" ");
+  const marker = hidden > 0 ? `…⟨${hidden} more chars⟩` : "";
+  return `  │ ${head ? `${head}  ` : ""}${shown}${marker}`;
+}
+
+/**
+ * The window form of a conversation: the thread start when it is older than
+ * the window, how many earlier messages were skipped and the command for
+ * them, the latest messages as bounded previews, and the command for the full
+ * text. It is a map to decide from, not the conversation: whether and how deep
+ * to read is the agent's call. Lines, without a trailing newline.
+ */
+export function renderThreadWindow(form: ThreadWindow, style: RaftHintStyle = "cli"): string[] {
+  const { target, start, messages } = form;
+  const seqs = messages.map((m) => Number(m.seq)).filter((s) => Number.isFinite(s) && s > 0);
+  const firstShownSeq = form.firstShownSeq ?? (seqs.length > 0 ? Math.min(...seqs) : undefined);
+  const lines: string[] = [];
+  if (start && (firstShownSeq === undefined || start.seq < firstShownSeq)) {
+    lines.push(`  ┌ Thread start ${"─".repeat(28)}`);
+    lines.push(threadWindowPreview(start));
+  }
+  if (form.omittedCount > 0 && firstShownSeq !== undefined) {
+    const older = formatHint(RAFT_HINTS.messageRead({ target, before: firstShownSeq }), style);
+    lines.push(
+      `  ├ ⋯ ${form.omittedCount} earlier message${form.omittedCount === 1 ? "" : "s"} skipped in this notice. `
+      + `Older exist: ${older}. ⋯`,
+    );
+  }
+  if (messages.length > 0) {
+    lines.push(`  ├ Latest ${form.shownCount ?? messages.length} ${"─".repeat(28)}`);
+    for (const message of messages) lines.push(threadWindowPreview(message));
+  }
+  lines.push(`  └ Previews are truncated. Full text: ${PASSIVE_RESOURCES.thread.activeCommand(target, style)}`);
+  return lines;
+}
+
+// ---- channel (policy "once") ----
+
+/** A channel's card, as the Server returns it with a read of the channel or of a thread in it. */
+export interface ChannelCard {
+  id: string;
+  name: string;
+  /** `channel` (public), `private` or `joint`. */
+  type?: string | null;
+  description?: string | null;
+  archived?: boolean | null;
+}
+
+/** Description cap in the card, in code points; the equivalent command shows it in full. */
+export const CHANNEL_CARD_DESCRIPTION_CHARS = 300;
+
+function displayedDescription(card: ChannelCard): string {
+  return (card.description ?? "").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Version of a channel card: `v1:` and two independent 32-bit FNV-1a hashes
+ * over a fixed-order serialization of what the card shows (the description
+ * as displayed, whitespace collapsed). Pure TS, so every side that versions
+ * a card calls this one function. A card that gains a field gets a new
+ * prefix (`v2:`): every agent then sees the card once more, and the prefix
+ * says the algorithm moved, not the channel.
+ */
+export function channelCardRev(card: ChannelCard): string {
+  const text = JSON.stringify([
+    card.name,
+    channelVisibility(card),
+    card.archived === true,
+    displayedDescription(card),
+  ]);
+  const a = fnv1a32(text, 0x811c9dc5).toString(16).padStart(8, "0");
+  const b = fnv1a32(text, 0x050c5d1f).toString(16).padStart(8, "0");
+  return `v1:${a}${b}`;
+}
+
+/**
+ * The card as the agent sees it: one line with the channel, its visibility,
+ * archived state and description (whitespace collapsed), then the equivalent
+ * command, which shows a capped description in full. An archived channel has
+ * no equivalent command (`raft channel info` lists live channels only), so
+ * its card carries the whole description and no pointer.
+ * `changed`: the agent saw an older version of this card in this context.
+ */
+export function renderChannelCard(card: ChannelCard, options: { changed?: boolean; descriptionChars?: number; style?: RaftHintStyle } = {}): string[] {
+  const ref = agentChannelRef(card.name, card.type);
+  const archived = card.archived === true;
+  const status = [channelVisibility(card), ...(archived ? ["archived"] : [])].join(", ");
+  const points = Array.from(displayedDescription(card));
+  const cap = archived ? points.length : (options.descriptionChars ?? CHANNEL_CARD_DESCRIPTION_CHARS);
+  const hidden = points.length - Math.min(points.length, cap);
+  const description = points.length > 0
+    ? `${points.slice(0, cap).join("")}${hidden > 0 ? `…⟨${hidden} more chars⟩` : ""}`
+    : "no description.";
+  const lead = options.changed ? `Channel ${ref} (${status}), changed since you last saw it:` : `Channel ${ref} (${status}):`;
+  const line = `${lead} ${description}`;
+  return archived ? [line] : [line, `Equivalent: ${PASSIVE_RESOURCES.channel.activeCommand(ref, options.style)}`];
+}
+
+// ---- DM peer card (the `sender` resource, read and send) ----
+
+/**
+ * The other side of a DM as a card: the same facts, and the same ledger row
+ * (`sender`, `senderObservationId`), as the `@name (zone) — description`
+ * a message from them carries, so a peer seen on a message is not shown
+ * again as a card, and the other way round. The zone is the one their latest
+ * message in the DM carried (a human's zone travels with each message).
+ */
+export interface PeerCard {
+  kind: "human" | "agent";
+  name: string;
+  description?: string | null;
+  timezone?: string | null;
+}
+
+/** The ledger id of a DM peer: the sender id their messages use. */
+export function peerCardId(card: Pick<PeerCard, "kind" | "name">): string {
+  return senderObservationId(card.kind, card.name);
+}
+
+/** The version of a DM peer card: the sender version (description and zone). */
+export function peerCardRev(card: PeerCard): string {
+  return senderRev(card.description, card.timezone);
+}
+
+/** Whether a peer card has anything to show (a peer with neither is never held for). */
+export function peerCardHasContent(card: PeerCard): boolean {
+  return Boolean(card.description?.trim() || card.timezone);
+}
+
+/**
+ * The card as the agent sees it: the peer, their kind and zone, their
+ * description (whitespace collapsed, capped like a channel card's), then the
+ * equivalent command, which shows it in full. A peer card is shown when this
+ * context has seen nothing of the peer; it has no "changed" form, because
+ * the zone travels with each message (a message from them shows the change).
+ */
+export function renderPeerCard(card: PeerCard, options: { descriptionChars?: number; style?: RaftHintStyle } = {}): string[] {
+  const status = [card.kind, ...(card.timezone ? [card.timezone] : [])].join(", ");
+  const cap = options.descriptionChars ?? CHANNEL_CARD_DESCRIPTION_CHARS;
+  const points = Array.from((card.description ?? "").replace(/\s+/g, " ").trim());
+  const hidden = points.length - Math.min(points.length, cap);
+  const description = points.length > 0
+    ? `${points.slice(0, cap).join("")}${hidden > 0 ? `…⟨${hidden} more chars⟩` : ""}`
+    : "no description.";
+  return [`DM peer @${card.name} (${status}): ${description}`, `Equivalent: ${PASSIVE_RESOURCES.sender.activeCommand(peerCardId(card), options.style)}`];
+}
+
+// ---- the push budget (glimpse §1.3, acceptance G1-11) ----
+
+/**
+ * Most a push (a hold's context, a send's attachment) puts into the agent's
+ * context, in code points, not counting the agent's own draft or the paths
+ * offered after it. The latest messages always stay; related resources give
+ * way first: card descriptions shrink (still ending in their equivalent
+ * command, so a shrunk card counts as seen), then a thread's start goes.
+ * Best effort: with handles as validated (at most 32 characters) it holds;
+ * only unvalidated bridged names far longer than that can push past it.
+ */
+export const GLIMPSE_PUSH_BUDGET_CHARS = 2000;
+
+/** Shortest a card description shrinks to under the budget. */
+const MIN_BUDGET_DESCRIPTION_CHARS = 40;
+
+export function codePointLength(text: string): number {
+  return Array.from(text).length;
+}
+
+/**
+ * The cards (channel, peer) shrunk until `fits` holds for their lines, never
+ * below MIN_BUDGET_DESCRIPTION_CHARS per description. Returns the lines of
+ * the last attempt, fitting or not.
+ */
+export function fitCards(
+  cards: { channelCard?: ChannelCard | null; channelCardChanged?: boolean; peerCard?: PeerCard | null },
+  fits: (cardLines: string[]) => boolean,
+  style: RaftHintStyle = "cli",
+): string[] {
+  if (!cards.channelCard && !cards.peerCard) return [];
+  const render = (descriptionChars: number) => [
+    ...(cards.channelCard ? renderChannelCard(cards.channelCard, { changed: cards.channelCardChanged === true, descriptionChars, style }) : []),
+    ...(cards.peerCard ? renderPeerCard(cards.peerCard, { descriptionChars, style }) : []),
+  ];
+  let descriptionChars = CHANNEL_CARD_DESCRIPTION_CHARS;
+  let lines = render(descriptionChars);
+  while (!fits(lines) && descriptionChars > MIN_BUDGET_DESCRIPTION_CHARS) {
+    descriptionChars = Math.max(MIN_BUDGET_DESCRIPTION_CHARS, descriptionChars - 20);
+    lines = render(descriptionChars);
+  }
+  return lines;
+}
+
+// ---- attached on every send (runtimes that do not report compaction) ----
+
+export interface SendAttachment {
+  target: string;
+  channelCard?: ChannelCard | null;
+  peerCard?: PeerCard | null;
+  /** The latest messages before the one just sent, oldest first. */
+  messages: readonly ThreadWindowMessage[];
+}
+
+/**
+ * What a send carries for a runtime that does not report compaction: a line
+ * saying what this is (not part of the sent message) and why, the cards,
+ * then the latest messages before the sent one in window form. The whole
+ * stays within `budget` code points: card descriptions shrink first, then the
+ * oldest messages go (the window says how many it skipped). Empty when there
+ * is nothing to show.
+ */
+export function renderSendAttachment(attachment: SendAttachment, budget = GLIMPSE_PUSH_BUDGET_CHARS, style: RaftHintStyle = "cli"): string[] {
+  const cards = {
+    channelCard: attachment.channelCard && attachment.channelCard.archived !== true ? attachment.channelCard : null,
+    peerCard: attachment.peerCard && peerCardHasContent(attachment.peerCard) ? attachment.peerCard : null,
+  };
+  if (!cards.channelCard && !cards.peerCard && attachment.messages.length === 0) return [];
+  const header = `Not part of your message: the latest in ${attachment.target} before it (shown after every send because this runtime does not report context compaction):`;
+  const all = attachment.messages;
+  const assemble = (cardLines: string[], dropped: number) => {
+    const messages = all.slice(dropped);
+    return [
+      header,
+      ...cardLines,
+      ...(messages.length > 0 ? renderThreadWindow({ target: attachment.target, omittedCount: dropped, messages }, style) : []),
+    ];
+  };
+  const fits = (lines: string[]) => codePointLength(lines.join("\n")) <= budget;
+  for (let dropped = 0; ; dropped += 1) {
+    const cardLines = fitCards(cards, (candidate) => fits(assemble(candidate, dropped)), style);
+    const lines = assemble(cardLines, dropped);
+    if (fits(lines) || dropped >= all.length) return lines;
+  }
 }

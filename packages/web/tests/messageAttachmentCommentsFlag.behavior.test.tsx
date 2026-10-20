@@ -42,7 +42,8 @@ test("AttachmentCommentRefChip renders when the message has a comment ref and th
   const html = renderChip(makeCommentRef(), true);
 
   assert.match(html, /data-message-affordance="attachment-comment-ref-chip"/);
-  assert.match(html, /bg-brutal-stone\/25/);
+  // The muted reference chip (raft-ui message-reference `muted` fill).
+  assert.match(html, /[\s"]bg-inactive-soft[\s"]/);
   assert.match(html, /data-base-ui-tooltip-trigger/);
   assert.match(html, /re: flagged\.txt/);
   assert.doesNotMatch(html, /Stryker was here!/);
@@ -81,7 +82,7 @@ test("AttachmentCommentRefChip host links include jump copy and call the jump ha
   );
   const link = document.querySelector('[data-message-affordance="attachment-comment-ref-chip"]');
   assert.ok(link.hasAttribute("data-base-ui-tooltip-trigger"), "jump hint now rides the RUI tooltip trigger");
-  assert.match(link.className, /bg-brutal-stone\/25/);
+  assert.match(link.className, /(^|\s)bg-inactive-soft(\s|$)/);
   fireEvent.click(link);
   assert.equal(jumpCount, 1);
 });

@@ -5,7 +5,7 @@
 // result to the caller. This verb files the work without taking it.
 
 import type { Command } from "commander";
-import { type AgentApiTaskConvertBody } from "@botiverse/raft-shared";
+import type { AgentApiTaskConvertBody } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

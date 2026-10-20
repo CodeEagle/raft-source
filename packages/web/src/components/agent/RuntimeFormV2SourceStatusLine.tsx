@@ -35,7 +35,7 @@ export function RuntimeFormV2SourceStatusLine({
     ? RUNTIME_FORM_V2_SOURCE_REASON_MESSAGE[status.reason as keyof typeof RUNTIME_FORM_V2_SOURCE_REASON_MESSAGE]
     : "agent.runtimeFormV2.sourceStatus.unknown";
   return (
-    <div className="mt-2 border-l-2 border-line-muted pl-2 text-xs text-foreground-muted" data-testid={`${testId}-status`} data-source-status={status.status}>
+    <div className="mt-2 border-l border-line-hairline pl-2 text-caption text-foreground-muted" data-testid={`${testId}-status`} data-source-status={status.status}>
       <p>
         {formatMessage({ id: reasonId })}
         {status.status === "fallback" ? <>{" "}{formatMessage({ id: "agent.runtimeFormV2.sourceStatus.fallback" })}</> : null}
@@ -47,7 +47,6 @@ export function RuntimeFormV2SourceStatusLine({
               type="button"
               onClick={handleRetry}
               disabled={retrying}
-              className="font-bold text-foreground-strong underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
               data-testid={`${testId}-retry`}
             >
               {formatMessage({ id: "agent.runtimeFormV2.retry" })}

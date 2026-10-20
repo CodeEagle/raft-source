@@ -197,7 +197,7 @@ test("Built-in Kimi provider defaults mirror Pi internal defaults independent of
 test("Built-in Xiaomi MiMo provider is generated from the Pi model catalog", () => {
   const xiaomiModels = PI_BUILTIN_PROVIDER_MODELS.xiaomi;
 
-  // pi 1.1.0 (as 1.0.2 did) lists MiMo-V2.6 first but keeps V2.5-Pro as the provider default.
+  // pi 1.3.0 (as 1.2.0, 1.1.0 and 1.0.2 did) lists MiMo-V2.6 first but keeps V2.5-Pro as the provider default.
   assert.equal(PI_BUILTIN_PROVIDER_DEFAULT_MODELS.xiaomi, "xiaomi/mimo-v2.5-pro");
   assert.equal(xiaomiModels[0]?.id, "xiaomi/mimo-v2.6-pro");
   assert.equal(xiaomiModels[0]?.label, "MiMo-V2.6-Pro");

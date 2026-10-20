@@ -46,9 +46,8 @@ test("message rich text tokens inherit the message font-size scale", () => {
   );
   assert.match(html, /<table class="[^"]*\[font-size:inherit\][^"]*"/);
 
-  // Reference chips take the body size from the RUI message-reference recipe
-  // (raft-ui 0.5.16, #319), so they follow the font-size preference with no
-  // local scale.
+  // Reference chips size their text in em from the RUI message-reference
+  // recipe, so they follow the font-size preference with no local scale.
 });
 
 test("attachment comment-ref chip scales with the message body font-size preference", () => {
@@ -71,10 +70,16 @@ test("attachment comment-ref chip scales with the message body font-size prefere
   );
 
   // The chip wrapper carries the same font-size class the message body uses and
-  // the chip inherits it (raft-ui 0.5.16 message-reference rule), so the "re:"
-  // chip scales from the user's body size rather than the outer base size
-  // (stdrc task #463).
+  // the chip sizes its text relative to it (raft-ui message-reference chip:
+  // `[font-size:0.875em]`, the inline-code size), so the "re:" chip scales from
+  // the user's body size rather than the outer base size (stdrc task #463).
   assert.match(html, /class="mb-0\.5 text-\[13px\]"/);
-  assert.match(html, /\[font-size:inherit\]/);
-  assert.doesNotMatch(html, /\[font-size:0\.875em\][^"]*"[^>]*data-slot="message-reference"/);
+  const chipTag = html.match(/<[a-z]+\b[^>]*data-message-affordance="attachment-comment-ref-chip"[^>]*>/)?.[0] ?? "";
+  const chipClass = chipTag.match(/\bclass="([^"]*)"/)?.[1] ?? "";
+  assert.match(chipClass, /(^|\s)\[font-size:(?:inherit|\d*\.?\d+em)\](\s|$)/, `chip font-size must follow the body: ${chipClass}`);
+  assert.doesNotMatch(
+    chipClass,
+    /(^|\s)text-(?:\[\d+px\]|xs|sm|base|caption|footnote|callout|subhead|body)(\s|$)/,
+    "a fixed text size on the chip would stop it scaling with the body",
+  );
 });

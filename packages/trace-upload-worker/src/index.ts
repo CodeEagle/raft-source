@@ -9,8 +9,10 @@ import {
   isFeedbackReportPath,
   putFeedbackReportObject,
 } from "./feedback/reports";
+import { GITHUB_REFRESH_PATH, ingestGithubRefreshBatch } from "./external/githubRefresh";
 import { HttpError, jsonResponse } from "./shared/http";
 import { createTraceBundleUpload, putTraceBundleObject } from "./traces/bundles";
+import { OtlpSinkError } from "./traces/otlpSink";
 import { ingestWebTraceBatch, webTraceCorsHeaders, webTraceCorsResponse } from "./traces/web";
 
 export async function handleRequest(request: Request, env: TraceUploadWorkerEnv, ctx?: ExecutionContextLike): Promise<Response> {
@@ -29,6 +31,9 @@ export async function handleRequest(request: Request, env: TraceUploadWorkerEnv,
       if (request.method === "POST" && (url.pathname === "/api/feedback-reports" || url.pathname === "/api/reports")) {
         return await createFeedbackReportUpload(request, env);
       }
+    }
+    if (request.method === "POST" && url.pathname === GITHUB_REFRESH_PATH) {
+      return await ingestGithubRefreshBatch(request, env);
     }
     if (url.pathname === "/api/web-traces") {
       if (request.method === "OPTIONS") {
@@ -52,13 +57,18 @@ export async function handleRequest(request: Request, env: TraceUploadWorkerEnv,
     }
     return jsonResponse({ error: "Not found" }, 404);
   } catch (err) {
-    const headers = url.pathname === "/api/web-traces"
+    const headers: Record<string, string> = url.pathname === "/api/web-traces"
       ? webTraceCorsHeaders(env, request)
       : isFeedbackReportPath(url.pathname)
         ? feedbackReportCorsHeaders(env, request)
         : {};
     if (err instanceof HttpError) {
-      return jsonResponse({ error: err.message }, err.status, headers);
+      if (err.retryAfterSeconds !== undefined) headers["Retry-After"] = String(err.retryAfterSeconds);
+      // The sink's own error text stays in the server log, never in the response.
+      const body = err instanceof OtlpSinkError
+        ? { error: "Trace sink unavailable", reason: err.reason }
+        : { error: err.message };
+      return jsonResponse(body, err.status, headers);
     }
     return jsonResponse({ error: "Internal server error" }, 500, headers);
   }

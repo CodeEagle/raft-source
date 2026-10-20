@@ -1,3 +1,4 @@
+import { raftbenchContextQuerySchema, raftbenchContextResponseSchema, raftbenchReportSchema, raftbenchSubmitResponseSchema, type RaftbenchContextQuery, type RaftbenchContextResponse, type RaftbenchReport, type RaftbenchSubmitResponse } from "./raftbenchContract";
 import { z } from "zod";
 import { lazySchema } from "./lazySchema";
 
@@ -37,10 +38,16 @@ import {
   type AgentApiSendBody,
   type AgentApiSendV2Body,
   type AgentApiSendResponse,
+  agentApiChannelCardSchema,
+  agentApiPeerCardSchema,
+  type AgentApiChannelCard,
+  type AgentApiPeerCard,
 } from "./agentApiMessageContract";
 
 export {
   agentApiAttachmentEnvelopeSchema,
+  agentApiChannelCardSchema,
+  agentApiPeerCardSchema,
   agentApiFreshnessContextModeSchema,
   agentApiHeldFreshnessResponseSchema,
   agentApiMessageEnvelopeSchema,
@@ -61,6 +68,8 @@ export {
 } from "./agentApiPaths";
 export type {
   AgentApiAttachmentEnvelope,
+  AgentApiChannelCard,
+  AgentApiPeerCard,
   AgentApiHeldFreshnessResponse,
   AgentApiMessageEnvelope,
   AgentApiSendBody,
@@ -120,6 +129,7 @@ export const agentApiCapabilities = [
   "mentions",
   "reactions",
   "mcp",
+  "raftbench",
 ] as const;
 export type AgentApiCapability = (typeof agentApiCapabilities)[number];
 
@@ -127,6 +137,9 @@ const optionalStringSchema = lazySchema("optionalStringSchema", () => z.string()
 const optionalStringArraySchema = lazySchema("optionalStringArraySchema", () => z.array(z.string().trim().min(1)).optional());
 const optionalBooleanSchema = lazySchema("optionalBooleanSchema", () => z.boolean().optional());
 const optionalNumberSchema = lazySchema("optionalNumberSchema", () => z.number().finite().optional());
+// What the agent's model context has seen of a task's board (glimpse G2): the
+// attestation a send carries. A task write without it is never held.
+const taskSeenExactSeqsSchema = lazySchema("taskSeenExactSeqsSchema", () => z.array(z.number().int().positive()).max(2_500).optional());
 const nullableStringSchema = lazySchema("nullableStringSchema", () => z.string().nullable());
 const nullableNumberSchema = lazySchema("nullableNumberSchema", () => z.number().finite().nullable());
 const optionalIsoTimestampSchema = lazySchema("optionalIsoTimestampSchema", () => z.string().datetime().optional());
@@ -296,6 +309,12 @@ const agentApiManagedMcpToolSchema = lazySchema("agentApiManagedMcpToolSchema", 
 export const agentApiManagedMcpToolsResponseSchema = lazySchema("agentApiManagedMcpToolsResponseSchema", () => z.object({
   catalogVersion: z.literal(1),
   tools: z.array(agentApiManagedMcpToolSchema),
+  /** Connectors the agent would have tools from that need a server admin to reconnect them (no tools). */
+  unavailable: z.array(z.object({
+    mcpServerId: z.string().uuid(),
+    serverName: z.string(),
+    status: z.literal("reconnect_required"),
+  })).optional(),
 }));
 
 export const agentApiManagedMcpCallBodySchema = lazySchema("agentApiManagedMcpCallBodySchema", () => z.object({
@@ -327,6 +346,8 @@ export const agentApiMessageSearchQuerySchema = lazySchema("agentApiMessageSearc
   after: optionalStringSchema,
   limit: optionalStringSchema,
   offset: optionalStringSchema,
+  /** A previous page's nextCursor, unchanged (recent-sort text search only). */
+  cursor: optionalStringSchema,
 }));
 
 export const agentApiMessageResolveParamsSchema = lazySchema("agentApiMessageResolveParamsSchema", () => passthroughObject({
@@ -530,6 +551,8 @@ export const agentApiTaskClaimBodySchema = lazySchema("agentApiTaskClaimBodySche
   channel: z.string().trim().min(1),
   task_numbers: z.array(z.number().int().positive()).optional(),
   message_ids: optionalStringArraySchema,
+  seenUpToSeq: optionalNumberSchema,
+  seenExactSeqs: taskSeenExactSeqsSchema,
   freshnessContextMode: agentApiFreshnessContextModeSchema.optional(),
 }));
 
@@ -595,6 +618,8 @@ export const agentApiTaskUpdateStatusBodySchema = lazySchema("agentApiTaskUpdate
   channel: z.string().trim().min(1),
   task_number: z.number().int().positive(),
   status: taskStatusSchema,
+  seenUpToSeq: optionalNumberSchema,
+  seenExactSeqs: taskSeenExactSeqsSchema,
   freshnessContextMode: agentApiFreshnessContextModeSchema.optional(),
 }));
 
@@ -645,6 +670,8 @@ export const agentApiTaskAmendBodySchema = lazySchema("agentApiTaskAmendBodySche
   task_number: z.number().int().positive(),
   title: z.string().trim().min(1).max(10_000).optional(),
   description: z.string().max(50_000).nullable().optional(),
+  seenUpToSeq: optionalNumberSchema,
+  seenExactSeqs: taskSeenExactSeqsSchema,
   freshnessContextMode: agentApiFreshnessContextModeSchema.optional(),
 }).refine((value) => value.title !== undefined || value.description !== undefined, {
   message: "At least one of title or description is required",
@@ -809,6 +836,8 @@ const agentApiIntegrationAppPrepareCommonBodyShape = {
   homepageUrl: optionalStringSchema,
   returnUrl: optionalStringSchema,
   agentManifestUrl: optionalStringSchema,
+  setupUrl: optionalStringSchema,
+  setupDescription: optionalStringSchema,
   scopes: optionalStringArraySchema,
   unsafeDemoUrlOverride: optionalBooleanSchema,
   draftHint: optionalStringSchema,
@@ -847,6 +876,8 @@ export const agentApiIntegrationAppUpdateBodySchema = lazySchema("agentApiIntegr
   homepageUrl: optionalStringSchema,
   returnUrl: optionalStringSchema,
   agentManifestUrl: optionalStringSchema,
+  setupUrl: optionalStringSchema,
+  setupDescription: optionalStringSchema,
   scopes: optionalStringArraySchema,
   unsafeDemoUrlOverride: optionalBooleanSchema,
 }));
@@ -960,6 +991,13 @@ export const agentApiAgentContextResponseSchema = lazySchema("agentApiAgentConte
     audience: z.literal("self-hosted-runner"),
     text: z.string(),
   }).nullable(),
+  // Server rollout flags that change how an agent should work, the same
+  // values a managed agent's Computer receives at start (AgentConfig
+  // reminderApp / vaultApp). Optional for older Servers; absent means off.
+  features: passthroughObject({
+    reminderApp: z.boolean(),
+    vaultApp: z.boolean(),
+  }).optional(),
 }));
 
 export const agentApiServerInfoChannelSchema = lazySchema("agentApiServerInfoChannelSchema", () => passthroughObject({
@@ -1144,11 +1182,22 @@ export const agentApiMentionActionsExecuteResponseSchema = lazySchema("agentApiM
   results: z.array(agentApiMentionActionResultSchema),
 }));
 
+const appSetupStateSchema = lazySchema("appSetupStateSchema", () => z.object({
+  status: z.enum(["not_required", "pending", "complete"]),
+  url: z.string().nullable(),
+  description: z.string().nullable(),
+  revision: z.number().int().positive(),
+  completedAt: z.string().nullable(),
+}));
+
 const agentApiIntegrationServiceSchema = lazySchema("agentApiIntegrationServiceSchema", () => passthroughObject({
   id: z.string(),
   clientId: z.string(),
   appType: z.enum(["server_local", "slock_builtin", "third_party_global"]).optional(),
   name: z.string(),
+  setupUrl: nullableStringSchema.optional(),
+  setupDescription: nullableStringSchema.optional(),
+  setup: appSetupStateSchema.nullable().optional(),
   description: nullableStringSchema,
   whenToUse: nullableStringSchema.optional(),
   homepageUrl: nullableStringSchema,
@@ -1185,6 +1234,9 @@ const agentApiMarketplaceIntegrationAppSchema = lazySchema("agentApiMarketplaceI
   id: z.string(),
   clientId: z.string(),
   name: z.string(),
+  setupUrl: nullableStringSchema.optional(),
+  setupDescription: nullableStringSchema.optional(),
+  setup: appSetupStateSchema.nullable().optional(),
   description: nullableStringSchema,
   category: z.string(),
   dataAccessSummary: nullableStringSchema,
@@ -1303,6 +1355,9 @@ export const agentApiOwnedIntegrationAppSchema = lazySchema("agentApiOwnedIntegr
   card: nullableStringSchema,
   installationId: z.string().uuid().nullable().optional(),
   name: z.string(),
+  setupUrl: nullableStringSchema.optional(),
+  setupDescription: nullableStringSchema.optional(),
+  setup: appSetupStateSchema.nullable().optional(),
   clientKey: nullableStringSchema,
   createdAt: z.string(),
   updatedAt: nullableStringSchema.optional(),
@@ -1485,10 +1540,16 @@ export const agentApiMessageEnvelopeSchema = passthroughObject({
       path: ["senderType"],
     });
   }
-  if (value.mentioned !== false) {
+  if (typeof value.mentioned !== "boolean") {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "external_message must be explicitly non-mentioned",
+      message: "external_message must carry an explicit mentioned boolean",
+      path: ["mentioned"],
+    });
+  } else if (value.mentioned && value.external_message.provider !== "slack") {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "non-Slack external_message must be explicitly non-mentioned",
       path: ["mentioned"],
     });
   }
@@ -1562,6 +1623,15 @@ export const agentApiHistoryResponseSchema = lazySchema("agentApiHistoryResponse
    * order is not commit order); those rows come again on the next unread read.
    */
   read_through_seq: nullableNumberSchema.optional(),
+  /**
+   * The card of the channel this read is in (for a thread, its parent
+   * channel): what `raft channel info` shows about it, for the passive-AX
+   * channel resource (`channelCardRev`). Absent for DMs, agent events and
+   * older servers.
+   */
+  channel_card: agentApiChannelCardSchema.optional(),
+  /** The other side of a DM (or of a thread in one); absent otherwise and on older servers. */
+  peer_card: agentApiPeerCardSchema.optional(),
 }));
 
 // RFC 074 §2 personal assistant (v0). The assistant calls with its own
@@ -1723,6 +1793,17 @@ export const AGENT_API_MESSAGE_SEARCH_MAX_LIMIT = 50;
 export const agentApiMessageSearchResponseSchema = lazySchema("agentApiMessageSearchResponseSchema", () => passthroughObject({
   results: z.array(agentApiSearchResultSchema),
   hasMore: z.boolean(),
+  /**
+   * The search stopped at its scan budget before the page filled: these are
+   * not all the matches (recent-sort text search; absent otherwise).
+   */
+  incomplete: z.boolean().optional(),
+  /** Continue with cursor=nextCursor (offset 0); present when hasMore or incomplete on that path. */
+  nextCursor: z.string().optional(),
+  /** incomplete only: the oldest message time searched (ISO). */
+  searchedThrough: z.string().optional(),
+  /** incomplete only: how many messages were read before the search stopped. */
+  searchedMessages: z.number().int().nonnegative().optional(),
 }));
 
 export const agentApiChannelMembersResponseSchema = lazySchema("agentApiChannelMembersResponseSchema", () => passthroughObject({
@@ -2157,6 +2238,26 @@ function route<const T extends Omit<AgentApiContractRoute, "fullPath">>(input: T
 }
 
 export const agentApiContract = {
+  raftbenchContext: route({
+    key: "raftbenchContext",
+    method: "GET",
+    path: "/raftbench/context",
+    client: { resource: "raftbench", method: "context" },
+    capability: "raftbench",
+    description: "Read a bounded source page for the current staging RaftBench run, with server-owned coverage.",
+    request: { query: raftbenchContextQuerySchema },
+    response: { body: raftbenchContextResponseSchema },
+  }),
+  raftbenchSubmit: route({
+    key: "raftbenchSubmit",
+    method: "POST",
+    path: "/raftbench/submit",
+    client: { resource: "raftbench", method: "submit" },
+    capability: "raftbench",
+    description: "Submit one complete or incomplete result for a bound run and revision; identical replays return the same receipt.",
+    request: { body: raftbenchReportSchema },
+    response: { body: raftbenchSubmitResponseSchema },
+  }),
   feedbackLocatorIngest: route({
     key: "feedbackLocatorIngest",
     method: "POST",
@@ -3308,6 +3409,10 @@ export interface AgentApiHistoryResponse {
   has_newer: boolean;
   last_read_seq?: number | null;
   model_seen_up_to_seq?: number | null;
+  /** The card of the channel this read is in (for a thread, its parent channel). */
+  channel_card?: AgentApiChannelCard;
+  /** The other side of a DM (or of a thread in one). */
+  peer_card?: AgentApiPeerCard;
   [key: string]: unknown;
 }
 
@@ -3473,6 +3578,8 @@ export type AgentApiFeedbackLocatorListQuery = z.infer<typeof agentApiFeedbackLo
 export type AgentApiFeedbackLocatorListResponse = z.infer<typeof agentApiFeedbackLocatorListResponseSchema>;
 
 export type AgentApiRequestParamsByRoute = {
+  raftbenchContext: never;
+  raftbenchSubmit: never;
   feedbackLocatorIngest: never;
   feedbackLocatorList: never;
   events: never;
@@ -3566,6 +3673,8 @@ export type AgentApiRequestParamsByRoute = {
 };
 
 export type AgentApiRequestQueryByRoute = {
+  raftbenchContext: RaftbenchContextQuery;
+  raftbenchSubmit: never;
   feedbackLocatorIngest: never;
   feedbackLocatorList: AgentApiFeedbackLocatorListQuery;
   events: AgentApiEventsQuery;
@@ -3659,6 +3768,8 @@ export type AgentApiRequestQueryByRoute = {
 };
 
 export type AgentApiRequestBodyByRoute = {
+  raftbenchContext: never;
+  raftbenchSubmit: RaftbenchReport;
   feedbackLocatorIngest: AgentApiFeedbackLocatorIngestBody;
   feedbackLocatorList: never;
   events: never;
@@ -3752,6 +3863,8 @@ export type AgentApiRequestBodyByRoute = {
 };
 
 export type AgentApiResponseByRoute = {
+  raftbenchContext: RaftbenchContextResponse;
+  raftbenchSubmit: RaftbenchSubmitResponse;
   feedbackLocatorIngest: AgentApiFeedbackLocatorAcceptance;
   feedbackLocatorList: AgentApiFeedbackLocatorListResponse;
   events: AgentApiEventsResponse;

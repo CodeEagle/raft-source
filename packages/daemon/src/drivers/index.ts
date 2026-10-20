@@ -87,3 +87,6 @@ export function getDriver(runtimeId: string): RuntimeDriver {
   }
   return driver;
 }
+
+// The release smoke loads the kimi SDK the way a launch does (computer native build).
+export { verifyBundledKimiSdk } from "./kimi-sdk";

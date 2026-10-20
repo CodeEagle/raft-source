@@ -23,7 +23,7 @@ import { seedPlaywrightScenario } from "../test/seedPlaywrightScenario";
 import { getDb } from "../db/index";
 import { agentMigrations, agentRuntimeProfiles, agents, channelAgents, channelHumans, channels as channelsTable, computerLifecycleDispatches, computerLifecycleOperationTargets, computerLifecycleOperations, computerOutageOccurrences, computers, featureFlagRules, featureFlags, machines, serverAgentMembers, serverInvites, serverJoinLinks, serverMemberRoleAuditEvents, serverMembers, servers as serversTable, subscriptions, users } from "../db/schema";
 import { createServer, getMemberSidebarOrder, removeMember, updateMemberSidebarOrder } from "../services/serverService";
-import { addAgent, addHuman, archiveChannel, createChannel, findOrCreateDM, findOrCreateUserDM } from "../services/channelService";
+import { addAgent, addHuman, archiveChannel, createChannel, deleteChannel, findOrCreateDM, findOrCreateUserDM } from "../services/channelService";
 import { createMessage } from "../services/messageService";
 import { createAgent, deleteAgent } from "../services/agentService";
 import { completeAgentMigrationAutoStart } from "../services/agentMigrationService";
@@ -1626,6 +1626,52 @@ test("PATCH /api/servers/:id/sidebar-order persists, sanitizes, and versions cus
     assert.deepEqual(getBody.customSections, updateBody.customSections);
     assert.deepEqual(getBody.sectionPlacements, updateBody.sectionPlacements);
     assert.equal(getBody.sectionsVersion, 1);
+});
+
+test("PATCH /api/servers/:id/sidebar-order preserves live channel order while omitting a deleted channel", async ({ app }) => {
+    const { userAB, serverA } = await seedTwoServerFixture();
+    const token = await tokenForHuman(userAB.email);
+    const firstChannel = await createChannel(serverA.id, "sidebar-order-live-first");
+    const deletedChannel = await createChannel(serverA.id, "sidebar-order-deleted-before-sparse-patch");
+    const lastChannel = await createChannel(serverA.id, "sidebar-order-live-last");
+    await updateMemberSidebarOrder(serverA.id, userAB.id, {
+      channelOrder: [lastChannel.id, deletedChannel.id, firstChannel.id],
+    });
+    await deleteChannel(deletedChannel.id);
+
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      "X-Server-Id": serverA.id,
+      "Content-Type": "application/json",
+    };
+    const expectedLiveOrder = [lastChannel.id, firstChannel.id];
+    const beforeUpdateRes = await fetch(`${app.baseUrl}/api/servers/${serverA.id}/sidebar-order`, { headers });
+    assert.equal(beforeUpdateRes.status, 200);
+    const beforeUpdate = await beforeUpdateRes.json() as {
+      channelOrder: string[];
+      sectionsVersion: number;
+    };
+    assert.deepEqual(beforeUpdate.channelOrder, expectedLiveOrder);
+
+    const updateRes = await fetch(`${app.baseUrl}/api/servers/${serverA.id}/sidebar-order`, {
+      method: "PATCH",
+      headers,
+      body: JSON.stringify({
+        customSections: [{ id: "project", name: "Project", emoji: null, sortMode: "manual" }],
+        sectionOrder: ["project"],
+        sectionPlacements: [],
+        sectionsVersion: beforeUpdate.sectionsVersion,
+      }),
+    });
+    assert.equal(updateRes.status, 200);
+    const updateBody = await updateRes.json() as {
+      channelOrder: string[];
+      sectionOrder: string[];
+      sectionsVersion: number;
+    };
+    assert.deepEqual(updateBody.channelOrder, expectedLiveOrder);
+    assert.deepEqual(updateBody.sectionOrder, ["project", "system:pinned", "system:joint", "system:channels", "system:dms"]);
+    assert.equal(updateBody.sectionsVersion, beforeUpdate.sectionsVersion + 1);
 });
 
 test("sidebar section persistence atomically rejects concurrent writes at the same version", async ({ app }) => {
@@ -4673,6 +4719,111 @@ test("schema kimi option source falls back to the managed default on missing_con
     ]);
 });
 
+test("v2 Kimi and Built-in Pi model sources report status instead of a 409; v1 bodies are unchanged", async ({ app }) => {
+    const { owner, server } = await seedRoleFixture("kimi-builtin-v2-source-status");
+    const [machine] = await getDb().insert(machines).values({
+      serverId: server.id,
+      userId: owner.id,
+      name: "kimi-builtin-v2-status-machine",
+      apiKeyHash: "unused-kimi-builtin-v2-status-machine-hash",
+      runtimes: ["builtin", "kimi-sdk"],
+    }).returning();
+    const headers = { Authorization: `Bearer ${await tokenForHuman(owner.email)}`, "X-Server-Id": server.id };
+    let kimiOutcome: unknown = { kind: "missing_config", recovery: "kimi_login" };
+    let builtinMode: "supported" | "legacy" | "offline" | "timeout" = "supported";
+    app.app.set("agentOrchestrator", {
+      hasMachineLocally: () => true,
+      detectMachineRuntimeModels: async () => kimiOutcome,
+      detectMachineRuntimeModelsWithAuthority: async () => {
+        if (builtinMode === "offline") throw new RouteFailureError("daemon_offline", "Computer disconnected during model detection");
+        return {
+          outcome: builtinMode === "timeout"
+            ? { kind: "error" as const, retryable: true, code: "detect_timeout" }
+            : {
+              kind: "live" as const,
+              value: {
+                models: Object.values(PI_BUILTIN_PROVIDER_MODELS).flat(),
+                ...(builtinMode === "supported" ? { catalog: { protocolVersion: 1 as const, runtime: "builtin" as const, runtimeVersion: "0.84.3" } } : {}),
+              },
+            },
+          authority: { connectionEpochId: "epoch-a", replicaGeneration: "generation-a" },
+          daemonVersion: builtinMode === "supported" ? "1.0.23" : "1.0.17",
+          computerVersion: builtinMode === "supported" ? "1.0.23" : "1.0.17",
+        };
+      },
+    });
+    const v2 = (runtime: string, sourceId = "model") =>
+      fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-forms/v2/${runtime}/option-sources/${sourceId}`, { headers });
+    type Source = { status?: string; reason?: string; retryable?: boolean; options?: unknown[]; optionsByValue?: Record<string, unknown[]>; defaultValue?: string };
+
+    // Both forms declare the capability, so a client handles one source's
+    // status instead of failing the whole form.
+    for (const runtime of ["kimi-sdk", "builtin"]) {
+      const formRes = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-forms/v2/${runtime}`, { headers });
+      assert.equal(formRes.status, 200, runtime);
+      const form = await formRes.json() as { requiredClientCapabilities?: string[] };
+      assert.ok(form.requiredClientCapabilities?.includes("option_source.status"), `${runtime} declares option_source.status`);
+    }
+
+    // Kimi: the cases that offered the managed default still do, marked fallback.
+    const missing = await (await v2("kimi-sdk")).json() as Source;
+    assert.deepEqual([missing.status, missing.reason, missing.retryable], ["fallback", "missing_config", false]);
+    assert.equal(missing.defaultValue, "kimi-code/kimi-for-coding");
+    kimiOutcome = { kind: "error", retryable: true, code: "computer_offline" };
+    const offline = await (await v2("kimi-sdk")).json() as Source;
+    assert.deepEqual([offline.status, offline.reason, offline.retryable], ["fallback", "machine_offline", true]);
+    // The cases that failed closed still offer nothing to launch with, per source.
+    for (const [outcome, reason, retryable] of [
+      [{ kind: "error", retryable: true }, "probe_failed", true],
+      [{ kind: "error", retryable: true, code: "detect_timeout" }, "probe_timeout", true],
+      [{ kind: "no_models" }, "no_models", true],
+      [{ kind: "unsupported" }, "unsupported", false],
+    ] as const) {
+      kimiOutcome = outcome;
+      const res = await v2("kimi-sdk");
+      assert.equal(res.status, 200, reason);
+      const body = await res.json() as Source;
+      assert.deepEqual([body.status, body.reason, body.retryable, body.options], ["unavailable", reason, retryable, []], reason);
+    }
+    kimiOutcome = { kind: "live", value: { models: [{ id: "kimi-code/k3", label: "K3" }], default: "kimi-code/k3" } };
+    const kimiLive = await (await v2("kimi-sdk")).json() as Source;
+    assert.equal(kimiLive.status, "live");
+    assert.equal("reason" in kimiLive, false);
+
+    // Built-in: live catalog, offline bundle, a probe without the catalog.
+    const live = await (await v2("builtin")).json() as Source;
+    assert.equal(live.status, "live");
+    const provider = await (await v2("builtin", "provider")).json() as Source;
+    assert.equal("status" in provider, false, "the static provider select carries no status");
+    builtinMode = "offline";
+    const bundled = await (await v2("builtin")).json() as Source;
+    assert.deepEqual([bundled.status, bundled.reason], ["fallback", "machine_offline"]);
+    assert.ok((bundled.optionsByValue?.deepseek ?? []).length > 0, "offline still serves the bundled catalog");
+    builtinMode = "timeout";
+    const timedOut = await v2("builtin");
+    assert.equal(timedOut.status, 200);
+    const timedOutBody = await timedOut.json() as Source;
+    assert.deepEqual([timedOutBody.status, timedOutBody.reason, timedOutBody.retryable, timedOutBody.optionsByValue], ["unavailable", "probe_timeout", true, {}]);
+    // Too old to prove its catalog: still the typed 409, an upgrade fixes it.
+    builtinMode = "legacy";
+    const legacy = await v2("builtin");
+    assert.equal(legacy.status, 409);
+    assert.equal((await legacy.json() as { code: string }).code, "builtin_catalog_capability_required");
+
+    // v1 keeps its bodies: no status fields, and the old 409s.
+    kimiOutcome = { kind: "missing_config", recovery: "kimi_login" };
+    const v1Kimi = await (await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-form-definitions/kimi-sdk/option-sources/model?schemaVersion=${KIMI_SDK_FORM_DEFINITION_REF.schemaVersion}`, { headers })).json() as Source;
+    assert.equal("status" in v1Kimi, false);
+    kimiOutcome = { kind: "no_models" };
+    const v1Failed = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-form-definitions/kimi-sdk/option-sources/model?schemaVersion=${KIMI_SDK_FORM_DEFINITION_REF.schemaVersion}`, { headers });
+    assert.equal(v1Failed.status, 409);
+    await v1Failed.text();
+    builtinMode = "timeout";
+    const v1Builtin = await fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/runtime-form-definitions/builtin/option-sources/model?schemaVersion=builtin-pi.create.v3`, { headers });
+    assert.equal(v1Builtin.status, 409);
+    assert.equal((await v1Builtin.json() as { code: string }).code, "builtin_catalog_unavailable");
+});
+
 test("a runtime with only a v2 form is served on v2 and stays invisible to v1 clients", async ({ app }) => {
     const { owner, server } = await seedRoleFixture("v2-only-runtime-form");
     const [machine] = await getDb().insert(machines).values({
@@ -4749,11 +4900,13 @@ test("batch 2 v2 forms: OpenCode option source is the live probe or the static f
     let probe: () => Promise<unknown> = async () => ({ kind: "live", value: { models: [{ id: "a/one", label: "One" }, { id: "b/two", label: "Two" }], default: "b/two" } });
     app.app.set("agentOrchestrator", {
       hasMachineLocally: () => true,
-      detectMachineRuntimeModels: async (_machineId: string, runtime: string) => {
+      detectMachineRuntimeModels: async (_machineId: string, runtime: string, options?: { force?: boolean }) => {
         probed.push(runtime);
+        forced.push(options?.force === true);
         return probe();
       },
     });
+    const forced: boolean[] = [];
     const base = `${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}`;
     const fixture = (name: string) => JSON.parse(readFileSync(new URL(`../../../runtime-form/fixtures/${name}`, import.meta.url), "utf8")) as unknown;
 
@@ -4777,6 +4930,11 @@ test("batch 2 v2 forms: OpenCode option source is the live probe or the static f
     assert.deepEqual(live.options, [{ value: "a/one", label: "One" }, { value: "b/two", label: "Two" }]);
     assert.equal(live.defaultValue, "b/two");
     assert.deepEqual(probed, ["opencode"]);
+    // The refresh action on a live source re-asks the Computer, bypassing its model cache.
+    const refreshed = await fetch(`${sourceUrl}?refresh=1`, { headers });
+    assert.equal(refreshed.status, 200);
+    assert.deepEqual(forced, [false, true]);
+    probed.length = 0;
 
     // Not live: the bundled list as a normal select, byte-equal to the shared fixture; never a 409 or 500.
     for (const nonLive of [
@@ -4829,12 +4987,14 @@ test("batch 3a v2 forms: Codex/Grok option sources carry option_source.status ov
     }).returning();
     const headers = { Authorization: `Bearer ${await tokenForHuman(owner.email)}`, "X-Server-Id": server.id };
     const probed: string[] = [];
+    const forced: boolean[] = [];
     let local = true;
     let probe: () => Promise<unknown> = async () => ({ kind: "missing_config" });
     app.app.set("agentOrchestrator", {
       hasMachineLocally: () => local,
-      detectMachineRuntimeModels: async (_machineId: string, runtime: string) => {
+      detectMachineRuntimeModels: async (_machineId: string, runtime: string, options?: { force?: boolean }) => {
         probed.push(runtime);
+        forced.push(options?.force === true);
         return probe();
       },
     });
@@ -4851,8 +5011,10 @@ test("batch 3a v2 forms: Codex/Grok option sources carry option_source.status ov
 
     // missing_config: 200 with the bundled list marked fallback, byte-equal to the shared fixture.
     const sourceUrl = `${base}/runtime-forms/v2/codex/option-sources/model`;
+    forced.length = 0;
     const fallback = await fetch(sourceUrl, { headers });
     assert.equal(fallback.status, 200);
+    assert.deepEqual(forced, [false], "a plain source read may be answered from the Computer's model cache");
     assert.equal(await asSent(fallback), fixtureText("codex.option-source.fallback.json"));
 
     // A retry asks the Computer again and gets the live list.
@@ -4864,6 +5026,7 @@ test("batch 3a v2 forms: Codex/Grok option sources carry option_source.status ov
     assert.equal(retriedBody.status, "live");
     assert.deepEqual(retriedBody.options.map((option) => option.value), ["gpt-7-preview"]);
     assert.deepEqual(probed, ["codex"]);
+    assert.deepEqual(forced.slice(-1), [true], "refresh=1 asks the Computer to bypass its model cache");
 
     // Every source-level failure is a 200 with a reason, never a 409/500 (no v1 fallback for a source).
     for (const [detect, reason, retryable] of [
@@ -5274,9 +5437,9 @@ test("GET /api/servers/:id/machines projects one source-aware policy decision pe
       getMachineConnectionEpoch: () => "policy-test-epoch",
       getMachineComputerVersionFact: async (machineId: string) => {
         const version = machineId === oldComputer.id
-          ? "1.0.40"
+          ? "1.0.46"
           : machineId === currentComputer.id
-            ? "1.0.41"
+            ? "1.0.47"
             : null;
         return {
           version,
@@ -5289,7 +5452,7 @@ test("GET /api/servers/:id/machines projects one source-aware policy decision pe
       },
     });
     app.app.set("computerBroadcastPolicyEvaluator", (input: EvaluateComputerBroadcastPolicyInput) => {
-      if (input.source?.version === "1.0.40") {
+      if (input.source?.version === "1.0.46") {
         return testBroadcastPolicyDecision(input, {
           eligibility: "eligible",
           reasonCode: "eligible",
@@ -7024,7 +7187,7 @@ test("remote_computer_upgrade_v2 alone opens the machine-list projection and the
       hasMachineCapability: () => true,
       getMachineConnectionEpoch: () => "v2-gated-epoch",
       getMachineComputerVersionFact: async () => ({
-        version: "1.0.40", observedAt: new Date().toISOString(), provenance: "owner_connection",
+        version: "1.0.46", observedAt: new Date().toISOString(), provenance: "owner_connection",
       }),
       sendComputerControl: async () => {
         throw new Error("the v2 upgrade route must not use the legacy control relay");
@@ -7042,7 +7205,7 @@ test("remote_computer_upgrade_v2 alone opens the machine-list projection and the
         handsRequests += 1;
         return Response.json({
           app: { slug: "raft-computer-cli", platform: "node" }, channel: "main",
-          build: { id: "build-41", version: "1.0.41" }, scoped: { release_id: "release-41" },
+          build: { id: "build-47", version: "1.0.47" }, scoped: { release_id: "release-47" },
           assets: [{ platform: "darwin", arch: "arm64", variant: null, filetype: "binary",
             sha256: "a".repeat(64), size_bytes: 100, download_url: "https://hands.build/artifact" }],
         });
@@ -7068,7 +7231,7 @@ test("remote_computer_upgrade_v2 alone opens the machine-list projection and the
     const upgrade = () => fetch(`${app.baseUrl}/api/servers/${server.id}/machines/${machine.id}/computer/upgrade`, {
       method: "POST",
       headers: { Authorization: `Bearer ${ownerToken}`, "X-Server-Id": server.id, "Content-Type": "application/json" },
-      body: JSON.stringify({ targetVersion: "1.0.41" }),
+      body: JSON.stringify({ targetVersion: "1.0.47" }),
     });
 
     // v2 off (no flag at all): the projection reports the gate and nothing is sent.
@@ -7088,7 +7251,7 @@ test("remote_computer_upgrade_v2 alone opens the machine-list projection and the
     const openPolicy = await listPolicy();
     assert.equal(openPolicy?.eligibility, "eligible");
     assert.equal(openPolicy?.reasonCode, "eligible");
-    assert.equal(openPolicy?.targetVersion, "1.0.41");
+    assert.equal(openPolicy?.targetVersion, "1.0.47");
     // The command cannot be delivered (machine dropped between the route's
     // check and the send): the request is settled on the spot, so the next
     // click creates a fresh request and really sends it instead of getting the
@@ -7105,8 +7268,8 @@ test("remote_computer_upgrade_v2 alone opens the machine-list projection and the
     const openUpgrade = await upgrade();
     assert.equal(openUpgrade.status, 201, await openUpgrade.clone().text());
     const openBody = await openUpgrade.json() as { upgradeRequest: { id: string; targetVersion: string } };
-    assert.equal(openBody.upgradeRequest.targetVersion, "1.0.41");
-    assert.deepEqual(sent, [{ machineId: machine.id, targetVersion: "1.0.41", requestId: openBody.upgradeRequest.id }]);
+    assert.equal(openBody.upgradeRequest.targetVersion, "1.0.47");
+    assert.deepEqual(sent, [{ machineId: machine.id, targetVersion: "1.0.47", requestId: openBody.upgradeRequest.id }]);
   } finally {
     globalThis.fetch = originalFetch;
     __resetLatestComputerVersionForTest();

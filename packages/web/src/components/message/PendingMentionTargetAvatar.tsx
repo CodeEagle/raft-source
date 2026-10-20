@@ -18,7 +18,7 @@ export function PendingMentionTargetAvatar({ action }: { action: PendingMentionA
           agentAvatarUrl={action.targetAvatarUrl}
           humanAvatarUrl={action.targetAvatarUrl}
         >
-          <AgentAvatar avatarUrl={action.targetAvatarUrl} size={18} className="!h-full !w-full" />
+          <AgentAvatar avatarUrl={action.targetAvatarUrl} />
         </AvatarSlot>
       </span>
     );

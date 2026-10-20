@@ -73,7 +73,7 @@ test("download-as-image freezes thread reply chip box from the live message", ()
   assert.match(screenshot, /freezeCloneRenderedBoxes\(node, clone\)/);
 });
 
-test("download-as-image uses a tablet-width cap without lowering pixel ratio", () => {
+test("download-as-image uses a tablet-width cap; only the pixel budget lowers the ratio", () => {
   // Anchor the share-screenshot container width to the live row's own
   // rendered box, then allow callers to cap it to a target reading width.
   // Measuring
@@ -88,7 +88,10 @@ test("download-as-image uses a tablet-width cap without lowering pixel ratio", (
   assert.match(screenshot, /maxWidth\?: number;/);
   assert.match(screenshot, /const rowWidth = nodes\[0\]\?\.getBoundingClientRect\(\)\.width \?\? SHARE_PREVIEW_MAX_WIDTH;/);
   assert.match(screenshot, /const liveWidth = typeof maxWidth === "number"[\s\S]*Math\.min\(rowWidth, maxWidth\)[\s\S]*: rowWidth;/);
-  assert.match(screenshot, /pixelRatio: resolveCapturePixelRatio\(options\.pixelRatio\)/);
+  // The screen's ratio is the starting point; only the pixel budget may lower
+  // it (task #1302), and the render uses exactly the planned ratio.
+  assert.match(screenshot, /planScreenshotPixelRatio\(liveWidth, liveHeight, resolveCapturePixelRatio\(options\.pixelRatio\)\)/);
+  assert.match(screenshot, /pixelRatio: plan\.pixelRatio,/);
   // Negative: must not regress to parentElement-based measurement.
   assert.doesNotMatch(
     screenshot,
@@ -120,7 +123,7 @@ test("download-as-image freezes markdown text metrics before rasterizing", () =>
 
   const fontsReadyIndex = screenshot.indexOf("await waitForDocumentFontsForScreenshot();");
   const freezeIndex = screenshot.indexOf("freezeTextLineBoxesForScreenshot(container);");
-  const rasterizeIndex = screenshot.indexOf("return await toPng(container");
+  const rasterizeIndex = screenshot.indexOf("const dataUrl = await toPng(container");
   assert.ok(fontsReadyIndex >= 0, "font readiness wait should be explicit");
   assert.ok(freezeIndex > fontsReadyIndex, "line boxes must be frozen after fonts are ready");
   assert.ok(rasterizeIndex > freezeIndex, "line boxes must be frozen before html-to-image rasterizes");
@@ -145,7 +148,7 @@ test("download-as-image constrains wide markdown content before rasterizing", ()
 
   const constrainIndex = screenshot.indexOf("constrainWideContentForScreenshot(container);");
   const freezeIndex = screenshot.indexOf("freezeTextLineBoxesForScreenshot(container);");
-  const rasterizeIndex = screenshot.indexOf("return await toPng(container");
+  const rasterizeIndex = screenshot.indexOf("const dataUrl = await toPng(container");
   assert.ok(constrainIndex >= 0, "wide content constraint must be explicit");
   assert.ok(freezeIndex > constrainIndex, "wide content should be constrained before text metrics are frozen");
   assert.ok(rasterizeIndex > constrainIndex, "wide content must be constrained before rasterization");
@@ -182,7 +185,7 @@ test("pixel avatars are already single data-URL images, so capture needs no grid
   assert.doesNotMatch(avatar, /gridTemplateColumns/);
   assert.doesNotMatch(screenshot, /inlinePixelAvatarsForScreenshot/);
   // Avatars then take the generic image path like every other <img>.
-  assert.ok(screenshot.indexOf('container.querySelectorAll("img")') < screenshot.indexOf("return await toPng(container"));
+  assert.ok(screenshot.indexOf('container.querySelectorAll("img")') < screenshot.indexOf("const dataUrl = await toPng(container"));
 });
 
 test("download-as-image uses a public no-auth fetch for uploaded avatar URLs", () => {

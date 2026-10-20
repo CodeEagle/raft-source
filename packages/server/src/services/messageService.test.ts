@@ -3,7 +3,8 @@ import { closeTestDatabase, openTestDatabase } from "../test/integration/databas
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
-import { BasicTracer, MemoryTraceSink, MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER } from "@botiverse/raft-shared";
+import { BasicTracer, CANONICAL_MESSAGE_FIELD_DESCRIPTORS, MemoryTraceSink, MESSAGE_REPLIES_SYNC_WINDOW_PRODUCER } from "@botiverse/raft-shared";
+import { enrichedMessagePayloadKeys } from "./messageRealtimeProducerRegistry";
 import { buildNotificationPushProjectionTargets, buildNotificationPushSocketTargets, buildPushTargetsFromContext, broadcastAndDeliver, broadcastSystemMessage, createMessage, deliverExternalInboundCommittedMessageToAgents, deliverMessageToAgent, deliverMessageToAgents, emitExternalProjectionMessageToFrontend, runExternalInboundCommitSideEffects, emitExternalReactionMessageUpdateToFrontend, getAgentResumeCatchupMessages, type AgentResumeCatchupResult, getSenderPendingMentionActions, getSenderReadReceiptInFlightCountForTests, planDirectMentionThreadFollow, registerSenderReadReceiptForTests, selectCanonicalWebPushProjectionTargets, __resetMessageServiceDepsForTests, __setMessageServiceDepsForTests } from "./messageService";
 import { __resetAgentSendReplayDbForTests, __setAgentSendReplayDbForTests } from "./agentSendReplayService";
 import { CompatibilityReadMutationPendingError } from "./readMutationSequencer";
@@ -970,6 +971,129 @@ test("broadcastAndDeliver message:new does not emit storage-only message columns
   assert.equal(emitted.content, "socket safe body");
   assert.equal(emitted.senderName, "Agent One");
   assert.equal(emitted.conversationContext.channelType, "channel");
+});
+
+// Canonical manifest: every key declared present on `message:new`. Mobile
+// accepts a realtime frame as a full canonical fact only when all are present
+// (values may be null / []); a dropped key silently demotes every live message.
+const MESSAGE_NEW_MANIFEST_KEYS = CANONICAL_MESSAGE_FIELD_DESCRIPTORS
+  .filter((descriptor) => descriptor.presence.messageNew === "present")
+  .map((descriptor) => descriptor.name);
+const MESSAGE_NEW_REGISTRY_KEYS = new Set<string>(enrichedMessagePayloadKeys);
+
+function assertManifestCompleteMessageNew(payload: Record<string, unknown>, label: string) {
+  const missing = MESSAGE_NEW_MANIFEST_KEYS.filter((key) => !(key in payload));
+  assert.deepEqual(missing, [], `${label}: message:new must carry every manifest messageNew key`);
+  const unregistered = Object.keys(payload).filter((key) => !MESSAGE_NEW_REGISTRY_KEYS.has(key));
+  assert.deepEqual(unregistered, [], `${label}: message:new keys must be declared in the producer registry`);
+}
+
+test("broadcastAndDeliver message:new and send response carry every manifest messageNew key with REST values", async ({ db }) => {
+  assert.ok(MESSAGE_NEW_MANIFEST_KEYS.includes("senderDescription") && MESSAGE_NEW_MANIFEST_KEYS.includes("reactions"));
+  const persisted = makePersistedMessage({
+    id: "message-new-manifest",
+    // Real persisted rows always carry these columns (null when unset).
+    randomId: null,
+    actionMetadata: null,
+    channelId: "channel-1",
+    content: "manifest complete body",
+  });
+  const senderIdentityCalls: string[] = [];
+  __setMessageServiceDepsForTests({
+    createMessage: async () => persisted as any,
+    getChannel: async (channelId: string) => ({
+      id: channelId,
+      serverId: "server-1",
+      type: "channel",
+      name: "engineering",
+      parentMessageId: null,
+    } as any),
+    getChannelHumans: async () => [],
+    getChannelAgents: async () => [],
+    getChannelMembers: async () => ({ agents: [], humans: [] }),
+    getActiveJointChannelProjectionsByLocalChannel: async () => [],
+    assertChannelNotArchived: async () => undefined,
+    markRead: async () => undefined,
+    markAgentLegacyRead: async () => undefined,
+    renderAgentReadablePermalinks: async (content: string) => content,
+    getSenderIdentity: async (_senderType, senderId, fallbackName) => {
+      senderIdentityCalls.push(senderId);
+      return { uniqueName: fallbackName, description: "Reviews pull requests" };
+    },
+    buildPushTargets: async () => new Map(),
+    sendPushNotifications: async () => undefined,
+    getMentionFactsForMessages: async () => new Map(),
+    insertMentionRows: async () => [],
+  });
+
+  const { io, events } = createIoRecorder();
+  const response = await broadcastAndDeliver(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, {
+    channelId: "channel-1",
+    senderType: "agent",
+    senderId: "agent-1",
+    senderName: "Agent One",
+    content: "manifest complete body",
+  }) as Record<string, unknown>;
+
+  const emitted = events.find((event) => event.room === "channel:channel-1" && event.event === "message:new")?.payload;
+  assert.ok(emitted, "expected realtime message:new payload");
+  assertManifestCompleteMessageNew(emitted, "persisted.channel");
+  // REST parity (enrichWithSenderNames): description || null; a brand-new
+  // row has no reactions; user/agent senders have no external author.
+  assert.equal(emitted.senderDescription, "Reviews pull requests");
+  assert.deepEqual(emitted.reactions, []);
+  assert.equal(emitted.externalAuthor, null);
+  assert.equal(emitted.commentRef, null);
+  // The HTTP send response is the same body minus the frame-only context.
+  const responseMissing = MESSAGE_NEW_MANIFEST_KEYS
+    .filter((key) => key !== "conversationContext")
+    .filter((key) => !(key in response));
+  assert.deepEqual(responseMissing, [], "send response must carry the manifest-complete body");
+  assert.equal(response.senderDescription, "Reviews pull requests");
+  assert.deepEqual(response.reactions, []);
+  // One sender lookup per send, shared by the frontend payload and agent delivery.
+  assert.deepEqual(senderIdentityCalls, ["agent-1"]);
+});
+
+test("broadcastSystemMessage message:new carries every manifest messageNew key with REST system values", async () => {
+  const persisted = makePersistedMessage({
+    id: "system-message-new-manifest",
+    // Real persisted rows always carry these columns (null when unset).
+    randomId: null,
+    actionMetadata: null,
+    channelId: "channel-1",
+    senderType: "user",
+    senderId: "system",
+    messageType: "system",
+    content: "Someone joined",
+  });
+  __setMessageServiceDepsForTests({
+    createMessage: async () => persisted as any,
+    getChannel: async (channelId: string) => ({
+      id: channelId,
+      serverId: "server-1",
+      type: "channel",
+      name: "engineering",
+      parentMessageId: null,
+    } as any),
+    getChannelHumans: async () => [],
+    getChannelAgents: async () => [],
+    getActiveJointChannelProjectionsByLocalChannel: async () => [],
+  });
+
+  const { io, events } = createIoRecorder();
+  await broadcastSystemMessage(io, withChannelDelivery({ deliverMessage: async () => undefined }) as any, "channel-1", "Someone joined", {
+    inboxFactPolicy: { mode: "skip", producer: "test.system.manifest", reason: "frame shape test" },
+  });
+
+  const emitted = events.find((event) => event.room === "channel:channel-1" && event.event === "message:new")?.payload;
+  assert.ok(emitted, "expected realtime system message:new payload");
+  assertManifestCompleteMessageNew(emitted, "system.channel");
+  assert.equal(emitted.senderDescription, null);
+  assert.equal(emitted.senderMembershipStatus, null);
+  assert.deepEqual(emitted.reactions, []);
+  assert.deepEqual(emitted.attachments, []);
+  assert.deepEqual(emitted.mentions, []);
 });
 
 test("a committed external projection emits one enriched message:new with its frozen avatar", async ({ db }) => {
@@ -2258,6 +2382,125 @@ function pickAgentLabels(message: AgentResumeCatchupResult["messages"][number]) 
     parent_channel_type: message.parent_channel_type,
   };
 }
+
+/** A two-server joint channel: the sender on server A, the agent a member of server B's local projection. */
+async function seedJointMentionOccurrenceFixture(db: ReturnType<typeof getDb>, slug: string) {
+  const [ownerA, ownerB] = await db.insert(users).values([
+    { email: `${slug}-a@test.com`, name: `${slug}A`, passwordHash: "x", emailVerified: true },
+    { email: `${slug}-b@test.com`, name: `${slug}B`, passwordHash: "x", emailVerified: true },
+  ]).returning();
+  const [serverA] = await db.insert(servers).values({ name: `${slug} A`, slug: `${slug}-a`, ownerId: ownerA.id }).returning();
+  const [serverB] = await db.insert(servers).values({ name: `${slug} B`, slug: `${slug}-b`, ownerId: ownerB.id }).returning();
+  await db.insert(serverMembers).values([
+    { serverId: serverA.id, userId: ownerA.id, role: "owner" },
+    { serverId: serverB.id, userId: ownerB.id, role: "owner" },
+  ]);
+  const [agent] = await db.insert(agents).values({ serverId: serverB.id, name: `${slug}-agent`, status: "active", runtime: "codex" }).returning();
+  const [canonical, localA, localB] = await db.insert(channels).values([
+    { serverId: serverA.id, name: `${slug}-canonical`, type: "joint" },
+    { serverId: serverA.id, name: `${slug}-a`, type: "joint" },
+    { serverId: serverB.id, name: `${slug}-b`, type: "joint" },
+  ]).returning();
+  const [joint] = await db.insert(jointChannels).values({
+    canonicalChannelId: canonical.id,
+    createdByServerId: serverA.id,
+    createdByUserId: ownerA.id,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: joint.id, serverId: serverA.id, localChannelId: localA.id, role: "host", status: "active", joinedByUserId: ownerA.id },
+    { jointChannelId: joint.id, serverId: serverB.id, localChannelId: localB.id, role: "participant", status: "active", joinedByUserId: ownerB.id },
+  ]);
+  await db.insert(channelHumans).values([
+    { channelId: localA.id, userId: ownerA.id },
+    { channelId: localB.id, userId: ownerB.id },
+  ]);
+  await db.insert(channelAgents).values({ channelId: localB.id, agentId: agent.id });
+  const delivered: { agentId: string; payload: any; options?: any }[] = [];
+  let signalAgentDelivered!: () => void;
+  // Joint channel deliveries are scheduled after broadcastAndDeliver returns.
+  const agentDelivered = new Promise<void>((resolve) => { signalAgentDelivered = resolve; });
+  const orchestrator = withChannelDelivery({
+    deliverMessage: async (agentId: string, payload: any, options?: any) => {
+      delivered.push({ agentId, payload, options });
+      if (agentId === agent.id) signalAgentDelivered();
+    },
+  }) as any;
+  return { ownerA, ownerB, serverA, serverB, agent, canonical, localA, localB, delivered, agentDelivered, orchestrator };
+}
+
+/** The mentioned agent's occurrence carries the payload it was delivered, and that delivery names the occurrence. */
+async function assertJointMentionOccurrenceDelivered(
+  db: ReturnType<typeof getDb>,
+  input: { messageId: string; agentId: string; delivered: { agentId: string; payload: any; options?: any }[]; agentDelivered: Promise<void> },
+) {
+  await waitForTestSignal(input.agentDelivered, "joint mention delivery");
+  const rows = await db.select().from(mentionDeliveryOccurrences).where(eq(mentionDeliveryOccurrences.messageId, input.messageId));
+  assert.equal(rows.length, 1, "the send records one occurrence for the mentioned agent");
+  const occurrence = rows[0]!;
+  assert.equal(occurrence.agentId, input.agentId);
+  const delivery = input.delivered.find((candidate) => candidate.agentId === input.agentId && candidate.payload.message_id === input.messageId);
+  assert.ok(delivery, "the mentioned agent is delivered the joint message");
+  assert.equal(delivery.payload.mentioned, true);
+  assert.notEqual(occurrence.deliveryPayload, null, "the joint path persists the occurrence's delivery payload");
+  assert.equal((occurrence.deliveryPayload as any).message_id, input.messageId);
+  assert.equal((occurrence.deliveryPayload as any).channel_id, delivery.payload.channel_id, "the payload is the receiver-local delivery");
+  assert.equal(delivery.options?.mentionDeliveryOccurrenceId, occurrence.occurrenceId, "the delivery carries its occurrence id");
+}
+
+test("a joint channel mention persists the agent's occurrence payload and passes its occurrence id to delivery", async ({ db }) => {
+  const f = await seedJointMentionOccurrenceFixture(db, "joint-occ-channel");
+  const { io } = createIoRecorder();
+
+  const message = await broadcastAndDeliver(io, f.orchestrator, {
+    channelId: f.localA.id,
+    senderType: "user",
+    senderId: f.ownerA.id,
+    senderName: f.ownerA.name,
+    content: `hello @${f.agent.name}`,
+    mentions: [{ type: "agent", id: f.agent.id, name: f.agent.name }] as any,
+  });
+
+  await assertJointMentionOccurrenceDelivered(db, { messageId: message.id, agentId: f.agent.id, delivered: f.delivered, agentDelivered: f.agentDelivered });
+  assert.equal(f.delivered.find((delivery) => delivery.agentId === f.agent.id)?.payload.channel_id, f.localB.id);
+});
+
+test("a joint thread mention persists the agent's occurrence payload and passes its occurrence id to delivery", async ({ db }) => {
+  const f = await seedJointMentionOccurrenceFixture(db, "joint-occ-thread");
+  const parent = await createMessage(f.canonical.id, "user", f.ownerA.id, "joint parent");
+  const [canonicalThread] = await db.insert(channels).values({
+    serverId: f.serverA.id,
+    name: `thread-${parent.id.slice(0, 8)}`,
+    type: "thread",
+    parentMessageId: parent.id,
+  }).returning();
+  await db.update(messages).set({ threadId: canonicalThread.id }).where(eq(messages.id, parent.id));
+  const [threadA, threadB] = await db.insert(channels).values([
+    { serverId: f.serverA.id, name: `thread-${parent.id.slice(0, 8)}`, type: "thread" },
+    { serverId: f.serverB.id, name: `thread-${parent.id.slice(0, 8)}`, type: "thread" },
+  ]).returning();
+  const [threadJoint] = await db.insert(jointChannels).values({
+    canonicalChannelId: canonicalThread.id,
+    createdByServerId: f.serverA.id,
+    createdByUserId: f.ownerA.id,
+  }).returning();
+  await db.insert(jointChannelServers).values([
+    { jointChannelId: threadJoint.id, serverId: f.serverA.id, localChannelId: threadA.id, role: "host", status: "active", joinedByUserId: f.ownerA.id },
+    { jointChannelId: threadJoint.id, serverId: f.serverB.id, localChannelId: threadB.id, role: "participant", status: "active", joinedByUserId: f.ownerB.id },
+  ]);
+  const { io } = createIoRecorder();
+
+  const reply = await broadcastAndDeliver(io, f.orchestrator, {
+    channelId: threadA.id,
+    senderType: "user",
+    senderId: f.ownerA.id,
+    senderName: f.ownerA.name,
+    content: `thread ping @${f.agent.name}`,
+    mentions: [{ type: "agent", id: f.agent.id, name: f.agent.name }] as any,
+  });
+
+  await assertJointMentionOccurrenceDelivered(db, { messageId: reply.id, agentId: f.agent.id, delivered: f.delivered, agentDelivered: f.agentDelivered });
+  assert.equal(f.delivered.find((delivery) => delivery.agentId === f.agent.id)?.payload.channel_id, threadB.id);
+});
 
 test("getAgentResumeCatchupMessages suppresses muted ordinary messages but preserves pierce facts", async ({ db }) => {
   const [owner] = await db.insert(users).values({

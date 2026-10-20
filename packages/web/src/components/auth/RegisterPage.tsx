@@ -1,7 +1,7 @@
 import { useCallback, useState } from "react";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
-import { Button, Input, TextSans } from "raft-ui";
+import { Button, Input, Separator, TextSans } from "@botiverse/raft-ui";
 import { CURRENT_LEGAL_ACCEPTANCE } from "@botiverse/raft-shared";
 import { useAuthStore } from "../../store/authStore";
 import type { AuthProvider, SocialAuthProviderId } from "../../hooks/useAuthProviders";
@@ -107,10 +107,10 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
       <div className="w-full">
         <AuthPageIntro title={formatMessage({ id: "pages.register.title" })} />
 
-        {error ? <Banner intent="warning" className="mb-4 font-bold">{error}</Banner> : null}
+        {error ? <Banner intent="warning" className="mb-4">{error}</Banner> : null}
 
         <form onSubmit={handleSubmit} className="space-y-4" autoComplete="on" noValidate>
-          <FormField label={formatMessage({ id: "pages.register.emailLabel" })} labelStyle="plain" error={fieldErrors.email} htmlFor="register-email">
+          <FormField label={formatMessage({ id: "pages.register.emailLabel" })} error={fieldErrors.email} htmlFor="register-email">
             <Input
               id="register-email"
               name="email"
@@ -123,7 +123,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
             />
           </FormField>
 
-          <FormField label={formatMessage({ id: "pages.register.passwordLabel" })} labelStyle="plain" error={fieldErrors.password} htmlFor="register-password">
+          <FormField label={formatMessage({ id: "pages.register.passwordLabel" })} error={fieldErrors.password} htmlFor="register-password">
             <Input
               id="register-password"
               name="new-password"
@@ -146,7 +146,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
           <Button
             type="submit"
             disabled={loading || !acceptedLegal}
-            size="lg"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -162,7 +162,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
               error next to the validation text. */}
           {!acceptedLegal && !loading ? (
             <p
-              className="text-center text-xs text-foreground-muted theme-brutal:text-black/50"
+              className="text-center text-caption text-foreground-hint"
               data-testid="register-legal-hint"
             >
               {formatMessage({ id: "auth.legalAcceptance.requiredHint" })}
@@ -172,13 +172,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
 
         {enabledProviders.length > 0 ? (
           <>
-            <div className="my-4 flex items-center gap-3">
-              <div className="h-0.5 flex-1 bg-line-strong theme-brutal:bg-black" />
-              <span className="text-xs font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/45">
-                {formatMessage({ id: "pages.register.or" })}
-              </span>
-              <div className="h-0.5 flex-1 bg-line-strong theme-brutal:bg-black" />
-            </div>
+            <Separator className="my-1">{formatMessage({ id: "pages.register.or" })}</Separator>
             <div className="space-y-2">
               {enabledProviders.map((provider) => (
                 <SocialProviderButton
@@ -192,7 +186,7 @@ export default function RegisterPage({ onSwitchToLogin, previewProviders }: Regi
           </>
         ) : null}
 
-        <TextSans size="small" className="mt-4 text-center theme-brutal:text-black/60">
+        <TextSans size="small" className="mt-4 text-center">
           {formatMessage(
             { id: "pages.register.haveAccountPrompt" },
             {

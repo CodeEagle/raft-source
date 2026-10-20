@@ -2,7 +2,7 @@
 // → POST /internal/agent-api/tasks  body: { channel, tasks: [{title}, ...], assignee? }
 
 import type { Command } from "commander";
-import { type AgentApiTaskCreateBody } from "@botiverse/raft-shared";
+import type { AgentApiTaskCreateBody } from "@botiverse/raft-shared";
 
 import { createAgentApiSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

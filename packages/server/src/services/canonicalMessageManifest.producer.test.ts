@@ -124,12 +124,16 @@ test("producer nested shapes == canonical manifest (compile-time maps, runtime c
 
 import type { CANONICAL_MESSAGE_FIELD_DESCRIPTORS } from "@botiverse/raft-shared";
 import type { projectTaskMessageUpdated } from "./taskRealtimeEvents";
+import type { buildPersistedMessageFrontendPayload } from "./messageService";
 
 type Descriptors = typeof CANONICAL_MESSAGE_FIELD_DESCRIPTORS;
 type TaskRow = ReturnType<typeof projectTaskMessageUpdated>;
-/** `message:new` broadcast payload: enriched row + conversationContext
- *  (withFrontendConversationContext is applied on every message:new emit). */
-type MessageNewRow = EnrichedMessageRow & { conversationContext: FrontendConversationContext };
+/** `message:new` broadcast payload: the body the send pipeline ACTUALLY emits
+ *  (broadcastAndDeliver → buildPersistedMessageFrontendPayload) +
+ *  conversationContext (withFrontendConversationContext is applied on every
+ *  message:new emit). Gating the REST row type here instead let the realtime
+ *  body silently drop senderDescription/reactions while this gate stayed green. */
+type MessageNewRow = ReturnType<typeof buildPersistedMessageFrontendPayload> & { conversationContext: FrontendConversationContext };
 /** `message:updated` enriched reload payload: getMessageContext messages —
  *  enriched row WITHOUT conversationContext (creation-time identity). */
 type EnrichedUpdatedRow = EnrichedMessageRow;

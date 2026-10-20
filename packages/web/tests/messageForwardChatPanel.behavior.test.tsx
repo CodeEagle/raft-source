@@ -7,7 +7,7 @@ import { TestIntlProvider } from "./helpers/intl";
 import { installForwardFoldMeasurementStub } from "./helpers/forwardFoldMeasurement";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { MemoryRouter, useNavigate } from "react-router-dom";
-import { ToastProvider, toast } from "raft-ui";
+import { ToastProvider, toast } from "@botiverse/raft-ui";
 import api from "../src/api/client";
 import { getSocket } from "../src/api/socket";
 import ChatPanel from "../src/components/message/ChatPanel";
@@ -106,17 +106,15 @@ function assertTitleOnlyToast(viewportSelector: string) {
   assert.equal(viewport.querySelector('[data-slot="toast-close"]'), null);
 }
 
-function assertForwardToastActionTextOnlyHover() {
+// Raft DS Toast: the action is the shared raft-ui ToastAction (underlined HUD
+// text drawn by the recipe). The forward toast must not re-skin it locally with
+// a fixed palette that breaks on the dark HUD.
+function assertForwardToastActionUsesSharedRecipe() {
   const action = document.querySelector(".forward-toast-viewport [data-slot=\"toast-action\"]");
   assert.ok(action);
-  assert.match(action.className, /\bhover:text-black\b/);
-  assert.match(action.className, /\bhover:border-transparent\b/);
-  assert.match(action.className, /\bhover:bg-transparent\b/);
-  assert.match(action.className, /\bhover:no-underline\b/);
-  assert.match(action.className, /\bhover:shadow-none\b/);
-  assert.match(action.className, /\bhover:translate-x-0\b/);
-  assert.match(action.className, /\bhover:translate-y-0\b/);
-  assert.doesNotMatch(action.className, /\bhover:underline\b/);
+  assert.equal(action.tagName, "BUTTON");
+  assert.doesNotMatch(action.className, /\btext-black(?:\/\d+)?\b/);
+  assert.doesNotMatch(action.className, /\bbg-white\b/);
 }
 
 function getForwardSendButton(): HTMLButtonElement {
@@ -498,7 +496,7 @@ test("mixed unsupported chat selections block before an origin-only selection se
   assert.ok(useMessageStore.getState().channelMessages["dm-target"]?.some((message) => message.id === "forwarded-message"));
   await waitFor(() => assert.match(getForwardToastText(), /Forwarded to DM\./));
   assertTitleOnlyToast(".forward-toast-viewport");
-  assertForwardToastActionTextOnlyHover();
+  assertForwardToastActionUsesSharedRecipe();
 });
 
 test("forward composer preview and request order selected messages by visible source time", async () => {
@@ -715,12 +713,15 @@ test("desktop Forward note matches the mobile input and action controls", async 
   assert.ok(noteActions.contains(textarea));
   assert.equal(textarea.getAttribute("placeholder"), "Add a note");
   assert.equal(textarea.getAttribute("maxLength"), "4000");
-  assert.match(textarea.className, /\btext-base\b/);
-  assert.match(textarea.className, /\bmd:text-sm\b/);
+  // The Raft composer input is 16/24 at every width, on desktop as on mobile.
+  assert.match(textarea.className, /(?:^| )text-body(?: |$)/);
+  assert.match(textarea.className, /(?:^| )md:text-body(?: |$)/);
   assert.equal(send.getAttribute("data-slot"), "button");
-  assert.ok(send.className.includes("bg-brutal-pink"));
+  // Primary send: raft-ui's accent sticker fill.
+  assert.ok(send.className.includes("bg-attention-400"));
   assert.equal(send.getAttribute("aria-label"), "Send forward");
-  assert.equal(send.querySelector("svg")?.getAttribute("width"), "14");
+  // The DS small icon button draws an 18px glyph.
+  assert.equal(send.querySelector("svg")?.getAttribute("width"), "18");
   assert.equal(noteActions.querySelector('button[title="Attach image"]'), null);
   assert.equal(noteActions.querySelector('button[title="Attach file"]'), null);
 
@@ -973,10 +974,11 @@ test("forward composer sends canonical multi-target batches without an Open acti
   const targetSearch = screen.getByPlaceholderText("Search targets");
   // task #736: the target search is a rui InputGroup now, not a hand-rolled
   // input with its own border/shadow theme classes. Assert the shared recipe
-  // owns the chrome (slot + shadow token) instead of pinning bespoke classes,
-  // so the box keeps following the design system across themes.
+  // owns the chrome (slot + border and focus-ring tokens) instead of pinning
+  // bespoke classes, so the box keeps following the design system.
   assert.equal(targetSearch.parentElement?.getAttribute("data-slot"), "input-group");
-  assert.match(targetSearch.parentElement?.className ?? "", /\bshadow-raft-sm\b/);
+  assert.match(targetSearch.parentElement?.className ?? "", /(?:^| )border-line-strong(?: |$)/);
+  assert.match(targetSearch.parentElement?.className ?? "", /(?:^| )focus-within:shadow-focus(?: |$)/);
   assert.match(screen.getByTestId("forward-desktop-note-actions").className, /\bp-3\b/);
   fireEvent.click(screen.getByTestId("forward-target-target-a"));
   fireEvent.click(screen.getByTestId("forward-target-target-b"));
@@ -1047,7 +1049,8 @@ test("mobile Forward opens a full-page note and send step without a drawer", asy
   assert.ok(screen.getByRole("button", { name: "Select multiple" }));
 
   const searchInput = screen.getByPlaceholderText("Search targets");
-  assert.equal(searchInput.getAttribute("data-slot"), "input", "mobile destination search should reuse Raft UI Input");
+  assert.equal(searchInput.getAttribute("data-slot"), "input-group-control", "mobile destination search is a Raft UI InputGroup field");
+  assert.equal(searchInput.closest('[data-slot="input-group"]')?.querySelector('[data-slot="input-group-addon"] svg') != null, true, "the search icon sits in the group's addon");
   assert.doesNotMatch(searchInput.className, /\btext-(?:sm|base)\b/, "Forward should not override canonical input typography");
   searchInput.focus();
   assert.equal(document.activeElement, searchInput);
@@ -1090,21 +1093,26 @@ test("mobile Forward opens a full-page note and send step without a drawer", asy
     Node.DOCUMENT_POSITION_FOLLOWING,
   );
   assert.match(actions.className, /shrink-0/);
-  assert.match(actions.className, /border-t-2/);
-  assert.match(actions.className, /bg-white/);
+  // Raft DS pushed page: the note dock is the shared composer dock (a seam
+  // above it, 12px around), on the paper.
+  assert.match(actions.className, /\bborder-t\b/);
+  assert.match(actions.className, /\bborder-line-seam\b/);
+  assert.match(actions.className, /\bp-3\b/);
+  assert.match(actions.className, /\bbg-layer-canvas\b/);
   assert.match(actions.className, /pb-\[max\(12px,env\(safe-area-inset-bottom\)\)\]/);
   assert.doesNotMatch(actions.className, /fixed|sticky|mt-4/);
   const mobileSend = screen.getByRole("button", { name: "Send forward" });
   assert.equal(mobileSend.getAttribute("data-slot"), "button");
-  assert.ok(mobileSend.className.includes("bg-brutal-pink"));
+  assert.ok(mobileSend.className.includes("bg-attention-400"));
   assert.equal(mobileSend.getAttribute("aria-label"), "Send forward");
-  assert.equal(mobileSend.querySelector("svg")?.getAttribute("width"), "14");
+  // The DS small icon button draws an 18px glyph.
+  assert.equal(mobileSend.querySelector("svg")?.getAttribute("width"), "18");
   assert.ok(actions.contains(screen.getByLabelText("Optional note")));
   assert.equal(actions.querySelector('button[title="Attach image"]'), null);
   assert.equal(actions.querySelector('button[title="Attach file"]'), null);
 
   const note = screen.getByLabelText("Optional note");
-  assert.match(note.className, /\btext-base\b/, "editable text must remain 16px to prevent iOS focus zoom");
+  assert.match(note.className, /(?:^| )text-body(?: |$)/, "editable text must remain 16px to prevent iOS focus zoom");
   assert.equal(note.getAttribute("maxLength"), "4000");
   fireEvent.click(viewAll);
   const detail = await screen.findByTestId("forward-mobile-detail-page");
@@ -1300,12 +1308,17 @@ test("mobile Forward multi-select requires Done and sends only from the note pag
   assert.ok(multiHeader.contains(multiCancel));
   assert.ok(multiHeader.contains(multiDone));
   assert.equal(mobileTargetPage.querySelector("footer"), null);
-  assert.match(multiCancel.className, /size-7/);
-  assert.match(multiDone.className, /size-7/);
-  assert.match(multiDone.className, /bg-brutal-pink/);
+  // The head is raft-ui's PanelHeader: Cancel is a ghost head action
+  // (PanelAction, overhanging the edge), Done a filled 44 icon button
+  // (`size="icon-lg"`, size-11, an accent sticker) straight in the head, so
+  // its shape ends on the content edge.
+  assert.equal(multiHeader.getAttribute("data-slot"), "panel-header");
+  assert.equal(multiCancel.getAttribute("data-slot"), "panel-action");
+  assert.ok(multiDone.parentElement === multiHeader);
+  assert.match(multiDone.className, /(^| )size-11( |$)/);
+  assert.match(multiDone.className, /(^| )bg-attention-400( |$)/);
   assert.equal(multiCancel.getAttribute("aria-label"), "Cancel");
   assert.equal(multiDone.getAttribute("aria-label"), "Done");
-  assert.equal(multiCancel.querySelector("svg")?.getAttribute("width"), "14");
   assert.equal(multiDone.querySelector("svg")?.getAttribute("width"), "14");
 
   fireEvent.click(multiDone);

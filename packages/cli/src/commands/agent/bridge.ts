@@ -5,7 +5,7 @@ import {
   EXTERNAL_AGENT_ACTIVITY_EVENT_SCHEMA,
   EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
   currentTimeMs,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 import type {
   DaemonApiRequestBodyByRoute,
   DaemonApiRequestQueryByRoute,

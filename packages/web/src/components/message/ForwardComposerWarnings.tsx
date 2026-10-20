@@ -1,7 +1,7 @@
 import { LogIn } from "lucide-react";
 import { useIntl } from "react-intl";
 import Banner from "../ui/Banner";
-import { Button, Spinner } from "raft-ui";
+import { Button, Spinner } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 
 type Props = {
@@ -36,11 +36,11 @@ export default function ForwardComposerWarnings({
           intent="warning"
           withIcon
           density="sm"
-          className="mb-3 !items-center font-bold"
+          className="mb-3 items-center"
           aria-live="polite"
           data-testid="forward-join-banner"
           actions={(
-            <Button type="button" size="xs" variant="outline" onClick={onJoin} disabled={joinInFlight} aria-label={joinLabel} data-testid="forward-join-selected-channels">
+            <Button type="button" size="sm" variant="outline" onClick={onJoin} disabled={joinInFlight} aria-label={joinLabel} data-testid="forward-join-selected-channels">
               {joinInFlight ? <Spinner size="xs" aria-label={formatMessage({ id: "message.forwardComposer.joining" })} /> : <LogIn size={12} />}
               {formatMessage({ id: "message.forwardComposer.join" })}
             </Button>
@@ -54,12 +54,12 @@ export default function ForwardComposerWarnings({
         </Banner>
       )}
       {hasJointDestination && (
-        <Banner intent="warning" withIcon className="mb-3 text-xs font-bold">
+        <Banner intent="warning" withIcon className="mb-3">
           {formatMessage({ id: "message.forwardComposer.jointWarning" })}
         </Banner>
       )}
       {skippedCount > 0 && (
-        <Banner intent="warning" className="mb-3 text-xs font-bold">
+        <Banner intent="warning" className="mb-3">
           {nestedForwardCount > 0
             ? formatMessage({ id: "message.forwardComposer.nestedForwardBlocked" })
             : sourceIsThread

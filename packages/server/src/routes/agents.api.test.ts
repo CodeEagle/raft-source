@@ -1,4 +1,4 @@
-import { PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY } from "@botiverse/raft-shared";
+import { PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY, type TrajectoryEntry } from "@botiverse/raft-shared";
 import { tokenForHuman, fixturePasswordHash } from "../test/integration/credentials";
 import { createApiTest } from "../test/integration/apiTest";
 import assert from "node:assert/strict";
@@ -23,6 +23,8 @@ import {
   type RuntimeConfig,
 } from "@botiverse/raft-shared";
 import { RouteFailureError } from "../tracing/routeFailure";
+import { appendAgentActivityEvent, listRecentAgentTrajectory } from "../services/agentActivityLogService";
+import { rewriteDaemonActivityEntries } from "../services/agentLifecycleReducer";
 import { openTestApp } from "../test/integration/app";
 import { createHangingStorageTestHarness } from "../test/hangingStorageTestHarness";
 import { beginArrivingTestAgentMigration, beginTestAgentMigration } from "../test/agentMigrationFixture";
@@ -1932,6 +1934,7 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
       [runtimeMissingTargetMachine.id, resumableTransport],
       [offlineTargetMachine.id, resumableTransport],
     ]);
+    const runtimeDetections = new Map<string, { status: "pending" | "complete" | "incomplete"; reason?: "deadline" | "child_failed" | "cancelled"; unfinishedRuntimes?: string[]; updatedAtMs: number }>();
     let provisionerFails = true;
     let provisionerCalls = 0;
     let removedWorkspacePreflightCalls = 0;
@@ -1942,6 +1945,8 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
         transportLookups.push(machineId);
         return migrationTransports.get(machineId) ?? null;
       },
+      // task #1268: the target's runtime detection state (pending / incomplete) gates the migration.
+      getMachineRuntimeDetection: async (machineId: string) => runtimeDetections.get(machineId) ?? null,
       preflightAgentMigrationTargetWorkspace: async () => {
         removedWorkspacePreflightCalls += 1;
         throw new Error("removed target workspace preflight must not be called");
@@ -2071,6 +2076,30 @@ test("POST /api/agents/:id/migrate starts owner migration without target workspa
       code: "TARGET_COMPUTER_OFFLINE",
       details: { failureReason: "TARGET_COMPUTER_OFFLINE" },
     });
+
+    // task #1268 (archer): a target still detecting, or whose last round never
+    // probed this runtime, is refused with a retryable 409; a finished round
+    // that did probe it is not. The source side is never gated by detection.
+    runtimeDetections.set(targetMachine.id, { status: "pending", updatedAtMs: 1 });
+    const targetPending = await postMigrate(targetMachine.id);
+    assert.equal(targetPending.status, 409);
+    assert.deepEqual(await targetPending.json(), {
+      error: "The target computer is still detecting its runtimes; try again in a moment",
+      code: "TARGET_RUNTIME_DETECTION_PENDING",
+      details: { failureReason: "TARGET_RUNTIME_DETECTION_PENDING", side: "target", runtime: "codex", detectionStatus: "pending", retryable: true },
+    });
+    runtimeDetections.set(targetMachine.id, { status: "incomplete", reason: "deadline", unfinishedRuntimes: ["codex"], updatedAtMs: 2 });
+    const targetIncomplete = await postMigrate(targetMachine.id);
+    assert.equal(targetIncomplete.status, 409);
+    assert.deepEqual((await targetIncomplete.json() as { details?: unknown }).details, {
+      failureReason: "TARGET_RUNTIME_DETECTION_PENDING", side: "target", runtime: "codex", detectionStatus: "incomplete", reason: "deadline", retryable: true,
+    });
+    runtimeDetections.set(targetMachine.id, { status: "incomplete", reason: "deadline", unfinishedRuntimes: ["grok"], updatedAtMs: 3 });
+    runtimeDetections.set(sourceMachine.id, { status: "pending", updatedAtMs: 4 });
+    const targetProbed = await postMigrate(targetMachine.id);
+    assert.notEqual(targetProbed.status, 409, "an incomplete round that did probe codex, and a pending source, do not gate");
+    runtimeDetections.clear();
+    await assertNoMigrationSideEffects("target runtime detection pending");
 
     const freeDenied = await fetch(`${app.baseUrl}/api/agents/${agent.id}/migrate`, {
       method: "POST",
@@ -5221,6 +5250,7 @@ test("agent private surfaces (workspace, skills, activity, agent-DMs, reminders)
   const viewerToken = await tokenForHuman(viewer.email);
     const routes = [
       `/api/agents/${agent.id}/activity-log`,
+      `/api/agents/${agent.id}/activity-summaries`,
       `/api/agents/${agent.id}/workspace-files`,
       `/api/agents/${agent.id}/workspace-files/read?path=MEMORY.md`,
       `/api/agents/${agent.id}/skills`,
@@ -5245,6 +5275,83 @@ test("agent private surfaces (workspace, skills, activity, agent-DMs, reminders)
       });
       assert.equal(adminRes.status, 200, `${route} should allow server admins`);
     }
+});
+
+test("activity-log returns the Tool finished outcome fields the daemon reported, after database persistence (task #17)", async ({ app }) => {
+    const owner = await seedUser("activity-tool-outcome-owner@slock.test", "activity-tool-outcome-owner");
+    const server = await createServer("Activity Tool Outcome Server", "activity-tool-outcome", owner.id);
+    const agent = await createAgent(server.id, "activity-tool-outcome-agent", {
+      runtime: "claude",
+      creatorType: "user",
+      creatorId: owner.id,
+    });
+    // Same rewrite the agent:activity ingest applies before persisting.
+    const entries = rewriteDaemonActivityEntries([
+      { kind: "tool_start", toolName: "Bash", toolInput: "pnpm test", callId: "toolu_1" },
+      {
+        kind: "status",
+        activity: "working",
+        detail: "Tool finished",
+        detailKind: "tool_end",
+        tool: { callId: "toolu_1", ok: true, durationMs: 2500, exitCode: 1 },
+      },
+      { kind: "status", activity: "working", detail: "Tool finished", detailKind: "tool_end", tool: { callId: "toolu_2", ok: false } },
+    ], { activity: "working", detailKind: "tool_end", source: "canonical" });
+    assert.ok(entries);
+    await appendAgentActivityEvent(agent.id, "working", "Tool finished", entries, new Date("2026-10-16T00:00:00Z"));
+    // The test app stubs the orchestrator; the real listRecentActivityLog is
+    // loadPersistedActivityLog -> listRecentAgentTrajectory, read from the database.
+    Object.assign(app.app.get("agentOrchestrator"), {
+      listRecentActivityLog: (agentId: string, limit?: number) => listRecentAgentTrajectory(agentId, limit),
+    });
+
+    const res = await fetch(`${app.baseUrl}/api/agents/${agent.id}/activity-log`, {
+      headers: authHeaders(await tokenForHuman(owner.email), server.id),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as Array<{ entry: TrajectoryEntry }>;
+    assert.deepEqual(body.map((row) => row.entry), entries);
+    assert.deepEqual(body.map((row) => row.entry.kind === "tool_start" ? row.entry.callId : row.entry.kind === "status" ? row.entry.tool : undefined), [
+      "toolu_1",
+      { callId: "toolu_1", ok: true, durationMs: 2500, exitCode: 1 },
+      { callId: "toolu_2", ok: false },
+    ]);
+});
+
+test("activity-summaries hides where a turn came from when the viewer cannot see that channel or DM (task #17)", async ({ app }) => {
+    const owner = await seedUser("activity-summary-owner@slock.test", "activity-summary-owner");
+    const server = await createServer("Activity Summary Server", "activity-summary", owner.id);
+    const agent = await createAgent(server.id, "activity-summary-agent", { runtime: "claude", creatorType: "user", creatorId: owner.id });
+    const publicChannel = await createChannel(server.id, "summary-public", "visible");
+    const privateChannel = await createChannel(server.id, "summary-secret", "not joined", "private");
+    const base = { v: 1 as const, outcome: "completed" as const, actions: [], toolCalls: 0, problems: [], problemCount: 0, messagesSent: 0 };
+    const calls: unknown[] = [];
+    Object.assign(app.app.get("agentOrchestrator"), {
+      listTurnSummaries: async (agentId: string, options: unknown) => {
+        calls.push([agentId, options]);
+        return { next: { endedAt: 1, id: "00000000-0000-4000-8000-000000000001" }, summaries: [
+          { ...base, startedAt: 5, endedAt: 6, trigger: { target: "#summary-public", channelId: publicChannel.id, sender: "richard", messageId: "m1" } },
+          { ...base, startedAt: 3, endedAt: 4, trigger: { target: "#summary-secret", channelId: privateChannel.id, sender: "richard", messageId: "m2" } },
+          { ...base, startedAt: 1, endedAt: 2, trigger: { target: "dm:@someone", channelId: randomUUID(), sender: "someone", messageId: "m3" } },
+          { ...base, startedAt: 0, endedAt: 1 },
+        ] };
+      },
+    });
+
+    const res = await fetch(`${app.baseUrl}/api/agents/${agent.id}/activity-summaries?limit=4&before=99:00000000-0000-4000-8000-000000000009`, {
+      headers: authHeaders(await tokenForHuman(owner.email), server.id),
+    });
+    assert.equal(res.status, 200);
+    const body = await res.json() as { summaries: Array<{ trigger?: unknown }>; next?: string };
+    assert.deepEqual(calls, [[agent.id, { limit: 4, before: { endedAt: 99, id: "00000000-0000-4000-8000-000000000009" } }]]);
+    assert.equal(body.next, "1:00000000-0000-4000-8000-000000000001");
+    assert.deepEqual(body.summaries.map((summary) => summary.trigger), [
+      { target: "#summary-public", channelId: publicChannel.id, sender: "richard", messageId: "m1" },
+      { hidden: "private_channel" },
+      { hidden: "dm" },
+      undefined,
+    ]);
+    assert.doesNotMatch(JSON.stringify(body), /summary-secret|someone/);
 });
 
 test("workspace file tree forwards includeHidden to the daemon request", async ({ app }) => {

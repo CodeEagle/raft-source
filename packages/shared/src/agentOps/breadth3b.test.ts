@@ -83,6 +83,55 @@ test("attachments: comments render the CLI text", async () => {
   }
 });
 
+test("search: an incomplete recent page says it is not all the matches and continues by cursor, not offset", async () => {
+  const calls: Array<{ method: string; path: string; body: unknown; init: RequestInit }> = [];
+  const api = client(() => Response.json({ results: [], hasMore: false, incomplete: true, nextCursor: "CUR", searchedThrough: T, searchedMessages: 10_000 }), calls);
+  const search = await searchMessages(api, { query: "invoice", sort: "recent", after: "2026-09-16T00:00:00Z", offset: 0 });
+  assert.equal(search.ok && search.state, "incomplete", "nothing found yet is not empty");
+  if (search.ok) {
+    assert.equal(search.data.incomplete, true);
+    assert.equal(search.data.nextCursor, "CUR");
+    assert.equal(search.data.searchedMessages, 10_000);
+    assert.doesNotMatch(search.text, /No search results/);
+    assert.match(search.text, /^Search incomplete: no matches in the messages searched so far \(stopped after reading 10,000 messages, back to [^)]+\)\./);
+    assert.match(search.text, /\nNext \(search older messages\): raft message search --query 'invoice' --after '2026-09-16T00:00:00Z' --sort recent --cursor 'CUR'\n/);
+    assert.equal(search.next?.kind, "continue_search");
+    assert.equal(search.next?.command, "raft message search --query 'invoice' --after '2026-09-16T00:00:00Z' --sort recent --cursor 'CUR'");
+    assert.deepEqual(search.next?.args, { query: "invoice", sort: "recent", after: "2026-09-16T00:00:00Z", cursor: "CUR" });
+  }
+  const toolStyle = await searchMessages(api, { query: "invoice", sort: "recent" }, { hints: "tool" });
+  if (toolStyle.ok) {
+    assert.match(toolStyle.text, /\nNext \(search older messages\): messages_search\(\{ query: "invoice", sort: "recent", cursor: "CUR" \}\)\nOr narrow the search: add target or sender\.$/);
+  }
+  await searchMessages(api, { query: "invoice", sort: "recent", cursor: "CUR" });
+  assert.equal(calls.at(-1)?.path, "/internal/agent-api/search?q=invoice&sort=recent&cursor=CUR");
+});
+
+test("search: a page with results that stopped early stays results with data.incomplete; a complete empty page stays empty", async () => {
+  const hit = { id: UUID_A, seq: 1, channelId: "c", threadId: null, parentMessageId: null, parentMessageContent: null, parentChannelId: "c", parentChannelName: "billing", parentChannelType: "channel", parentChannelArchivedAt: null, senderId: "u", senderType: "human", senderName: "richard", channelName: "billing", channelType: "channel", channelArchivedAt: null, content: "the invoice", snippet: "invoice", createdAt: T };
+  const partial = await searchMessages(client(() => Response.json({ results: [hit], hasMore: false, incomplete: true, nextCursor: "CUR", searchedThrough: T, searchedMessages: 10_000 })), { query: "invoice", sort: "recent" });
+  assert.equal(partial.ok && partial.state, "results");
+  if (partial.ok) {
+    assert.equal(partial.data.incomplete, true);
+    assert.equal(partial.next?.kind, "continue_search");
+    assert.match(partial.text, /\(1 result · incomplete=true · stopped after reading 10,000 messages, back to [^;]+; older messages were not searched, so these are NOT all the matches\)/);
+  }
+  // The state follows the data, never whether a next step could be built.
+  const noQuery = await searchMessages(client(() => Response.json({ results: [], hasMore: false, incomplete: true, nextCursor: "CUR" })), { sender: "alice", sort: "recent" });
+  assert.equal(noQuery.ok && noQuery.state, "incomplete");
+  // A caller that left sort to the server still continues as a recent search (a cursor with relevance is rejected).
+  const defaultSort = await searchMessages(client(() => Response.json({ results: [], hasMore: false, incomplete: true, nextCursor: "CUR" })), { query: "invoice" });
+  assert.equal(defaultSort.ok && defaultSort.next?.kind, "continue_search");
+  if (defaultSort.ok) assert.deepEqual(defaultSort.next?.args, { query: "invoice", sort: "recent", cursor: "CUR" });
+  const empty = await searchMessages(client(() => Response.json({ results: [], hasMore: false })), { query: "invoice", sort: "recent" });
+  assert.equal(empty.ok && empty.state, "empty");
+  if (empty.ok) {
+    assert.equal(empty.data.incomplete, false);
+    assert.equal(empty.next, null);
+    assert.equal(empty.text, "No search results. (truncated=false)");
+  }
+});
+
 test("search/resolve/react: CLI text with neutralised refs, canonical resolve, reaction receipt", async () => {
   const calls: Array<{ method: string; path: string; body: unknown; init: RequestInit }> = [];
   const api = client((path) => {

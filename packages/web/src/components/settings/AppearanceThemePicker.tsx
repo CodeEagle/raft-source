@@ -1,178 +1,136 @@
+import { Check } from "lucide-react";
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
-import {
-  RadioGroup,
-  SegmentedControl,
-  SegmentedControlItem,
-  SegmentedControlLabel,
-  useTheme,
-} from "raft-ui";
-import { presetFromTheme } from "../../theme/appTheme";
-import type {
-  AppAppearanceMode,
-  AppResolvedMode,
-  AppThemeId,
-  AppThemePreferences,
-  AppThemePreset,
-} from "../../theme/appTheme";
-import { ThemeModeGroup } from "./ThemeModeGroup";
-import { ThemePresetCard } from "./ThemePresetCard";
-export type { AppThemePreset } from "../../theme/appTheme";
+import { Card, RadioGroup, RadioGroupItem } from "@botiverse/raft-ui";
+import { APP_APPEARANCE_MODES, isAppAppearanceMode } from "../../theme/appTheme";
+import type { AppAppearanceMode, AppResolvedMode } from "../../theme/appTheme";
 
 export interface AppearanceThemePickerProps {
-  /** Canonical controlled value used by the product Settings contract. */
-  preset?: AppThemePreset;
-  onChange?: (preset: AppThemePreset) => void;
-  /** Controlled preset. When omitted, the app-level RUI provider owns it. */
-  value?: AppThemePreset;
-  onValueChange?: (preset: AppThemePreset) => void;
-  /** Reserved compatibility surface; the current product UI intentionally shows three cards. */
-  includeSystemCard?: boolean;
-  /** New two-axis product contract. When supplied, the picker renders mode and
-   * per-mode theme choices instead of the legacy mixed preset radios. */
-  preferences?: AppThemePreferences;
-  resolvedMode?: AppResolvedMode;
-  onModeChange?: (mode: AppAppearanceMode) => void;
-  onThemeForModeChange?: (mode: AppResolvedMode, themeId: AppThemeId) => void;
+  mode: AppAppearanceMode;
+  onModeChange: (mode: AppAppearanceMode) => void;
+  /** `large` is the onboarding picker, where the cards are the whole step. */
+  size?: "default" | "large";
 }
 
-export type ThemeOption = {
-  value: AppThemePreset;
-  labelId:
-    | "settings.appearance.themeBrutal"
-    | "settings.appearance.themeElegant"
-    | "settings.appearance.themeElegantDark"
-    | "settings.appearance.themeElegantSystem";
-  family: "brutal" | "elegant";
-  mode: "light" | "dark" | "system";
-};
+const MODE_LABEL_IDS = {
+  light: "settings.appearance.modeLight",
+  dark: "settings.appearance.modeDark",
+  system: "settings.appearance.modeSystem",
+} as const satisfies Record<AppAppearanceMode, string>;
 
-const BASE_OPTIONS: readonly ThemeOption[] = [
-  {
-    value: "brutal",
-    labelId: "settings.appearance.themeBrutal",
-    family: "brutal",
-    mode: "light",
-  },
-  {
-    value: "elegant-light",
-    labelId: "settings.appearance.themeElegant",
-    family: "elegant",
-    mode: "light",
-  },
-  {
-    value: "elegant-dark",
-    labelId: "settings.appearance.themeElegantDark",
-    family: "elegant",
-    mode: "dark",
-  },
-] as const;
-// The three user-facing accessible names are Brutal, Elegant, and Elegant dark.
-
-const SYSTEM_OPTION: ThemeOption = {
-  value: "elegant-system",
-  labelId: "settings.appearance.themeElegantSystem",
-  family: "elegant",
-  mode: "system",
-};
-
-function selectPreset(
-  preset: AppThemePreset,
-  setTheme: ReturnType<typeof useTheme>["setTheme"],
-) {
-  if (preset === "brutal") {
-    setTheme("brutal");
-    return;
-  }
-  const mode = preset === "elegant-dark" ? "dark" : preset === "elegant-system" ? "system" : "light";
-  setTheme("elegant", { mode });
-}
-
-export function AppearanceThemePicker({
-  preset,
-  onChange,
-  value,
-  onValueChange,
-  includeSystemCard = false,
-  preferences,
-  resolvedMode,
-  onModeChange,
-  onThemeForModeChange,
-}: AppearanceThemePickerProps) {
+/**
+ * Light, Dark or follow the system. Each card previews the Raft Design System
+ * in that mode, so the choice reads before it is made. Selecting applies
+ * immediately; the app behind the picker restyles under the cursor.
+ */
+export function AppearanceThemePicker({ mode, onModeChange, size = "default" }: AppearanceThemePickerProps) {
   const { formatMessage } = useIntl();
-  const { theme, mode, setTheme } = useTheme();
-  const activePreset = preset ?? value ?? presetFromTheme(theme, mode);
-  const options = includeSystemCard ? [...BASE_OPTIONS, SYSTEM_OPTION] : BASE_OPTIONS;
-
-  const handleValueChange = useCallback(
-    (nextValue: string) => {
-      const nextPreset = nextValue as AppThemePreset;
-      (onChange ?? onValueChange)?.(nextPreset);
-      if (preset === undefined && value === undefined) selectPreset(nextPreset, setTheme);
-    },
-    [onChange, onValueChange, preset, value, setTheme],
-  );
-
-  if (preferences && resolvedMode && onModeChange && onThemeForModeChange) {
-    const modeOptions: readonly AppAppearanceMode[] = ["light", "dark", "system"];
-    const modeLabels: Record<AppAppearanceMode, string> = {
-      light: formatMessage({ id: "settings.appearance.modeLight" }),
-      dark: formatMessage({ id: "settings.appearance.modeDark" }),
-      system: formatMessage({ id: "settings.appearance.modeSystem" }),
-    };
-    const themeModes: readonly AppResolvedMode[] = ["light", "dark"];
-    return (
-      <div className="space-y-4" data-testid="appearance-theme-picker">
-        <div className="space-y-2">
-          <div className="text-xs font-bold uppercase tracking-widest text-foreground-muted">
-            {formatMessage({ id: "settings.appearance.modeTitle" })}
-          </div>
-          <SegmentedControl<AppAppearanceMode>
-            value={preferences.mode}
-            onValueChange={onModeChange}
-            aria-label={formatMessage({ id: "settings.appearance.modeAria" })}
-            className="w-fit max-w-full"
-          >
-            {modeOptions.map((mode) => (
-              <SegmentedControlItem key={mode} value={mode} data-testid={`appearance-mode-${mode}`}>
-                <SegmentedControlLabel>{modeLabels[mode]}</SegmentedControlLabel>
-              </SegmentedControlItem>
-            ))}
-          </SegmentedControl>
-          <p className="text-xs text-foreground-muted">
-            {formatMessage({ id: "settings.appearance.modeDescription" })}
-          </p>
-        </div>
-        {themeModes.map((themeMode) => (
-          <ThemeModeGroup
-            key={themeMode}
-            themeMode={themeMode}
-            themeId={themeMode === "light" ? preferences.lightThemeId : preferences.darkThemeId}
-            isEffective={resolvedMode === themeMode}
-            onThemeForModeChange={onThemeForModeChange}
-          />
-        ))}
-      </div>
-    );
-  }
+  const handleValueChange = useCallback((value: string) => {
+    if (isAppAppearanceMode(value)) onModeChange(value);
+  }, [onModeChange]);
 
   return (
-    <div className="space-y-3" data-testid="appearance-theme-picker">
-      <RadioGroup
-        value={activePreset}
-        onValueChange={handleValueChange}
-        className={`grid gap-2 ${includeSystemCard ? "sm:grid-cols-2 xl:grid-cols-4" : "sm:grid-cols-3"}`}
-        aria-label={formatMessage({ id: "settings.appearance.themeAria" })}
+    <RadioGroup
+      value={mode}
+      onValueChange={handleValueChange}
+      aria-label={formatMessage({ id: "settings.appearance.themeAria" })}
+      className={size === "large" ? "grid grid-cols-1 gap-3 sm:grid-cols-3" : "grid grid-cols-1 gap-2 sm:grid-cols-3"}
+      data-testid="appearance-theme-picker"
+    >
+      {APP_APPEARANCE_MODES.map((option) => (
+        <ThemeModeCard
+          key={option}
+          mode={option}
+          label={formatMessage({ id: MODE_LABEL_IDS[option] })}
+          selected={mode === option}
+          savedLabel={formatMessage({ id: "settings.appearance.savedOnDevice" })}
+          size={size}
+          onSelect={onModeChange}
+        />
+      ))}
+    </RadioGroup>
+  );
+}
+
+function ThemeModeCard({
+  mode,
+  label,
+  selected,
+  savedLabel,
+  size,
+  onSelect,
+}: {
+  mode: AppAppearanceMode;
+  label: string;
+  selected: boolean;
+  savedLabel: string;
+  size: "default" | "large";
+  onSelect: (mode: AppAppearanceMode) => void;
+}) {
+  const handleClick = useCallback(() => onSelect(mode), [mode, onSelect]);
+  return (
+    <div className="group min-w-0" data-testid={`appearance-theme-${mode}`}>
+      <RadioGroupItem appearance="none" value={mode} aria-label={label} className="peer" />
+      <Card
+        onClick={handleClick}
+        className={[
+          "h-full gap-2 p-2",
+          "hover:press-overlay",
+          "peer-focus-visible:shadow-focus",
+          "peer-data-checked:border-[1.5px] peer-data-checked:border-line-strong peer-data-checked:p-[7.5px]",
+        ].join(" ")}
       >
-        {options.map((option) => (
-          <ThemePresetCard
-            key={option.value}
-            option={option}
-            selected={activePreset === option.value}
-            onSelect={handleValueChange}
-          />
-        ))}
-      </RadioGroup>
+        {mode === "system" ? (
+          // Follow system: half light, half dark, split on the diagonal.
+          <div className="relative" aria-hidden="true">
+            <ThemePreviewSurface mode="light" size={size} />
+            <div className="absolute inset-0 [clip-path:polygon(100%_0,100%_100%,0_100%)]">
+              <ThemePreviewSurface mode="dark" size={size} />
+            </div>
+          </div>
+        ) : (
+          <ThemePreviewSurface mode={mode} size={size} />
+        )}
+        <div className="flex min-w-0 items-center gap-2 px-1">
+          <span className="min-w-0 flex-1 truncate text-callout font-semibold text-foreground">{label}</span>
+          {selected ? <Check size={16} className="shrink-0 text-foreground" aria-hidden="true" /> : null}
+        </div>
+        <span className="min-h-4 px-1 text-caption text-foreground-hint">{selected ? savedLabel : null}</span>
+      </Card>
+    </div>
+  );
+}
+
+/**
+ * A miniature of the app in one mode: yellow (or neutral) frame, cream
+ * sidebar with the selected row as a yellow sticker, white paper with the
+ * one pink button. Its mode class (`.light` / `.dark`) makes it render that
+ * mode whatever the page is in.
+ */
+function ThemePreviewSurface({ mode, size }: { mode: AppResolvedMode; size: "default" | "large" }) {
+  return (
+    <div
+      className={`${mode} flex overflow-hidden rounded-control border border-line-seam bg-layer-canvas ${size === "large" ? "h-28" : "h-20"}`}
+      aria-hidden="true"
+    >
+      <div className="w-3 shrink-0 border-r border-line-seam bg-layer-frame" />
+      <div className="flex w-1/3 shrink-0 flex-col gap-1 border-r border-line-seam bg-layer-sidebar p-1.5">
+        <div className="h-1.5 w-3/4 rounded-[2px] bg-foreground/30" />
+        <div className="h-3 rounded-[3px] border border-sticker-ink bg-brand" />
+        <div className="h-1.5 w-2/3 rounded-[2px] bg-foreground/15" />
+        <div className="h-1.5 w-1/2 rounded-[2px] bg-foreground/15" />
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-1.5 p-2">
+        <div className="h-1.5 w-1/2 rounded-[2px] bg-foreground/40" />
+        <div className="flex items-center gap-1.5">
+          <div className="size-3 shrink-0 rounded-[2px] border border-sticker-ink bg-palette-lavender" />
+          <div className="h-1.5 flex-1 rounded-[2px] bg-foreground/15" />
+        </div>
+        <div className="mt-auto flex items-center gap-1.5 rounded-[4px] border border-line-strong bg-layer-card p-1">
+          <div className="h-1.5 flex-1 rounded-[2px] bg-foreground/15" />
+          <div className="h-3 w-6 shrink-0 rounded-[3px] border border-sticker-ink bg-attention" />
+        </div>
+      </div>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import {
   countIngest,
   getProductEventSink,
 } from "../services/productEventIngest";
+import { productEventContext } from "../services/productEventContext";
 import * as productEventsService from "../services/productEventsService";
 import { sendJsonServerError } from "./errorResponse";
 
@@ -168,6 +169,7 @@ productEventsRouter.post("/batch", async (req, res) => {
       analyticsId: gate.analyticsId,
       serverId: req.serverId!,
       receivedAt: new Date(),
+      context: productEventContext({ userAgent: req.get("user-agent"), country: req.get("cloudfront-viewer-country") }),
     });
     for (const [reason, count] of Object.entries(rejected)) {
       countIngest(`rejected_${reason as keyof typeof rejected}`, count);

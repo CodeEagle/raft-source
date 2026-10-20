@@ -4,6 +4,7 @@
 // put prompts, credentials, private URLs, or message payloads in them.
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import type { AgentApiKnowledgeGetResponse, AgentApiKnowledgeSearchResponse } from "../agentApiContract";
@@ -23,16 +24,16 @@ const manualContextFields = {
   reason: z.string().min(MIN_KNOWLEDGE_CONTEXT_LENGTH).max(MAX_KNOWLEDGE_CONTEXT_LENGTH).describe("Why the Manual is needed now, in a few words. Same rules as intent."),
 };
 
-export const getManualTopicRequestSchema = requestSchema<{ topic: string } & ManualContext>()(z.object({
+export const getManualTopicRequestSchema = lazySchema("getManualTopicRequestSchema", () => requestSchema<{ topic: string } & ManualContext>()(z.object({
   topic: z.string().describe("Topic id (slug), for example one returned by manual.search."),
   ...manualContextFields,
-}));
+})));
 
-export const searchManualRequestSchema = requestSchema<{ query: string; scope?: string } & ManualContext>()(z.object({
+export const searchManualRequestSchema = lazySchema("searchManualRequestSchema", () => requestSchema<{ query: string; scope?: string } & ManualContext>()(z.object({
   query: z.string().describe("Search keywords."),
   scope: z.string().optional().describe("Restrict the search to one Manual section."),
   ...manualContextFields,
-}));
+})));
 
 function requireContext(context: ManualContext) {
   if (!context?.intent?.trim() || !context?.reason?.trim()) {

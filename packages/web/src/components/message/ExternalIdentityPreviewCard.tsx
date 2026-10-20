@@ -5,7 +5,7 @@ import {
   PreviewCard,
   PreviewCardContent,
   PreviewCardTrigger,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import AvatarSlot from "../ui/AvatarSlot";
 import {
   EXTERNAL_ACTOR_KIND_MESSAGE_IDS,
@@ -45,7 +45,7 @@ export function ExternalIdentityPreviewBody({
     id: EXTERNAL_ACTOR_KIND_MESSAGE_IDS[actorKind ?? "unknown"],
   });
   return (
-    <div data-testid="external-identity-preview" className="flex items-start gap-3 px-3 py-3">
+    <div data-testid="external-identity-preview" className="flex items-start gap-3 p-4">
       <AvatarSlot
         context="mention-card"
         type="app"
@@ -53,10 +53,10 @@ export function ExternalIdentityPreviewBody({
         appInitials={displayName}
       />
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-bold text-foreground-strong theme-brutal:text-black">
+        <div className="truncate text-headline text-foreground">
           {displayName}
         </div>
-        <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
+        <div className="truncate text-footnote text-foreground-muted">
           {providerLabel
             ? formatMessage(
                 { id: "message.externalIdentity.providerAndKind" },
@@ -65,14 +65,14 @@ export function ExternalIdentityPreviewBody({
             : actorKindLabel}
         </div>
         {workspaceName ? (
-          <div className="mt-1 truncate text-xs text-foreground-muted theme-brutal:text-black/60">
+          <div className="mt-1 truncate text-footnote text-foreground-muted">
             {formatMessage(
               { id: "message.externalIdentity.fromWorkspace" },
               { workspace: workspaceName },
             )}
           </div>
         ) : null}
-        <div className="mt-1 text-xs text-foreground-hint theme-brutal:text-black/50">
+        <div className="mt-1 text-caption text-foreground-hint">
           {formatMessage({ id: "message.externalIdentity.externalProjection" })}
         </div>
       </div>
@@ -110,7 +110,7 @@ export default function ExternalIdentityPreviewCard({
             data-testid={testId}
             data-avatar-kind="external"
             data-avatar-source={avatarUrl ? "external-avatar" : "placeholder"}
-            className="mt-0.5 shrink-0 self-start border-0 bg-transparent p-0 transition-[filter] duration-75 hover:brightness-90"
+            className="mt-0.5 shrink-0 self-start rounded-sticker border-0 bg-transparent p-0 outline-none transition-[filter] duration-75 hover:brightness-90 focus-visible:shadow-focus"
           >
             <AvatarSlot
               context="panel-header"
@@ -124,7 +124,6 @@ export default function ExternalIdentityPreviewCard({
       <PreviewCardContent
         sideOffset={6}
         collisionPadding={6}
-        className="w-[280px]"
       >
         <ExternalIdentityPreviewBody
           displayName={displayName}

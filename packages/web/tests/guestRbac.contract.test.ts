@@ -17,7 +17,7 @@ test("channel settings gate and preserve the Guest policy invariant", () => {
     assert.match(source, /effectiveCapabilities\.manageGuestAccess/);
     assert.match(source, /!isArchived/);
     assert.match(source, /channel\?\.type === "private" && channel\?\.name !== "all"/);
-    assert.match(source, /channel\?\.name !== "all" && <div/);
+    assert.match(source, /channel\?\.name !== "all" && <><Separator \/><div/);
     assert.match(source, /guestVisible: false, guestJoinable: false/);
     assert.match(source, /guestVisible: true, guestJoinable: true/);
     assert.match(source, /channel\.edit\.guestVisibleTitle/);
@@ -93,7 +93,7 @@ test("channel-scoped hover cards keep people visible without leaking Agent runti
   const messageItem = readSource("src/components/message/MessageItem.tsx");
 
   assert.match(profileCard, /profileAgent\?\.profileProjection === "channel_summary"/);
-  assert.match(profileCard, /!isChannelSummaryAgent \? <dl/);
+  assert.match(profileCard, /!isChannelSummaryAgent \? <><Separator[^>]*\/><dl/);
   assert.match(mentionLink, /fallbackAgent\?: Agent \| null/);
   assert.match(mentionLink, /fallbackMember\?: ServerMember \| null/);
   assert.match(mentionLink, /fallbackAgent=\{fallbackAgent\}/);

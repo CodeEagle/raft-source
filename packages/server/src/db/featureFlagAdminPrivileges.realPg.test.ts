@@ -60,7 +60,8 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
     deleting_at timestamptz
   )`);
   await target.query("CREATE TABLE users (id uuid PRIMARY KEY, email text NOT NULL)");
-  await target.query("CREATE TABLE servers (id uuid PRIMARY KEY, slug text NOT NULL, deleted_at timestamptz, name text NOT NULL, plan text NOT NULL DEFAULT 'free')");
+  await target.query("CREATE TABLE servers (id uuid PRIMARY KEY, slug text NOT NULL, deleted_at timestamptz, name text NOT NULL, plan text NOT NULL DEFAULT 'free', kind text NOT NULL DEFAULT 'normal')");
+  await target.query("CREATE TABLE server_members (server_id uuid NOT NULL, user_id uuid NOT NULL, role text NOT NULL DEFAULT 'member')");
   await target.query("CREATE TABLE subscriptions (id uuid PRIMARY KEY, server_id uuid NOT NULL, plan text NOT NULL, status text NOT NULL, stripe_customer_id text NOT NULL)");
   await target.query("CREATE TABLE lab_definitions (key text PRIMARY KEY, state text NOT NULL, name text NOT NULL, description text NOT NULL DEFAULT '', created_at timestamptz NOT NULL DEFAULT now(), updated_at timestamptz NOT NULL DEFAULT now(), version integer NOT NULL DEFAULT 1)");
   await target.query("CREATE TABLE server_lab_access (server_id uuid PRIMARY KEY, enabled boolean NOT NULL, version bigint NOT NULL)");
@@ -135,6 +136,8 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   await target.query(labPrivilegeMigration);
   await target.query(traceIdentityPrivilegeMigration);
   await target.query(announcementImagePrivilegeMigration);
+  const targetingMigration = readFileSync(new URL("../../drizzle/0355_announcement_targeting.sql", import.meta.url), "utf8");
+  await target.query(targetingMigration.replaceAll("--> statement-breakpoint", ""));
   await assert.rejects(
     reconcileAndVerifyFeatureFlagAdminPrivileges((text, values) => target.query(text, values)),
     (error: unknown) => (error as { code?: string }).code === "42704",
@@ -149,6 +152,8 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   );
   await admin.query(`CREATE ROLE ${WRONG_LOGIN_ROLE} NOLOGIN`);
 
+  await target.query(`GRANT SELECT (server_id, user_id, role) ON TABLE public.server_members TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
+
   // A hand-built copy of the complete grants is deliberately insufficient:
   // state readback can pass, but the migration receipt remains absent.
   await target.query(`GRANT USAGE ON SCHEMA public TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
@@ -159,7 +164,7 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   await target.query(`GRANT SELECT, INSERT, UPDATE ON TABLE public.feature_flag_audiences TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT, INSERT, DELETE ON TABLE public.feature_flag_audience_members TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT (id) ON TABLE public.users TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
-  await target.query(`GRANT SELECT (id, slug, deleted_at, plan) ON TABLE public.servers TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
+  await target.query(`GRANT SELECT (id, slug, deleted_at, plan, kind) ON TABLE public.servers TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT (server_id, plan, status) ON TABLE public.subscriptions TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT (server_id, lab_key, enabled) ON TABLE public.server_lab_enrollments TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
   await target.query(`GRANT SELECT (server_id, enabled) ON TABLE public.server_lab_access TO ${FEATURE_FLAG_ADMIN_OPERATOR_ROLE}`);
@@ -205,6 +210,9 @@ test("real PostgreSQL proves durable reconciliation, exact grants, and binding i
   await operator.query("SELECT id FROM feature_flag_audience_members");
   await operator.query("DELETE FROM feature_flag_audience_members WHERE audience_key = 'insiders'");
   await operator.query("SELECT id FROM users");
+  await operator.query("SELECT server_id, user_id, role FROM server_members");
+  await assert.rejects(operator.query("UPDATE server_members SET role = 'member'"),
+    (error: unknown) => (error as { code?: string }).code === "42501");
   await operator.query("SELECT id, slug, deleted_at, plan FROM servers");
   await operator.query("SELECT server_id, plan, status FROM subscriptions");
   await operator.query("SELECT server_id, lab_key, enabled FROM server_lab_enrollments");

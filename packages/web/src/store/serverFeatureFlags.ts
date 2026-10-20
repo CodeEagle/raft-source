@@ -1,5 +1,7 @@
 import {
   AGENT_MIGRATION_FEATURE_FLAG_KEY,
+  AGENT_MIGRATION_HOSTED_FEATURE_FLAG_KEY,
+  SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY,
   ANTIPROTON_HOSTED_RUNTIME_FEATURE_FLAG_KEY,
   CHANNEL_TO_JOINT_CONVERSION_FEATURE_FLAG_KEY,
   CHANNEL_MANAGER_ROLE_ACTIONS_FEATURE_FLAG_KEY,
@@ -22,7 +24,6 @@ import { useServerStore } from "./serverStore";
 export const SYNC_CORE_NOTIFICATION_PREFS_FLAG_KEY = "sync_core_notification_prefs_v0";
 export const ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY = "attachment_comments_v0";
 export const READ_RECEIPTS_FEATURE_FLAG_KEY = "read_receipts_v0";
-export const ACTIVITY_SIDEBAR_INBOX_FLAG_KEY = "activity_sidebar_inbox_v0";
 /** Web remote Computer upgrade v2 (task #873). Default off: the upgrade button stays greyed. */
 export const REMOTE_COMPUTER_UPGRADE_V2_FLAG_KEY = "remote_computer_upgrade_v2";
 /** Create-agent form over runtime form protocol v2 (packages/runtime-form). Default off. */
@@ -33,15 +34,40 @@ export const RUNTIME_FORM_V2_WEB_FLAG_KEY = "runtime_form_v2_web";
  * section are confirmed (#proj-analytics:63b84f03).
  */
 export const PRODUCT_ANALYTICS_SETTINGS_FLAG_KEY = "product_analytics_settings_v0";
+/** RaftBench pilot: default off; enroll only the approved server ID via rollout controls. */
+export const RAFTBENCH_OVERVIEW_FLAG_KEY = "raftbench_overview_v0";
 /**
  * Computer detail bulk "Change model" (task #1287, designs task #1285).
  * Default off: the toolbar button is not rendered until the flag is enabled.
  */
 export const BULK_CHANGE_MODEL_WEB_FLAG_KEY = "bulk_change_model_web_v0";
+/**
+ * Followed-thread unread folded onto the parent channel's sidebar badge, plus
+ * the jump pill at the top of the channel (#wg-thread-unread). Default off:
+ * sidebar and channel view stay exactly as before.
+ */
+export const THREAD_UNREAD_BADGE_FLAG_KEY = "thread_unread_badge_v0";
+/**
+ * Activity tab "Overview": one line per finished agent turn, read from the
+ * per-turn summaries (task #17). Default off: the tab shows only the raw
+ * activity log, as before.
+ */
+export const ACTIVITY_OVERVIEW_WEB_FLAG_KEY = "activity_overview_web_v0";
+/**
+ * Activity as a conversation list (#proj-uiux task #5): one row per
+ * conversation with avatar, one-line preview and unread count, pinned
+ * conversations first. Default off: rows stay the existing cards.
+ */
+export const ACTIVITY_CONVERSATION_LIST_FLAG_KEY = "activity_conversation_list_v0";
+
+export { SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY };
 
 const SERVER_FEATURE_FLAG_REGISTRY = {
-  activitySidebarInbox: ACTIVITY_SIDEBAR_INBOX_FLAG_KEY,
+  sidebarMarkAllRead: SIDEBAR_MARK_ALL_READ_FEATURE_FLAG_KEY,
+  activityOverviewWeb: ACTIVITY_OVERVIEW_WEB_FLAG_KEY,
+  activityConversationList: ACTIVITY_CONVERSATION_LIST_FLAG_KEY,
   agentMigration: AGENT_MIGRATION_FEATURE_FLAG_KEY,
+  agentMigrationHosted: AGENT_MIGRATION_HOSTED_FEATURE_FLAG_KEY,
   antiprotonHostedRuntime: ANTIPROTON_HOSTED_RUNTIME_FEATURE_FLAG_KEY,
   attachmentComments: ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
   bulkChangeModelWeb: BULK_CHANGE_MODEL_WEB_FLAG_KEY,
@@ -53,11 +79,13 @@ const SERVER_FEATURE_FLAG_REGISTRY = {
   runtimeFormV2Web: RUNTIME_FORM_V2_WEB_FLAG_KEY,
   providerConnections: PROVIDER_CONNECTIONS_FEATURE_FLAG_KEY,
   productAnalyticsSettings: PRODUCT_ANALYTICS_SETTINGS_FLAG_KEY,
+  raftbenchOverview: RAFTBENCH_OVERVIEW_FLAG_KEY,
   publicServer: PUBLIC_SERVER_FEATURE_FLAG_KEY,
   serverLabsUi: SERVER_LABS_UI_FEATURE_FLAG_KEY,
   slackBridge: SLACK_BRIDGE_FEATURE_FLAG_KEYS.master,
   serverGuest: SERVER_GUEST_FEATURE_FLAG_KEY,
   syncCoreNotificationPrefs: SYNC_CORE_NOTIFICATION_PREFS_FLAG_KEY,
+  threadUnreadBadge: THREAD_UNREAD_BADGE_FLAG_KEY,
   usageLimitAttention: USAGE_LIMIT_ATTENTION_FEATURE_FLAG_KEY,
 } as const;
 

@@ -10,6 +10,7 @@ import {
   configPassiveAx,
   CONTEXT_SESSIONS_FILENAME,
   MAX_REMEMBERED_SESSIONS,
+  planSpawnContextGeneration,
   publishSpawnContextGeneration,
   readContextGeneration,
   rememberSessionContext,
@@ -176,6 +177,46 @@ test("a resume gets a new id when the session is unknown, or the runtime never r
 
     publishSpawnContextGeneration(dir, { runtime: "claude", resumeSessionId: "never-seen", passiveAx: false });
     assert.equal(readContextGeneration(dir)?.reason, "spawn");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// glimpse G0: the daemon plans the spawn's id before the process exists (to
+// book the start input under it); the transport then publishes exactly that id.
+test("a planned spawn id is the one published, and planning writes nothing", () => {
+  const { root, launch } = launchDirs();
+  try {
+    const first = launch("launch-1");
+    const spawnId = publishSpawnContextGeneration(first, { runtime: "claude", resumeSessionId: null, passiveAx: true });
+    bindContextGenerationToSession(first, { runtime: "claude", sessionId: "s1", expectedSessionId: null });
+
+    const second = launch("launch-2");
+    const resumed = planSpawnContextGeneration(second, { runtime: "claude", resumeSessionId: "s1" });
+    assert.deepEqual(resumed, { contextId: spawnId, reason: "resume" });
+    const fresh = planSpawnContextGeneration(second, { runtime: "claude", resumeSessionId: null });
+    assert.equal(fresh.reason, "spawn");
+    assert.notEqual(fresh.contextId, spawnId);
+    assert.equal(readContextGeneration(second), null, "planning publishes nothing");
+
+    assert.equal(publishSpawnContextGeneration(second, { runtime: "claude", resumeSessionId: null, passiveAx: true, plan: fresh }), fresh.contextId);
+    assert.equal(readContextGeneration(second)?.contextId, fresh.contextId);
+    assert.equal(readContextGeneration(second)?.reason, "spawn");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("binding a session returns the id now current", () => {
+  const { root, launch } = launchDirs();
+  try {
+    const dir = launch("launch-1");
+    const spawnId = publishSpawnContextGeneration(dir, { runtime: "claude", resumeSessionId: "s1", passiveAx: false });
+    assert.equal(bindContextGenerationToSession(dir, { runtime: "claude", sessionId: "s1", expectedSessionId: "s1" }), spawnId);
+    const rebound = bindContextGenerationToSession(dir, { runtime: "claude", sessionId: "s2", expectedSessionId: "s1" });
+    assert.notEqual(rebound, spawnId, "another session than the one resumed: a new id");
+    assert.equal(readContextGeneration(dir)?.contextId, rebound);
+    assert.equal(bindContextGenerationToSession(launch("empty"), { runtime: "claude", sessionId: "s3", expectedSessionId: null }), null);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -68,7 +68,10 @@ export interface RaftStateStore {
   save(state: RaftState, options: { expectedVersion: number | undefined }): Promise<void>;
 }
 
-export type RaftStateSaveErrorHandler = (error: unknown, context: { phase: "load" | "save"; version: number | undefined }) => void;
+/** Called when loading (`phase: "load"`) or saving (`phase: "save"`) the state fails or is rejected as stale. */
+export type RaftStateErrorHandler = (error: unknown, context: { phase: "load" | "save"; version: number | undefined }) => void;
+/** @deprecated Use `RaftStateErrorHandler` (same signature; it covers loads too). Removed in 1.0. */
+export type RaftStateSaveErrorHandler = RaftStateErrorHandler;
 
 export const RAFT_STATE_CONTINUATIONS_PER_TARGET = 3;
 export const RAFT_STATE_CONTINUATIONS_TOTAL = 20;
@@ -126,7 +129,7 @@ export class RaftStateSession {
   constructor(
     private readonly store: RaftStateStore | undefined,
     frontier: SeenFrontier,
-    private readonly onError?: RaftStateSaveErrorHandler,
+    private readonly onError?: RaftStateErrorHandler,
   ) {
     this.frontier = frontier;
   }

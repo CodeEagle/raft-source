@@ -1,4 +1,13 @@
 import { axSurface } from "../../core/renderer";
+import type {
+  AgentMentionActionKind,
+  AgentMentionActionResult,
+  AgentMentionActionResultStatus,
+  AgentPendingMentionAction,
+  AgentSenderMentionDeliveryRow,
+  AgentSenderPendingMentionAction,
+  AgentSenderUnresolvedMentionWarning,
+} from "@botiverse/raft-shared";
 import {
   AGENT_MENTION_PENDING_MAX_LIMIT,
   formatAgentMentionActionResults,
@@ -10,14 +19,7 @@ import {
   normalizeAgentUnresolvedMentionHandles,
   toAgentSenderPendingMentionAction,
   toAgentSenderUnresolvedMentionWarning,
-  type AgentMentionActionKind,
-  type AgentMentionActionResult,
-  type AgentMentionActionResultStatus,
-  type AgentPendingMentionAction,
-  type AgentSenderMentionDeliveryRow,
-  type AgentSenderPendingMentionAction,
-  type AgentSenderUnresolvedMentionWarning,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 // The text and the normalisers live in `@botiverse/raft-shared`
 // (`agentText/mentions.ts`) so the SDK renders the same bytes; this file keeps

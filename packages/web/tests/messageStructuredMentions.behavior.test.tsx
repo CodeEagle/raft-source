@@ -235,6 +235,20 @@ test("structured mention facts show the send-time name without fallback lookup",
   assert.doesNotMatch(plain, /<a\b(?=[^>]*href="#")[^>]*>@baoyu<\/a>/);
 });
 
+test("external messages highlight only server-minted mention facts", () => {
+  resetStores();
+  const members = new Map<string, MentionEntry>([
+    ["owner", { displayName: "owner", type: "user", id: "user-owner" }],
+  ]);
+  const html = renderMessage(makeMessage({
+    senderType: "external_projection",
+    content: "@peng please check with @owner",
+    mentions: [{ type: "agent", id: "agent-peng", name: "peng" }],
+  }), members);
+  assert.match(html, /<a\b(?=[^>]*href="#")[^>]*>@peng<\/a>/);
+  assert.doesNotMatch(html, /<a\b(?=[^>]*href="#")[^>]*>@owner<\/a>/, "free text keeps no authority");
+});
+
 test("free-text mentions keep a glued CJK suffix and never split Latin text", () => {
   resetStores();
   const members = new Map<string, MentionEntry>([
@@ -263,7 +277,12 @@ test("Computer and App refs render as typed chips without becoming mentions", ()
   }));
 
   assert.match(html, /data-testid="computer-reference-550e8400-e29b-41d4-a716-446655440000"/);
-  assert.match(html, /bg-brutal-cyan/);
+  // The Computer ref is a raft-ui MessageReferenceChip (link variant): a
+  // typed chip on the info-soft fill, not a mention link.
+  assert.match(
+    html,
+    /<a\b(?=[^>]*data-testid="computer-reference-550e8400-e29b-41d4-a716-446655440000")(?=[^>]*data-slot="message-reference")(?=[^>]*class="[^"]*(?<=["\s])bg-info-soft(?=["\s]))[^>]*>@Desk<\/a>/,
+  );
   assert.match(html, /data-testid="app-reference-system.reminder"/);
   assert.match(html, /@system\.reminder/);
   assert.match(html, /data-base-ui-tooltip-trigger/);

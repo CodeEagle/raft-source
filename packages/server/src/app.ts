@@ -5,6 +5,16 @@ import cors from "cors";
 import rateLimit, { ipKeyGenerator } from "express-rate-limit";
 import { channelRouter } from "./routes/channels";
 import { publicServerRouter } from "./routes/publicServer";
+import { publicFeatureFlagsRouter } from "./routes/publicFeatureFlags";
+import { publicSearchRouter } from "./routes/publicSearch";
+import { createPublicSearchAccess, type PublicSearchServiceBucketStore, type PublicSearchServiceKeySource } from "./lib/publicSearchServiceAccess";
+import {
+  PUBLIC_VISITS_PATH,
+  publicVisitsBodyErrorHandler,
+  publicVisitsBodyParser,
+  publicVisitsRouter,
+} from "./routes/publicVisits";
+import { countIngest } from "./services/productEventIngest";
 import { messageRouter, messageV2Router } from "./routes/messages";
 import { agentRouter, agentAvatarRouter } from "./routes/agents";
 import { agentCredentialsHandler, listAgentCredentialsHandler, revokeAgentCredentialHandler } from "./routes/agentCredentials";
@@ -31,9 +41,11 @@ import { computerLegacyMachinesRouter } from "./routes/computerLegacyMachines";
 import { isDeviceAuthSurfaceEnabled } from "./services/deviceAuthService";
 import { internalComputerRouter } from "./routes/internalComputer";
 import { internalAgentApiRouter } from "./routes/internalAgentApi";
+import { agentApiErrorTrace } from "./routes/agentApiErrorTrace";
 import { serverRouter } from "./routes/servers";
 import { billingRouter, stripeWebhookHandler } from "./routes/billing";
 import { resendNewsletterWebhookHandler } from "./routes/newsletterWebhooks";
+import { raftbenchRouter } from "./routes/raftbench";
 import { taskRouter } from "./routes/tasks";
 import { reminderRouter } from "./routes/reminders";
 import { attachmentRouter, attachmentPublicRouter } from "./routes/attachments";
@@ -58,6 +70,7 @@ import { agentRuntimeProviderRouter } from "./routes/agentRuntimeProviders";
 import { productFeedbackRouter } from "./routes/productFeedback";
 import { releaseNotesRouter } from "./routes/releaseNotes";
 import { mobileDownloadRouter } from "./routes/mobileDownload";
+import { desktopDownloadRouter } from "./routes/desktopDownload";
 import { mobileAppEmailUnsubscribeRouter } from "./routes/mobileAppEmailUnsubscribe";
 import { featureFlagsRouter } from "./routes/featureFlags";
 import { readMutationRouter } from "./routes/readMutations";
@@ -82,15 +95,16 @@ import { AGENT_BOOTSTRAP_SURFACE_ENABLED_ENV, isAgentBootstrapSurfaceEnabled } f
 import { getWebCorsOriginOption } from "./config/appUrl";
 import { globalJsonServerErrorHandler } from "./routes/errorResponse";
 import { readBuildIdentityStatus } from "./version";
+import { clientIpForRateLimit } from "./lib/clientIpForRateLimit";
 
 
 export const CORS_PREFLIGHT_MAX_AGE_SECONDS = 7200;
-export function rateLimitUserOrIpKey(req: Pick<Request, "ip" | "userId">): string {
-  return req.userId || ipKeyGenerator(req.ip ?? "unknown");
+export function rateLimitUserOrIpKey(req: Pick<Request, "ip" | "userId"> & { headers?: Request["headers"] }): string {
+  return req.userId || ipKeyGenerator(clientIpForRateLimit(req));
 }
 
-export function rateLimitUserMachineOrIpKey(req: Pick<Request, "ip" | "machineId" | "userId">): string {
-  return req.userId || req.machineId || ipKeyGenerator(req.ip ?? "unknown");
+export function rateLimitUserMachineOrIpKey(req: Pick<Request, "ip" | "machineId" | "userId"> & { headers?: Request["headers"] }): string {
+  return req.userId || req.machineId || ipKeyGenerator(clientIpForRateLimit(req));
 }
 
 export function shouldSkipAttachmentRateLimit(input: {
@@ -127,6 +141,8 @@ export type CreateAppOptions = Readonly<{
     skipAuthRateLimit?: boolean;
     enforceMessageRateLimit?: boolean;
     messageRateLimitMax?: number;
+    publicSearchKeySource?: PublicSearchServiceKeySource;
+    publicSearchBucketStore?: PublicSearchServiceBucketStore;
   };
   attachmentUploadSessionService?: AttachmentUploadSessionService;
   slackBridge?: SlackBridgeRouteDependencies;
@@ -245,6 +261,9 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // the global JSON parser, which would otherwise parse the request first and make a
   // router-level limit a no-op.
   app.use("/api/release-notes", express.json({ limit: "4mb" }));
+  // Public Server visit beacons: unauthenticated, so parse at most 1 KB and
+  // answer a bad body with the route's uniform 204 (routes/publicVisits.ts).
+  app.post(PUBLIC_VISITS_PATH, publicVisitsBodyParser, publicVisitsBodyErrorHandler);
   // Route-scoped 1 MiB JSON limit for machine scope attestation (old daemons
   // send ~180 KB of now-stripped diagnostics). Machine auth runs BEFORE the
   // parser; registered ahead of the global parser, which then skips the
@@ -286,6 +305,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   // Rate limiter for auth endpoints (general)
   const authLimiter = rateLimit({
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
     windowMs: 60 * 1000, // 1 minute
     max: 200,
     standardHeaders: true,
@@ -305,6 +325,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   // Separate (more lenient) limiter for join-link invite flow endpoints.
   const inviteFlowLimiter = rateLimit({
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
     windowMs: 60 * 1000, // 1 minute
     max: 120,
     standardHeaders: true,
@@ -314,6 +335,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   // Stricter rate limiter for forgot-password (5 requests/hour/IP)
   const forgotPasswordLimiter = rateLimit({
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
     windowMs: 60 * 60 * 1000, // 1 hour
     max: 5,
     standardHeaders: true,
@@ -486,6 +508,8 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // phone scanning it has no session. Requiring auth would land every scan on a
   // login wall. Artifacts behind it are public app builds.
   app.use("/api/mobile-download", authLimiter, mobileDownloadRouter);
+  // Same reason: the /download page is anonymous. Public desktop-beta builds.
+  app.use("/api/desktop-download", authLimiter, desktopDownloadRouter);
   app.use("/api/email/mobile-app", authLimiter, mobileAppEmailUnsubscribeRouter);
   // Global product release notes: public read of published revisions (anonymous
   // projection). Writes no longer go through the server API; the Release App
@@ -496,6 +520,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
 
   // Rate limiter for billing mutation endpoints (checkout/portal create Stripe sessions)
   const billingLimiter = rateLimit({
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
     windowMs: 60 * 1000, // 1 minute
     max: 5,
     standardHeaders: true,
@@ -507,6 +532,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // Rate limiter for file uploads (10 uploads/minute/IP to prevent abuse).
   // This covers both human `/api/attachments/upload` and agent `/internal/.../upload`.
   const uploadLimiter = rateLimit({
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
     windowMs: 60 * 1000, // 1 minute
     max: 10,
     validate: rateLimitValidate,
@@ -526,7 +552,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
     standardHeaders: true,
     legacyHeaders: false,
     message: attachmentUploadRateLimitedResponse,
-    keyGenerator: (req) => req.userId || req.actingAgentId || ipKeyGenerator(req.ip ?? "unknown"),
+    keyGenerator: (req) => req.userId || req.actingAgentId || ipKeyGenerator(clientIpForRateLimit(req)),
     skip: () => isTestEnv,
   });
   app.set("attachmentUploadSessionCreateLimiter", directUploadLimiter);
@@ -594,8 +620,36 @@ export function createApp(options: CreateAppOptions = {}): Express {
     keyGenerator: rateLimitUserOrIpKey,
   });
 
+  // Public translation can invoke the provider without a principal. Keep a
+  // separate IP-only bucket so signing in cannot multiply the public allowance.
+  // Its numeric budget matches the member endpoint by product decision.
+  const publicTranslationLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    validate: rateLimitValidate,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many public translation requests, please slow down" },
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
+  });
+
+  // Public attachment bytes are fetched without a principal, one request per
+  // image on a public page. Keep a separate IP-only bucket sized like the
+  // member download limiter so anonymous reads cannot borrow other budgets.
+  const publicAttachmentLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 120,
+    validate: rateLimitValidate,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many public attachment requests, please slow down" },
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
+  });
+
   // Resource routes (auth + verified + server required)
   app.post(/^\/api\/message-translations:batch$/, requireAuth, requireVerified, requireServer, translationLimiter, messageTranslationBatchHandler);
+  app.post(/^\/api\/public\/servers\/[^/]+\/message-translations:batch$/, publicTranslationLimiter);
+  app.get(/^\/api\/public\/servers\/[^/]+\/attachments\/[^/]+$/, publicAttachmentLimiter);
   // Authenticate the JWT without DB work, then admit Inbox requests before
   // verified-profile, server-membership, policy, and serving-row queries. This
   // bounds all PostgreSQL work caused by one authenticated Inbox request, not
@@ -604,7 +658,57 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // No router-wide requireAuth/requireVerified/requireServer on purpose — its GETs
   // serve logged-out visitors. Task #74's one membership write attaches auth and
   // verification on that route itself; see routes/publicServer.ts.
+  // Public server SEO: the read-only search API raft.build renders from. A
+  // narrower predicate than the guest view (owner search switch + indexing
+  // master switch); see routes/publicSearch.ts. Mounted before /api/public so
+  // the guest router never sees these paths.
+  // Every service-scheme request is limited per client IP before its key
+  // lookup (task #4), so forged credentials cannot drive unbounded reads of
+  // the key table. Above the shared service bucket, so it never binds first
+  // for genuine raft.build traffic spread over Cloudflare egress addresses.
+  const publicSearchVerifyLimiter = rateLimit({
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
+    windowMs: 60 * 1000,
+    max: 600,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many requests, please try again later" },
+  });
+  // Anonymous callers keep the per-IP authLimiter; raft.build's service
+  // credential gets its own finite bucket instead (lib/publicSearchServiceAccess.ts).
+  app.use("/api/public/search", createPublicSearchAccess({
+    anonymousLimiter: authLimiter,
+    verifyLimiter: publicSearchVerifyLimiter,
+    // Test harnesses inject these explicitly; production never falls back to
+    // a process-local bucket or an unchecked key source.
+    ...(options.testHarness?.publicSearchKeySource ? { keySource: options.testHarness.publicSearchKeySource } : {}),
+    ...(options.testHarness?.publicSearchBucketStore ? { bucketStore: options.testHarness.publicSearchBucketStore } : {}),
+  }), publicSearchRouter);
+  // Before-login feature flags (task #205): pre_auth_evaluable flags only, no credentials read.
+  app.use("/api/public/feature-flags", authLimiter, publicFeatureFlagsRouter);
   app.use("/api/public", authLimiter, publicServerRouter);
+  // Count-only visit beacons from public server pages: unauthenticated, always
+  // 204 (routes/publicVisits.ts). Outside authLimiter so visits do not spend
+  // the public read budget. replica-local: per-task budget (20/min/IP, Tenny
+  // 2026-10-14); the per-server daily cap is shared in Redis. The key is the
+  // visitor address only once TRUST_CLOUDFRONT_VIEWER_HEADERS is on (until then
+  // the CloudFront edge); never parse forwarding headers here.
+  const publicVisitsLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    validate: rateLimitValidate,
+    standardHeaders: false,
+    legacyHeaders: false,
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
+    // 204 like every other outcome there; the metric is the only trace.
+    handler: (_req, res) => {
+      countIngest("public_visit_rate_limited", 1);
+      res.set("Cache-Control", "no-store");
+      res.status(204).end();
+    },
+    skip: () => isTestEnv,
+  });
+  app.use("/api/public-visits", publicVisitsLimiter, publicVisitsRouter);
 
   app.use(
     "/api/channels",
@@ -641,6 +745,7 @@ export function createApp(options: CreateAppOptions = {}): Express {
   app.post("/api/agents/:id/credentials", requireAuth, requireVerified, agentCredentialsHandler);
   app.get("/api/agents/:id/credentials", requireAuth, requireVerified, listAgentCredentialsHandler);
   app.delete("/api/agents/:id/credentials/:credentialId", requireAuth, requireVerified, revokeAgentCredentialHandler);
+  app.use("/api/raftbench", requireAuth, requireVerified, requireServer, raftbenchRouter);
   app.use("/api/agents", requireAuth, requireVerified, requireServer, agentRouter);
   app.use("/api/billing", requireAuth, requireVerified, requireServer, billingLimiter, billingRouter);
   app.use("/api/tasks", requireAuth, requireVerified, requireServer, taskRouter);
@@ -707,7 +812,27 @@ export function createApp(options: CreateAppOptions = {}): Express {
   // bound agentId is read from the credential row — there is NO `:id` path
   // param. Cross-principal rejection (sk_machine_* / sk_computer_* / JWT) is
   // handled inside `requireAgentCredentialAuth`.
-  app.use("/internal/agent-api", experimentalInternalSurfaceContract("agent-api"), authFromRegistry(), internalAgentApiRouter);
+  // agentApiErrorTrace before auth: auth refusals (401/403) are classified too.
+  app.use("/internal/agent-api", experimentalInternalSurfaceContract("agent-api"), agentApiErrorTrace, authFromRegistry(), internalAgentApiRouter);
+
+  // App-side endpoint: installed Apps exchange their OAuth access token for
+  // the managed bot's sk_agent_* key. No user session, no X-Server-Id —
+  // server is derived from the oauth_access_tokens row. Mounted before
+  // requireMachineAuth because the caller's credential is OAuth, not
+  // sk_machine_*.
+  const appBotTokenLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 20,
+    keyGenerator: (req) => ipKeyGenerator(clientIpForRateLimit(req)),
+    validate: rateLimitValidate,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { error: "Too many bot token requests" },
+  });
+  app.post("/api/app-bot/token", appBotTokenLimiter, async (req, res) => {
+    const { handleAppBotTokenExchange } = await import("./routes/integrations");
+    await handleAppBotTokenExchange(req, res);
+  });
 
   // Internal routes (machine auth)
   app.use("/internal", requireMachineAuth, internalRouter);

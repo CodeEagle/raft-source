@@ -31,5 +31,5 @@ export function ConnectedAppsErrorBanner({
   error: string;
 }) {
   if (surface !== target) return null;
-  return <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>;
+  return <Banner intent="warning" density="sm">{error}</Banner>;
 }

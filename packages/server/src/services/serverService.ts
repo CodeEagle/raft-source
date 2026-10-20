@@ -1,7 +1,7 @@
 import { revokeSocketAccess } from "../socket/accessRevocation";
 import { createHash } from "crypto";
-import { eq, and, asc, isNull, inArray, sql, count, ne } from "drizzle-orm";
-import { getDb, type DatabaseExecutor } from "../db/index";
+import { eq, and, asc, isNull, inArray, sql, count, ne, or, lt } from "drizzle-orm";
+import { getDb, type DatabaseExecutor, type DatabaseTransaction } from "../db/index";
 import { sqlUuidOrNull } from "../db/sqlUuid";
 import { CURRENT_CONTRACT_VERSION } from "./serverSetupStateService";
 import { servers, serverMembers, serverMembershipDepartures, serverMemberRoleAuditEvents, serverAgentMembers, users, channels, channelHumans, messages, agents, subscriptions, threadFollows, oauthAccessTokens } from "../db/schema";
@@ -284,6 +284,7 @@ export async function getUserServers(userId: string, opts: { traceQuery?: DbQuer
         planDowngradedAt: servers.planDowngradedAt,
         role: serverMembers.role,
         serverPushMuted: serverMembers.serverPushMuted,
+        publiclyVisible: servers.publiclyVisible,
         createdAt: servers.createdAt,
       })
       .from(serverMembers)
@@ -426,8 +427,12 @@ export async function updateServerSwitcherOrder(userId: string, serverOrder: str
   return { serverOrder: filtered, serverOrderVersion };
 }
 
-export async function updateServerOnboardingAgent(serverId: string, onboardingAgentId: string | null) {
-  return getDb().transaction(async (tx) => {
+export async function updateServerOnboardingAgent(
+  serverId: string,
+  onboardingAgentId: string | null,
+  options: { executor?: DatabaseTransaction } = {},
+) {
+  const run = async (tx: DatabaseTransaction) => {
     const [updated] = await tx
       .update(servers)
       .set({
@@ -446,7 +451,9 @@ export async function updateServerOnboardingAgent(serverId: string, onboardingAg
       await reconcileOwnersToSetupCheckpoint(tx, serverId);
     }
     return updated;
-  });
+  };
+  // With a caller's transaction the link commits together with the caller's writes.
+  return options.executor ? run(options.executor) : getDb().transaction(run);
 }
 
 export async function getServerOnboardingSettings(serverId: string): Promise<ServerOnboardingSettings | null> {
@@ -1561,6 +1568,45 @@ export async function markSetupHandoffAcknowledged(
         isNull(users.firstOnboardingCompletedAt),
       ));
   });
+}
+
+/** A claim older than this belongs to a sender that died and can be taken over. */
+export const OWNER_OPENER_CLAIM_LEASE_MS = 5 * 60_000;
+
+/**
+ * Claim the owner opener for one sender. Returns the claim's token (its
+ * time) only to the caller that set it: the opener is unsent and unclaimed
+ * (or the claim's lease ran out); null otherwise. Pair with
+ * releaseOwnerOpenerClaim(token) on failure; a successful send stamps
+ * onboardingOwnerOpenerV2SentAt and the claim no longer matters.
+ */
+export async function claimOwnerOpener(serverId: string, userId: string, now: Date = currentDate()): Promise<Date | null> {
+  const staleBefore = new Date(now.getTime() - OWNER_OPENER_CLAIM_LEASE_MS);
+  const rows = await getDb().update(serverMembers)
+    .set({ onboardingOwnerOpenerClaimedAt: now })
+    .where(and(
+      eq(serverMembers.serverId, serverId),
+      eq(serverMembers.userId, userId),
+      isNull(serverMembers.onboardingOwnerOpenerV2SentAt),
+      or(isNull(serverMembers.onboardingOwnerOpenerClaimedAt), lt(serverMembers.onboardingOwnerOpenerClaimedAt, staleBefore)),
+    ))
+    .returning({ claimedAt: serverMembers.onboardingOwnerOpenerClaimedAt });
+  return rows[0]?.claimedAt ?? null;
+}
+
+/**
+ * Release a claim this sender still holds. A slow sender whose lease ran out
+ * and was taken over must not clear the new holder's claim, so the release
+ * only matches the token its own claim returned.
+ */
+export async function releaseOwnerOpenerClaim(serverId: string, userId: string, token: Date): Promise<void> {
+  await getDb().update(serverMembers)
+    .set({ onboardingOwnerOpenerClaimedAt: null })
+    .where(and(
+      eq(serverMembers.serverId, serverId),
+      eq(serverMembers.userId, userId),
+      eq(serverMembers.onboardingOwnerOpenerClaimedAt, token),
+    ));
 }
 
 export async function updateMemberOnboardingPreferences(

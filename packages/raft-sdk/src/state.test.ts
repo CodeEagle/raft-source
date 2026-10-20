@@ -154,6 +154,28 @@ test("a stale or failed save never fails the operation and is reported", async (
   assert.deepEqual(await raft.inbox.commit(), { cursor: 2, saved: false });
 });
 
+test("onStateError gets load and save failures; the deprecated onStateSaveError still works and yields to it", async () => {
+  const failing: RaftStateStore = {
+    load: async () => { throw new Error("unreadable"); },
+    save: async () => { throw new Error("stale"); },
+  };
+  const errors: Array<{ phase: string }> = [];
+  const legacy: Array<{ phase: string }> = [];
+  const raft = createRaft({
+    serverUrl: "https://raft.example", credential, fetch: fakeServer([1]).fetch, state: failing,
+    onStateError: (_e, ctx) => errors.push({ phase: ctx.phase }),
+    onStateSaveError: (_e, ctx) => legacy.push({ phase: ctx.phase }),
+  });
+  assert.equal((await raft.inbox.check()).ok, true);
+  assert.deepEqual(errors.map((e) => e.phase), ["load", "save"]);
+  assert.deepEqual(legacy, [], "onStateError wins when both are set");
+
+  const old: Array<string> = [];
+  const viaAlias = createRaft({ serverUrl: "https://raft.example", credential, fetch: fakeServer([1]).fetch, state: failing, onStateSaveError: (_e, ctx) => old.push(ctx.phase) });
+  await viaAlias.inbox.check();
+  assert.deepEqual(old, ["load", "save"], "the deprecated name still receives both phases");
+});
+
 test("an unreadable or foreign state value starts empty instead of failing", async () => {
   const server = fakeServer([7]);
   const raft = createRaft({

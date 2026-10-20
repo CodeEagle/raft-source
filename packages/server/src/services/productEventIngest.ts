@@ -1,8 +1,8 @@
 // Client product-event ingest (RFC-067 §6).
 //
-// Web and desktop send registered interaction events in batches. Each batch is
-// for one server (the request's X-Server-Id, membership already checked) and
-// one signed-in user. The user's Raft id never reaches the store: rows carry
+// Web, desktop and the native apps send registered interaction events in
+// batches. Each batch is for one server (the request's X-Server-Id, membership
+// already checked) and one signed-in user. The user's Raft id never reaches the store: rows carry
 // the analytics id from productAnalyticsGate, and only when the user and the
 // workspace allow client events. Anything outside the registry is rejected
 // and counted, never stored.
@@ -17,13 +17,18 @@ import {
   type ServerId,
 } from "@botiverse/raft-shared";
 import { productEventIngestTotal } from "../metrics";
+import { noteProductEventOutcome } from "./productEventIngestSummary";
 import {
   createProductEventSinkFromEnv,
+  createPublicVisitorSinkFromEnv,
   type ProductEventRow,
   type ProductEventSink,
+  type PublicVisitorSink,
 } from "./productEventScopeDbWriter";
+import type { ProductEventContext } from "./productEventContext";
 
 export const PRODUCT_EVENT_SINK_APP_KEY = "productEventSink";
+export const PUBLIC_VISITOR_SINK_APP_KEY = "publicVisitorSink";
 
 export const MAX_CLIENT_EVENTS_PER_BATCH = 100;
 // Client clocks drift and batches wait in a queue; anything outside this
@@ -35,7 +40,8 @@ const shortToken = z.string().max(64).regex(PRODUCT_EVENT_STRING_TOKEN);
 const propertyValue = z.union([z.string().max(256), z.number(), z.boolean()]);
 
 export const clientEventBatchSchema = z.object({
-  source: z.enum(["web", "desktop"]),
+  // Native apps send only events whose registry `sources` name them.
+  source: z.enum(["web", "desktop", "ios", "android", "harmonyos"]),
   app_version: z.string().max(64).regex(/^[0-9A-Za-z._+-]+$/).optional(),
   platform: shortToken.optional(),
   events: z.array(z.object({
@@ -78,6 +84,8 @@ export function buildClientEventRows(input: {
   analyticsId: AnalyticsId;
   serverId: ServerId;
   receivedAt: Date;
+  /** `$` properties derived from the request (productEventContext.ts), added after validation. */
+  context?: ProductEventContext;
 }): ClientEventRowsResult {
   const rows: ProductEventRow[] = [];
   const rejected: Partial<Record<IngestRejection, number>> = {};
@@ -112,7 +120,7 @@ export function buildClientEventRows(input: {
       client_session_id: event.client_session_id ?? null,
       app_version: input.batch.app_version ?? null,
       platform: input.batch.platform ?? null,
-      properties,
+      properties: { ...properties, ...input.context },
     });
   }
   return { rows, rejected };
@@ -125,8 +133,33 @@ export function getProductEventSink(app: Application): ProductEventSink | null {
   return app.get(PRODUCT_EVENT_SINK_APP_KEY) as ProductEventSink | null;
 }
 
-export type IngestOutcome = "written" | "gated" | "unconfigured" | "lost" | "rejected_malformed" | `rejected_${IngestRejection}`;
+export function getPublicVisitorSink(app: Application): PublicVisitorSink | null {
+  if (app.get(PUBLIC_VISITOR_SINK_APP_KEY) === undefined) {
+    app.set(PUBLIC_VISITOR_SINK_APP_KEY, createPublicVisitorSinkFromEnv());
+  }
+  return app.get(PUBLIC_VISITOR_SINK_APP_KEY) as PublicVisitorSink | null;
+}
+
+export type IngestOutcome =
+  | "written"
+  | "gated"
+  | "unconfigured"
+  | "lost"
+  | "rejected_malformed"
+  | `rejected_${IngestRejection}`
+  // Public Server visits (publicVisitCounts.ts), all answered 204: past the
+  // per-server daily cap, throttled per IP, not sent from the app's own site,
+  // no public server by that slug, its flags off, its analytics switch off,
+  // or a channel or thread that is not public.
+  | "public_visit_capped"
+  | "public_visit_rate_limited"
+  | "public_visit_not_same_site"
+  | "public_visit_no_target"
+  | "public_visit_flag_off"
+  | "public_visit_workspace_off"
+  | "public_visit_bad_channel";
 
 export function countIngest(outcome: IngestOutcome, count: number): void {
   if (count > 0) productEventIngestTotal.inc({ outcome }, count);
+  noteProductEventOutcome(outcome, count);
 }

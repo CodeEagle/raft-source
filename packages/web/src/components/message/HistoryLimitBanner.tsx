@@ -23,14 +23,14 @@ export default function HistoryLimitBanner({ target = false }: {
   const days = getEffectiveLimits(plan).messageHistoryDays;
 
   return (
-    <Banner intent="warning" density="sm" className="mx-auto mb-3 max-w-md text-center font-bold justify-center" data-testid={target ? "history-limit-target-banner" : "history-limit-banner"}>
+    <Banner intent="warning" density="sm" className="mx-auto mb-3 max-w-md justify-center text-center" data-testid={target ? "history-limit-target-banner" : "history-limit-banner"}>
       {formatMessage(
         { id: target ? "message.chatPanel.messageBeyondHistory" : "message.chatPanel.historyLimit" },
         { days, plan: PLAN_CONFIG[plan].displayName },
       )}
       <button
         onClick={() => nav.toSettings("billing")}
-        className="ml-1 underline"
+        className="ml-1 rounded-[2px] font-semibold underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus"
       >
         {formatMessage({ id: "message.chatPanel.viewBilling" })}
       </button>

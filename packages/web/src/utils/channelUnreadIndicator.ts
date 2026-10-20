@@ -8,9 +8,16 @@ export function getChannelUnreadIndicatorState(opts: {
    * indicator of a non-joined row.
    */
   hasNew?: boolean;
+  /**
+   * Followed threads under the channel with unread replies (threads, not
+   * replies). Lights the same badge as the channel's own unread, as a separate
+   * segment; 0 when the thread-unread mark is gated off.
+   */
+  threadUnread?: number;
 }): { showLoudUnreadBadge: boolean; showQuietUnreadCount: boolean; showQuietNewDot: boolean } {
-  const showLoudUnreadBadge = opts.unread > 0 && opts.joined && !opts.showMutedIcon;
-  const showQuietUnreadCount = opts.unread > 0 && (!opts.joined || opts.showMutedIcon);
+  const hasUnread = opts.unread > 0 || (opts.threadUnread ?? 0) > 0;
+  const showLoudUnreadBadge = hasUnread && opts.joined && !opts.showMutedIcon;
+  const showQuietUnreadCount = hasUnread && (!opts.joined || opts.showMutedIcon);
   const showQuietNewDot = !showQuietUnreadCount && !opts.joined && opts.hasNew === true;
   return { showLoudUnreadBadge, showQuietUnreadCount, showQuietNewDot };
 }

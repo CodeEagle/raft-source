@@ -4,6 +4,9 @@ import type { TraceUploadWorkerEnv } from "../env";
 export type JsonObject = Record<string, unknown>;
 
 export class HttpError extends Error {
+  /** When set, the error response carries `Retry-After: <seconds>`. */
+  readonly retryAfterSeconds?: number;
+
   constructor(public readonly status: number, message: string) {
     super(message);
   }

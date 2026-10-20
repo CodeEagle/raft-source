@@ -25,10 +25,13 @@ export function useLightboxPortalContainer() {
 }
 
 /**
- * Full-screen dark-backdrop overlay for lightboxes and bottom sheets.
+ * Full-screen scrim overlay for lightboxes and bottom sheets.
  *
  * Replaces the recurring pattern:
- *   <div className="fixed inset-0 z-[70] flex flex-col bg-black/75" onClick={...}>
+ *   <div className="fixed inset-0 z-[70] flex flex-col <scrim>" onClick={...}>
+ *
+ * The default backdrop is the Raft Design System scrim (`bg-layer-backdrop`,
+ * the same dim as dialogs) in both modes.
  *
  * Used in: ImageLightbox, SelectShareLightbox, MessageItem mobile reaction sheet.
  *
@@ -45,7 +48,7 @@ interface LightboxProps extends Omit<HTMLAttributes<HTMLDivElement>, "onClick" |
   children: ReactNode;
   /** CSS z-index. Default 70 (above Modal's z-50/z-[60]). */
   zIndex?: number;
-  /** Tailwind bg class for the backdrop. Default "bg-black/75". */
+  /** Tailwind bg class for the backdrop. Default "bg-layer-backdrop" (the DS scrim). */
   backdropClass?: string;
   /** Click on backdrop closes. Default true. */
   dismissOnBackdrop?: boolean;
@@ -63,7 +66,7 @@ export default function Lightbox({
   onClose,
   children,
   zIndex = 70,
-  backdropClass = "bg-black/75",
+  backdropClass = "bg-layer-backdrop",
   dismissOnBackdrop = true,
   className = "",
   positionClass = "fixed inset-0",

@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import { ProxyAgent } from "undici";
 import { createProviderHttpClient, daemonFetch, withDaemonFetchProxy } from "./daemonFetch";
 import {
+  buildDirectFetchDispatcher,
   buildIsolatedFetchDispatcher,
   evictIsolatedFetchDispatcher,
 } from "./proxy";
@@ -196,7 +197,10 @@ test("withDaemonFetchProxy honors NO_PROXY bypasses", () => {
   });
 
   assert.equal(init.method, "POST");
-  assert.equal(init.dispatcher, undefined);
+  // Bypassed targets still get the daemon's HTTP/1.1 dispatcher, not undici's
+  // global one (which negotiates HTTP/2 in undici 8).
+  assert.equal(init.dispatcher, buildDirectFetchDispatcher());
+  assert.ok(!(init.dispatcher instanceof ProxyAgent));
 });
 
 test("provider HTTP clients own and dispose their isolated dispatcher pools", async () => {

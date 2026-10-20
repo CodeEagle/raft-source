@@ -1,3 +1,4 @@
+import { ambientProcessEnv } from "../processEnvPatch";
 import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
 import { logger } from "../logger";
 
@@ -59,7 +60,8 @@ const ABANDON_KILL_AFTER_MS = 5_000;
 
 /** `spawn()` for runtime children: the child is guarded before it is returned. */
 export function spawnRuntimeChild(command: string, args: readonly string[], options: SpawnOptions): ChildProcess {
-  const child = spawn(command, args, options);
+  // Never inherit a Pi session-create patch in flight (task #28).
+  const child = spawn(command, args, { ...options, env: options.env ?? ambientProcessEnv() });
   guardRuntimeChild(child);
   return child;
 }

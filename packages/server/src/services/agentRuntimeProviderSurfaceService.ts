@@ -67,6 +67,8 @@ const usageRowSchema = z.object({
   dimensions: z.record(z.string(), z.string()),
   unit: z.string(),
   quantity: z.number(),
+  /** USD for this row; `null` = not priced (e.g. tool calls). Absent from providers that do not price usage. */
+  cost: z.number().nullable().optional(),
 });
 
 const usageSchema = z.object({
@@ -92,7 +94,7 @@ async function providerGet<T>(
     .where(eq(agentRuntimeProvisions.agentId, agentId)).limit(1);
   if (!row) return { kind: "unavailable", reason: "not_provisioned" };
   if (row.state !== "active" || !row.providerAgentId) return { kind: "unavailable", reason: `state_${row.state}` };
-  const config = resolveProviderConfig(row.provider);
+  const config = resolveProviderConfig(row.provider, process.env, row.providerTarget);
   if (!config) return { kind: "unavailable", reason: "provider_not_configured" };
   const result = await providerRequest(config, "GET", path(row.providerAgentId, row.serverId));
   if (result.kind === "network") return { kind: "upstream_unavailable", reason: result.code, httpStatus: null };

@@ -32,6 +32,7 @@ import {
   type AgentInboxStateMachineEffect,
 } from "./agentInboxStateMachine";
 import { projectAgentInboxSnapshot } from "./agentInboxProjection";
+import { formatProxyVisibleMessageTarget } from "./agentVisibleDeliveryLedger";
 import type { AgentInboxTargetRow } from "./agentInboxProjection";
 import type { AgentAppInboxStore } from "./agentAppInbox";
 import { daemonFetch, type DaemonFetchOptions } from "./daemonFetch";
@@ -53,16 +54,23 @@ type ProxyRegistration = {
   tracer: Tracer;
   daemonVersion: string | null;
   computerVersion: string | null;
-  /**
-   * Passive AX gate this launch was spawned with (task #359). When on, the
-   * daemon ledger (process-scoped, not context-scoped) must not attest model-
-   * seen state for v2 sends: the CLI already scopes thread evidence to the
-   * current context, and a pre-compaction boundary would reopen that gap.
-   */
-  passiveAx: boolean;
   /** Task #178: third-party events served under lease, keyed by batch id. Lives with the registration, so a relaunch voids them. */
   thirdPartyLeases?: Map<string, ThirdPartyEventLease>;
+  /** Glimpse G2-3: this agent's recent local holds of a task write, keyed by target and write (see taskWriteRehold). */
+  taskWriteHolds?: Map<string, { seenUpToSeq: number; at: number }>;
 };
+
+/** How long a local hold of a task write covers its rerun: one hold per catch-up (the Server's window too). */
+const TASK_WRITE_REHOLD_WINDOW_MS = 10 * 60_000;
+
+/** A task write's identity on its board: the action and its task(s), so a hold covers only its own rerun. */
+function taskWriteKey(action: AgentProxyFreshnessAction, body: Record<string, unknown>): string {
+  const numbers = (value: unknown) => (Array.isArray(value) ? value : []).filter((n): n is number => typeof n === "number").sort((a, b) => a - b).join(",");
+  const strings = (value: unknown) => (Array.isArray(value) ? value : []).filter((v): v is string => typeof v === "string").sort().join(",");
+  if (action === "task_claim") return `task_claim:${numbers(body.task_numbers)}|${strings(body.message_ids)}`;
+  if (action === "task_update") return `task_update:${String(body.task_number)}:${String(body.status)}`;
+  return `${action}:${String(body.task_number)}`;
+}
 
 // Task #178 — serve = lease, ack = consume + report. A leased event stays in
 // the Local Inbox: a later /events re-serves it under a new batch (voiding the
@@ -180,6 +188,8 @@ export type AgentProxyInboxCoordinator = {
   isMessageModelSeen?(input: { target: string; message: AgentProxyVisibleMessage }): boolean;
   /** Exact model-seen seqs for a target, ascending (task #360); merged into a send's `seenExactSeqs`. */
   getExactSeenSeqs?(target: string): number[];
+  /** The id of the model context the agent is in now (new on compaction), or null when none was published. */
+  getContextId?(): string | null;
   /**
    * Local Inbox contract for daemon-managed runners:
    * `/internal/agent-api/events` and `slock message check` MUST drain this
@@ -197,6 +207,8 @@ export type AgentProxyInboxCoordinator = {
     source: "server_held_context" | "agent_api_events_local" | "agent_api_events_server" | "agent_api_history" | "agent_api_send_commit" | "side_effect_preflight_context";
   }): void;
   recordFreshnessDecision?(input: AgentProxyFreshnessDecision): void;
+  /** What the Server said about a forwarded message send: accepted (with its id) or held as a draft. */
+  recordSendOutcome?(input: { state: "sent"; messageId?: string } | { state: "held" }): void;
   recordDrainOutcome?(input: AgentProxyDrainOutcome): void;
   recordProxyFailure?(input: AgentProxyFailure): void;
   recordTransportNormalizedError?(input: AgentProxyTransportNormalizedError): void;
@@ -208,7 +220,7 @@ export type AgentProxyInboxProjectionTraceInput = {
   pendingMessageCount: number;
 };
 
-export type AgentProxyFreshnessAction = "send" | "task_claim" | "task_update";
+export type AgentProxyFreshnessAction = "send" | "task_claim" | "task_update" | "task_amend";
 
 export type AgentProxyFreshnessDecision = {
   action: AgentProxyFreshnessAction;
@@ -623,6 +635,11 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
   };
   let upstreamResponseStarted = false;
   let upstreamResponseComplete = false;
+  // Upload failures are read by size, so the upload span carries a coarse
+  // bucket only (never names or bytes). The declared length covers failures
+  // before the body is read; the buffered length replaces it once known.
+  const sizeTracked = routeFamilyForPath(localPathname) === "attachments/upload";
+  let requestBodyBytes = sizeTracked ? declaredContentLength(req.headers["content-length"]) : undefined;
   try {
     target = new URL(req.url ?? "/", registration.serverUrl);
     // The local bearer authorizes this agent's Raft server only. Absolute,
@@ -665,6 +682,12 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
     headers.set("accept-encoding", "identity");
     headers.set("Authorization", `Bearer ${registration.apiKey}`);
     headers.set("X-Agent-Id", registration.agentId);
+    // The launch and model context this request belongs to: the server's
+    // agent-context return events (glimpse input duplication) group what it
+    // offered per context; the daemon is the authority on both.
+    if (registration.launchId) headers.set("X-Agent-Launch-Id", registration.launchId);
+    const contextId = registration.inboxCoordinator?.getContextId?.();
+    if (contextId) headers.set("X-Agent-Context-Id", contextId);
     headers.set("X-Raft-Client", "cli");
     headers.set("X-Slock-Agent-Active-Capabilities", registration.activeCapabilities);
     // The caller-supplied context is only a parent. Always create a daemon
@@ -676,6 +699,7 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
     let rawBodyBuffer: Buffer | undefined;
     if (method !== "GET" && method !== "HEAD") {
       rawBodyBuffer = await readRequestBody(req);
+      if (sizeTracked) requestBodyBytes = rawBodyBuffer.byteLength;
       const bodyBuffer = new ArrayBuffer(rawBodyBuffer.byteLength);
       new Uint8Array(bodyBuffer).set(rawBodyBuffer);
       body = bodyBuffer;
@@ -839,7 +863,8 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
         return;
       }
       body = prepared.bodyText;
-      if (sideEffectAction === "send") sendTarget = prepared.target;
+      // The target whose held context (a send's or a task write's) the response books.
+      sendTarget = prepared.target;
       sideEffectFreshnessContextMode = prepared.freshnessContextMode;
       headers.set("content-type", "application/json");
       headers.delete("content-length");
@@ -848,13 +873,11 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
       // side-effect preflight above never matched, so the daemon's model-seen
       // facts never reached a real send. Forward-only: lift `seenUpToSeq` and
       // union exact seqs; never answer a v2 send locally (the hold stays the
-      // Server's). A passiveAx launch skips the enrichment: the daemon ledger
-      // is process-scoped, not context-scoped. The response still feeds the
-      // ledger (held context, own commit) exactly as v1 does.
+      // Server's). Under passive AX the coordinator's facts are scoped to the
+      // model's current context, like the CLI's own (glimpse G0). The response
+      // still feeds the ledger (held context, own commit) exactly as v1 does.
       const rawBody = rawBodyBuffer?.toString("utf8") ?? "";
-      const prepared = registration.passiveAx
-        ? describeSendBodyForConsumption(rawBody)
-        : await prepareAgentApiSideEffectForward(registration, headers, rawBody, "send", { localHold: false });
+      const prepared = await prepareAgentApiSideEffectForward(registration, headers, rawBody, "send", { localHold: false });
       body = prepared.bodyText;
       sendTarget = prepared.target;
       sendV2ConsumeFreshnessContextMode = prepared.freshnessContextMode;
@@ -931,7 +954,23 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
         outcome: "upstream_response",
         http_status: upstream.status,
       };
-      await consumeVisibleResponse(registration, target, sendTarget, sideEffectFreshnessContextMode ?? sendV2ConsumeFreshnessContextMode, responseText);
+      // The ledger is the daemon's own bookkeeping. On a side-effecting route
+      // the Server has already acted, so the agent must get its reply even if
+      // the ledger update fails: a lost "sent" invites a duplicate send, a lost
+      // hold hides the draft and its context (PROXY_5XX on 2026-10-14, thread
+      // alias, see serverResolvedThreadTarget). A read can simply be retried,
+      // so there the failure stays a post_response_local error.
+      try {
+        await consumeVisibleResponse(registration, target, sendTarget, sideEffectFreshnessContextMode ?? sendV2ConsumeFreshnessContextMode, responseText);
+      } catch (err) {
+        if (!sideEffectAction && !isMessageSendV2) throw err;
+        const errorMessage = truncateProxyErrorMessage(err instanceof Error ? err.message : String(err));
+        logger.warn(`[Agent Credential Proxy] visible-delivery ledger update failed; forwarding the upstream response (correlation_id=${correlationId}): ${errorMessage}`);
+        proxySpan.addEvent("daemon.agent_proxy.visible_ledger_failed", {
+          route_family: routeFamilyForPath(target.pathname),
+          error_class: err instanceof Error ? err.name : "Error",
+        });
+      }
       const downstreamResponseText = sideEffectFreshnessContextMode === "withheld"
         ? reprojectReviewerIsolationResponse(responseText, upstream.status, target.pathname)
         : responseText;
@@ -989,8 +1028,25 @@ async function handleProxyRequest(req: http.IncomingMessage, res: http.ServerRes
     proxySpanEndAttrs = proxyFailureSpanAttrs(transportError);
     writeProxyFailureResponse(res, failure);
   } finally {
+    if (requestBodyBytes !== undefined) {
+      proxySpanEndAttrs = { ...proxySpanEndAttrs, body_size_bucket: bodySizeBucket(requestBodyBytes) };
+    }
     proxySpan.end(proxySpanStatus, { attrs: proxySpanEndAttrs });
   }
+}
+
+const MIB = 1024 * 1024;
+
+export function bodySizeBucket(bytes: number): "<1MiB" | "1-10MiB" | "10-50MiB" | ">50MiB" {
+  if (bytes < MIB) return "<1MiB";
+  if (bytes < 10 * MIB) return "1-10MiB";
+  if (bytes <= 50 * MIB) return "10-50MiB";
+  return ">50MiB";
+}
+
+function declaredContentLength(value: string | undefined): number | undefined {
+  if (!value || !/^\d+$/.test(value.trim())) return undefined;
+  return Number(value.trim());
 }
 
 function firstRequestHeader(value: string | string[] | undefined): string | undefined {
@@ -1849,29 +1905,23 @@ function isAgentApiSendPath(pathname: string): boolean {
   return pathname === "/internal/agent-api/send" || pathname === MESSAGE_SEND_V2_PATH;
 }
 
-function describeSendBodyForConsumption(rawBody: string): { bodyText: string; target?: string; freshnessContextMode?: "inline" | "withheld" } {
-  try {
-    const body = rawBody ? JSON.parse(rawBody) as Record<string, unknown> : {};
-    return {
-      bodyText: rawBody,
-      target: sideEffectTarget("send", body),
-      freshnessContextMode: body.freshnessContextMode === "withheld" ? "withheld" : "inline",
-    };
-  } catch {
-    return { bodyText: rawBody };
-  }
-}
-
 /** Exported for the route-coverage guard test. */
 export function __agentApiSideEffectActionForTest(pathname: string): AgentProxyFreshnessAction | "send_v2_forward_only" | undefined {
   if (pathname === MESSAGE_SEND_V2_PATH) return "send_v2_forward_only";
   return agentApiSideEffectAction(pathname);
 }
 
+/** A task write the Server can hold for freshness (glimpse G2): claim, status update, amend. */
+function isAgentApiTaskWritePath(pathname: string): boolean {
+  const action = agentApiSideEffectAction(pathname);
+  return action !== undefined && action !== "send";
+}
+
 function agentApiSideEffectAction(pathname: string): AgentProxyFreshnessAction | undefined {
   if (pathname === "/internal/agent-api/send") return "send";
   if (pathname === "/internal/agent-api/tasks/claim") return "task_claim";
   if (pathname === "/internal/agent-api/tasks/update-status") return "task_update";
+  if (pathname === "/internal/agent-api/tasks/amend") return "task_amend";
   return undefined;
 }
 
@@ -1999,14 +2049,36 @@ async function prepareAgentApiSideEffectForward(
   });
   if (!options.localHold && plan.localResponse) {
     // A hold the agent will not see must not record its context as consumed.
-    if (action === "send") mergeDaemonExactSeenSeqs(body, coordinator.getExactSeenSeqs?.(target) ?? []);
+    mergeDaemonExactSeenSeqs(body, coordinator.getExactSeenSeqs?.(target) ?? []);
     return { bodyText: JSON.stringify(body), target, freshnessContextMode };
   }
-  await applyAgentInboxStateMachineEffects(coordinator, plan.effects);
-  if (typeof plan.forwardSeenUpToSeq === "number") {
-    if (action === "send") body.seenUpToSeq = plan.forwardSeenUpToSeq;
+  // Glimpse G2-3: a task write has no --anyway, so its local hold is at most
+  // one per catch-up, as the Server's is. When the same write was held here
+  // within the window and the model has taken in what that hold showed, newer
+  // messages that reached the daemon meanwhile do not hold the rerun again:
+  // it is forwarded with the model-seen boundary (nothing newer consumed), and
+  // the Server's gate decides by the same rule. Reviewer isolation shows no
+  // messages, so there one hold lets the rerun through.
+  if (plan.localResponse && action !== "send") {
+    const holds = registration.taskWriteHolds ??= new Map();
+    const key = `${target}|${taskWriteKey(action, body)}`;
+    const last = holds.get(key);
+    const now = Date.now();
+    const boundary = coordinator.getBoundary(target) ?? 0;
+    if (last && now - last.at < TASK_WRITE_REHOLD_WINDOW_MS && (freshnessContextMode === "withheld" || boundary >= last.seenUpToSeq)) {
+      holds.delete(key);
+      if (boundary > 0) body.seenUpToSeq = Math.max(existingBoundary ?? 0, boundary);
+      mergeDaemonExactSeenSeqs(body, coordinator.getExactSeenSeqs?.(target) ?? []);
+      return { bodyText: JSON.stringify(body), target, freshnessContextMode };
+    }
+    const shown = (plan.localResponse as { seenUpToSeq?: unknown }).seenUpToSeq;
+    holds.set(key, { seenUpToSeq: typeof shown === "number" ? shown : 0, at: now });
   }
-  if (action === "send" && !plan.localResponse) mergeDaemonExactSeenSeqs(body, coordinator.getExactSeenSeqs?.(target) ?? []);
+  await applyAgentInboxStateMachineEffects(coordinator, plan.effects);
+  // Every gated write carries the model-seen boundary (glimpse G2-3): the
+  // Server holds a task write by it as it holds a send.
+  if (typeof plan.forwardSeenUpToSeq === "number") body.seenUpToSeq = plan.forwardSeenUpToSeq;
+  if (!plan.localResponse) mergeDaemonExactSeenSeqs(body, coordinator.getExactSeenSeqs?.(target) ?? []);
   return {
     bodyText: JSON.stringify(body),
     target,
@@ -2020,9 +2092,41 @@ function shouldBufferJsonResponse(upstream: Response, pathname: string, registra
   const contentType = upstream.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) return false;
   return isAgentApiSendPath(pathname) ||
+    isAgentApiTaskWritePath(pathname) ||
     pathname === "/internal/agent-api/events" ||
     pathname === "/internal/agent-api/history" ||
     /^\/internal\/agent-api\/messages\/[^/]+\/resolve$/.test(pathname);
+}
+
+/**
+ * A thread has two addresses the Server accepts: its root message's short id
+ * (`#chan:3ae9bd99`, the canonical one) and the thread channel's own id
+ * (`#chan:46a146e8`, the `threadId` in message headers). A send to the second
+ * is resolved by the Server, and the context it returns carries the canonical
+ * target. Those messages are the Server's answer for the target it resolved,
+ * so record them under that target: only when every held message names the
+ * same thread in the same parent channel as the requested one.
+ */
+function serverResolvedThreadTarget(
+  sendTarget: string | undefined,
+  heldMessages: AgentProxyVisibleMessage[],
+): string | undefined {
+  if (!sendTarget) return sendTarget;
+  const threadParent = (target: string): string | null => {
+    const match = /^(#[^:]+|dm:@[^:]+):[^:]+$/.exec(target);
+    return match ? match[1]! : null;
+  };
+  const requestedParent = threadParent(sendTarget);
+  if (!requestedParent) return sendTarget;
+  const resolved = new Set<string>();
+  for (const message of heldMessages) {
+    if (!message || typeof message !== "object" || message.third_party_event) continue;
+    if (message.channel_type !== "thread" || !message.parent_channel_name || !message.channel_name) continue;
+    resolved.add(formatProxyVisibleMessageTarget(message));
+  }
+  if (resolved.size !== 1) return sendTarget;
+  const [only] = resolved;
+  return only && threadParent(only) === requestedParent ? only : sendTarget;
 }
 
 async function consumeVisibleResponse(
@@ -2050,15 +2154,22 @@ async function consumeVisibleResponse(
   } catch {
     return;
   }
+  if (isAgentApiSendPath(targetUrl.pathname) && (parsed.state === "sent" || parsed.state === "held")) {
+    coordinator.recordSendOutcome?.(parsed.state === "sent"
+      ? { state: "sent", ...(typeof parsed.messageId === "string" ? { messageId: parsed.messageId } : {}) }
+      : { state: "held" });
+  }
   if (
-    isAgentApiSendPath(targetUrl.pathname)
+    (isAgentApiSendPath(targetUrl.pathname) || isAgentApiTaskWritePath(targetUrl.pathname))
     && parsed.state === "held"
     && requestedFreshnessContextMode !== "withheld"
     && parsed.freshnessContextMode !== "withheld"
     && Array.isArray(parsed.heldMessages)
   ) {
+    // The Server's held context reaches the model with the response, so its
+    // boundary is the model's: the identical rerun attests it and passes.
     coordinator.consumeVisibleMessages({
-      target: sendTarget,
+      target: serverResolvedThreadTarget(sendTarget, parsed.heldMessages),
       messages: normalizeInboxVisibleMessages(parsed.heldMessages, sendTarget),
       boundarySeq: typeof parsed.seenUpToSeq === "number" ? parsed.seenUpToSeq : undefined,
       source: "server_held_context",
@@ -2155,7 +2266,6 @@ export async function registerAgentCredentialProxy(input: {
   tracer?: Tracer;
   daemonVersion?: string | null;
   computerVersion?: string | null;
-  passiveAx?: boolean;
 }): Promise<ProxyHandle> {
   const server = await ensureServer();
   const proxyToken = `sap_${randomBytes(32).toString("base64url")}`;
@@ -2170,7 +2280,6 @@ export async function registerAgentCredentialProxy(input: {
     tracer: input.tracer ?? noopTracer,
     daemonVersion: input.daemonVersion?.trim() || null,
     computerVersion: input.computerVersion?.trim() || null,
-    passiveAx: input.passiveAx === true,
   });
   return {
     proxyUrl: server.proxyUrl,

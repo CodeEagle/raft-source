@@ -361,7 +361,7 @@ test("every channel.jointInvite.* id is translated", () => {
   const en = enMessages as Record<string, string>;
   const zh = zhMessages as Record<string, string>;
   const ids = Object.keys(en).filter((k) => k.startsWith("channel.jointInvite."));
-  assert.equal(ids.length, 4);
+  assert.equal(ids.length, 8, "4 invite errors + 4 same-admin strings (RFC 075 §4.5)");
   for (const id of ids) {
     assert.notEqual(zh[id], en[id], `${id} is still the English string`);
     assert.match(zh[id], /\p{Script=Han}/u, `${id} has no Chinese characters`);

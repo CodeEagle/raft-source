@@ -1,6 +1,6 @@
 import { MessageSquare, Pencil } from "lucide-react";
 import { useIntl } from "react-intl";
-import { Badge } from "raft-ui";
+import { Badge } from "@botiverse/raft-ui";
 
 interface ThreadRepliesBadgeProps {
   replyCount: number;
@@ -27,7 +27,6 @@ export function ThreadRepliesBadge({
       render={<button type="button" />}
       data-testid="message-thread-replies-badge"
       onClick={onClick}
-      uppercase={false}
       appearance={hasUnreadReplies ? "soft" : "solid"}
       variant={hasUnreadReplies ? "information" : "default"}
       className="transition-colors"

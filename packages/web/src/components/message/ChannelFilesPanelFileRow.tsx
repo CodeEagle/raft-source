@@ -4,7 +4,7 @@ import { useIntl } from "react-intl";
 import {
   Button,
   FileRow,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import api from "../../api/client";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import AvatarListRow from "../ui/AvatarListRow";
@@ -108,7 +108,6 @@ export function ChannelFilesPanelFileRow({
                 onClick={handleOpenSource}
                 size="icon-sm"
                 variant="ghost"
-                className="size-7 p-0"
                 aria-label={formatMessage({ id: "message.channelFilesPanel.jumpToMessage" })}
                 data-testid="channel-file-inline-jump"
               >
@@ -120,7 +119,6 @@ export function ChannelFilesPanelFileRow({
                 onClick={handleDownload}
                 size="icon-sm"
                 variant="ghost"
-                className="size-7 p-0"
                 aria-label={formatMessage({ id: "message.channelFilesPanel.downloadFile" })}
                 data-testid="channel-file-inline-download"
               >

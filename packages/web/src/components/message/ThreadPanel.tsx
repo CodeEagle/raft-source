@@ -5,7 +5,7 @@ import { useEffectEvent,  useEffect, useRef, useMemo, useCallback, useState } fr
 import type { Dispatch, SetStateAction, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { X, ArrowDown, LogIn, Search, ChevronUp, ChevronDown } from "lucide-react";
-import { Button, PanelTitle, toast, ThreadIcon, ThreadPanelBody, ThreadPanelContent, ThreadPanelFooter, ThreadPanelRoot } from "raft-ui";
+import { Button, PanelAction, PanelMeta, PanelTitle, Status, toast, ThreadIcon, ThreadPanelBody, ThreadPanelContent, ThreadPanelFooter, ThreadPanelRoot } from "@botiverse/raft-ui";
 import { useThreadStore } from "../../store/threadStore";
 import type { ThreadSummary } from "../../store/threadStore";
 import { useAgentStore } from "../../store/agentStore";
@@ -87,19 +87,24 @@ export const THREAD_LIVE_REPLY_READ_DEBOUNCE_MS = 500;
 // The read-only panel is framed with the same rui parts and the same surface,
 // chrome-layer and content-layer classes as AuthenticatedThreadPanel below
 // (panelClassName, threadChromeLayerClassName, threadContentLayerClassName).
-const READ_ONLY_THREAD_PANEL_CLASS_NAME = "isolate flex h-full min-h-0 w-full flex-col bg-layer-panel dark:bg-layer-card theme-brutal:bg-white";
+const READ_ONLY_THREAD_PANEL_CLASS_NAME = "isolate flex h-full min-h-0 w-full flex-col bg-layer-canvas";
 const READ_ONLY_THREAD_BODY_CLASS_NAME = "relative z-0 min-h-0 flex-1 overflow-hidden";
-const THREAD_PANEL_PARENT_CLASS_NAME = "border-b border-line-muted bg-layer-panel px-3 py-3 [--mi-hdr-pr:2.5rem] theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white";
+// The origin message sits on the paper with a content hairline under it
+// (Raft Design System › Panel: thread origin). It is the first thing in the
+// thread's scroller, and raft-ui's hover toolbar rides 18px above a message's
+// top edge, so the 20px top padding holds the toolbar and its ring; less and
+// the scroller clips it under the head. (A channel always opens with a date
+// divider, so its first message has the room.)
+const THREAD_PANEL_PARENT_CLASS_NAME = "border-b border-line-hairline bg-layer-canvas px-3 pt-5 pb-3";
 /** Discriminator for HistoryTopState catalog keys — keep out of JSX string attrs. */
 const THREAD_HISTORY_NOUN = "replies" as const;
 export const THREAD_LATEST_WINDOW_LIMIT = 50;
 const THREAD_CHROME_LAYER_CLASS_NAME = "relative z-20 shrink-0";
-// Header tint (cindyz 2026-10-10, #737): in elegant the thread column's header
-// sits on the same canvas-muted surface as the chat panel's header — same
-// token, dark mode handled by the token. The plain z-stack class stays for the
-// other thread chrome layers (search bar / composer keep their own
-// backgrounds). Brutal is untouched (its header rule comes from the recipe).
-const THREAD_HEADER_CONTAINER_CLASS_NAME = `${THREAD_CHROME_LAYER_CLASS_NAME} in-data-[theme=elegant]:bg-layer-canvas-muted`;
+// The thread header is the shared paper PanelHeader (its seam comes from the
+// recipe); the container only joins the chrome z-stack layer.
+const THREAD_HEADER_CONTAINER_CLASS_NAME = THREAD_CHROME_LAYER_CLASS_NAME;
+// Thread header subtitle: where the thread lives, then how many replies.
+const THREAD_HEADER_SUBTITLE_CLASS_NAME = "truncate";
 const READ_ONLY_THREAD_HEADER_CONTAINER_PROPS = { className: THREAD_HEADER_CONTAINER_CLASS_NAME };
 const THREAD_MOBILE_BACK_PROPS = { "data-testid": "thread-mobile-back" } as const;
 const THREAD_CHROME_CONTAINER_PROPS = { className: THREAD_HEADER_CONTAINER_CLASS_NAME } as const;
@@ -131,7 +136,6 @@ export interface ThreadPanelProps {
     focusedMessageId?: string | null;
   };
   onFocusedMessageConsumed?: () => void;
-  onOpenParentChannel?: (parentChannelId: string, parentMessageId: string) => void;
   onOpenProfile?: (kind: "agent" | "human", id: string) => void;
   showComposer?: boolean;
   overlayComposer?: boolean;
@@ -169,8 +173,9 @@ function ReadOnlyThreadPanel({
   const closeButtonClassName = presentation === "modal"
     ? "flex"
     : "hidden lg:flex";
+  const readOnlyParentChannelName = readOnlyData.channels.find((channel) => channel.id === readOnlyData.parentChannelId)?.name;
   const renderMessage = useCallback((message: Message) => (
-    <div className="px-3 [--mi-hdr-pr:2.5rem]" style={{ overflow: "clip visible" }}>
+    <div className="px-3" style={{ overflow: "clip visible" }}>
       <MessageItem
         message={message}
         mentionMap={EMPTY_PUBLIC_MENTION_MAP}
@@ -206,35 +211,32 @@ function ReadOnlyThreadPanel({
         <PanelHeader
           containerProps={READ_ONLY_THREAD_HEADER_CONTAINER_PROPS}
           titleSlot={(
-            <PanelTitle className="flex h-10 w-full min-w-0 items-center truncate text-left">
-              {formatMessage({ id: "message.threadPanel.thread" })}
-              {/* The gap before the dash is `ml-1`, not a leading space: the span
-                  is a flex item (blockified), and a leading space inside it
-                  collapses. Do not re-add it as text. */}
-              <span className="ml-1 font-normal in-data-[theme=elegant]:text-[15px] text-foreground-placeholder theme-brutal:text-black/50">
-                {formatMessage(
-                  { id: "message.threadPanel.channelContext" },
-                  { name: readOnlyData.channels.find((channel) => channel.id === readOnlyData.parentChannelId)?.name },
-                )}
-              </span>
-            </PanelTitle>
+            <div className="flex min-w-0 flex-col">
+              <PanelTitle className="min-w-0 truncate text-left">
+                {formatMessage({ id: "message.threadPanel.thread" })}
+              </PanelTitle>
+              {readOnlyParentChannelName ? (
+                <PanelMeta render={<p />} className={THREAD_HEADER_SUBTITLE_CLASS_NAME}>
+                  {formatMessage({ id: "message.threadPanel.channelContext" }, { name: readOnlyParentChannelName })}
+                  {" · "}
+                  {formatMessage({ id: "message.inlineThreadReplies.replyCount" }, { count: readOnlyData.replies.length })}
+                </PanelMeta>
+              ) : null}
+            </div>
           )}
           mobileBreakpoint={presentation === "side" ? "lg" : "md"}
           onMobileBack={onClose}
           mobileBackProps={THREAD_MOBILE_BACK_PROPS}
           actions={presentation !== "mobile-modal" ? (
             <Tooltip content={formatMessage({ id: "message.threadPanel.closeThread" })}>
-              <Button
-                type="button"
-                size="icon-sm"
-                variant="ghost"
+              <PanelAction
                 onClick={onClose}
                 className={closeButtonClassName}
                 aria-label={formatMessage({ id: "message.threadPanel.closeThread" })}
                 data-testid="thread-close"
               >
-                <X size={14} />
-              </Button>
+                <X />
+              </PanelAction>
             </Tooltip>
           ) : undefined}
         />
@@ -658,7 +660,6 @@ function AuthenticatedThreadPanel({
   onClose,
   threadIdentity,
   onFocusedMessageConsumed,
-  onOpenParentChannel,
   onOpenProfile,
   // Stryker disable all: host defaults are exercised by browser smoke.
   showComposer = true,
@@ -694,7 +695,6 @@ function AuthenticatedThreadPanel({
   /** Clears a focus authority owned outside threadStore, such as Activity's
    * persistent master/detail `?msg=` anchor. */
   onFocusedMessageConsumed?: () => void;
-  onOpenParentChannel?: (parentChannelId: string, parentMessageId: string) => void;
   onOpenProfile?: (kind: "agent" | "human", id: string) => void;
   showComposer?: boolean;
   overlayComposer?: boolean;
@@ -746,6 +746,11 @@ function AuthenticatedThreadPanel({
   const retryTaskModal = useThreadStore((s) => s.retryTaskModal);
   const retryOpenThread = isTaskModalSurface ? retryTaskModal : retryOpenThreadFromStore;
   const ensureOpenThreadChannel = useThreadStore((s) => s.ensureOpenThreadChannel);
+  const ensureTaskModalThreadChannel = useThreadStore((s) => s.ensureTaskModalThreadChannel);
+  // task #750: a task-modal composer's first send must resolve the thread from
+  // the taskModal slot, not the side thread's open* slots (which are null
+  // there and threw "No open thread to resolve" → "创建消息列失败").
+  const ensureSurfaceThreadChannel = isTaskModalSurface ? ensureTaskModalThreadChannel : ensureOpenThreadChannel;
   const clearFocusedMessage = useThreadStore((s) => s.clearFocusedMessage);
   const consumeFocusedMessage = useCallback(() => {
     clearFocusedMessage();
@@ -1341,7 +1346,9 @@ function AuthenticatedThreadPanel({
     setAtBottom(true);
     setHasMore(true);
     setHasNewer(false);
-    setSearchContextAutoLoadBlockKey(null);
+    // A permalink is a bounded context just like a search hit. Layout and
+    // programmatic positioning must not page history before a user scroll.
+    setSearchContextAutoLoadBlockKey(initialFocusId);
     setHistoryLimited(false);
     setLoadingOlder(false);
     setLoadingNewer(false);
@@ -1903,7 +1910,21 @@ function AuthenticatedThreadPanel({
       firstUnreadMessageId: existing?.firstUnreadMessageId ?? null,
       ...(existing?.latestReplies ? { latestReplies: existing.latestReplies } : {}),
     });
-  }, [parentMessageId]);
+    // task #750: on the modal surface the durable accept also binds the
+    // taskModal slot, so the panel's identity (and composer) rebinds to the
+    // real channel. Anchor-checked so a stale accept can't clobber a newer
+    // modal. The server slug participates in the guard like every other
+    // anchor comparison in this store (#750 follow-up).
+    if (isTaskModalSurface) {
+      useThreadStore.setState((prev) =>
+        prev.taskModal
+        && prev.taskModal.parentMessageId === parentMessageId
+        && prev.taskModal.serverSlug === taskModalSlot?.serverSlug
+          ? { taskModal: { ...prev.taskModal, threadChannelId: resolvedThreadChannelId } }
+          : {},
+      );
+    }
+  }, [parentMessageId, isTaskModalSurface, taskModalSlot?.serverSlug]);
 
   const threadSearchMessages = useMemo(
     () => getThreadSearchableMessages(
@@ -2108,7 +2129,7 @@ function AuthenticatedThreadPanel({
     if (systemMessageState?.kind === "summary") {
       const expanded = expandedSystemMessageGroups.has(systemMessageState.groupId);
       return (
-        <div className="px-3 [--mi-hdr-pr:2.5rem]" style={{ overflow: "clip visible" }}>
+        <div className="px-3" style={{ overflow: "clip visible" }}>
           <ThreadPanelSystemMessageGroupDisclosure
             groupId={systemMessageState.groupId}
             summary={systemMessageState.content}
@@ -2148,7 +2169,7 @@ function AuthenticatedThreadPanel({
       // `overflow: clip visible` (not `overflow-hidden`) so the hover toolbar can
       // ride on top of the message border without being clipped — matches
       // ChatPanel. Horizontal clipping is preserved.
-      <div className="px-3 [--mi-hdr-pr:2.5rem]" style={{ overflow: "clip visible" }}>
+      <div className="px-3" style={{ overflow: "clip visible" }}>
         <MessageItem
           key={msg.id}
           message={msg}
@@ -2218,12 +2239,9 @@ function AuthenticatedThreadPanel({
           loadingOlder={loadingOlder}
           noun={THREAD_HISTORY_NOUN}
         />
-        <div className="border-b border-line-muted pb-2 mb-1 text-xs text-foreground-muted font-mono text-center">
-          {formatMessage({ id: "message.inlineThreadReplies.replyCount" }, { count: messages.length })}
-        </div>
       </div>
     </div>
-  ), [activeThreadSearchMessageId, canReactToThread, channels, displayedParentMessageWithThreadId, displayedParentTask, externalById, formatMessage, getPreviewSenderAgent, getPreviewSenderMember, hasMore, historyLimited, loadingOlder, mentionMap, messages.length, onOpenProfile, displayedParentThreadSummary, parentReactionParentScopeKey, parentSlot, threadMentionComposerChannelId, threadSearchQuery]);
+  ), [activeThreadSearchMessageId, canReactToThread, channels, displayedParentMessageWithThreadId, displayedParentTask, externalById, getPreviewSenderAgent, getPreviewSenderMember, hasMore, historyLimited, loadingOlder, mentionMap, onOpenProfile, displayedParentThreadSummary, parentReactionParentScopeKey, parentSlot, threadMentionComposerChannelId, threadSearchQuery]);
   // Stryker restore all
 
   const threadFooter = useMemo(() => (
@@ -2231,7 +2249,7 @@ function AuthenticatedThreadPanel({
       {loadingNewer && (
         <div
           data-testid="thread-loading-newer"
-          className="py-2 text-center text-foreground-muted font-mono text-xs"
+          className="py-2 text-center font-mono text-mono-meta text-foreground-hint"
         >
           {formatMessage({ id: "message.threadPanel.loadingNewerReplies" })}
         </div>
@@ -2250,10 +2268,6 @@ function AuthenticatedThreadPanel({
   }, [setPicPreview]);
   const handleOpenParentChannelAction = useCallback(() => {
     if (!parentMessageId || !parentChannelId) return;
-    if (onOpenParentChannel) {
-      onOpenParentChannel(parentChannelId, parentMessageId);
-      return;
-    }
     const routeKind = parentRouteKind === "dm" ? "dm" : "channel";
     // Reserve the canonical ?msg= URL before navigating, then clear the store
     // synchronously. BrowserRouter commits route state in a transition; the
@@ -2269,7 +2283,7 @@ function AuthenticatedThreadPanel({
       serverSlug,
       navigate: routeNavigate,
     });
-  }, [parentMessageId, parentChannelId, onOpenParentChannel, parentRouteKind, isDesktop, serverSlug, routeNavigate]);
+  }, [parentMessageId, parentChannelId, parentRouteKind, isDesktop, serverSlug, routeNavigate]);
   // Wrap so the menu's click event never leaks in as the seed query.
   const handleOpenThreadSearch = useCallback(() => openThreadSearch(), [openThreadSearch]);
   const markThreadSearchScopeActive = useCallback(() => {
@@ -2301,17 +2315,20 @@ function AuthenticatedThreadPanel({
   // iPad Safari can keep the momentum scroller's composited hit-test layer
   // above adjacent flex siblings after history scroll; keep thread chrome in
   // explicit stack layers so back/input remain reachable.
-  const panelClassName = mobilePage
-    ? "isolate flex h-full min-h-0 w-full flex-col bg-layer-panel dark:bg-layer-card theme-brutal:bg-white"
-    : "isolate flex h-full min-h-0 w-full flex-col bg-layer-panel dark:bg-layer-card theme-brutal:bg-white";
+  const panelClassName = "isolate flex h-full min-h-0 w-full flex-col bg-layer-canvas";
+  // Inside the task sheet the modal frame (or the screen edge) already bounds
+  // the panel, so the root's attached left edge would sit right beside the
+  // frame's and read as a doubled line (task #741). Only the side column uses
+  // that edge as its divider.
+  const panelEdgeClassName = presentation === "modal" || presentation === "mobile-modal" ? " border-l-0" : "";
   // X close button visibility, per stdrc 2026-05-21 #proj-task:287f18ce
   // msg=804c045d: "它作为弹窗就需要叉；如果它是直接覆盖整个页面，就是返回."
   //   modal        — X (centered card with backdrop, X is the dialog close)
   //   mobile-modal — NO X (full-screen overlay, back chevron handles close)
   //   side         — X on desktop (lg+) only; mobile uses back chevron
   const closeButtonClassName = presentation === "modal"
-    ? "flex size-7 items-center justify-center"
-    : "hidden size-7 items-center justify-center lg:flex";
+    ? "flex"
+    : "hidden lg:flex";
 
   // Show a loading shell while threadChannelId is being fetched (first-open
   // case). If resolution actually failed for *this* parent (e.g. the permalink
@@ -2336,13 +2353,14 @@ function AuthenticatedThreadPanel({
           mobileBreakpoint="lg"
           actions={
             <Tooltip content={formatMessage({ id: "message.threadPanel.closeThread" })}>
-            <CloseButton
+            <PanelAction
               onClick={handleClose}
               className={closeButtonClassName}
+              aria-label={formatMessage({ id: "common.close" })}
               data-testid="thread-close"
             >
-              <X size={14} />
-            </CloseButton>
+              <X />
+            </PanelAction>
             </Tooltip>
           }
         />}
@@ -2350,10 +2368,10 @@ function AuthenticatedThreadPanel({
         <div className="flex flex-1 items-center justify-center p-6">
           {resolveFailed ? (
             <div className="flex flex-col items-center gap-3 text-center">
-              <div className="font-display text-lg font-bold text-foreground-strong">
+              <div className="text-headline text-foreground-muted">
                 {formatMessage({ id: "message.threadPanel.loadFailedTitle" })}
               </div>
-              <div className="max-w-xs text-sm text-foreground-muted">
+              <div className="max-w-xs text-callout text-foreground-hint">
                 {formatMessage({ id: "message.threadPanel.loadFailedBody" })}
               </div>
               <Button
@@ -2366,7 +2384,7 @@ function AuthenticatedThreadPanel({
               </Button>
             </div>
           ) : (
-            <div className="text-foreground-muted font-mono text-sm">{formatMessage({ id: "message.chatPanel.loading" })}</div>
+            <div className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "message.chatPanel.loading" })}</div>
           )}
         </div>
       </div>
@@ -2377,7 +2395,7 @@ function AuthenticatedThreadPanel({
   // corpus.
   const selectShareLightbox = picPreview ? (
     <SelectShareLightbox
-      dataUrl={picPreview}
+      image={picPreview}
       filename={`raft-thread-${new Date().toISOString().slice(0, 10)}.png`}
       onClose={handleClosePicPreview}
       onShareToX={onSharePreviewToX}
@@ -2402,9 +2420,7 @@ function AuthenticatedThreadPanel({
   // Stryker restore all
   // Stryker disable all: header action wiring is browser-smoke verified.
   // Thread commands live in the menu; structural Back and Close stay in the header.
-  const openParentChannelLabel = onOpenParentChannel
-    ? formatMessage({ id: "message.threadPanel.openChannel" })
-    : formatMessage({ id: "message.threadPanel.viewInChannel" });
+  const openParentChannelLabel = formatMessage({ id: "message.threadPanel.viewInChannel" });
 
   const threadContextActions = (
     <ThreadOverflowMenu
@@ -2428,7 +2444,7 @@ function AuthenticatedThreadPanel({
   return (
     <ThreadPanelRoot
       ref={panelRef}
-      className={panelClassName}
+      className={panelClassName + panelEdgeClassName}
       onPointerDownCapture={markThreadSearchScopeActive}
       onFocusCapture={markThreadSearchScopeActive}
     >
@@ -2442,31 +2458,39 @@ function AuthenticatedThreadPanel({
         // presentation the chevron stays through to lg- (mobile full-screen).
         mobileBreakpoint={presentation === "side" ? "lg" : "md"}
         titleSlot={
-          <Tooltip content={formatMessage({ id: "message.threadPanel.scrollToFirst" })}>
-          <PanelTitle
-            render={(
-              <button
-                type="button"
-                onClick={() => { void jumpToThreadStart(); }}
-                aria-label={formatMessage({ id: "message.threadPanel.scrollThreadToFirst" })}
-                data-testid="thread-scroll-to-top"
-              />
-            )}
-            className="flex h-10 w-full min-w-0 items-center truncate text-left"
-          >
-            {formatMessage({ id: "message.threadPanel.thread" })}
+          <div className="flex min-w-0 flex-col">
+            <Tooltip content={formatMessage({ id: "message.threadPanel.scrollToFirst" })}>
+            <PanelTitle
+              render={(
+                <button
+                  type="button"
+                  onClick={() => { void jumpToThreadStart(); }}
+                  aria-label={formatMessage({ id: "message.threadPanel.scrollThreadToFirst" })}
+                  data-testid="thread-scroll-to-top"
+                />
+              )}
+              className="block w-full min-w-0 truncate rounded-sticker text-left outline-none focus-visible:shadow-focus"
+            >
+              {formatMessage({ id: "message.threadPanel.thread" })}
+            </PanelTitle>
+            </Tooltip>
             {parentChannelId && (() => {
               // Stryker disable all: pre-existing parent label resolution is outside the workspace mutation corpus.
               const ch = channels.find((c) => c.id === parentChannelId) || dmChannels.find((c) => c.id === parentChannelId);
               if (!ch) return null;
-              const label = ch.type === "dm" ? `@${ch.peerDisplayName || ch.peerName || ch.name}` : `#${ch.name}`;
+              const label = ch.type === "dm"
+                ? `@${ch.peerDisplayName || ch.peerName || ch.name}`
+                : formatMessage({ id: "message.threadPanel.channelContext" }, { name: ch.name });
               // Stryker restore all
-              // The gap before the dash is `ml-1` on the span below; a leading
-              // space inside a flex-item span collapses (blockified).
-              return <span className="ml-1 font-normal in-data-[theme=elegant]:text-[15px] text-foreground-placeholder theme-brutal:text-black/50">— {label}</span>;
+              return (
+                <PanelMeta render={<p />} className={THREAD_HEADER_SUBTITLE_CLASS_NAME} data-testid="thread-header-subtitle">
+                  {label}
+                  {" · "}
+                  {formatMessage({ id: "message.inlineThreadReplies.replyCount" }, { count: messages.length })}
+                </PanelMeta>
+              );
             })()}
-          </PanelTitle>
-          </Tooltip>
+          </div>
         }
         actions={
           <>
@@ -2482,13 +2506,14 @@ function AuthenticatedThreadPanel({
             */}
             {showCloseButton && (
               <Tooltip content={formatMessage({ id: "message.threadPanel.closeThread" })}>
-              <CloseButton
+              <PanelAction
                 onClick={handleClose}
                 className={closeButtonClassName}
+                aria-label={formatMessage({ id: "common.close" })}
                 data-testid="thread-close"
               >
-                <X size={14} />
-              </CloseButton>
+                <X />
+              </PanelAction>
               </Tooltip>
             )}
           </>
@@ -2498,10 +2523,11 @@ function AuthenticatedThreadPanel({
       {/* Stryker restore all */}
       {threadSearchOpen && (
         <div
-          className={`${threadChromeLayerClassName} flex items-center gap-1.5 border-b border-line-muted bg-layer-panel dark:bg-layer-card px-2 py-2 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white`}
+          className={`${threadChromeLayerClassName} flex items-center gap-1 border-b border-line-seam bg-layer-canvas px-3 py-2`}
           data-testid="thread-search-bar"
         >
-          <Search size={14} className="shrink-0 text-foreground-muted theme-brutal:text-black/50" />
+          <div className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-control border-[1.5px] border-line-strong bg-layer-card px-2.5 focus-within:shadow-focus">
+          <Search size={16} className="shrink-0 text-foreground-hint" />
           <input
             ref={threadSearchInputRef}
             value={threadSearchQuery}
@@ -2526,12 +2552,13 @@ function AuthenticatedThreadPanel({
                 goToThreadSearchMatch(event.shiftKey ? -1 : 1);
               }
             }}
-            className="min-w-0 flex-1 border border-line-muted bg-layer-panel px-2 py-1 text-sm font-medium outline-none focus:border-line-strong focus:shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:focus:shadow-brutal-sm"
+            className="h-full min-w-0 flex-1 bg-transparent text-callout text-foreground outline-none placeholder:text-foreground-hint"
             placeholder={formatMessage({ id: "message.threadPanel.searchThisThread" })}
             aria-label={formatMessage({ id: "message.threadPanel.searchThisThread" })}
             data-testid="thread-search-input"
           />
-          <div className="w-20 shrink-0 text-center font-mono text-xs text-foreground-muted theme-brutal:text-black/50" data-testid="thread-search-count">
+          </div>
+          <div className="w-16 shrink-0 text-center font-mono text-mono-meta text-foreground-hint" data-testid="thread-search-count">
             {normalizeThreadSearchQuery(threadSearchQuery) && threadSearchLoading
               ? formatMessage({ id: "message.threadPanel.searchLoading" })
               : normalizeThreadSearchQuery(threadSearchQuery)
@@ -2567,7 +2594,6 @@ function AuthenticatedThreadPanel({
           <Tooltip content={formatMessage({ id: "message.threadPanel.closeThreadSearch" })}>
           <CloseButton
             onClick={closeThreadSearch}
-            className=" flex size-7 items-center justify-center "
             aria-label={formatMessage({ id: "message.threadPanel.closeThreadSearch" })}
           >
             <X size={14} />
@@ -2605,7 +2631,7 @@ function AuthenticatedThreadPanel({
               </div>
             )}
             <div className="flex flex-1 items-center justify-center">
-              <div className="font-mono text-sm text-foreground-placeholder theme-brutal:text-black/40">{formatMessage({ id: "message.chatPanel.loading" })}</div>
+              <div className="font-mono text-mono-meta text-foreground-hint">{formatMessage({ id: "message.chatPanel.loading" })}</div>
             </div>
           </div>
         ) : messages.length === 0 ? (
@@ -2668,7 +2694,7 @@ function AuthenticatedThreadPanel({
             size="sm"
             variant="outline"
             onClick={handleBottomButton}
-            className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 font-bold"
+            className="absolute inset-x-0 bottom-3 mx-auto w-fit z-10"
           >
             <ArrowDown size={12} />
             {/* Stryker disable all: pre-existing scroll-status copy is outside the workspace mutation corpus. */}
@@ -2687,7 +2713,7 @@ function AuthenticatedThreadPanel({
       >
       <div className={`${threadChromeLayerClassName} min-w-0 w-full flex-1`}>
         {showGuestReadOnly ? (
-          <div className="border-t border-line-muted bg-layer-panel p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white" data-testid="guest-readonly-thread-banner">
+          <div className="bg-layer-canvas p-3" data-testid="guest-readonly-thread-banner">
             <Banner intent="warning" className="justify-center text-center font-bold">
               {formatMessage({ id: "message.threadPanel.guestReadOnlyThread" })}
             </Banner>
@@ -2705,12 +2731,12 @@ function AuthenticatedThreadPanel({
             onSelectAll={handleSelectAllInThread}
           />
         ) : parentJointFeatureLocked ? (
-          <div className="border-t border-line-muted bg-layer-panel p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
+          <div className="bg-layer-canvas p-3">
             <Banner intent="warning" className="justify-center text-center font-bold">
-              {formatMessage({ id: "message.chatPanel.jointLocked" })}
+              {formatMessage({ id: "message.chatPanel.jointLocked" })}{" "}
               <button
                 onClick={() => nav.toSettings("billing")}
-                className="font-bold text-foreground-strong underline theme-brutal:text-black"
+                className="font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px]"
               >
                 {formatMessage({ id: "message.chatPanel.viewBilling" })}
               </button>
@@ -2723,7 +2749,7 @@ function AuthenticatedThreadPanel({
             placeholder={formatMessage({ id: "message.threadPanel.composerPlaceholder" })}
             channelName={formatMessage({ id: "message.composer.threadChannelName" })}
             onWillSend={handleWillSend}
-            resolveChannelId={threadChannelId ? undefined : ensureOpenThreadChannel}
+            resolveChannelId={threadChannelId ? undefined : ensureSurfaceThreadChannel}
             onChannelResolved={threadChannelId ? undefined : handleThreadChannelResolved}
             migrateDraftFromChannelId={threadChannelId ? `pending-thread:${parentMessageId}` : undefined}
             mentionChannelId={threadMentionChannelId}
@@ -2732,11 +2758,11 @@ function AuthenticatedThreadPanel({
             autoFocus={composerAutoFocus}
           />
         ) : showJoinParentChannel ? (
-          <div className="flex flex-col items-center gap-2 border-t border-line-muted bg-layer-panel p-3 theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white">
-            <Button
+          <div className="flex flex-col items-center gap-2 bg-layer-canvas p-3">
+            <Button size="lg"
               variant="accent"
               onClick={handleJoinParentChannel}
-              className="w-full font-bold"
+              className="w-full"
             >
               <LogIn size={14} />
               {formatMessage({ id: isGuest
@@ -2744,7 +2770,7 @@ function AuthenticatedThreadPanel({
                 : "message.threadPanel.joinChannelToReply" })}
             </Button>
             {isGuest ? (
-              <p className="text-center text-xs font-medium text-foreground-muted theme-brutal:text-black/60" data-testid="guest-thread-join-explanation">
+              <p className="text-center text-caption text-foreground-hint" data-testid="guest-thread-join-explanation">
                 {formatMessage({ id: "message.threadPanel.guestJoinExplanation" })}
               </p>
             ) : null}
@@ -2772,10 +2798,11 @@ function AuthenticatedThreadPanel({
       {picError && (
         <div
           role="alert"
-          className="fixed bottom-20 left-1/2 z-[110] -translate-x-1/2 border border-warning bg-warning-soft px-3 py-2 text-xs font-bold text-warning-strong shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-orange theme-brutal:text-black theme-brutal:shadow-brutal-sm"
+          className="fixed bottom-20 left-1/2 z-[110] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-container bg-layer-hud px-4 py-3 text-callout text-foreground-on-hud shadow-float"
           onClick={() => setPicError(null)}
           data-testid="thread-select-share-error"
         >
+          <Status aria-hidden="true" presence="error" />
           {formatMessage({ id: "message.chatPanel.imageActionFailed" }, { error: picError })}
         </div>
       )}

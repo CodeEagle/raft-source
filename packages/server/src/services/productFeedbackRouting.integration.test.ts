@@ -89,3 +89,110 @@ test("route binding failures carry a fixed reason code for the operator log", as
   const swapped = { ...ENV, HANDS_FEEDBACK_ROUTE_SUBJECT_ROOT: Buffer.alloc(32, 9).toString("base64url") };
   assert.equal(await reasonOf(swapped, ok), "root_commitment_mismatch");
 });
+
+// A fresh task (empty cache) right after a deploy: every active reporter binds at
+// once, and Hands may be slow to connect (Eric, 2026-10-15: 5xx bursts per deploy).
+test("concurrent first requests for one reporter share a single Hands call", async () => {
+  await seed();
+  let calls = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const fetchImpl = (async () => {
+    calls += 1;
+    await gate;
+    return Response.json({ changed: true, subject_version: "v1" }, { status: 201 });
+  }) as typeof fetch;
+  const binds = Array.from({ length: 5 }, () => ensureProductFeedbackRouteBinding({ userId: USER_ID, env: ENV, fetchImpl }));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  release();
+  await Promise.all(binds);
+  assert.equal(calls, 1);
+});
+
+test("a transient Hands failure is retried once; a definite answer is not", async () => {
+  await seed();
+  const connectTimeout = Object.assign(new TypeError("fetch failed"), { cause: { code: "UND_ERR_CONNECT_TIMEOUT" } });
+  const outcomes: Array<() => Response> = [];
+  let calls = 0;
+  const fetchImpl = (async () => {
+    calls += 1;
+    const next = outcomes.shift();
+    if (!next) throw connectTimeout;
+    return next();
+  }) as typeof fetch;
+  const bind = () => ensureProductFeedbackRouteBinding({ userId: USER_ID, env: ENV, fetchImpl, retryDelayMs: 0 });
+  const reasonOf = async (): Promise<string> => {
+    try {
+      await bind();
+    } catch (error) {
+      assert.ok(error instanceof ProductFeedbackRouteBindingError);
+      return error.reason;
+    }
+    return "ok";
+  };
+
+  // Network error then success: one retry, bound.
+  outcomes.push(() => { throw connectTimeout; }, () => Response.json({ changed: true, subject_version: "v1" }, { status: 201 }));
+  assert.equal(await reasonOf(), "ok");
+  assert.equal(calls, 2);
+
+  // Network error twice: the low-level code reaches the operator log, not "request_failed".
+  resetProductFeedbackRouteBindingCacheForTest();
+  calls = 0;
+  assert.equal(await reasonOf(), "network_UND_ERR_CONNECT_TIMEOUT");
+  assert.equal(calls, 2);
+
+  // 5xx is transient too.
+  resetProductFeedbackRouteBindingCacheForTest();
+  calls = 0;
+  outcomes.push(() => new Response("busy", { status: 503 }), () => new Response("busy", { status: 503 }));
+  assert.equal(await reasonOf(), "hands_status_503");
+  assert.equal(calls, 2);
+
+  // A 4xx is Hands' answer: no retry.
+  resetProductFeedbackRouteBindingCacheForTest();
+  calls = 0;
+  outcomes.push(() => new Response("no", { status: 403 }));
+  assert.equal(await reasonOf(), "hands_status_403");
+  assert.equal(calls, 1);
+
+  // A timeout (AbortSignal) is reported as such.
+  resetProductFeedbackRouteBindingCacheForTest();
+  calls = 0;
+  const timeout = () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); };
+  outcomes.push(timeout, timeout);
+  assert.equal(await reasonOf(), "timeout");
+  assert.equal(calls, 2);
+});
+
+test("the root commitment is checked once per process, and a database failure has its own reason", async () => {
+  await seed();
+  const ok = (async () => Response.json({ changed: true, subject_version: "v1" }, { status: 201 })) as typeof fetch;
+  let dbCalls = 0;
+  const realDb = getDb();
+  const countingExecutor = new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === "insert" || prop === "select") dbCalls += 1;
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  await ensureProductFeedbackRouteBinding({ userId: USER_ID, env: ENV, fetchImpl: ok, executor: countingExecutor });
+  const afterFirst = dbCalls;
+  assert.ok(afterFirst > 0);
+  await ensureProductFeedbackRouteBinding({
+    userId: USER_ID, reporterId: "another-reporter", env: ENV, fetchImpl: ok, executor: countingExecutor,
+  });
+  assert.equal(dbCalls, afterFirst, "a verified commitment is not re-read on later requests");
+
+  resetProductFeedbackRouteBindingCacheForTest();
+  const failingExecutor = new Proxy(realDb, {
+    get(target, prop, receiver) {
+      if (prop === "insert") return () => { throw new Error("connection terminated"); };
+      return Reflect.get(target, prop, receiver);
+    },
+  });
+  await assert.rejects(
+    ensureProductFeedbackRouteBinding({ userId: USER_ID, env: ENV, fetchImpl: ok, executor: failingExecutor }),
+    (error: unknown) => error instanceof ProductFeedbackRouteBindingError && error.reason === "commitment_failed",
+  );
+});

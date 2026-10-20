@@ -35,6 +35,8 @@ export function formatMarketplaceApps(data: AgentApiIntegrationMarketplaceRespon
       `   installed on this Server: ${app.installedOnServer ? "yes" : "no"}`,
       `   allowed scopes: ${app.allowedScopes.length > 0 ? app.allowedScopes.join(", ") : "none declared"}`,
     ];
+    if (app.setupUrl) lines.push("   post-install setup: required");
+    if (app.setupDescription) lines.push(`   setup instructions: ${oneLine(app.setupDescription)}`);
     if (app.description) lines.push(`   description: ${oneLine(app.description)}`);
     if (app.dataAccessSummary) lines.push(`   data access: ${oneLine(app.dataAccessSummary)}`);
     if (app.homepageUrl) lines.push(`   homepage: ${app.homepageUrl}`);

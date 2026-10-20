@@ -40,10 +40,11 @@ test("main panel surfaces keep the canonical PanelHeader adoption contract", () 
     assert.match(source, /<PanelHeader\b/, `${path} should use PanelHeader's canonical padding`);
   }
 
+  // The legacy task head is raft-ui's PanelHeader itself: the shell height, the
+  // 20 / 16 edges, the seam under it and the phone Back overhang all come from
+  // the recipe instead of a copied class string.
   const legacySource = readFileSync(resolve(repoRoot, "src/components/task/LegacyTaskPanel.tsx"), "utf8");
-  assert.match(
-    legacySource,
-    /className="flex h-panel-header items-center gap-3 border-b border-line-hairline bg-layer-panel px-5 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-white"/,
-    "LegacyTaskPanel should keep the legacy px-5 header contract until migrated (now on semantic tokens)",
-  );
+  assert.match(legacySource, /<PanelHeader data-testid="legacy-task-panel-header">/);
+  assert.match(legacySource, /<PanelActions>/);
+  assert.doesNotMatch(legacySource, /md:pr-\[13px\]/, "the head's edges belong to the raft-ui recipe");
 });

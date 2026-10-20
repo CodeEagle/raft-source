@@ -225,6 +225,11 @@ export async function collectFeedbackAgentEventTail(input: {
   const identity = { feedbackReportId: input.feedbackReportId, agentId: input.agentId, requestId: input.requestId, window: input.window };
   if (!input.machineDir) return buildFailedFeedbackAgentEventTail({ ...identity, failure: "corpus_unavailable" });
   const traceDir = path.join(input.machineDir, "traces");
+  const deadline = now() + limits.timeBudgetMs;
+  // Join the slot queue before the first await, so the slot goes to scans in
+  // call order. Queued after the directory listing, a scan called later whose
+  // listing finished first took the slot ahead of it (CI run 38761287677).
+  const slot = acquireScanSlot(deadline, now, input.signal);
   let names: string[];
   try {
     names = (await readdir(traceDir))
@@ -232,16 +237,16 @@ export async function collectFeedbackAgentEventTail(input: {
       .sort()
       .reverse();
   } catch {
+    void slot.then((release) => release?.());
     throwIfAborted(input.signal);
     return buildFailedFeedbackAgentEventTail({ ...identity, failure: "corpus_unreadable" });
   }
   const accumulator = new AgentEventTailAccumulator({ agentId: input.agentId, window: input.window });
-  const deadline = now() + limits.timeBudgetMs;
   let stopReason: FeedbackAgentEventTailScanStopReason | null = null;
   let filesScanned = 0;
   let filesUnreadable = 0;
   let bytesScanned = 0;
-  const release = await acquireScanSlot(deadline, now, input.signal);
+  const release = await slot;
   if (!release) {
     throwIfAborted(input.signal);
     stopReason = "busy";

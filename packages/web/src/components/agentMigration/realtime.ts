@@ -3,7 +3,11 @@ import {
   clearClockTimeout,
   setClockTimeout,
 } from "@botiverse/raft-shared";
-import type { AgentMigrationSourceBuildProgress } from "@botiverse/raft-shared";
+import type {
+  AgentMigrationHostedImportSummary,
+  AgentMigrationSourceBuildProgress,
+  AgentMigrationTargetKind,
+} from "@botiverse/raft-shared";
 import { isActiveMigrationState } from "./state";
 import type { AgentMigrationState } from "./state";
 
@@ -13,7 +17,9 @@ export interface AgentMigrationNotice {
   state: AgentMigrationState;
   revision: number;
   sourceMachineId?: string;
-  targetMachineId?: string;
+  // REST only, like the deadlines below. `hosted` has no target machine.
+  targetKind?: AgentMigrationTargetKind;
+  targetMachineId?: string | null;
   failureReason?: string | null;
   abortReason?: string | null;
   // REST only. `GET /agents/:id/migration` sends these; the realtime payload
@@ -51,6 +57,16 @@ export interface AgentMigrationNotice {
   cancelTargetOutcome?: "cleaned" | "stopped" | "needs_attention" | null;
   createdAt?: string;
   updatedAt?: string;
+  // REST only, and only for a move to the cloud: the review the user confirms.
+  hosted?: AgentMigrationHostedReview | null;
+}
+
+export interface AgentMigrationHostedReview {
+  provider?: string;
+  hostedModel?: string | null;
+  reviewReadyAt: string | null;
+  reviewConfirmedAt: string | null;
+  importSummary: AgentMigrationHostedImportSummary | null;
 }
 
 export interface AgentMigrationStatusResponse {

@@ -21,7 +21,9 @@ test("PanelResizeHandle straddles the named edge and appears from the named brea
   assert.ok(leftMd.classList.contains("hidden") && leftMd.classList.contains("md:block") && !leftMd.classList.contains("sm:block"));
   for (const handle of [rightSm, leftMd]) {
     assert.ok(handle.classList.contains("cursor-col-resize"));
-    assert.equal(handle.querySelectorAll("span").length, 1, "one divider hairline");
+    // The panel's border is the divider; the handle only adds the grab strip
+    // and cursor, as the signed-in app's resizers do (#wg-rbac task #126).
+    assert.equal(handle.childElementCount, 0, "the handle draws nothing of its own");
   }
 });
 

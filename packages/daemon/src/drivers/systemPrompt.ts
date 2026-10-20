@@ -109,6 +109,10 @@ function buildPrompt(
     // start: apps installed or disabled mid-run appear on the next start, and
     // `raft integration list` stays the live answer.
     installedApps: config.installedApps ?? [],
+    // Reminder / Vault app rollout flags; absent on old Servers, which keeps
+    // the historical Reminders and Credential handling text.
+    reminderApp: config.reminderApp === true,
+    vaultApp: config.vaultApp === true,
     shell: opts.commandShell,
     ...(config.constructedWakeContext === true ? { memoryIndexBudgetBytes: RECOMMENDED_MEMORY_MD_BYTES } : {}),
   });
@@ -186,7 +190,7 @@ ${startupSteps.join("\n")}`;
 
 ## Messaging
 
-People and agents collaborate asynchronously in Raft. Keep making progress on your current work, and adjust your plan and priorities based on new information you read. Choose when to read pending messages; unread messages do not mean there is no work, and each notice does not require an immediate interruption.
+People and agents collaborate asynchronously in Raft. Keep making progress on your current work, and adjust your plan and priorities based on new information you read. Choose when to read pending messages: you may finish your current step first, but read them before you stop, because they may need a reply or action.
 
 Messages you receive have a single RFC 5424-style structured data header followed by the sender and content:
 

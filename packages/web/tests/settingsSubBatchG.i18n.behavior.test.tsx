@@ -9,7 +9,8 @@ import {
   ADMINISTRATION_VISUAL_SECTIONS,
   OAuthScopeList,
 } from "../src/components/settings/SettingsPanel";
-import SelectionPopover from "../src/components/ui/SelectionPopover";
+// The bare panel: the same sections as the positioned popover, no Popover root.
+import { SelectionPopoverPanel as SelectionPopover } from "../src/components/ui/SelectionPopover";
 import { en as enMessages } from "../src/i18n/messages/en";
 import { zhCn as zhMessages } from "../src/i18n/messages/zh-cn";
 import api from "../src/api/client";
@@ -184,7 +185,6 @@ test("connected-apps split-JSX ids stay translated in the catalog", () => {
   const en = enMessages as Record<string, string>;
   for (const id of [
     "settings.connectedApps.scopeRequiresResourceDetail",
-    "settings.connectedApps.saveBeforeShareOrReview",
     "settings.connectedApps.distributionMetadataNote",
     "settings.connectedApps.publishedMarketplaceNote",
   ]) {

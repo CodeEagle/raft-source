@@ -32,7 +32,7 @@ afterEach(() => {
 });
 
 test("catalog pins legacy-task MessageIds with Chinese and ICU", () => {
-  assert.equal(en["task.legacyPanel.taskNumberLegacy"], "Task #{taskNumber} · LEGACY");
+  assert.equal(en["task.legacyPanel.taskNumberLegacy"], "Task #{taskNumber} · Legacy");
   assert.equal(en["task.legacyPanel.unknownChannel"], "unknown");
   assert.equal(en["task.legacyPanel.noDescription"], "No description");
   assert.equal(en["task.legacyPanel.notDone"], "Not done");
@@ -94,7 +94,7 @@ test("LegacyTaskPanel renders missing legacy metadata through the zh-cn catalog"
   );
 
   assert.ok(screen.getByRole("heading", { name: "#未知" }));
-  assert.ok(screen.getByText("任务 #12 · LEGACY"));
+  assert.ok(screen.getByText("任务 #12 · Legacy"));
   assert.ok(screen.getByText("暂无描述"));
   assert.ok(screen.getByText("未分配"));
   assert.ok(screen.getByText("未完成"));

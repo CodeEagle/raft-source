@@ -1,11 +1,11 @@
 /**
  * Task #708 (Artea): an @mention must sit on the same text baseline as the
- * message text around it, in every theme.
+ * message text around it, in light and in dark mode.
  *
  * raft-ui 0.5.16 (#319) already aligns message reference chips to the body
  * baseline. A slock-local `align-middle` override on MentionLink (#8532,
  * written against 0.5.15's `align-bottom` and merged after the 0.5.16 bump)
- * sank every @mention 1.3px below the text (Brutal: 1.55px). This pins the
+ * sank every @mention 1.3px below the text. This pins the
  * visible fact in a real browser, where layout exists: the bottom of the
  * mention's own text box versus the bottom of the neighbouring CJK text box,
  * same font size, so equal bottoms mean equal baselines.
@@ -15,7 +15,7 @@ import type { Page } from "@playwright/test";
 import { assertApiOk } from "../fixtures/apiResponse";
 import { test } from "../fixtures/scenario";
 
-const THEMES = ["brutal", "elegant-light", "elegant-dark"] as const;
+const MODES = ["light", "dark"] as const;
 const BODY_MARKER = "用简洁明了的语言陈述一遍";
 /** Sub-pixel tolerance: 0.5 CSS px is below what anti-aliasing can show. */
 const MAX_BASELINE_OFFSET_PX = 0.5;
@@ -50,8 +50,8 @@ async function mentionBaselineOffsets(page: Page) {
   }, BODY_MARKER);
 }
 
-for (const theme of THEMES) {
-  test(`@mentions sit on the message text baseline (${theme})`, async ({ page, request, scenario }) => {
+for (const mode of MODES) {
+  test(`@mentions sit on the message text baseline (${mode})`, async ({ page, request, scenario }) => {
     const { seed, login, peer } = scenario;
     const sent = await request.post(`${seed.urls.api}/api/v2/messages`, {
       headers: { Authorization: `Bearer ${login.accessToken}`, "X-Server-Id": seed.server.id },
@@ -59,12 +59,12 @@ for (const theme of THEMES) {
     });
     await assertApiOk(sent, "POST /api/v2/messages (mentions)");
 
-    await page.addInitScript((preset) => {
-      localStorage.removeItem("slock-theme-preferences-v2");
-      localStorage.setItem("slock-theme-preset", preset);
-    }, theme);
+    await page.addInitScript((nextMode) => {
+      localStorage.setItem("slock-theme-preferences-v2", JSON.stringify({ mode: nextMode }));
+    }, mode);
     await page.goto(`/s/${seed.server.slug}/channel/${seed.channel.id}`);
     await expect(page.getByText(BODY_MARKER).last()).toBeVisible();
+    await expect(page.locator("html")).toHaveClass(new RegExp(`(^|\\s)${mode}(\\s|$)`));
 
     const measured = await mentionBaselineOffsets(page);
     expect(measured, "the message body must render").not.toBeNull();

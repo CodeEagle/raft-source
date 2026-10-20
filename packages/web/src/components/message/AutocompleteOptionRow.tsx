@@ -1,5 +1,5 @@
 import { useCallback } from "react";
-import { ComposerSuggestionOption } from "raft-ui";
+import { ComposerSuggestionOption } from "@botiverse/raft-ui";
 
 /** Autocomplete suggestion row — owns its per-item select closure so the
     parent map passes only stable references (task #709 react-perf). */

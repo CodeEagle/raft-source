@@ -16,13 +16,14 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  FormSection,
   Progress,
   ProgressHeader,
   ProgressIndicator,
   ProgressLabel,
   ProgressTrack,
   ProgressValue, Spinner
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 
 type JointConversionSectionProps = {
   busy: boolean;
@@ -47,7 +48,6 @@ type JointConversionSectionProps = {
   onCancel?: () => void;
   onOpenChannel?: () => void;
   cancelBusy?: boolean;
-  headingClassName?: string;
 };
 
 /**
@@ -75,7 +75,6 @@ export default function JointConversionSection({
   onCancel,
   onOpenChannel,
   cancelBusy = false,
-  headingClassName = "text-base font-bold text-foreground-strong theme-brutal:text-black",
 }: JointConversionSectionProps) {
   const { formatMessage } = useIntl();
   const descriptionId = "channel-settings-joint-conversion-description";
@@ -97,38 +96,31 @@ export default function JointConversionSection({
   );
 
   return (
-    <section
-      className="mb-5 space-y-4 border-b border-line-muted pb-5 theme-brutal:border-black/10"
+    <FormSection
       data-testid="channel-settings-joint-conversion-section"
+      title={formatMessage({ id: "channel.edit.convertSectionTitle" })}
+      description={<span id={descriptionId}>{formatMessage({ id: "channel.edit.convertSectionDescription" })}</span>}
     >
-      <div className="space-y-2">
-        <div className="min-w-0">
-          <h3 className={headingClassName} data-testid="channel-settings-joint-conversion-title">
-            {formatMessage({ id: "channel.edit.convertSectionTitle" })}
-          </h3>
-          <p id={descriptionId} className="mt-1 text-xs font-normal text-foreground-muted theme-brutal:text-black/55">
-            {formatMessage({ id: "channel.edit.convertSectionDescription" })}
-          </p>
+      {!conversionComplete && !conversionFailed && !conversionJob && !disabled && (
+        <div className="flex justify-end" data-testid="channel-settings-joint-conversion-cta-row">
+          {/* Not the sheet's reason to exist (Save is): an ink-bordered
+              button, so the screen keeps one pink action. */}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={onStart}
+            disabled={disabled || busy}
+            loading={busy}
+            loadingLabel={formatMessage({ id: "channel.edit.converting" })}
+            aria-describedby={[descriptionId, unavailableId].filter(Boolean).join(" ")}
+            data-testid="channel-settings-joint-conversion-cta"
+          >
+            <GitBranch aria-hidden="true" />
+            {formatMessage({ id: "channel.edit.convertAction" })}
+          </Button>
         </div>
-        {!conversionComplete && !conversionFailed && !conversionJob && !disabled && (
-          <div className="flex justify-end" data-testid="channel-settings-joint-conversion-cta-row">
-            <Button
-              type="button"
-              size="sm"
-              variant="accent"
-              onClick={onStart}
-              disabled={disabled || busy}
-              loading={busy}
-              loadingLabel={formatMessage({ id: "channel.edit.converting" })}
-              aria-describedby={[descriptionId, unavailableId].filter(Boolean).join(" ")}
-              data-testid="channel-settings-joint-conversion-cta"
-            >
-              <GitBranch aria-hidden="true" />
-              {formatMessage({ id: "channel.edit.convertAction" })}
-            </Button>
-          </div>
-        )}
-      </div>
+      )}
       {connectionWarning && (
         <Banner
           status="warning"
@@ -173,7 +165,7 @@ export default function JointConversionSection({
               return (
                 <li
                   key={stage.key}
-                  className="flex items-center gap-2 text-sm font-normal"
+                  className="flex items-center gap-2 text-callout"
                   aria-current={current ? "step" : undefined}
                   data-stage={stage.key}
                   data-stage-state={completed ? "complete" : current ? "current" : "pending"}
@@ -195,7 +187,7 @@ export default function JointConversionSection({
                   </Badge>
                   <span>{formatMessage({ id: stage.messageId })}</span>
                   {current && (
-                    <span className="text-xs font-normal text-foreground-muted theme-brutal:text-black/55">
+                    <span className="text-caption text-foreground-hint">
                       {formatMessage({ id: "channel.edit.convertInProgress" })}
                     </span>
                   )}
@@ -207,7 +199,7 @@ export default function JointConversionSection({
             <Banner
               status="warning"
               size="sm"
-              className="min-w-0 items-start font-normal"
+              className="min-w-0 items-start"
               data-testid="channel-settings-joint-conversion-error"
             >
               <CircleAlert aria-hidden="true" className="shrink-0" />
@@ -233,7 +225,7 @@ export default function JointConversionSection({
               <Button
                 type="button"
                 size="sm"
-                variant="accent"
+                variant="outline"
                 onClick={onDismissProgress}
                 data-testid="channel-settings-joint-conversion-done"
               >
@@ -245,7 +237,7 @@ export default function JointConversionSection({
             <div className="flex justify-end">
               <div className="flex flex-wrap justify-end gap-2">
                 {canCancel && onCancel && (
-                  <Button type="button" size="sm" variant="outline" onClick={onCancel} disabled={cancelBusy} loading={cancelBusy} loadingLabel={formatMessage({ id: "channel.edit.cancelingConversion" })} data-testid="channel-settings-joint-conversion-cancel">
+                  <Button type="button" size="sm" variant="ghost" onClick={onCancel} disabled={cancelBusy} loading={cancelBusy} loadingLabel={formatMessage({ id: "channel.edit.cancelingConversion" })} data-testid="channel-settings-joint-conversion-cancel">
                     {formatMessage({ id: "channel.edit.cancelConversion" })}
                   </Button>
                 )}
@@ -270,14 +262,14 @@ export default function JointConversionSection({
       )}
       {unavailableMessage && (
         <div>
-          <p id={unavailableId} className="text-xs font-normal text-foreground-muted" data-testid="channel-settings-joint-conversion-unavailable">
+          <p id={unavailableId} className="text-caption text-foreground-hint" data-testid="channel-settings-joint-conversion-unavailable">
             {unavailableMessage}
           </p>
         </div>
       )}
       {displayError && !showProgress && (
         <div>
-          <Banner status="warning" size="sm" className="min-w-0 items-start font-normal" data-testid="channel-settings-joint-conversion-error">
+          <Banner status="warning" size="sm" className="min-w-0 items-start" data-testid="channel-settings-joint-conversion-error">
             <CircleAlert aria-hidden="true" className="shrink-0" />
             {isUploadsInFlightError(error, conversionJob?.progress) && (
               <BannerTitle className="min-w-0 whitespace-normal break-words [overflow-wrap:anywhere]">
@@ -297,7 +289,7 @@ export default function JointConversionSection({
           </Banner>
         </div>
       )}
-    </section>
+    </FormSection>
   );
 }
 
@@ -331,26 +323,26 @@ export function JointConversionConfirmDialog({
           <DialogClose
             disabled={busy}
             render={
-              <Button variant="outline" size="icon-md" aria-label={formatMessage({ id: "common.close" })}>
-                <X className="size-5" aria-hidden="true" />
+              <Button variant="ghost" size="icon-sm" aria-label={formatMessage({ id: "common.close" })}>
+                <X className="size-[18px]" aria-hidden="true" />
               </Button>
             }
           />
         </DialogHeader>
-        <DialogBody className="font-normal" data-testid="channel-settings-joint-conversion-dialog-body">
+        <DialogBody data-testid="channel-settings-joint-conversion-dialog-body">
           <JointConversionConfirmContent channelName={channelName} />
-          {error && <Banner status="warning" size="sm" className="mt-4 font-normal">{error}</Banner>}
+          {error && <Banner status="warning" size="sm" className="mt-4">{error}</Banner>}
         </DialogBody>
         <DialogFooter>
           <DialogClose
             disabled={busy}
-            variant="outline"
-            size="sm"
-            render={<Button variant="outline" size="sm" />}
+            variant="ghost"
+            size="lg"
+            render={<Button variant="ghost" size="lg" />}
           >
             {formatMessage({ id: "common.confirm.cancel" })}
           </DialogClose>
-          <Button type="button" variant="accent" size="sm" loading={busy}
+          <Button type="button" variant="accent" size="lg" loading={busy}
             loadingLabel={formatMessage({ id: "channel.edit.converting" })}
             onClick={handleConfirm} data-testid="channel-settings-joint-conversion-confirm">
             {formatMessage({ id: "channel.edit.convertAction" })}
@@ -369,7 +361,7 @@ export function JointConversionConfirmContent({
   const { formatMessage } = useIntl();
 
   return (
-    <div className="space-y-3 font-normal" data-testid="channel-settings-joint-conversion-confirm-content">
+    <div className="space-y-3" data-testid="channel-settings-joint-conversion-confirm-content">
       <p>{formatMessage({ id: "channel.edit.convertConfirmIntro" }, { name: channelName })}</p>
       <ul className="list-disc space-y-1 pl-5">
         <li>{formatMessage({ id: "channel.edit.convertConfirmHistory" })}</li>

@@ -2,6 +2,9 @@ import type { TraceAttributes } from "@botiverse/raft-shared";
 import {
   getRisingWaveConnectionTimeoutMillis,
   getRisingWavePoolState,
+  isRisingWaveInternalResetsError,
+  isRisingWaveUnreachableError,
+  RisingWaveOverloadedError,
   RisingWaveReadError,
   type RisingWavePoolState,
 } from "../db/risingwave";
@@ -13,6 +16,7 @@ export type RisingWaveInboxFallbackReason = "rw_error" | "breaker_open";
 export type RisingWaveFailureStage = "acquire" | "connect" | "query" | "unknown";
 export type RisingWaveErrorKind =
   | "rw_acquire_timeout"
+  | "rw_internal_resets"
   | "rw_connect_error"
   | "rw_query_error"
   | "rw_unknown_error";
@@ -36,6 +40,15 @@ export interface RisingWaveInboxFailureTraceInput {
   breakerState?: RisingWaveBreakerState;
   fallbackReason?: RisingWaveInboxFallbackReason;
   terminalStatus?: 500;
+}
+
+/** The overload reason anywhere in the cause chain; undefined for any other failure. */
+function overloadReasonOf(error: unknown): string | undefined {
+  for (let current = error, depth = 0; current && depth < 5; depth += 1) {
+    if (current instanceof RisingWaveOverloadedError) return current.reason;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return undefined;
 }
 
 export function risingWaveInboxFailureAttrs(input: RisingWaveInboxFailureTraceInput): TraceAttributes {
@@ -62,6 +75,9 @@ export function risingWaveInboxFailureAttrs(input: RisingWaveInboxFailureTraceIn
     query_name: input.queryName,
     error_class: errorClass(error),
     error_kind: classification.errorKind,
+    // Same field as the stale served/missed events: rw_connect_error also
+    // covers other connection failures, so a restart window is counted by this.
+    overload_reason: overloadReasonOf(input.error),
     error_subkind: classification.failureStage,
     rw_failure_stage: classification.failureStage,
     sqlstate: classification.sqlstate,
@@ -97,6 +113,16 @@ function classifyRisingWaveError(error: unknown): {
       failureStage: "acquire",
       driverCode: "PG_POOL_CONNECT_TIMEOUT",
     };
+  }
+  // Classified as rw_overloaded for the response, but kept apart here so the
+  // trace says which overload it was.
+  if (isRisingWaveInternalResetsError(error)) {
+    return { errorKind: "rw_internal_resets", failureStage: "query", ...(code && isSqlState(code) ? { sqlstate: code } : {}) };
+  }
+  // RisingWave not there (restart window): served as an overload, traced as
+  // the connect error it is.
+  if (isRisingWaveUnreachableError(error)) {
+    return { errorKind: "rw_connect_error", failureStage: "connect", driverCode: code === "ECONNREFUSED" ? "ECONNREFUSED" : "RW_DRIVER_UNKNOWN" };
   }
   if (code && isSqlState(code)) {
     if (isConnectionSqlState(code)) {

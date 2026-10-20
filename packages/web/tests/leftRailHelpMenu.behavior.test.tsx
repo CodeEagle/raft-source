@@ -93,10 +93,13 @@ test("Help sits above Settings and exposes Raft Documentation, Feedback, and Joi
   assert.equal(rail.contains(help), true);
   for (const button of [notification, help, settings]) {
     assert.match(button.className, /\bsize-10\b/, `${button.getAttribute("aria-label")} keeps a 40px target`);
+    // DS rail rhythm: 40px items 6px apart, set once by the rail's footer
+    // gap. A fixed 44px wrapper per item made the footer's spacing differ
+    // from the nav's.
     assert.equal(
       button.parentElement?.classList.contains("h-11"),
-      true,
-      `${button.getAttribute("aria-label")} keeps the 44px center rhythm`,
+      false,
+      `${button.getAttribute("aria-label")} takes the rail's own 6px rhythm`,
     );
   }
   assert.ok(

@@ -11,6 +11,7 @@ import {
   recordAgentMigrationAutoStartFailure,
   recordAgentMigrationSourceArchiveAttemptFailed,
   recordAgentMigrationSourceWorkspaceArchivedById,
+  requireComputerTarget,
   sweepElapsedAgentMigrationDeadline,
 } from "./agentMigrationService";
 import { emitAgentMigrationUpdated } from "./agentMigrationRealtime";
@@ -55,12 +56,15 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
     return true;
   }
 
-  let current = claim.migration;
+  // Auto-start after arrival starts the agent on its target Computer; a hosted
+  // target starts through the provider instead and never reaches this claim.
+  const migration = requireComputerTarget(claim.migration);
+  let current: typeof claim.migration = migration;
   if (!input.orchestrator || typeof input.orchestrator.startAgent !== "function") {
     current = await recordAgentMigrationAutoStartFailure({
       migrationId: claim.migration.id,
       agentId: claim.migration.agentId,
-      targetMachineId: claim.migration.targetMachineId,
+      targetMachineId: migration.targetMachineId,
       stage: "orchestrator",
       code: "orchestrator_unavailable",
       remediationLeaseId: claim.leaseId,
@@ -76,7 +80,7 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
       current = await recordAgentMigrationAutoStartFailure({
         migrationId: claim.migration.id,
         agentId: claim.migration.agentId,
-        targetMachineId: claim.migration.targetMachineId,
+        targetMachineId: migration.targetMachineId,
         stage: "start_agent",
         code: "start_not_dispatched",
         remediationLeaseId: claim.leaseId,
@@ -88,7 +92,7 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
     current = await completeAgentMigrationAutoStart({
       migrationId: claim.migration.id,
       agentId: claim.migration.agentId,
-      targetMachineId: claim.migration.targetMachineId,
+      targetMachineId: migration.targetMachineId,
       remediationLeaseId: claim.leaseId,
       now: input.now,
     });
@@ -99,7 +103,7 @@ async function remediateAutoStart(input: Required<Pick<AgentMigrationRemediation
     current = await recordAgentMigrationAutoStartFailure({
       migrationId: claim.migration.id,
       agentId: claim.migration.agentId,
-      targetMachineId: claim.migration.targetMachineId,
+      targetMachineId: migration.targetMachineId,
       stage: "start_agent",
       code: "start_threw",
       remediationLeaseId: claim.leaseId,

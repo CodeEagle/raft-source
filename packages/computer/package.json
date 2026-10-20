@@ -37,6 +37,7 @@
     "manifest:native": "node scripts/native/produce-manifest.mjs",
     "test": "vitest run",
     "test:manifest": "node scripts/check-test-manifest.mjs",
+    "test:update-manifest": "node scripts/check-test-manifest.mjs --update-manifest",
     "typecheck": "tsc --noEmit",
     "lint:boundaries": "node scripts/check-boundaries.mjs",
     "lint:naming": "node scripts/check-naming.mjs"
@@ -46,7 +47,7 @@
     "@botiverse/raft-daemon": "workspace:*",
     "commander": "^12.1.0",
     "proper-lockfile": "^4.1.2",
-    "undici": "^7.30.0"
+    "undici": "8.10.2"
   },
   "devDependencies": {
     "@botiverse/raft-shared": "workspace:*",

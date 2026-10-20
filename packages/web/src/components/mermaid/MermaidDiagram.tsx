@@ -3,7 +3,7 @@ import {
   LightboxClose,
   LightboxContent,
   LightboxStage, Spinner
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { useOptionalAppTheme } from "../../hooks/useAppTheme";
 import Banner from "../ui/Banner";
 import { ImageOff, X } from "lucide-react";

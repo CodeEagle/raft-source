@@ -30,7 +30,7 @@ import { useServerStore } from "../../store/serverStore";
 import { useChannelStore } from "../../store/channelStore";
 import { useChannelMembers } from "../../hooks/useChannelMembers";
 import { isLocalProjectionMember } from "../../utils/channelLocalMembership";
-import { Button } from "raft-ui";
+import { Button, Card, IconTile } from "@botiverse/raft-ui";
 import { CandidateRemoveButton } from "./CandidateRemoveButton";
 
 interface Props {
@@ -245,32 +245,32 @@ export default function AddMembersDialog({
 
   return (
     <DialogCard title={formatMessage({ id: "channel.addMembers.title" })} onClose={onClose}>
-        <div className="mb-3 flex items-center gap-2 border border-line-muted bg-layer-inset p-2 text-sm text-foreground-strong theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-brutal-cream theme-brutal:text-black">
-          {channel?.type === "private" ? (
-            <Lock size={14} className="shrink-0" />
-          ) : (
-            <Hash size={14} className="shrink-0" />
-          )}
-          <span className="font-bold">{channel?.name ?? formatMessage({ id: "channel.addMembers.unknownChannel" })}</span>
-          <span className="text-foreground-muted theme-brutal:text-black/55">{formatMessage({ id: "channel.addMembers.targetChannelSuffix" })}</span>
+        {/* The target channel is a place: the neutral channel tile (DS
+            ChannelIcon, never coloured) and its name. */}
+        <div className="mb-3 flex min-w-0 items-center gap-2 text-callout text-foreground">
+          <IconTile size="sm">
+            {channel?.type === "private" ? <Lock /> : <Hash />}
+          </IconTile>
+          <span className="truncate font-bold">{channel?.name ?? formatMessage({ id: "channel.addMembers.unknownChannel" })}</span>
+          <span className="shrink-0 text-foreground-muted">{formatMessage({ id: "channel.addMembers.targetChannelSuffix" })}</span>
         </div>
 
         {draftHint ? (
-          <div className="mb-3 border-l-2 border-line-muted pl-2 text-xs italic text-foreground-muted theme-brutal:border-black/20 theme-brutal:text-black/55">
+          <div className="mb-3 border-l-2 border-line-seam pl-2.5 text-callout text-foreground-muted">
             {draftHint}
           </div>
         ) : null}
 
         {error ? (
-          <Banner intent="warning" className="mb-3 text-xs font-bold">
+          <Banner intent="warning" className="mb-3">
             {error}
           </Banner>
         ) : null}
 
         {nothingToAdd ? (
-            <div className="mb-4 border border-line-muted bg-layer-panel p-3 text-sm text-foreground-muted theme-brutal:border-2 theme-brutal:border-black/15 theme-brutal:bg-white theme-brutal:text-black/55">
+          <Card className="mb-4 p-3 text-callout text-foreground-hint">
             {formatMessage({ id: "channel.addMembers.nothingToAdd" })}
-          </div>
+          </Card>
         ) : (
           <ChannelMemberListShell className="mb-4" data-testid="add-members-action-list">
             {candidateAgents.length > 0 ? (
@@ -333,22 +333,20 @@ export default function AddMembersDialog({
           </ChannelMemberListShell>
         )}
 
-        <div className="flex justify-end gap-2">
-          <Button size="sm"
-            variant="outline"
+        <div className="flex flex-wrap justify-end gap-2">
+          <Button size="lg"
+            variant="ghost"
             type="button"
             onClick={onClose}
             disabled={submitting}
-            className="px-4 py-2 text-sm text-foreground-strong disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {formatMessage({ id: "common.confirm.cancel" })}
           </Button>
-          <Button size="sm"
+          <Button size="lg"
             variant="accent"
             type="button"
             onClick={handleSubmit}
             disabled={!canSubmit}
-            className="px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting
               ? formatMessage({ id: "channel.addMembers.adding" })

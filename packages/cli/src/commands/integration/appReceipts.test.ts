@@ -176,3 +176,12 @@ test("remaining direct app receipts also drop undeclared response fields", () =>
     metadata: { kind: "action-card" },
   });
 });
+
+test("setup receipts retain progress but discard nested unexpected credentials", () => {
+  const receipt = projectAppStatusReceipt({ app: { ...app, setup: {
+    status: "pending", url: "https://demo.example/setup", description: "Choose a repository", revision: 1, completedAt: null,
+    client_secret: "setup_secret_must_not_render",
+  } } } as never);
+  assert.equal(receipt.app.setup?.status, "pending");
+  assert.doesNotMatch(JSON.stringify(receipt), /must_not_render/);
+});

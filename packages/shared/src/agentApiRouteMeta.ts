@@ -66,6 +66,8 @@ const managedWrite: AgentApiRouteMeta = { sideEffect: "write", idempotency: "non
 const managedNaturalDestructive: AgentApiRouteMeta = { sideEffect: "write", idempotency: "natural", destructive: true, audience: "managed" };
 
 export const AGENT_API_ROUTE_META = {
+  raftbenchContext: { ...read, audience: "external" },
+  raftbenchSubmit: { ...naturalWrite, audience: "external" },
   feedbackLocatorIngest: naturalWrite,
   feedbackLocatorList: read,
   // Default `ack=immediate` consumes the returned rows before the response;

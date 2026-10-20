@@ -1,3 +1,5 @@
+import { RAFT_SERVER_CAPABILITIES_HEADER } from "@botiverse/raft-shared";
+import { serverMachineContextCapabilities } from "../runtimeOutcomeOutboxIngest";
 import { WebSocketServer, type WebSocket } from "ws";
 import type http from "node:http";
 import { URL } from "node:url";
@@ -19,6 +21,7 @@ import type {
 } from "../services/agentOrchestrator";
 import { newMachineConnectionEpochId, sendAuthenticatedMachineContext } from "../services/machineContext";
 import { errorClassOf, recordTraceEvent, runWithTraceSpan } from "../tracing/semanticTrace";
+import { argon2VerifyTraceAttrs, newArgon2VerifyStats, type Argon2VerifyStats } from "../services/argon2VerifyStats";
 import type { MachineToServerMessage } from "@botiverse/raft-shared";
 import {
   buildMachineConnectTraceContext,
@@ -73,7 +76,7 @@ function extractBearerToken(header: string | string[] | undefined): string | nul
  * key iff the machine exists, is not migrated, and its server is live. The
  * ONLY addition is the reason/stage, for tracing + Slock-Reason.
  */
-async function resolveUpgradeAuth(apiKey: string | null): Promise<UpgradeAuthResult> {
+async function resolveUpgradeAuth(apiKey: string | null, argon2Stats: Argon2VerifyStats): Promise<UpgradeAuthResult> {
   if (!apiKey) {
     return { outcome: "rejected", principalKind: "unknown", reason: "missing_key", stage: "format" };
   }
@@ -88,7 +91,7 @@ async function resolveUpgradeAuth(apiKey: string | null): Promise<UpgradeAuthRes
   }
 
   if (isComputer) {
-    const lookup = await findComputerByApiKeyWithReason(apiKey);
+    const lookup = await findComputerByApiKeyWithReason(apiKey, argon2Stats);
     if (!lookup.ok) {
       // The lookup owns the machine-link decision; keep the historical stage
       // for the unlinked reason so the trace contract is unchanged.
@@ -107,7 +110,7 @@ async function resolveUpgradeAuth(apiKey: string | null): Promise<UpgradeAuthRes
     return { outcome: "accepted", principalKind, machine, computerId: lookup.computer.computerId };
   }
 
-  const machine = await findMachineByApiKey(apiKey);
+  const machine = await findMachineByApiKey(apiKey, argon2Stats);
   if (!machine) {
     return { outcome: "rejected", principalKind, reason: "machine_key_invalid", stage: "machine_lookup" };
   }
@@ -129,12 +132,25 @@ async function resolveUpgradeAuth(apiKey: string | null): Promise<UpgradeAuthRes
  * remains accepted for older daemon processes during rollout.
  * Accepts both sk_daemon_ and sk_machine_ API key prefixes.
  */
+/** task #1268: `Raft-Server-Capabilities: <space-separated>` for the WebSocket 101, or null when the server advertises none. */
+export function machineUpgradeCapabilitiesHeader(capabilities: readonly string[] = serverMachineContextCapabilities()): string | null {
+  const list = capabilities.filter((capability) => typeof capability === "string" && capability.trim()).join(" ");
+  return list ? `${RAFT_SERVER_CAPABILITIES_HEADER}: ${list}` : null;
+}
+
 export function setupMachineWebSocket(
   server: http.Server,
   orchestrator: AgentOrchestrator,
   tracer: Tracer | null = null,
 ) {
   const wss = new WebSocketServer({ noServer: true });
+  // task #1268: the daemon builds its first `ready` before it can read the
+  // `machine:context` frame, so the 101 response carries the same capability
+  // list as a pre-read (`machine:context` stays authoritative).
+  wss.on("headers", (headers) => {
+    const header = machineUpgradeCapabilitiesHeader();
+    if (header) headers.push(header);
+  });
 
   // Every machine WS lifecycle step (connection setup, each message, and
   // disconnect) runs in its own root span, so orchestrator spans nest under
@@ -190,8 +206,10 @@ export function setupMachineWebSocket(
       },
     });
 
+    // Wall time in argon2 (incl. the wait for a libuv pool thread), on every outcome.
+    const argon2Stats = newArgon2VerifyStats();
     try {
-      const result = await resolveUpgradeAuth(apiKey);
+      const result = await resolveUpgradeAuth(apiKey, argon2Stats);
 
       if (result.outcome === "rejected") {
         span.addEvent("auth.rejected", {
@@ -213,6 +231,7 @@ export function setupMachineWebSocket(
             principal_kind: result.principalKind,
             auth_stage: result.stage,
             ...traceAttrs,
+            ...argon2VerifyTraceAttrs(argon2Stats),
           },
         });
         return;
@@ -233,6 +252,7 @@ export function setupMachineWebSocket(
           machine_id: result.machine.id,
           server_id: result.machine.serverId,
           ...traceAttrs,
+          ...argon2VerifyTraceAttrs(argon2Stats),
         },
       });
 
@@ -250,7 +270,9 @@ export function setupMachineWebSocket(
       });
       // Closed-set reason/stage on the root so an exploded auth path is
       // queryable/alertable the same way every other outcome is.
-      span.end("error", { attrs: { outcome: "error", reason: "exception", auth_stage: "exception", ...traceAttrs } });
+      span.end("error", {
+        attrs: { outcome: "error", reason: "exception", auth_stage: "exception", ...traceAttrs, ...argon2VerifyTraceAttrs(argon2Stats) },
+      });
       try {
         socket.write("HTTP/1.1 500 Internal Server Error\r\n\r\n");
         socket.destroy();

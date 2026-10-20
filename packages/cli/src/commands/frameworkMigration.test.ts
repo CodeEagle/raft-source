@@ -167,7 +167,7 @@ test("missing required options fail as INVALID_ARG before auth bootstrap", async
   await assertInvalidBeforeBootstrap(
     "channel members",
     (ctx) => channelMembersCommand.handler(ctx, ""),
-    "target is required",
+    "A target is required: a channel, DM, or thread.",
   );
   await assertInvalidBeforeBootstrap(
     "reminder cancel",

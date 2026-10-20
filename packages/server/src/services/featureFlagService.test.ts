@@ -33,7 +33,6 @@ import {
   ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
   ATTACHMENT_DIRECT_UPLOAD_FEATURE_FLAG_KEY,
   ATTACHMENT_ORIGINAL_STORAGE_V2_FEATURE_FLAG_KEY,
-  CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY,
   GROK_RUNTIME_FEATURE_FLAG_KEY,
   SERVER_LABS_UI_FEATURE_FLAG_KEY,
   bumpFeatureFlagConfigVersion,
@@ -349,18 +348,6 @@ test("feature flags: agent migration is dark for botiverse after follow-up deny"
   assert.doesNotMatch(sql, /'community-cn'/);
 });
 
-test("feature flags: chat grid layout seed allowlists botiverse only", () => {
-  const sql = readFileSync(
-    resolve(import.meta.dirname, "../../drizzle/0151_chat_grid_layout_flag.sql"),
-    "utf8",
-  );
-
-  assert.match(sql, new RegExp(`'${CHAT_GRID_LAYOUT_FEATURE_FLAG_KEY}'`));
-  assert.match(sql, /"slug" IN \('botiverse'\)/);
-  assert.doesNotMatch(sql, /'community'/);
-  assert.doesNotMatch(sql, /'community-cn'/);
-});
-
 test("feature flags: channel-to-joint conversion is default-off without slug allowlists", () => {
   const migration = readFileSync(
     resolve(import.meta.dirname, "../../drizzle/0266_channel_joint_conversion.sql"),
@@ -385,6 +372,36 @@ test("feature flags: channel-to-joint default-off assertion detects a default_en
   assert.throws(
     () => assert.equal(parseChannelJointMigration(mutated).default_enabled, "false"),
   );
+});
+
+test("feature flags: thread-unread badge is default-off without allow rules", () => {
+  const migration = readFileSync(
+    resolve(import.meta.dirname, "../../drizzle/0353_thread_unread_badge_flag.sql"),
+    "utf8",
+  );
+
+  const mapped = parseChannelJointMigration(migration);
+  assert.equal(mapped.key, "'thread_unread_badge_v0'");
+  assert.equal(mapped.enabled, "true");
+  assert.equal(mapped.kill_switch, "false");
+  assert.equal(mapped.default_enabled, "false", "thread-unread badge must be disabled by default");
+  assert.equal(mapped.randomization_unit, "'server'");
+  assert.doesNotMatch(migration, /INSERT INTO "feature_flag_rules"/);
+});
+
+test("feature flags: activity conversation list is default-off without allow rules", () => {
+  const migration = readFileSync(
+    resolve(import.meta.dirname, "../../drizzle/0362_activity_conversation_list_flag.sql"),
+    "utf8",
+  );
+
+  const mapped = parseChannelJointMigration(migration);
+  assert.equal(mapped.key, "'activity_conversation_list_v0'");
+  assert.equal(mapped.enabled, "true");
+  assert.equal(mapped.kill_switch, "false");
+  assert.equal(mapped.default_enabled, "false", "activity conversation list must be disabled by default");
+  assert.equal(mapped.randomization_unit, "'server'");
+  assert.doesNotMatch(migration, /INSERT INTO "feature_flag_rules"/);
 });
 
 test("feature flags: Activity v2 seed is globally default-off and allowlists slock-android", () => {

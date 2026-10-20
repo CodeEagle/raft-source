@@ -13,7 +13,7 @@ import { createInterface } from "node:readline";
 import { Writable } from "node:stream";
 
 import type { Command } from "commander";
-import { fetch as undiciFetch } from "undici";
+import { undiciFetch } from "../../proxy";
 
 import {
   authorizeDeviceCode,

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import SearchOverlay from "../src/components/search/SearchOverlay";
-import { DESKTOP_SEARCH_ANCHOR_VARS, SEARCH_OVERLAY_FALLBACK_TOP, searchOverlayCardStyle } from "../src/components/search/searchOverlayAnchor";
+import { DESKTOP_SEARCH_ANCHOR_VARS, SEARCH_OVERLAY_FALLBACK_TOP, searchOverlayCardStyle, searchOverlayColumnFromRect } from "../src/components/search/searchOverlayAnchor";
 import { TestIntlProvider } from "./helpers/intl";
 import { useServerStore } from "../src/store/serverStore";
 
@@ -18,7 +18,7 @@ function mount(onClose: () => void) {
   return render(
     <MemoryRouter initialEntries={["/s/x/search"]}>
       <TestIntlProvider>
-        <SearchOverlay onClose={onClose} />
+        <SearchOverlay onClose={onClose} contentColumnRef={null} />
       </TestIntlProvider>
     </MemoryRouter>,
   );
@@ -85,7 +85,7 @@ test("the overlay card is anchored to the desktop search field via CSS variables
   const style = searchOverlayCardStyle();
   assert.equal(style.position, "fixed");
   assert.equal(style.top, `var(${DESKTOP_SEARCH_ANCHOR_VARS.top}, ${SEARCH_OVERLAY_FALLBACK_TOP})`);
-  assert.equal(style.left, `var(${DESKTOP_SEARCH_ANCHOR_VARS.centerX}, 50%)`);
+  assert.equal(style.left, "50%", "centred on the window, not on the field (WAWQAQ 2026-10-13)");
   assert.equal(style.transform, "translateX(-50%)");
   assert.equal(style.width, `max(var(${DESKTOP_SEARCH_ANCHOR_VARS.width}, 0px), min(720px, 92vw))`);
   assert.equal(style.height, `min(min(680px, 80vh), calc(100vh - var(${DESKTOP_SEARCH_ANCHOR_VARS.top}, ${SEARCH_OVERLAY_FALLBACK_TOP}) - 24px))`);
@@ -98,18 +98,21 @@ test("the overlay card is anchored to the desktop search field via CSS variables
   assert.match(attr, /position:\s*fixed/);
   // The old placement: centred while the card fits, else pinned at 8vh + 16px.
   assert.equal(SEARCH_OVERLAY_FALLBACK_TOP, "max(calc(8vh + 16px), calc((100vh - min(680px, 80vh)) / 2))");
-  assert.match(attr, /left:\s*var\(--desktop-search-anchor-center-x, 50%\)/);
+  assert.match(attr, /left:\s*50%/);
   assert.doesNotMatch(card.className, /my-\[8vh\]|self-start/);
 });
 
-test("the overlay backdrop is transparent: no dim, no blur behind the palette (Slack), click-outside still closes", () => {
+test("the overlay is a centred modal like every other: the page dims, the panel is the dialog frame, click-outside still closes", () => {
   let closed = 0;
   const view = mount(() => { closed += 1; });
   const card = view.getByTestId("desktop-search-overlay") as HTMLElement;
+  // The dialog frame, not a popover surface (which brought its own open
+  // animation): no centred modal animates.
+  assert.equal(card.getAttribute("data-slot"), "dialog-surface");
   const backdrop = card.closest(".fixed.inset-0") as HTMLElement | null;
   assert.ok(backdrop, "modal root present");
-  assert.doesNotMatch(backdrop.className, /backdrop-blur|bg-layer-backdrop|bg-black\/60/);
-  assert.match(backdrop.className, /bg-transparent/);
+  assert.match(backdrop.className, /\bbg-layer-backdrop\b/);
+  assert.doesNotMatch(backdrop.className, /bg-transparent/);
   const clickLayer = backdrop.firstElementChild as HTMLElement;
   clickLayer.click();
   assert.equal(closed, 1, "clicking outside the card still dismisses");
@@ -123,12 +126,45 @@ test("the overlay's modal root carries the dismiss-layer marker hosts key off (t
   assert.ok(backdrop!.hasAttribute("data-dismiss-layer"), "and carries the shared dismiss-layer marker");
 });
 
-test("the overlay card is raft-ui's popover surface, not the legacy card-brutal utility (Elegant corners come from the theme family)", () => {
+test("the overlay card is raft-ui's dialog surface, not a hand-rolled card", () => {
   const view = mount(() => {});
   const card = view.getByTestId("desktop-search-overlay") as HTMLElement;
-  assert.equal(card.dataset.slot, "popover-content", "surface = PopoverPopup");
+  assert.equal(card.dataset.slot, "dialog-surface", "surface = DialogSurface");
   assert.ok(!card.classList.contains("card-brutal"), "no hand-rolled card-brutal surface");
   assert.ok(!card.classList.contains("bg-white"), "no forced white background (Elegant Dark)");
   const footer = view.getByTestId("desktop-search-overlay-footer");
   assert.ok(![...footer.classList].some((c) => /bg-/.test(c)), "footer inherits the surface background");
+});
+
+// Task #143: on the web there is no title-bar field, and the centred fallback
+// cut through the channel header's tab row. The web panel's top sits at the top
+// of the content column; horizontally it is centred on the whole window, the
+// same place as the desktop's panel (WAWQAQ 2026-10-13).
+test("web placement: top of the content column, centred on the window", () => {
+  const column = searchOverlayColumnFromRect({ top: 0 });
+  assert.deepEqual(column, { top: 8 });
+  const style = searchOverlayCardStyle(column);
+  assert.equal(style.top, "8px");
+  assert.equal(style.left, "50%");
+  assert.equal(style.transform, "translateX(-50%)");
+  assert.equal(style.width, "min(720px, 92vw)");
+});
+
+// Josh (#9556): the rendered overlay must actually pick up MainLayout's content
+// column — a broken wiring would silently fall back to the centred placement.
+test("web: the rendered overlay takes its position from the content column MainLayout passes in", () => {
+  useServerStore.setState({ current: { id: "srv-1", slug: "x", name: "X" } as never });
+  const columnEl = document.createElement("div");
+  columnEl.getBoundingClientRect = () => ({ top: 0, left: 296, width: 984, height: 800, right: 1280, bottom: 800, x: 296, y: 0, toJSON() {} }) as DOMRect;
+  const view = render(
+    <MemoryRouter initialEntries={["/s/x/search"]}>
+      <TestIntlProvider>
+        <SearchOverlay onClose={() => {}} contentColumnRef={{ current: columnEl }} />
+      </TestIntlProvider>
+    </MemoryRouter>,
+  );
+  const attr = view.getByTestId("desktop-search-overlay").getAttribute("style") ?? "";
+  assert.match(attr, /top:\s*8px/);
+  assert.match(attr, /left:\s*50%/);
+  assert.doesNotMatch(attr, /--desktop-search-anchor/, "not the centred/desktop fallback");
 });

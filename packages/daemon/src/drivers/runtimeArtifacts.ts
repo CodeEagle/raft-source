@@ -7,6 +7,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { ambientProcessEnv } from "../processEnvPatch";
 import os from "node:os";
 import path from "node:path";
 import { currentDate, type AgentConfig, type AgentRuntimeProfileRef } from "@botiverse/raft-shared";
@@ -429,10 +430,10 @@ export function resolveRuntimeHomeDir(
   opts: { agentId?: string; slockHome?: string } = {},
 ): string {
   if (config.runtime === "codex") {
-    return resolveCodexHomeRootFromConfig(config, defaultHomeDir, workspacePath, process.env, opts);
+    return resolveCodexHomeRootFromConfig(config, defaultHomeDir, workspacePath, ambientProcessEnv(), opts);
   }
   if (config.runtime === "grok") {
-    return resolveGrokHomeFromEnv({ ...process.env, ...(config.envVars ?? {}) }, {
+    return resolveGrokHomeFromEnv({ ...ambientProcessEnv(), ...(config.envVars ?? {}) }, {
       cwd: workspacePath,
       homeDir: defaultHomeDir,
     });

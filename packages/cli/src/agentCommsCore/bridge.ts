@@ -2,6 +2,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
+import type {
+  ExternalAgentActivityDrainResponse,
+  ExternalAgentActivityEvent,
+  ExternalAgentActivityIngestRequest,
+  ExternalAgentWakeAdapter,
+  ExternalAgentWakeAttemptInput,
+  ExternalAgentWakeEventEnvelope,
+} from "@botiverse/raft-shared";
 import {
   EXTERNAL_AGENT_ACTIVITY_DRAIN_SCHEMA,
   EXTERNAL_AGENT_ACTIVITY_EVENT_SCHEMA,
@@ -11,16 +19,10 @@ import {
   EXTERNAL_AGENT_WAKE_EVENT_SCHEMA,
   errorClassOf,
   validateExternalAgentWakeEventEnvelope,
-  type ExternalAgentActivityDrainResponse,
-  type ExternalAgentActivityEvent,
-  type ExternalAgentActivityIngestRequest,
-  type ExternalAgentWakeAdapter,
-  type ExternalAgentWakeAttemptInput,
-  type ExternalAgentWakeEventEnvelope,
   RAFT_AGENT_STATUS_DETAIL_LIMIT,
   isExternalAgentActivityLegacyStatus,
   isRaftAgentStatus,
-} from "@botiverse/raft-shared";
+} from "@botiverse/raft-shared/src/agentCliSurface";
 
 import type { AgentContext } from "../auth/env";
 import { resolveProfileDir } from "../auth/env";

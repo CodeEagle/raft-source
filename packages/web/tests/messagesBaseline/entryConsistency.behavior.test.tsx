@@ -6,7 +6,7 @@ import { act, cleanup, fireEvent, render as rtlRender, screen, waitFor } from "@
 import { TestIntlProvider } from "../helpers/intl";
 const render: typeof rtlRender = (ui, options) => rtlRender(ui, { wrapper: TestIntlProvider, ...options });
 import { MemoryRouter, useLocation } from "react-router-dom";
-import { ToastProvider } from "raft-ui";
+import { ToastProvider } from "@botiverse/raft-ui";
 import api from "../../src/api/client";
 import { getSocket } from "../../src/api/socket";
 import { ActivityThreadContentRoute } from "../../src/components/layout/MainLayout";

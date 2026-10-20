@@ -3,6 +3,7 @@
 // per-target delivery outcome of a message you sent.
 
 import { z } from "zod";
+import { lazySchema } from "../lazySchema";
 
 import type { AgentApiClient } from "../agentApiClient";
 import type { AgentApiSenderMentionDeliveriesResponse } from "../agentApiContract";
@@ -20,17 +21,17 @@ import { hintStep, RAFT_HINTS, type RaftHintOptions } from "./hint";
 import { failureFromClientResult, failureOutcome, opError, validateOpRequest, type RaftNextStep, type RaftOutcome } from "./outcome";
 import { requestSchema } from "./requestSchema";
 
-export const pendingMentionActionsRequestSchema = requestSchema<{ limit?: number }>()(z.object({
+export const pendingMentionActionsRequestSchema = lazySchema("pendingMentionActionsRequestSchema", () => requestSchema<{ limit?: number }>()(z.object({
   limit: z.number().int().positive().optional().describe("Maximum pending mentions to list."),
-}));
+})));
 
-export const mentionResolutionIdsRequestSchema = requestSchema<MentionResolutionIdsRequest>()(z.object({
+export const mentionResolutionIdsRequestSchema = lazySchema("mentionResolutionIdsRequestSchema", () => requestSchema<MentionResolutionIdsRequest>()(z.object({
   resolutionIds: z.array(z.string()).describe("resolutionId values from mentions.pending."),
-}));
+})));
 
-export const senderMentionDeliveriesRequestSchema = requestSchema<{ messageId: string }>()(z.object({
+export const senderMentionDeliveriesRequestSchema = lazySchema("senderMentionDeliveriesRequestSchema", () => requestSchema<{ messageId: string }>()(z.object({
   messageId: z.string().describe("Id of a message you sent."),
-}));
+})));
 
 export interface RaftPendingMentions {
   actions: AgentPendingMentionAction[];

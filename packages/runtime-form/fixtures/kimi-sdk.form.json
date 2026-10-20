@@ -77,5 +77,8 @@
       "kind": "select",
       "pointer": "/model"
     }
-  }
+  },
+  "requiredClientCapabilities": [
+    "option_source.status"
+  ]
 }

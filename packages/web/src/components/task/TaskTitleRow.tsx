@@ -1,4 +1,4 @@
-import { Input, Button } from "raft-ui";
+import { Input, Button } from "@botiverse/raft-ui";
 import { useCallback } from "react";
 import { Trash2 } from "lucide-react";
 
@@ -17,7 +17,7 @@ export function TaskTitleRow({ index, title, placeholder, removable, onChange, o
   const handleRemove = useCallback(() => onRemove(index), [index, onRemove]);
 
   return (
-    <div className="flex items-center gap-1 mb-1">
+    <div className="mb-2 flex items-center gap-1">
       <Input
         type="text"
         value={title}
@@ -26,14 +26,16 @@ export function TaskTitleRow({ index, title, placeholder, removable, onChange, o
         placeholder={placeholder}
         autoFocus={index === 0}
       />
+      {/* Removing a draft row is undoable typing, not an irreversible
+          consequence: a borderless icon button, not the red sticker. */}
       {removable && (
-        <Button size="sm"
-          variant="danger"
+        <Button size="icon-sm"
+          variant="ghost"
           type="button"
           onClick={handleRemove}
-          className="p-1"
+          className="shrink-0"
         >
-          <Trash2 size={14} />
+          <Trash2 size={16} />
         </Button>
       )}
     </div>

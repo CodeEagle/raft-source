@@ -27,7 +27,7 @@
 import { writeDiagnostic } from "../../core/renderer";
 import { formatVerificationHandoff } from "./_format";
 import type { Command } from "commander";
-import { fetch as undiciFetch } from "undici";
+import { undiciFetch } from "../../proxy";
 
 import {
   DeviceCodeLoginError,

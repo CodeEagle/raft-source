@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
 import { getDb, type DatabaseExecutor } from "../db/index";
+import { afterAmbientTransaction } from "../db/ambientTransaction";
 import { agents, assistantDoorbells, channelAgents, channelHumans, channels, messages, thirdPartyAgentEvents } from "../db/schema";
 import type { AgentOrchestrator } from "./agentOrchestrator";
 import { SYSTEM_ASSISTANT_APP } from "./agentAppEventsService";
@@ -245,7 +246,8 @@ export async function recordAssistantDoorbells(
     ON CONFLICT (agent_id) DO NOTHING
     RETURNING agent_id`);
   const inserted = result.rows.length;
-  if (inserted > 0) kickAssistantDoorbellDrain();
+  // After commit, so the drain never runs inside (and savepoints onto) the producing transaction.
+  if (inserted > 0) afterAmbientTransaction(kickAssistantDoorbellDrain);
   return inserted;
 }
 

@@ -1,11 +1,12 @@
+import { getAppInstallationSetup } from "../services/appSetupService";
 import { Router, type Request, type Response, type Router as RouterType } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import multer from "multer";
-import { updateAppAgentJwtSettingsSchema, type ServerCapability } from "@botiverse/raft-shared";
-import { AgentAudienceJwtError, AgentJwtPolicyError, getAppAgentJwtSettings, setAppAgentJwtSettings } from "../services/agentAudienceJwtPolicyService";
+import { type ServerCapability } from "@botiverse/raft-shared";
+import { AgentJwtPolicyError, getLegacyAppAgentJwtSettings } from "../services/agentAudienceJwtPolicyService";
 import { actorHasServerCapabilityInServer, getActorServerRoleInServer, roleCanInspectAgentPrivateSurfaces, userCanActOnAgentResource } from "../lib/actorPermissions";
 import { getDb } from "../db/index";
-import { agents, oauthClientInstalls, oauthClients } from "../db/schema";
+import { agentCredentials, agents, oauthAccessTokens, oauthClientInstalls, oauthClients } from "../db/schema";
 import * as oauthService from "../services/oauthService";
 import {
   AGENT_APP_EVENTS_MAX_LIMIT,
@@ -156,6 +157,19 @@ integrationRouter.get("/marketplace", async (req, res) => {
   }
 });
 
+integrationRouter.get("/clients/:clientId/setup", async (req, res) => {
+  res.setHeader("Cache-Control", "private, no-store");
+  try {
+    if (!UUID_RE.test(req.params.clientId)) { res.status(400).json({ error: "clientId must be an App ID" }); return; }
+    const setup = await getAppInstallationSetup({ clientId: req.params.clientId, serverId: req.serverId! });
+    if (!setup) { res.status(404).json({ error: "Active installation not found" }); return; }
+    const canConfigure = await currentUserHasServerCapability(req, "manageIntegrations");
+    res.json({ ...setup, canConfigure, url: canConfigure ? setup.url : null });
+  } catch (err) {
+    sendJsonServerError(req, res, { error: "Failed to read App setup", logPrefix: "Read App setup error:", err });
+  }
+});
+
 integrationRouter.get("/clients", async (req, res) => {
   try {
     const clients = await oauthService.listOAuthClients(req.serverId!);
@@ -171,7 +185,7 @@ integrationRouter.post("/clients", async (req, res) => {
       res.status(403).json({ error: "Only server owners and admins can manage integrations" });
       return;
     }
-    const { name, description, whenToUse, homepageUrl, returnUrl, agentManifestUrl, clientId, allowedScopes, category } = req.body ?? {};
+    const { name, description, whenToUse, homepageUrl, returnUrl, agentManifestUrl, setupUrl, setupDescription, clientId, allowedScopes, category } = req.body ?? {};
     const created = await oauthService.createOAuthClient({
       serverId: req.serverId!,
       createdByUserId: req.userId!,
@@ -180,7 +194,7 @@ integrationRouter.post("/clients", async (req, res) => {
       whenToUse,
       homepageUrl,
       returnUrl,
-      agentManifestUrl,
+      agentManifestUrl, setupUrl, setupDescription,
       clientId,
       allowedScopes,
       category,
@@ -191,7 +205,7 @@ integrationRouter.post("/clients", async (req, res) => {
     if (
       message.includes("required") ||
       message.includes("clientId") ||
-      message.includes("agentManifestUrl") ||
+      message.includes("agentManifestUrl") || message.includes("setup") ||
       message.includes("scope") ||
       message.includes("category") ||
       message.includes("returnUrl") ||
@@ -214,7 +228,7 @@ integrationRouter.patch("/clients/:clientId", async (req, res) => {
       res.status(403).json({ error: "Only server owners and admins can manage integrations" });
       return;
     }
-    const { name, description, whenToUse, homepageUrl, returnUrl, agentManifestUrl, allowedScopes, category } = req.body ?? {};
+    const { name, description, whenToUse, homepageUrl, returnUrl, agentManifestUrl, setupUrl, setupDescription, allowedScopes, category, enableBot } = req.body ?? {};
     const updated = await oauthService.updateOAuthClient({
       serverId: req.serverId!,
       clientId: req.params.clientId,
@@ -224,9 +238,10 @@ integrationRouter.patch("/clients/:clientId", async (req, res) => {
       whenToUse,
       homepageUrl,
       returnUrl,
-      agentManifestUrl,
+      agentManifestUrl, setupUrl, setupDescription,
       allowedScopes,
       category,
+      enableBot,
     });
     if (!updated) {
       res.status(404).json({ error: "OAuth client not found" });
@@ -235,7 +250,7 @@ integrationRouter.patch("/clients/:clientId", async (req, res) => {
     res.json(updated);
   } catch (err: any) {
     const message = err?.message || "Failed to update OAuth client";
-    if (message.includes("required") || message.includes("agentManifestUrl") || message.includes("scope") || message.includes("category") || message.includes("returnUrl") || message.includes("whenToUse")) {
+    if (message.includes("required") || message.includes("agentManifestUrl") || message.includes("setup") || message.includes("scope") || message.includes("category") || message.includes("returnUrl") || message.includes("whenToUse")) {
       res.status(400).json({ error: message });
       return;
     }
@@ -244,36 +259,25 @@ integrationRouter.patch("/clients/:clientId", async (req, res) => {
 });
 
 
-function sendAgentJwtPolicyError(req: Request, res: Response, error: unknown) {
-  if (error instanceof AgentJwtPolicyError) {
-    res.status(error.status).json({ error: error.message });
-  } else if (error instanceof AgentAudienceJwtError) {
-    res.status(503).json({ error: error.code });
-  } else {
-    sendJsonServerError(req, res, { error: "Failed to update Agent JWT settings", logPrefix: "Agent JWT settings error:", err: error });
-  }
-}
-
+// Agent JWT is built in (no per-App or per-installation switch). These two
+// routes only answer web bundles from the previous release; remove both next release.
 integrationRouter.get("/clients/:clientId/agent-jwt", async (req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
   try {
-    res.json(await getAppAgentJwtSettings(req.serverId!, req.params.clientId));
-  } catch (error) { sendAgentJwtPolicyError(req, res, error); }
+    if (!await currentUserHasServerCapability(req, "manageIntegrations")) {
+      res.status(403).json({ error: "Only server owners and admins can read Agent JWT access" });
+      return;
+    }
+    res.json(await getLegacyAppAgentJwtSettings(req.serverId!, req.params.clientId));
+  } catch (error) {
+    if (error instanceof AgentJwtPolicyError) { res.status(error.status).json({ error: error.message }); return; }
+    sendJsonServerError(req, res, { error: "Failed to load Agent JWT settings", logPrefix: "Agent JWT settings error:", err: error });
+  }
 });
 
-integrationRouter.put("/clients/:clientId/agent-jwt", async (req, res) => {
+integrationRouter.put("/clients/:clientId/agent-jwt", (_req, res) => {
   res.setHeader("Cache-Control", "private, no-store");
-  if (!req.userId) { res.status(403).json({ error: "Human server administrator required" }); return; }
-  const parsed = updateAppAgentJwtSettingsSchema.safeParse(req.body);
-  if (!parsed.success) {
-    res.status(400).json({ error: "Agent JWT settings require only a boolean enabled field" });
-    return;
-  }
-  try {
-    res.json(await setAppAgentJwtSettings({
-      serverId: req.serverId!, clientId: req.params.clientId, actorUserId: req.userId!, enabled: parsed.data.enabled,
-    }));
-  } catch (error) { sendAgentJwtPolicyError(req, res, error); }
+  res.status(410).json({ error: "Agent JWT is built in for every App; there is no setting to change" });
 });
 
 integrationRouter.get("/clients/:clientId/app-notifications", async (req, res) => {
@@ -801,6 +805,183 @@ integrationRouter.delete("/marketplace/:clientId/install", async (req, res) => {
     sendJsonServerError(req, res, { error: "Failed to uninstall marketplace app", logPrefix: "Uninstall marketplace OAuth client error:", err });
   }
 });
+
+// ── App-owned Bot grant / revoke (design-v3 §identity) ────────────────────────
+// Granting the bot capability to an installation creates the managed bot agent
+// + binding atomically; revoking disables it. The Bot itself is created lazily
+// at grant-time, not install-time, so existing installs can be retrofitted.
+integrationRouter.post("/clients/:clientId/install/bot", async (req, res) => {
+  try {
+    if (!await currentUserHasServerCapability(req, "manageIntegrations")) {
+      res.status(403).json({ error: "Only server owners and admins can manage the app bot" });
+      return;
+    }
+    const action = typeof req.body?.action === "string" ? req.body.action : "grant";
+    if (action !== "grant" && action !== "revoke") {
+      res.status(400).json({ error: "action must be 'grant' or 'revoke'" });
+      return;
+    }
+    const result = await getDb().transaction(async (tx) => {
+      const [install] = await tx.select({
+        id: oauthClientInstalls.id,
+        clientId: oauthClientInstalls.clientId,
+        serverId: oauthClientInstalls.serverId,
+        status: oauthClientInstalls.status,
+        botGrant: oauthClientInstalls.botGrant,
+      }).from(oauthClientInstalls).where(and(
+        eq(oauthClientInstalls.serverId, req.serverId!),
+        eq(oauthClientInstalls.clientId, req.params.clientId),
+        eq(oauthClientInstalls.status, "active"),
+      )).limit(1).for("update");
+      if (!install) return null;
+
+      if (action === "revoke") {
+        await tx.update(oauthClientInstalls)
+          .set({ botGrant: "revoked", updatedAt: new Date() })
+          .where(eq(oauthClientInstalls.id, install.id));
+        const { disableManagedAppBot } = await import("../services/appBotIdentityService");
+        await disableManagedAppBot(tx, { installId: install.id });
+        return { installationId: install.id, botGrant: "revoked" as const, bot: null };
+      }
+
+      await tx.update(oauthClientInstalls)
+        .set({ botGrant: "granted", updatedAt: new Date() })
+        .where(eq(oauthClientInstalls.id, install.id));
+      const { createManagedAppBot } = await import("../services/appBotIdentityService");
+      const bot = await createManagedAppBot(tx, {
+        installId: install.id,
+        serverId: req.serverId!,
+        requestedPermissions: Array.isArray(req.body?.permissions) ? req.body.permissions : undefined,
+      });
+      return { installationId: install.id, botGrant: "granted" as const, bot };
+    });
+    if (!result) {
+      res.status(404).json({ error: "Active app installation not found" });
+      return;
+    }
+    res.json(result);
+  } catch (err: unknown) {
+    const errName = err instanceof Error ? err.name : String(err);
+    const errCode = (err as { code?: string })?.code;
+    const errMsg = err instanceof Error ? err.message : String(err);
+    if (errCode === "app_bot_handle_conflict" || errName === "AppBotHandleConflictError") {
+      res.status(409).json({ error: errMsg });
+      return;
+    }
+    if (errCode === "app_bot_install_not_granted" || errName === "AppBotInstallNotGrantedError") {
+      res.status(403).json({ error: errMsg });
+      return;
+    }
+    if (errCode === "app_bot_already_bound" || errName === "AppBotAlreadyBoundError") {
+      res.status(409).json({ error: errMsg });
+      return;
+    }
+    sendJsonServerError(req, res, { error: "Failed to manage app bot", logPrefix: "App bot grant error:", err });
+  }
+});
+
+/**
+ * App-side endpoint: the installed App exchanges its OAuth access token for a
+ * managed bot's `sk_agent_*` key. The plaintext key is returned once; only a
+ * hash is stored. Call again to rotate: previous credentials are revoked in
+ * the same transaction.
+ *
+ * Mounted at `POST /api/app-bot/token` (outside `/api/integrations` because
+ * that surface requires user auth + X-Server-Id; this surface is
+ * OAuth-access-token authenticated and derives the server from the token's
+ * recorded `serverId`, not from the request).
+ */
+export async function handleAppBotTokenExchange(req: Request, res: Response): Promise<void> {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      res.status(401).json({ error: "Missing OAuth access token" });
+      return;
+    }
+    const rawToken = authHeader.slice(7).trim();
+    if (!rawToken) {
+      res.status(401).json({ error: "Missing OAuth access token" });
+      return;
+    }
+
+    const result = await getDb().transaction(async (tx) => {
+      // Verify the OAuth access token first: hash lookup, non-revoked,
+      // non-expired. Server is derived from the token row, not the request.
+      const { createHash } = await import("node:crypto");
+      const tokenHash = createHash("sha256").update(rawToken).digest("hex");
+      const [oauthToken] = await tx.select({
+        id: oauthAccessTokens.id,
+        clientId: oauthAccessTokens.clientId,
+        serverId: oauthAccessTokens.serverId,
+        expiresAt: oauthAccessTokens.expiresAt,
+        revokedAt: oauthAccessTokens.revokedAt,
+      }).from(oauthAccessTokens).where(eq(oauthAccessTokens.tokenHash, tokenHash)).limit(1);
+      if (!oauthToken || oauthToken.revokedAt || oauthToken.expiresAt < new Date()) {
+        return { status: 401 as const, error: "Invalid or expired OAuth access token" };
+      }
+
+      // Resolve install: this client on this server, grant+active.
+      const [install] = await tx.select({
+        id: oauthClientInstalls.id,
+        clientId: oauthClientInstalls.clientId,
+        serverId: oauthClientInstalls.serverId,
+        status: oauthClientInstalls.status,
+        botGrant: oauthClientInstalls.botGrant,
+      }).from(oauthClientInstalls).where(and(
+        eq(oauthClientInstalls.serverId, oauthToken.serverId),
+        eq(oauthClientInstalls.clientId, oauthToken.clientId),
+      )).limit(1);
+      if (!install) {
+        return { status: 404 as const, error: "App installation not found for this token" };
+      }
+      if (install.status !== "active" || install.botGrant !== "granted") {
+        return { status: 403 as const, error: "Bot grant not active for this installation" };
+      }
+
+      const { getManagedAppBot } = await import("../services/appBotIdentityService");
+      const bot = await getManagedAppBot(tx, install.id);
+      if (!bot) {
+        return { status: 404 as const, error: "No active bot for this installation" };
+      }
+
+      // Rotation: revoke all live credentials for this bot's agent before
+      // minting the replacement, in the same transaction.
+      const now = new Date();
+      await tx.update(agentCredentials).set({
+        revokedAt: now,
+        revokedReason: "rotated_via_app_bot_token_exchange",
+      }).where(and(
+        eq(agentCredentials.agentId, bot.agentId),
+        isNull(agentCredentials.revokedAt),
+      ));
+
+      const { mintAgentCredential, MANAGED_APP_BOT_CAPABILITIES } = await import("../services/agentCredentialService");
+      const minted = await mintAgentCredential({
+        agentId: bot.agentId,
+        scopes: MANAGED_APP_BOT_CAPABILITIES,
+        name: `app-bot:${oauthToken.clientId}`,
+        createdByUserId: null,
+      }, { executor: tx });
+      return {
+        status: 200 as const,
+        body: {
+          credentialId: minted.credentialId,
+          apiKey: minted.apiKey,
+          agentId: minted.agentId,
+          scopes: minted.scopes,
+        },
+      };
+    });
+
+    if (result.status !== 200) {
+      res.status(result.status).json({ error: result.error });
+      return;
+    }
+    res.json(result.body);
+  } catch (err: unknown) {
+    sendJsonServerError(req, res, { error: "Failed to issue bot token", logPrefix: "Bot token error:", err });
+  }
+}
 
 integrationRouter.post("/clients/:clientId/logo", async (req, res) => {
   try {

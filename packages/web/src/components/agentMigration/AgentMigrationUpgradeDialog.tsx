@@ -13,7 +13,7 @@ export function AgentMigrationUpgradeDialog({
     <ConfirmDialog
       title={formatMessage({ id: "agent.migration.proRequired.title" })}
       message={(
-        <p className="text-sm leading-relaxed text-foreground-strong theme-brutal:text-black/75">
+        <p>
           {formatMessage({ id: "agent.migration.proRequired.description" })}
         </p>
       )}

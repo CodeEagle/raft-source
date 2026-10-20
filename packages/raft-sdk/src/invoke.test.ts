@@ -185,6 +185,8 @@ test("contextId scopes attestation: a send attests only reads from the same mode
     targets: { "#general": { upTo: 1201, upToContextId: "ctx-B" } },
     aliases: {},
     contextId: "ctx-B",
+    // The read order the thread-target check compares (glimpse G2-5); the latest read of the target wins.
+    reads: [{ target: "#general", order: 2, seq: 1201, contextId: "ctx-B" }],
   });
   // Snapshot / restore keeps the scoping.
   const restored = createRaft({ serverUrl: "https://raft.example", credential, frontier: raft.frontier.snapshot() });

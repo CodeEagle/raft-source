@@ -184,14 +184,13 @@ function getEffectiveAvatarKey(avatarUrl: string | null): string {
   return parsePixelAvatar(avatarUrl) || DEFAULT_AVATAR_KEY;
 }
 
-/** Render a pixel art avatar at the given size */
+/** Render a pixel art avatar. It fills its frame (the avatar sticker sizes
+ *  it), so the pixels sit flush to the border at any DPR. */
 const PixelAvatar = memo(function PixelAvatar({
   avatarKey,
-  size = 40,
   className = "",
 }: {
   avatarKey: string;
-  size?: number;
   className?: string;
 }) {
   const src = useMemo(() => pixelAvatarDataUrl(avatarKey), [avatarKey]);
@@ -202,18 +201,9 @@ const PixelAvatar = memo(function PixelAvatar({
       src={src}
       alt=""
       draggable={false}
-      className={`shrink-0 ${className}`}
-      style={{
-        // Default to fixed `size`. Callers can override via className
-        // (`!w-full !h-full`) to make the sprite fill its parent — used by
-        // AvatarSlot to push pixels flush to the border on non-integer
-        // DPR devices.
-        width: size,
-        height: size,
-        imageRendering: "pixelated",
-      }}
+      className={`size-full shrink-0 ${className}`.trim()}
+      style={{ imageRendering: "pixelated" }}
       data-agent-pixel-avatar="true"
-      data-cell-size={size / 8}
     />
   );
 });
@@ -224,15 +214,12 @@ export function isCustomAvatar(avatarUrl: string | null): boolean {
   return !avatarUrl.startsWith("pixel:");
 }
 
-/** Render an agent avatar — custom image if uploaded, pixel art otherwise */
+/** Render an agent avatar — custom image if uploaded, pixel art otherwise.
+ *  Either one fills its frame: put it inside an AvatarSlot. */
 export const AgentAvatar = memo(function AgentAvatar({
   avatarUrl,
-  size = 40,
-  className = "",
 }: {
   avatarUrl: string | null;
-  size?: number;
-  className?: string;
 }) {
   // Some legacy test render trees mount this shared leaf without IntlProvider.
   const intl = useContext(IntlContext as unknown as Context<OptionalAvatarIntl | null>);
@@ -243,13 +230,12 @@ export const AgentAvatar = memo(function AgentAvatar({
       <img
         src={avatarUrl!}
         alt={avatarAlt}
-        className={`shrink-0 object-cover ${className}`}
-        style={{ width: size, height: size }}
+        className="size-full shrink-0 object-cover"
         onError={() => setFailedCustomUrl(avatarUrl)}
       />
     );
   }
-  return <PixelAvatar avatarKey={getEffectiveAvatarKey(avatarUrl)} size={size} className={className} />;
+  return <PixelAvatar avatarKey={getEffectiveAvatarKey(avatarUrl)} />;
 });
 
 export default PixelAvatar;

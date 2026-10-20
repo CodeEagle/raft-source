@@ -170,7 +170,7 @@ test("the optional clause is an ICU select, not a concatenated fragment", () => 
     rawMessage: "x:maxBytes=3221225472:topEntries=.git%2F,2147483648",
     context: "failed",
   }, intl.formatMessage);
-  assert.match(withItems.message, /Largest items: \.git\/ \(2 GiB\)\./);
+  assert.match(withItems.message, /Largest items \(before compression\): \.git\/ \(2 GiB\)\./);
   const withoutItems = migrationErrorPresentation({
     code: "MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE",
     rawMessage: "x:maxBytes=3221225472",
@@ -190,7 +190,7 @@ test("the optional clause is an ICU select, not a concatenated fragment", () => 
     context: "failed",
   }, intl.formatMessage);
   assert.match(noLimitWithItems.message, /too large to move\./);
-  assert.match(noLimitWithItems.message, /Largest items: \.git\/ \(2 GiB\)\./);
+  assert.match(noLimitWithItems.message, /Largest items \(before compression\): \.git\/ \(2 GiB\)\./);
   // …and the manifest pair, for the same reason.
   const manifestNoCount = migrationErrorPresentation({
     code: "MIGRATION_OBJECT_STORE_MANIFEST_TOO_LARGE",

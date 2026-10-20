@@ -280,6 +280,15 @@ test("task #10: session_needs_reset blocks automatic starts on the first failure
   assert.equal(await breaker.isBlocked("agent-1"), false);
 });
 
+test("task #1258: session_runtime_mismatch blocks automatic starts on the first failure; a human start (Reset Session) lifts it", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await breaker.recordStart("agent-1", "launch-a", 1_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "session_runtime_mismatch", nowMs: 1_500 })).outcome, "blocked");
+  assert.equal(await breaker.isBlocked("agent-1"), true);
+  await breaker.recordStart("agent-1", "launch-b", 2_000, { human: true });
+  assert.equal(await breaker.isBlocked("agent-1"), false);
+});
+
 test("task #1221: a config change or a human start lifts a start-failure block", async () => {
   const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
   await breaker.recordStart("agent-1", "launch-a", 1_000);
@@ -342,14 +351,14 @@ test("model_not_found retries once after the hold; a second failure in a row blo
   const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore(), { retryOnceDelayMs: 60_000 });
   await breaker.recordStart("agent-1", "launch-a", 1_000);
   const first = await breaker.recordStartFailure("agent-1", { launchId: "launch-a", reason: "model_not_found", nowMs: 2_000 });
-  assert.deepEqual(first, { outcome: "retry_scheduled", blocked: false, startFailureCount: 1, retryAfterMs: 62_000 });
+  assert.deepEqual(first, { outcome: "retry_scheduled", blocked: false, startFailureCount: 1, retryAfterMs: 62_000, notify: false });
   assert.deepEqual(await breaker.automaticWakeHold("agent-1", 61_999), { kind: "retry_pending", retryAfterMs: 62_000 });
   assert.equal(await breaker.automaticWakeHold("agent-1", 62_000), null, "the hold ends; the retry may start");
   assert.equal(await breaker.isCatchupOwed("agent-1"), true, "messages refused during the hold are owed to the retry");
 
   await breaker.recordStart("agent-1", "launch-b", 62_250);
   const second = await breaker.recordStartFailure("agent-1", { launchId: "launch-b", reason: "model_not_found", nowMs: 63_000 });
-  assert.deepEqual(second, { outcome: "blocked", blocked: true, startFailureCount: 2, retryAfterMs: null });
+  assert.deepEqual(second, { outcome: "blocked", blocked: true, startFailureCount: 2, retryAfterMs: null, notify: false });
   assert.deepEqual(await breaker.automaticWakeHold("agent-1", 200_000), { kind: "blocked", reason: "model_not_found" });
 });
 
@@ -397,4 +406,151 @@ test("a config change or a human start ends a start-failure streak and a pending
   await breaker.recordStart("agent-1", "launch-c", 4_000, { human: true });
   assert.equal(await breaker.automaticWakeHold("agent-1", 4_100), null);
   assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-c", reason: "model_not_found", nowMs: 4_500 })).outcome, "retry_scheduled");
+});
+
+// A runtime error only the owner can fix (rejected credential) blocks
+// automatic wakes at once; the owner is told once per distinct error. The
+// caller marks the error as told only after its notice was posted.
+async function blockAndTell(b: WakeCrashLoopBreaker, launchId: string, fingerprint: string, nowMs: number) {
+  const result = await b.recordActionRequired("a", { launchId, reason: "user_reauth", fingerprint, nowMs });
+  if (result.notify) await b.markActionRequiredNotified("a", fingerprint);
+  return result;
+}
+
+test("an owner-action runtime error on the current start blocks at once and asks to notify once", async () => {
+  const b = new WakeCrashLoopBreaker();
+  await b.recordStart("a", "launch-1", 0);
+  assert.deepEqual(await blockAndTell(b, "launch-1", "f1", 1_000), { outcome: "blocked", notify: true });
+  assert.deepEqual(await b.automaticWakeHold("a", 2_000), { kind: "blocked", reason: "user_reauth" });
+  assert.equal(await b.isCatchupOwed("a"), true, "messages that arrive while blocked are owed to the next start");
+  // The same error again while blocked changes nothing and is not news.
+  assert.deepEqual(await blockAndTell(b, "launch-1", "f1", 3_000), { outcome: "already_blocked", notify: false });
+});
+
+test("a notice that was not posted is asked for again on the next occurrence", async () => {
+  const b = new WakeCrashLoopBreaker();
+  await b.recordStart("a", "launch-1", 0);
+  // Posting failed: the caller does not mark it.
+  assert.deepEqual(
+    await b.recordActionRequired("a", { launchId: "launch-1", reason: "user_reauth", fingerprint: "f1", nowMs: 1_000 }),
+    { outcome: "blocked", notify: true },
+  );
+  await b.recordStart("a", "launch-2", 2_000, { human: true });
+  assert.deepEqual(await blockAndTell(b, "launch-2", "f1", 3_000), { outcome: "blocked", notify: true });
+});
+
+test("an owner-action error from a start that is not the current one is ignored", async () => {
+  const b = new WakeCrashLoopBreaker();
+  await b.recordStart("a", "launch-2", 0);
+  for (const launchId of ["launch-1", null]) {
+    assert.deepEqual(
+      await b.recordActionRequired("a", { launchId, reason: "user_reauth", fingerprint: "f1", nowMs: 1_000 }),
+      { outcome: "ignored", notify: false },
+    );
+  }
+  assert.equal(await b.automaticWakeHold("a", 2_000), null);
+});
+
+test("a manual start without a fix lifts the block but does not re-notify the same error", async () => {
+  const b = new WakeCrashLoopBreaker();
+  await b.recordStart("a", "launch-1", 0);
+  await blockAndTell(b, "launch-1", "f1", 1_000);
+  await b.recordStart("a", "launch-2", 2_000, { human: true });
+  assert.equal(await b.automaticWakeHold("a", 2_500), null, "a human start lifts the block");
+  assert.deepEqual(await blockAndTell(b, "launch-2", "f1", 3_000), { outcome: "blocked", notify: false });
+  // A different error is news.
+  await b.recordStart("a", "launch-3", 4_000, { human: true });
+  assert.deepEqual(
+    await b.recordActionRequired("a", { launchId: "launch-3", reason: "user_model_access", fingerprint: "f2", nowMs: 5_000 }),
+    { outcome: "blocked", notify: true },
+  );
+});
+
+test("after a config change or a run that clears the error, the same error is reported again", async () => {
+  const b = new WakeCrashLoopBreaker();
+  await b.recordStart("a", "launch-1", 0);
+  await blockAndTell(b, "launch-1", "f1", 1_000);
+  assert.equal(await b.liftForConfigChange("a"), true);
+  assert.equal(await b.automaticWakeHold("a", 1_500), null);
+  await b.recordStart("a", "launch-2", 2_000);
+  assert.deepEqual(await blockAndTell(b, "launch-2", "f1", 3_000), { outcome: "blocked", notify: true });
+
+  // Fixed outside Raft (e.g. signed in on the computer), started by hand, ran
+  // fine for a while (the error cleared), then the credential expired again.
+  await b.recordStart("a", "launch-3", 4_000, { human: true });
+  await b.forgetActionRequiredNotice("a");
+  assert.deepEqual(await blockAndTell(b, "launch-3", "f1", 5_000), { outcome: "blocked", notify: true });
+});
+
+test("a config change while not blocked (started by hand first, then a new key) still makes the error news", async () => {
+  const b = new WakeCrashLoopBreaker();
+  await b.recordStart("a", "launch-1", 0);
+  await blockAndTell(b, "launch-1", "f1", 1_000);
+  await b.recordStart("a", "launch-2", 2_000, { human: true });
+  assert.equal(await b.liftForConfigChange("a"), false, "nothing was blocked");
+  await b.recordStart("a", "launch-3", 3_000);
+  assert.deepEqual(await blockAndTell(b, "launch-3", "f1", 4_000), { outcome: "blocked", notify: true });
+});
+
+test("a manual stop keeps the notified error", async () => {
+  const b = new WakeCrashLoopBreaker();
+  await b.recordStart("a", "launch-1", 0);
+  await blockAndTell(b, "launch-1", "f1", 1_000);
+  await b.recordManualStop("a");
+  await b.recordStart("a", "launch-2", 2_000, { human: true });
+  assert.deepEqual(await blockAndTell(b, "launch-2", "f1", 3_000), { outcome: "blocked", notify: false });
+});
+
+test("a runtime the computer does not have blocks on the first failure, unless the lookup itself did not decide", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await breaker.recordStart("agent-1", "launch-1", 1_000);
+  const first = await breaker.recordStartFailure("agent-1", { launchId: "launch-1", reason: "runtime_not_found", nowMs: 1_500, noticeFingerprint: "runtime_not_found:codex:m1" });
+  assert.equal(first.outcome, "blocked");
+  assert.equal(first.notify, true, "the owner is told");
+  assert.deepEqual(await breaker.automaticWakeHold("agent-1", 2_000), { kind: "blocked", reason: "runtime_not_found" });
+
+  const confirmed = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await confirmed.recordStart("agent-1", "launch-1", 1_000);
+  assert.equal((await confirmed.recordStartFailure("agent-1", { launchId: "launch-1", reason: "runtime_not_found", lookupReason: "not_on_path", nowMs: 1_500 })).outcome, "blocked");
+
+  for (const lookupReason of ["lookup_timed_out", "lookup_failed"] as const) {
+    const undecided = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+    await undecided.recordStart("agent-1", "launch-1", 1_000);
+    const result = await undecided.recordStartFailure("agent-1", { launchId: "launch-1", reason: "runtime_not_found", lookupReason, nowMs: 1_500, noticeFingerprint: "f" });
+    assert.equal(result.outcome, "counted", `${lookupReason} keeps the ordinary threshold`);
+    assert.equal(result.notify, false);
+  }
+});
+
+test("the runtime-missing notice is not repeated for the same runtime and computer, even after a human start", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  const fingerprint = "runtime_not_found:codex:m1";
+  await breaker.recordStart("agent-1", "launch-1", 1_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-1", reason: "runtime_not_found", nowMs: 1_500, noticeFingerprint: fingerprint })).notify, true);
+  await breaker.markActionRequiredNotified("agent-1", fingerprint);
+  await breaker.recordStart("agent-1", "launch-2", 2_000, { human: true });
+  const again = await breaker.recordStartFailure("agent-1", { launchId: "launch-2", reason: "runtime_not_found", nowMs: 2_500, noticeFingerprint: fingerprint });
+  assert.equal(again.outcome, "blocked");
+  assert.equal(again.notify, false);
+  await breaker.recordStart("agent-1", "launch-3", 3_000, { human: true });
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-3", reason: "runtime_not_found", nowMs: 3_500, noticeFingerprint: "runtime_not_found:codex:m2" })).notify, true, "another computer is news");
+});
+
+test("the computer listing the runtime lifts only a runtime-missing block, keeping the owed catch-up and the notice", async () => {
+  const breaker = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await breaker.recordStart("agent-1", "launch-1", 1_000);
+  await breaker.recordStartFailure("agent-1", { launchId: "launch-1", reason: "runtime_not_found", nowMs: 1_500, noticeFingerprint: "f" });
+  await breaker.markActionRequiredNotified("agent-1", "f");
+  assert.equal(await breaker.liftForRuntimeAvailable("agent-1"), true);
+  assert.equal(await breaker.automaticWakeHold("agent-1", 2_000), null);
+  assert.equal(await breaker.isCatchupOwed("agent-1"), true);
+  // If the start still fails, the owner already knows.
+  await breaker.recordStart("agent-1", "launch-2", 3_000);
+  assert.equal((await breaker.recordStartFailure("agent-1", { launchId: "launch-2", reason: "runtime_not_found", nowMs: 3_500, noticeFingerprint: "f" })).notify, false);
+
+  const other = new WakeCrashLoopBreaker(new InMemoryWakeCrashLoopStateStore());
+  await other.recordStart("agent-1", "launch-1", 1_000);
+  await other.recordStartFailure("agent-1", { launchId: "launch-1", reason: "model_not_configured", nowMs: 1_500 });
+  assert.equal(await other.liftForRuntimeAvailable("agent-1"), false);
+  assert.deepEqual(await other.automaticWakeHold("agent-1", 2_000), { kind: "blocked", reason: "model_not_configured" });
 });

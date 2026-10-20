@@ -3,7 +3,7 @@ import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 
 type RaftTooltipProps = ComponentProps<typeof Tooltip>;
 type TooltipContentProps = ComponentProps<typeof TooltipContent>;

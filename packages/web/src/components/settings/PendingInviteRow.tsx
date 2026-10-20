@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useCallback } from "react";
 import { X } from "lucide-react";
@@ -16,11 +16,11 @@ export function PendingInviteRow({
   const handleRequestRevoke = useCallback(() => onRequestRevoke(invite), [invite, onRequestRevoke]);
 
   return (
-    <div className="flex items-center gap-2 border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 px-3 py-2">
-      <span className="flex-1 font-mono text-xs text-foreground-strong theme-brutal:text-black truncate">
+    <div className="flex min-h-11 items-center gap-3 py-2 first:pt-0 last:pb-0">
+      <span className="min-w-0 flex-1 truncate text-callout text-foreground">
         {invite.invitedEmail}
       </span>
-      <span className="text-[10px] text-foreground-muted theme-brutal:text-black/40 font-mono shrink-0">
+      <span className="shrink-0 font-mono text-mono-meta text-foreground-hint">
         {formatDate(invite.createdAt, {
           month: "short",
           day: "numeric",
@@ -34,7 +34,7 @@ export function PendingInviteRow({
         aria-label={formatMessage({ id: "settings.invites.revokeInviteTitle" })}
         data-slot="button"
       >
-        <X size={12} />
+        <X size={14} />
       </Button>
       </Tooltip>
     </div>

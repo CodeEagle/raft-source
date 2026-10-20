@@ -389,7 +389,7 @@ test("a joint message from a current-server store agent keeps local thread autho
 });
 
 test("the production message click handler fails closed when context is unauthorized or missing", async () => {
-  const { toast } = await import("raft-ui");
+  const { toast } = await import("@botiverse/raft-ui");
   const toastError = vi.spyOn(toast, "error");
   const getCalls: string[] = [];
   api.get = (async (url: string) => {
@@ -554,7 +554,7 @@ const dmArtinChannel: Channel = {
 };
 
 test("a dm-thread ref stays one clickable token even when the peer is a structured mention", async () => {
-  const { toast } = await import("raft-ui");
+  const { toast } = await import("@botiverse/raft-ui");
   const toastError = vi.spyOn(toast, "error");
   const getCalls: string[] = [];
   api.get = (async (url: string) => {

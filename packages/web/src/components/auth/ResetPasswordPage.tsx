@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Input, Button, TextSans } from "raft-ui";
+import { Input, Button, TextSans } from "@botiverse/raft-ui";
 import type { ChangeEvent, FormEvent } from "react";
 import { useIntl } from "react-intl";
 import { useAuthStore } from "../../store/authStore";
@@ -75,7 +75,7 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
           />
           <Button
             onClick={onBack}
-            size="lg"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -93,11 +93,11 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
         <AuthPageIntro title={formatMessage({ id: "pages.resetPassword.title" })} />
 
         {error && (
-          <Banner intent="warning" className="mb-4 font-bold">{error}</Banner>
+          <Banner intent="warning" className="mb-4">{error}</Banner>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4" noValidate>
-          <FormField label={formatMessage({ id: "pages.resetPassword.newPasswordLabel" })} labelStyle="plain" error={fieldErrors.password}>
+          <FormField label={formatMessage({ id: "pages.resetPassword.newPasswordLabel" })} error={fieldErrors.password}>
             <Input
               type="password"
               value={password}
@@ -107,7 +107,7 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
               required
             />
           </FormField>
-          <FormField label={formatMessage({ id: "pages.resetPassword.confirmPasswordLabel" })} labelStyle="plain" error={fieldErrors.confirmPassword}>
+          <FormField label={formatMessage({ id: "pages.resetPassword.confirmPasswordLabel" })} error={fieldErrors.confirmPassword}>
             <Input
               type="password"
               value={confirmPassword}
@@ -119,7 +119,7 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
           <Button
             type="submit"
             disabled={loading}
-            size="lg"
+            size="xl"
             variant="accent"
             className="w-full"
           >
@@ -129,7 +129,7 @@ export default function ResetPasswordPage({ token, onBack }: ResetPasswordPagePr
           </Button>
         </form>
 
-        <TextSans size="small" className="mt-4 text-center theme-brutal:text-black/60">
+        <TextSans size="small" className="mt-4 text-center">
           <TextLink variant="primary" onClick={onBack}>
             {formatMessage({ id: "auth.backToSignIn.link" })}
           </TextLink>

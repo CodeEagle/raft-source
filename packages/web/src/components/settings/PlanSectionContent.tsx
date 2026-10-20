@@ -1,4 +1,5 @@
-import { Button, Card, Input, Progress, ProgressIndicator, ProgressTrack, Status } from "raft-ui";
+import { Button, Card, Input, Progress, ProgressIndicator, ProgressTrack, Separator } from "@botiverse/raft-ui";
+import Banner from "../ui/Banner";
 import Tooltip from "../ui/Tooltip";
 import { useCallback, useMemo } from "react";
 import type { ChangeEvent } from "react";
@@ -9,6 +10,7 @@ import type { BillingInfo, Server, ServerUsage } from "../../store/serverStore";
 import ConfirmDialog from "../ConfirmDialog";
 import api from "../../api/client";
 import { FormattedMessage, useIntl } from "react-intl";
+import SectionEyebrow from "../ui/SectionEyebrow";
 import SectionHeader from "../ui/SectionHeader";
 import { getBillingControlsState, getSettingsBillingPlanPresentation } from "../../utils/billingControls";
 import { formatGlobalTrialCutoffDate } from "../../utils/trialCutoff";
@@ -16,6 +18,7 @@ import { applyBillingSeatInputChange, applyBillingSeatInputCommit, getBillingCur
 import type { BillingPricedTotal } from "../../utils/billingSeatInput";
 import { BillingIntervalSegmentedControl } from "./SettingsSegmentedControls";
 import { DowngradeWarningCard } from "./SettingsPanel";
+import { HostedRuntimeSpendCard } from "./HostedRuntimeSpendCard";
 import type { BillingSeatUpdatePreview, usePlanBillingDraft } from "./SettingsPanel";
 
 // Stryker disable all: Settings billing UI wiring is covered by billingSeatInput behavior tests, source-copy contracts, and visual preview screenshots.
@@ -277,6 +280,7 @@ export function PlanSectionContent({
     try {
       const { data } = await api.post("/billing/checkout", {
         targetPlan: "pro",
+        ...(normalizedPromotionCode ? { promotionCode: normalizedPromotionCode } : {}),
         billingInterval,
         seatQuantity: requestedSeatQuantity,
         humanSeatQuantity: requestedHumanSeatCapacity,
@@ -286,12 +290,15 @@ export function PlanSectionContent({
       });
       window.location.href = data.url;
     } catch (err: any) {
-      setBillingError(err.response?.data?.error || formatMessage({ id: "billing.failedToStartCheckout" }));
+      setBillingError(err.response?.data?.code === "promotion_code_unavailable"
+        ? formatMessage({ id: "billing.checkoutPromotionUnavailable" })
+        : err.response?.data?.error || formatMessage({ id: "billing.failedToStartCheckout" }));
       setBillingAction(null);
     }
   }, [
     billingControlsDisabledReason,
     billingControlsState.canCheckout,
+    normalizedPromotionCode,
     billingInterval,
     formatMessage,
     requestedAgentSeatCapacity,
@@ -457,6 +464,13 @@ export function PlanSectionContent({
     setConfirmBillingAction(null);
     setSeatUpdatePreview(null);
   }, [setConfirmBillingAction, setSeatUpdatePreview]);
+  // One seat meter, the DS progress bar: cyan, orange from 90% (or over the
+  // cap). Humans and agents are two segments of the same colour, agents in its
+  // lighter tint, so the split reads without inventing a new colour meaning.
+  const seatUsagePercent = Math.min(100, humanSeatUsagePercent + agentSeatUsagePercent);
+  const seatUsageNearLimit = seatUsagePercent >= 90;
+  const humanSeatFillClass = seatUsageNearLimit ? "bg-warning" : "bg-info";
+  const agentSeatFillClass = seatUsageNearLimit ? "bg-warning-muted" : "bg-info-muted";
   const humanSeatIndicatorStyle = useMemo(() => ({ width: `${humanSeatUsagePercent}%` }), [humanSeatUsagePercent]);
   const agentSeatIndicatorStyle = useMemo(() => ({ width: `${agentSeatUsagePercent}%` }), [agentSeatUsagePercent]);
 
@@ -475,30 +489,38 @@ export function PlanSectionContent({
 
       {/* Free trial notice */}
       {plan === "free" && finalTrialActive && (
-        <div className="mb-4 border border-line-muted theme-brutal:border-2 theme-brutal:border-black bg-primary-soft theme-brutal:bg-soft-signal/30 shadow-raft-sm theme-brutal:shadow-brutal-sm p-4">
-          <div className="flex items-center gap-2 mb-1">
-            <span className="text-sm font-bold">{formatMessage({ id: "billing.finalTrialPeriod" })}</span>
-          </div>
-          <p className="text-xs text-foreground-muted theme-brutal:text-black/60 font-mono">
-                  {formatMessage(
-                    { id: "billing.trialActiveThrough" },
-                    {
-                      date: formatGlobalTrialCutoffDate(intlLocale),
-                    },
-                  )}
-          </p>
-        </div>
+        <Banner
+          intent="info"
+          role="note"
+          className="mb-4"
+          title={formatMessage({ id: "billing.finalTrialPeriod" })}
+        >
+          {formatMessage(
+            { id: "billing.trialActiveThrough" },
+            {
+              date: formatGlobalTrialCutoffDate(intlLocale),
+            },
+          )}
+        </Banner>
       )}
 
-      <div
-        className="mb-6 border border-line-muted bg-layer-panel shadow-raft-sm theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-sm"
+      <Card
+        className="mb-6"
         data-testid="billing-current-plan-card"
       >
-        <div className="border-b-2 border-line-muted theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-4">
+        <div className="border-b border-line-hairline px-4 py-4">
           <div className="flex flex-wrap items-center gap-3">
             <div className="min-w-0">
-              <div className="text-lg font-bold text-foreground-strong theme-brutal:text-black">{currentPlanDisplayName}</div>
-              <div className="text-sm text-foreground-muted theme-brutal:text-black/60">
+              <div className="flex min-w-0 items-center gap-2">
+                <div className="min-w-0 text-headline text-foreground">{currentPlanDisplayName}</div>
+                <span
+                  aria-hidden="true"
+                  className="inline-flex size-[22px] shrink-0 items-center justify-center rounded-chip border-[1.5px] border-sticker-ink bg-brand text-sticker-ink"
+                >
+                  <Check size={14} strokeWidth={2.5} />
+                </span>
+              </div>
+              <div className="mt-0.5 text-callout text-foreground-muted">
                 {currentPlanDescription}
               </div>
             </div>
@@ -507,11 +529,11 @@ export function PlanSectionContent({
 
         <div className={`grid gap-4 p-4 ${hasNotIncludedFeatures ? "lg:grid-cols-2" : ""}`}>
           <div>
-            <div className="mb-3 text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.included" })}</div>
+            <SectionEyebrow as="div" className="mb-3">{formatMessage({ id: "billing.included" })}</SectionEyebrow>
             <div className="space-y-3">
               {currentIncludedFeatures.map((feature) => (
-                <div key={feature} className="flex items-start gap-3 text-sm text-foreground-strong theme-brutal:text-black">
-                  <Check size={16} className="mt-0.5 shrink-0 text-green-700" />
+                <div key={feature} className="flex items-start gap-3 text-callout text-foreground">
+                  <Check size={16} className="mt-0.5 shrink-0 text-foreground" />
                   <span>{feature}</span>
                 </div>
               ))}
@@ -520,11 +542,11 @@ export function PlanSectionContent({
 
           {hasNotIncludedFeatures && (
             <div>
-              <div className="mb-3 text-sm font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "billing.notIncluded" })}</div>
+              <SectionEyebrow as="div" className="mb-3">{formatMessage({ id: "billing.notIncluded" })}</SectionEyebrow>
               <div className="space-y-3">
                 {currentNotIncludedFeatures.map((feature) => (
-                  <div key={feature} className="flex items-start gap-3 text-sm text-foreground-strong theme-brutal:text-black">
-                    <X size={16} className="mt-0.5 shrink-0 text-brutal-red" />
+                  <div key={feature} className="flex items-start gap-3 text-callout text-foreground-muted">
+                    <X size={16} className="mt-0.5 shrink-0 text-foreground-hint" />
                     <span>{feature}</span>
                   </div>
                 ))}
@@ -533,17 +555,22 @@ export function PlanSectionContent({
           )}
         </div>
 
-        <div className="border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
+        <Separator />
+        <div className="px-4 py-4">
           {showSeatUsage && usesUniversalSeats && (
-            <div className="space-y-3">
+            <div className="space-y-2">
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.seat" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                <span className="text-footnote font-semibold text-foreground">{formatMessage({ id: "billing.seat" })}</span>
+                <span className="font-mono text-mono-meta text-foreground-hint">
                   {formatSeatUsageNumber(usedUniversalSeats)} / {formatLimit(universalSeatLimit)} {formatMessage({ id: "billing.used" })}
                 </span>
               </div>
-              <Progress value={Math.min(100, humanSeatUsagePercent + agentSeatUsagePercent)} aria-label={formatMessage({ id: "billing.seat" })}>
-              <ProgressTrack className="flex !overflow-hidden">
+              <Progress
+                value={seatUsagePercent}
+                variant={seatUsageNearLimit ? "warning" : "information"}
+                aria-label={formatMessage({ id: "billing.seat" })}
+              >
+              <ProgressTrack className="flex">
                 {humanSeatUsagePercent > 0 && (
                   <Tooltip content={formatMessage(
                     { id: "billing.humansUsingSeats" },
@@ -554,7 +581,7 @@ export function PlanSectionContent({
                     },
                   )}>
                   <ProgressIndicator
-                    className="rounded-none h-full bg-primary-strong theme-brutal:bg-soft-signal"
+                    className={`h-full ${humanSeatFillClass} ${agentSeatUsagePercent > 0 ? "rounded-r-none" : ""}`}
                     style={humanSeatIndicatorStyle}
                     data-slot="progress-indicator"
                   />
@@ -570,7 +597,7 @@ export function PlanSectionContent({
                     },
                   )}>
                   <ProgressIndicator
-                    className="rounded-none h-full bg-accent-strong theme-brutal:bg-brutal-pink"
+                    className={`h-full ${agentSeatFillClass} ${humanSeatUsagePercent > 0 ? "-ml-[1.5px] rounded-l-none" : ""}`}
                     style={agentSeatIndicatorStyle}
                     data-slot="progress-indicator"
                   />
@@ -578,16 +605,16 @@ export function PlanSectionContent({
                 )}
               </ProgressTrack>
               </Progress>
-              <div className="flex flex-wrap items-center gap-4 text-xs">
+              <div className="flex flex-wrap items-center gap-4 text-caption text-foreground-muted">
                 <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-2 font-bold text-foreground-strong">
-                    <Status variant="primary" size="sm" />
+                  <span className="flex items-center gap-2 font-semibold">
+                    <span aria-hidden="true" className={`size-[9px] shrink-0 rounded-[2px] border-[1.5px] border-sticker-ink ${humanSeatFillClass}`} />
                     {formatMessage({ id: "billing.humans" })}
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="flex items-center gap-2 font-bold text-foreground-strong">
-                    <Status variant="accent" size="sm" />
+                  <span className="flex items-center gap-2 font-semibold">
+                    <span aria-hidden="true" className={`size-[9px] shrink-0 rounded-[2px] border-[1.5px] border-sticker-ink ${agentSeatFillClass}`} />
                     {formatMessage({ id: "billing.agents" })}
                   </span>
                 </div>
@@ -598,15 +625,15 @@ export function PlanSectionContent({
             <div className="grid gap-3 sm:grid-cols-2">
               {humanCount != null && (
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.humans" })}</span>
-                  <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                  <span className="text-footnote font-semibold text-foreground">{formatMessage({ id: "billing.humans" })}</span>
+                  <span className="font-mono text-mono-meta text-foreground-hint">
                     {humanCount} / {formatLimit(capacity?.maxHumans)}
                   </span>
                 </div>
               )}
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.agents" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                <span className="text-footnote font-semibold text-foreground">{formatMessage({ id: "billing.agents" })}</span>
+                <span className="font-mono text-mono-meta text-foreground-hint">
                   {agentCount} / {formatLimit(capacity?.maxAgents ?? limits.maxAgents)}
                 </span>
               </div>
@@ -615,16 +642,16 @@ export function PlanSectionContent({
           <div className="grid gap-3 sm:grid-cols-2">
             {plan === "free" && (
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.messageHistory" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                <span className="text-footnote font-semibold text-foreground">{formatMessage({ id: "billing.messageHistory" })}</span>
+                <span className="font-mono text-mono-meta text-foreground-hint">
                   {pricedLimits.messageHistoryDays === -1 ? formatMessage({ id: "billing.unlimited" }) : `${pricedLimits.messageHistoryDays} ${formatMessage({ id: "billing.days" })}`}
                 </span>
               </div>
             )}
             {plan === "free" && billing?.fileUploadQuota && (
               <div className="flex items-center justify-between gap-3">
-                <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.fileUploads" })}</span>
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                <span className="text-footnote font-semibold text-foreground">{formatMessage({ id: "billing.fileUploads" })}</span>
+                <span className="font-mono text-mono-meta text-foreground-hint">
                   {billing.fileUploadQuota.limited
                     ? `${formatBytes(billing.fileUploadQuota.usedBytes)} / ${formatBytes(billing.fileUploadQuota.limitBytes)} ${formatMessage({ id: "billing.thisMonth" })}`
                     : pricedFileUploadLimitLabel}
@@ -633,7 +660,8 @@ export function PlanSectionContent({
             )}
           </div>
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t-2 border-line-muted theme-brutal:border-black/10 px-4 py-4">
+        <Separator />
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-4">
           {billingControlsState.canOpenPortal ? (
             <div className="flex min-w-0 flex-wrap gap-2">
               <div className="flex flex-wrap gap-2">
@@ -651,7 +679,7 @@ export function PlanSectionContent({
                 {!isCancelScheduled && (
                   <Tooltip content={billingControlsDisabledReason ?? formatMessage({ id: "billing.cancelTheWholeProSubscriptionAtPeriodEnd" })}>
                   <Button
-                    variant="outline" size="sm"
+                    variant="warning" size="sm"
                     type="button"
                     disabled={!!billingControlsDisabledReason || billingAction != null}
                     onClick={handleOpenCancelSubscriptionConfirm}
@@ -675,7 +703,9 @@ export function PlanSectionContent({
             <FormattedMessage id="billing.seeAllFeaturesAndComparePlans" />
           </Button>
         </div>
-      </div>
+      </Card>
+
+      {billing?.permissions.canReadBillingSummary === true && <HostedRuntimeSpendCard />}
 
       {showManagePlanSection && (
         <>
@@ -685,11 +715,11 @@ export function PlanSectionContent({
             label={managePlanTitle}
           />
 
-          <div className="mb-6 grid gap-4 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white p-4 shadow-raft-sm theme-brutal:shadow-brutal-sm lg:grid-cols-[minmax(0,1fr)_280px]">
+          <Card className="mb-6 grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_280px]">
             <div>
               {isCheckoutMode && (
                 <div className="mb-4">
-                  <div className="mb-2 text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.howOftenDoYouWantToBeBilled" })}</div>
+                  <div className="mb-2 text-subhead font-semibold text-foreground">{formatMessage({ id: "billing.howOftenDoYouWantToBeBilled" })}</div>
                   <BillingIntervalSegmentedControl
                     value={billingInterval}
                     onValueChange={setBillingInterval}
@@ -699,7 +729,7 @@ export function PlanSectionContent({
               )}
 
               {billing?.subscription && (
-                <div className="mb-4 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                <div className="mb-4 text-footnote text-foreground-muted">
                   {formatMessage({ id: "billing.billingInterval" })}: {isCancelScheduled
                     ? formatMessage(
                         { id: "billing.intervalWithCancellationScheduled" },
@@ -710,14 +740,14 @@ export function PlanSectionContent({
               )}
 
               <div className="flex min-w-0 flex-col gap-3">
-                <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+                <span className="text-subhead font-semibold text-foreground">
                   {managePlanInputPrompt}
                 </span>
                 <div className="flex flex-wrap items-end gap-3">
-                  <label className="flex flex-col gap-1">
-                    <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{localizedBillingSeatCopyLabels.seatQuantityLabel}</span>
+                  <label className="flex flex-col gap-1.5">
+                    <span className="text-footnote font-semibold text-foreground-muted">{localizedBillingSeatCopyLabels.seatQuantityLabel}</span>
                     <Input
-                      className="w-28 text-sm font-mono"
+                      className="w-28"
                       type="text"
                       inputMode="numeric"
                       pattern="[0-9]*"
@@ -730,11 +760,11 @@ export function PlanSectionContent({
                       onBlur={commitSeatInput}
                     />
                   </label>
-                  {isManageSeatMode && seatDelta > 0 && (
-                    <label className="flex w-64 max-w-full flex-col gap-1">
-                      <span className="text-xs font-bold text-foreground-muted theme-brutal:text-black/60">{formatMessage({ id: "billing.promotionCodeOptional" })}</span>
+                  {(isCheckoutMode || (isManageSeatMode && seatDelta > 0)) && (
+                    <label className="flex w-64 max-w-full flex-col gap-1.5">
+                      <span className="text-footnote font-semibold text-foreground-muted">{formatMessage({ id: "billing.promotionCodeOptional" })}</span>
                       <Input
-                        className="w-full text-sm font-mono uppercase"
+                        className="w-full"
                         type="text"
                         autoComplete="off"
                         aria-label={formatMessage({ id: "billing.promotionCodeOptional" })}
@@ -745,19 +775,24 @@ export function PlanSectionContent({
                     </label>
                   )}
                 </div>
+                {isCheckoutMode && (
+                  <span className="text-caption text-foreground-hint">
+                    {formatMessage({ id: "billing.checkoutPromotionHint" })}
+                  </span>
+                )}
                 {isManageSeatMode && seatDelta > 0 && (
-                  <span className="text-[11px] font-mono text-foreground-muted theme-brutal:text-black/50">
+                  <span className="text-caption text-foreground-hint">
                     {formatMessage({ id: "billing.enterACodeApprovedForExistingSeatUpdate" })}
                   </span>
                 )}
-                <span className="text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                <span className="text-caption text-foreground-hint">
                     {localizedBillingSeatCopyLabels.quantityHelpLabel} {formatMessage(
                       { id: "billing.seatCoverageHelp" },
                       { min: minimumUsageSeatQuantity, price: PRO_SEAT_MONTHLY_USD },
                     )}
                 </span>
                 {billingSeatDraftError && (
-                  <span className="text-xs font-mono text-brutal-red">
+                  <span className="text-caption font-semibold text-danger-strong">
                     {billingSeatDraftError}
                   </span>
                 )}
@@ -800,36 +835,35 @@ export function PlanSectionContent({
                 )}
               </div>
               {billingControlsDisabledReason && (
-                <p className="mt-2 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">{billingControlsDisabledReason}</p>
+                <p className="mt-2 text-caption text-foreground-hint">{billingControlsDisabledReason}</p>
               )}
               {billingNotice && (
-                <p className="mt-2 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">{billingNotice}</p>
+                <Banner intent="info" density="sm" role="status" className="mt-3">{billingNotice}</Banner>
               )}
               {billingError && (
-                <p className="mt-2 text-xs font-mono text-brutal-red">{billingError}</p>
+                <Banner intent="warning" density="sm" className="mt-3">{billingError}</Banner>
               )}
             </div>
 
             <Card
-              variant="option"
               data-testid="billing-summary-card"
-              className="bg-layer-canvas-muted p-4 theme-brutal:border-black theme-brutal:bg-brutal-cream"
+              className="p-4"
             >
-              <div className="mb-3 text-xs font-bold uppercase tracking-widest text-foreground-muted theme-brutal:text-black/50">
+              <SectionEyebrow as="div" className="mb-3">
                 {isCheckoutMode ? formatMessage({ id: "billing.checkoutSummary" }) : isManageSeatMode ? (formatMessage({ id: "billing.manageSeatsSummary" })) : formatMessage({ id: "billing.subscriptionSummary" })}
-              </div>
+              </SectionEyebrow>
               <div className="space-y-3">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.seatSummaryLabel}</span>
-                  <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{seatSummaryValue}</span>
+                  <span className="text-callout text-foreground-muted">{localizedBillingSeatCopyLabels.seatSummaryLabel}</span>
+                  <span className="font-mono text-mono-code text-foreground">{seatSummaryValue}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.billableSeatsSummaryLabel}</span>
-                  <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{draftSeatQuantity}</span>
+                  <span className="text-callout text-foreground-muted">{localizedBillingSeatCopyLabels.billableSeatsSummaryLabel}</span>
+                  <span className="font-mono text-mono-code text-foreground">{draftSeatQuantity}</span>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingSeatCopyLabels.capacitySummaryLabel}</span>
-                  <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
+                  <span className="text-callout text-foreground-muted">{localizedBillingSeatCopyLabels.capacitySummaryLabel}</span>
+                  <span className="inline-flex flex-col items-end text-right text-callout text-foreground">
                     <span>{formatHumanCapacityLabel(draftSeatQuantity)}</span>
                     <span>{formatAgentCapacityLabel(draftProvisionedAgentSeats)}</span>
                   </span>
@@ -837,10 +871,10 @@ export function PlanSectionContent({
                 {isCheckoutMode ? (
                   <>
                     <div className="flex items-center justify-between gap-3">
-                      <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
-                      <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
+                      <span className="text-callout font-semibold text-foreground">{localizedBillingTotalSummaryLabels.totalLabel}</span>
+                      <span className="inline-flex flex-col items-end text-callout font-semibold text-foreground">
                         {localizedSelectedTotalLabels.originalLabel && (
-                          <span className="text-foreground-muted theme-brutal:text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
+                          <span className="font-normal text-foreground-hint line-through">{localizedSelectedTotalLabels.originalLabel}</span>
                         )}
                         <span>{localizedSelectedTotalLabels.totalLabel}</span>
                       </span>
@@ -850,14 +884,14 @@ export function PlanSectionContent({
                   <>
                     {isManageSeatMode && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{formatMessage({ id: "billing.currentSeats" })}</span>
-                        <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{currentSeatQuantity}</span>
+                        <span className="text-callout text-foreground-muted">{formatMessage({ id: "billing.currentSeats" })}</span>
+                        <span className="font-mono text-mono-code text-foreground">{currentSeatQuantity}</span>
                       </div>
                     )}
                     {isManageSeatMode && seatDelta !== 0 && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{seatDelta > 0 ? formatMessage({ id: "billing.addedCapacity" }) : formatMessage({ id: "billing.removedCapacity" })}</span>
-                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
+                        <span className="text-callout text-foreground-muted">{seatDelta > 0 ? formatMessage({ id: "billing.addedCapacity" }) : formatMessage({ id: "billing.removedCapacity" })}</span>
+                        <span className="inline-flex flex-col items-end text-right text-callout text-foreground">
                           <span>{formatHumanCapacityLabel(Math.abs(seatDelta))}</span>
                           <span>{formatAgentCapacityLabel(Math.abs(seatDelta) * PRO_AGENT_SEAT_BLOCK_SIZE)}</span>
                         </span>
@@ -865,29 +899,30 @@ export function PlanSectionContent({
                     )}
                     {isManageSeatMode && localizedCurrentTotalLabel && localizedBillingTotalSummaryLabels.currentTotalLabel && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.currentTotalLabel}</span>
-                        <span className="text-sm font-mono text-foreground-muted theme-brutal:text-black/60">{localizedCurrentTotalLabel}</span>
+                        <span className="text-callout text-foreground-muted">{localizedBillingTotalSummaryLabels.currentTotalLabel}</span>
+                        <span className="text-callout text-foreground">{localizedCurrentTotalLabel}</span>
                       </div>
                     )}
                     {isManageSeatMode && (
                       <div className="flex items-center justify-between gap-3">
-                        <span className="text-sm font-bold text-foreground-strong theme-brutal:text-black">{localizedBillingTotalSummaryLabels.totalLabel}</span>
-                        <span className="inline-flex flex-col items-end text-sm font-mono leading-5 text-foreground-muted theme-brutal:text-black/60">
+                        <span className="text-callout font-semibold text-foreground">{localizedBillingTotalSummaryLabels.totalLabel}</span>
+                        <span className="inline-flex flex-col items-end text-callout font-semibold text-foreground">
                           {localizedSelectedTotalLabels.originalLabel && (
-                            <span className="text-foreground-muted theme-brutal:text-black/40 line-through">{localizedSelectedTotalLabels.originalLabel}</span>
+                            <span className="font-normal text-foreground-hint line-through">{localizedSelectedTotalLabels.originalLabel}</span>
                           )}
                           <span>{localizedSelectedTotalLabels.totalLabel}</span>
                         </span>
                       </div>
                     )}
-                    <div className="border-t-2 border-line-muted theme-brutal:border-black pt-3 text-xs font-mono text-foreground-muted theme-brutal:text-black/60">
+                    <div className="text-caption text-foreground-hint">
+                      <Separator className="mb-3" />
                       {formatMessage({ id: "billing.seatIncreasesMayBillImmediatelyAfterStripeConf" })}
                     </div>
                   </>
                 )}
               </div>
             </Card>
-          </div>
+          </Card>
         </>
       )}
 
@@ -898,7 +933,7 @@ export function PlanSectionContent({
           message={formatMessage({ id: "billing.cancelTheWholeProSubscriptionAtTheEndOfTheCu" })}
           confirmLabel={formatMessage({ id: "billing.cancelSubscription2" })}
           loadingLabel={formatMessage({ id: "billing.canceling" })}
-          confirmColor="bg-brutal-orange"
+          confirmVariant="warning"
           onConfirm={handleCancelSubscription}
           onClose={handleCloseCancelSubscriptionConfirm}
         />
@@ -917,7 +952,10 @@ export function PlanSectionContent({
                   ? formatMessage({ id: "billing.youAreAboutToStartProCheckout" })
                   : formatMessage({ id: "billing.youAreAboutToUpdateThisProSubscription" })}
               </p>
-              <div className="font-mono text-xs">
+              {confirmBillingAction === "checkout" && normalizedPromotionCode && (
+                <p className="break-all text-footnote text-foreground-muted">{formatMessage({ id: "billing.checkoutPromotionReview" }, { code: normalizedPromotionCode })}</p>
+              )}
+              <div className="space-y-0.5 rounded-control bg-fill-muted px-3 py-2 text-footnote text-foreground">
                 {confirmBillingAction === "update" ? (
                   <>
                     <div>{formatMessage({ id: "billing.currentSeats" })}: {currentSeatQuantity}</div>
@@ -980,7 +1018,7 @@ export function PlanSectionContent({
           loadingLabel={confirmBillingAction === "checkout"
             ? formatMessage({ id: "billing.opening2" })
             : formatMessage({ id: "billing.updating2" })}
-          confirmColor="bg-brutal-pink"
+          confirmVariant="accent"
           onConfirm={confirmBillingAction === "checkout" ? handleCheckout : handlePackQuantityUpdate}
           onClose={handleCloseBillingConfirm}
         />

@@ -11,7 +11,7 @@ export async function expectCssColor(
    * Per-channel tolerance. Default 0 (exact). Use 1 when the expected color
    * is a hex literal but the actual comes from an oklch design token — the
    * color-space round-trip can drift one channel by 1/255 (e.g. RUI's
-   * bg-primary oklch(0.883 0.162 91.89) → [255,212,65] vs #FFD440).
+   * bg-brand oklch(0.883 0.162 91.89) → [255,212,65] vs #FFD440).
    */
   tolerance = 0,
 ): Promise<void> {

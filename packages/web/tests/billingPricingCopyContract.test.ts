@@ -52,6 +52,7 @@ test("settings billing pricing copy matches current landing pricing copy", () =>
   // output is pinned in tests/billingTrialAndCheckout.i18n.test.ts.
   assert.match(billingCopy, /id: "billing\.seatCoverageHelp"/);
   assert.match(billingCopy, /Everything in Free/);
+  assert.match(publicPlanBlocks, /billing\.agentMigration/);
   assert.match(billingCopy, /Unlimited message history/);
   assert.match(billingCopy, /Higher file upload limits/);
   assert.match(billingCopy, /Joint channels/);

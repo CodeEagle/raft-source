@@ -22,12 +22,12 @@ export function targetPickerLabel(channel: Channel) {
 
 export function targetIcon(channel: Channel) {
   if (channel.type === "dm" && channel.peerType === "agent") {
-    return <AvatarSlot context="compact-list" type="agent" agentAvatarUrl={channel.peerAvatarUrl ?? null} />;
+    return <AvatarSlot context="compact-row" type="agent" agentAvatarUrl={channel.peerAvatarUrl ?? null} />;
   }
   if (channel.type === "dm") {
     return (
       <AvatarSlot
-        context="compact-list"
+        context="compact-row"
         type="human"
         humanAvatarUrl={channel.peerAvatarUrl ?? null}
         gravatarHash={channel.peerGravatarHash ?? null}

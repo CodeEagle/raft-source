@@ -38,6 +38,7 @@ import {
   validateDraftSendFlags,
   formatDriveByJoinedToPostTip,
   formatHeldSendOutput,
+  normalizeAttachmentIdFlags,
 } from "./send";
 import {
   formatFreshnessHoldOutput,
@@ -729,6 +730,64 @@ function preResponseTimeout(): CliError {
     proxyResponseComplete: false,
   });
 }
+
+const ATTACHMENT_A = "11111111-1111-4111-8111-111111111111";
+const ATTACHMENT_B = "22222222-2222-4222-8222-222222222222";
+const ATTACHMENT_C = "33333333-3333-4333-8333-333333333333";
+
+test("normalizeAttachmentIdFlags splits ids an agent put in one --attachment-id", () => {
+  assert.deepEqual(normalizeAttachmentIdFlags([]), []);
+  assert.deepEqual(normalizeAttachmentIdFlags([ATTACHMENT_A]), [ATTACHMENT_A]);
+  assert.deepEqual(
+    normalizeAttachmentIdFlags([`${ATTACHMENT_A} ${ATTACHMENT_B}`, `${ATTACHMENT_C},`]),
+    [ATTACHMENT_A, ATTACHMENT_B, ATTACHMENT_C],
+  );
+  assert.deepEqual(normalizeAttachmentIdFlags([` ${ATTACHMENT_A},\n ${ATTACHMENT_B} `]), [ATTACHMENT_A, ATTACHMENT_B]);
+  assert.deepEqual(normalizeAttachmentIdFlags([`${ATTACHMENT_A} ${ATTACHMENT_A}`, ATTACHMENT_B, ATTACHMENT_A]), [ATTACHMENT_A, ATTACHMENT_B]);
+});
+
+test("normalizeAttachmentIdFlags names a bad entry by position, never echoes it, and gives a runnable next step", () => {
+  assert.throws(
+    () => normalizeAttachmentIdFlags([`${ATTACHMENT_A} report.png`], "#design"),
+    (err: unknown) =>
+      err instanceof SendContentError
+      && err.code === "ATTACHMENT_ID_INVALID"
+      && err.message.startsWith("Not sent: --attachment-id entry 2 is not an attachment ID.")
+      && err.message.includes('"Attachment ID:" line')
+      && err.message.endsWith('Run: raft attachment upload --path <file> --target "#design"')
+      && !err.message.includes("report.png"),
+  );
+});
+
+test("normalizeAttachmentIdFlags rejects an empty value instead of sending without the attachment", () => {
+  for (const values of [[""], [ATTACHMENT_A, "  "]]) {
+    assert.throws(
+      () => normalizeAttachmentIdFlags(values, "#room"),
+      (err: unknown) =>
+        err instanceof SendContentError
+        && err.code === "ATTACHMENT_ID_INVALID"
+        && err.message.startsWith(`Not sent: --attachment-id entry ${values.length} is empty.`),
+    );
+  }
+});
+
+test("message send sends split attachment ids, and sends nothing when one is malformed", async () => {
+  process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-attachment-split-"));
+  const sent = ambiguousSendHarness([{ ok: true, status: 200, error: null, data: { ok: true, state: "sent", messageId: "m-1" } }]);
+  await messageSendCommand.handler(sent.ctx, [], { target: "#room", attachmentId: [`${ATTACHMENT_A} ${ATTACHMENT_B}`] });
+  assert.deepEqual(sent.bodies[0]!.attachmentIds, [ATTACHMENT_A, ATTACHMENT_B]);
+
+  // The bad id is reported before stdin is read, so the body is not consumed.
+  const rejected = ambiguousSendHarness([]);
+  let stdinRead = false;
+  (rejected.ctx.io as unknown as { stdin: Readable }).stdin = new Readable({ read() { stdinRead = true; this.push(null); } });
+  await assert.rejects(
+    async () => messageSendCommand.handler(rejected.ctx, [], { target: "#room", attachmentId: ["att-1"] }),
+    (err: unknown) => err instanceof CliError && err.code === "ATTACHMENT_ID_INVALID",
+  );
+  assert.equal(rejected.bodies.length, 0, "a malformed id is caught before any request");
+  assert.equal(stdinRead, false, "stdin is left unread");
+});
 
 test("message send reconciles a timeout after commit without replaying content", async () => {
   process.env.SLOCK_CLI_DRAFT_STATE_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "slock-cli-drafts-reconcile-after-"));

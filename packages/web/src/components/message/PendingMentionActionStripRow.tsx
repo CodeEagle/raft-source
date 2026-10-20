@@ -2,7 +2,7 @@ import { BellRing, Check, UserPlus, UserX } from "lucide-react";
 import { useCallback } from "react";
 import { useIntl } from "react-intl";
 import type { PendingMentionAction } from "../../store/messageStore";
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import type { PendingMentionActionLocalState } from "./PendingMentionActionStrip";
 import { PendingMentionTargetAvatar } from "./PendingMentionTargetAvatar";
 
@@ -21,6 +21,9 @@ export function pendingMentionTargetLabel(action: PendingMentionAction): string 
   }
   return handle;
 }
+
+// A finished step reads as a neutral status chip: sunken fill, no edge, hint ink.
+const PENDING_MENTION_DONE_CHIP_CLASS = "inline-flex h-[22px] cursor-default items-center gap-1 rounded-chip bg-fill-muted px-2 text-caption font-semibold text-foreground-muted";
 
 interface PendingMentionActionStripRowProps {
   action: PendingMentionAction;
@@ -80,9 +83,9 @@ export function PendingMentionActionStripRow({
           <PendingMentionTargetAvatar action={action} />
         </div>
         <div className="min-w-0 flex-1">
-          <div className="truncate text-xs font-bold text-foreground-strong">{targetLabel}</div>
+          <div className="truncate text-footnote font-bold text-foreground">{targetLabel}</div>
           <div
-            className="line-clamp-2 text-[11px] leading-4 text-foreground-muted sm:line-clamp-none sm:truncate"
+            className="line-clamp-2 text-caption text-foreground-muted sm:line-clamp-none sm:truncate"
             data-testid="pending-mention-action-status"
           >
             {statusCopy}
@@ -94,14 +97,14 @@ export function PendingMentionActionStripRow({
         data-testid="pending-mention-action-buttons"
       >
         {localState === "added" ? (
-          <span className="inline-flex items-center gap-1 rounded-md border border-line-hairline bg-fill-muted px-2 py-0.5 text-[12px] font-bold text-foreground-hint cursor-default theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/20 theme-brutal:bg-black/[0.04] theme-brutal:text-black/40">
-            <Check size={12} strokeWidth={3} />
+          <span className={PENDING_MENTION_DONE_CHIP_CLASS}>
+            <Check size={12} />
             {formatMessage({ id: "message.pendingMention.added" })}
           </span>
         ) : canAdd ? (
           <Button
             type="button"
-            variant="accent"
+            variant="outline"
             size="sm"
             disabled={Boolean(executingState)}
             onClick={handleMarkAdded}
@@ -111,8 +114,8 @@ export function PendingMentionActionStripRow({
           </Button>
         ) : null}
         {localState === "notified" ? (
-          <span className="inline-flex items-center gap-1 rounded-md border border-line-hairline bg-fill-muted px-2 py-0.5 text-[12px] font-bold text-foreground-hint cursor-default theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/20 theme-brutal:bg-black/[0.04] theme-brutal:text-black/40">
-            <Check size={12} strokeWidth={3} />
+          <span className={PENDING_MENTION_DONE_CHIP_CLASS}>
+            <Check size={12} />
             {formatMessage({ id: "message.pendingMention.queued" })}
           </span>
         ) : canNotify ? (
@@ -129,7 +132,7 @@ export function PendingMentionActionStripRow({
         ) : null}
         <Button
           type="button"
-          variant="muted"
+          variant="ghost"
           size="sm"
           onClick={handleDismiss}
         >

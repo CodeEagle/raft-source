@@ -32,6 +32,7 @@ import {
   NON_RETRYABLE_SPAWN_FAILURE_REASONS,
   RETRY_ONCE_SPAWN_FAILURE_REASONS,
   SPAWN_FAILURE_RETRY_ONCE_DELAY_MS,
+  type SpawnFailureLookupReason,
   type SpawnFailureReason,
   type WakeCrashLoopActivityDiagnostic,
 } from "@botiverse/raft-shared";
@@ -138,6 +139,14 @@ export interface WakeCrashLoopEpisodeState {
    * start's ownership can lift the block. Absent = null (= never lifted).
    */
   blockedByLaunchId?: string | null;
+  /**
+   * Fingerprint of the needs-action runtime error the owner was last told
+   * about, written only after the notice was posted. Survives a human start
+   * and a manual stop (restarting without a fix is not news to them); any
+   * runtime config change or a run that clears the error forgets it, so the
+   * next failure is reported again. Absent = null.
+   */
+  actionRequiredNotifiedFingerprint?: string | null;
 }
 
 /** Token returned by `recordStart`; lets a failed dispatch roll the record back. */
@@ -220,8 +229,13 @@ export function applyWakeCrashLoopStart(
 ): WakeCrashLoopEpisodeState {
   let state: WakeCrashLoopEpisodeState = { ...current };
   if (input.human && (state.blocked || state.earlyExitCount > 0 || hasStartFailureStreak(state))) {
-    // A new episode, but an owed catch-up survives until it is delivered.
-    state = { ...freshWakeCrashLoopEpisode(state.episode + 1), catchupOwed: current.catchupOwed === true };
+    // A new episode, but an owed catch-up survives until it is delivered, and
+    // the owner is not told again about an error they have already seen.
+    state = {
+      ...freshWakeCrashLoopEpisode(state.episode + 1),
+      catchupOwed: current.catchupOwed === true,
+      actionRequiredNotifiedFingerprint: current.actionRequiredNotifiedFingerprint ?? null,
+    };
   } else if (
     state.lastStartAtMs !== null
     && !state.lastStartCounted
@@ -243,7 +257,12 @@ export function applyWakeCrashLoopStart(
 export function applyWakeCrashLoopManualStop(current: WakeCrashLoopEpisodeState): WakeCrashLoopEpisodeState {
   // task #1221: an undelivered catch-up survives the stop; the carrier (if any)
   // loses its claim, so only a later start that carries it again can clear it.
-  return { ...freshWakeCrashLoopEpisode(current.episode), catchupOwed: current.catchupOwed === true, catchupCarriedLaunchId: null };
+  return {
+    ...freshWakeCrashLoopEpisode(current.episode),
+    catchupOwed: current.catchupOwed === true,
+    catchupCarriedLaunchId: null,
+    actionRequiredNotifiedFingerprint: current.actionRequiredNotifiedFingerprint ?? null,
+  };
 }
 
 export function wakeCrashLoopExitRejectReason(
@@ -303,7 +322,9 @@ export type WakeCrashLoopStartFailureOutcome =
  * the current start, once per start: a late failure from an older launch must
  * not count against (or block) a start a person or a config change has since
  * made. Then, in order:
- *  - task #1221: a reason retrying cannot fix blocks at once;
+ *  - task #1221: a reason retrying cannot fix blocks at once; so does a
+ *    runtime the computer does not have (`runtime_not_found`), unless the
+ *    lookup itself timed out or failed;
  *  - a retry-once reason blocks when the previous counted failure had the same
  *    reason (the retry failed too), else holds automatic wakes for
  *    `retryOnceDelayMs` so the server retries once after it;
@@ -313,7 +334,7 @@ export type WakeCrashLoopStartFailureOutcome =
  */
 export function applyWakeCrashLoopStartFailure(
   current: WakeCrashLoopEpisodeState,
-  input: { launchId: string | null; reason: string; nowMs: number },
+  input: { launchId: string | null; reason: string; lookupReason?: SpawnFailureLookupReason; nowMs: number },
   rules: WakeCrashLoopRules = DEFAULT_WAKE_CRASH_LOOP_RULES,
 ): { state: WakeCrashLoopEpisodeState; outcome: WakeCrashLoopStartFailureOutcome } {
   if (current.blocked) return { state: current, outcome: "ignored" };
@@ -332,6 +353,7 @@ export function applyWakeCrashLoopStartFailure(
   const reason = input.reason as SpawnFailureReason;
   const retryOnce = RETRY_ONCE_SPAWN_FAILURE_REASONS.includes(reason);
   const block = NON_RETRYABLE_SPAWN_FAILURE_REASONS.includes(reason)
+    || isRuntimeAbsentStartFailure(reason, input.lookupReason)
     || (retryOnce && previousCount > 0 && current.lastStartFailureReason === input.reason)
     || count >= (rules.startFailureThreshold ?? START_FAILURE_THRESHOLD);
   if (block) {
@@ -355,6 +377,15 @@ export function applyWakeCrashLoopStartFailure(
     };
   }
   return { state: counted, outcome: "counted" };
+}
+
+/**
+ * The computer does not have the agent's runtime (no CLI on PATH): retrying
+ * cannot fix that, only installing it there or switching runtime. A lookup
+ * that timed out or failed did not decide, so it counts like any failure.
+ */
+export function isRuntimeAbsentStartFailure(reason: string, lookupReason: SpawnFailureLookupReason | undefined): boolean {
+  return reason === "runtime_not_found" && lookupReason !== "lookup_timed_out" && lookupReason !== "lookup_failed";
 }
 
 /**
@@ -392,6 +423,47 @@ export function applyWakeCrashLoopStartFailureOwned(
     state.blockedByLaunchId = null;
   }
   return { state, changed: true, withdrawn: true, unblocked };
+}
+
+export type WakeCrashLoopActionRequiredOutcome =
+  /** Not the current start's error, or no start recorded: no change. */
+  | "ignored"
+  /** Already blocked: nothing new to hold. */
+  | "already_blocked"
+  /** Automatic wakes are now blocked until the owner acts. */
+  | "blocked";
+
+/**
+ * The current start's runtime reported an error only the owner can fix (a
+ * rejected credential, a model the plan does not allow). Retrying cannot help,
+ * so automatic wakes stop at once, like a non-retryable start failure: the
+ * block keeps the reason, owes the unread catch-up, and lifts on a human start
+ * or a runtime config change. `notify` is true when the owner has not been
+ * told about this error (by fingerprint) yet; the caller records the
+ * fingerprint once the notice is actually posted (`markActionRequiredNotified`).
+ */
+export function applyWakeCrashLoopActionRequired(
+  current: WakeCrashLoopEpisodeState,
+  input: { launchId: string | null; reason: string; fingerprint: string; nowMs: number },
+): { state: WakeCrashLoopEpisodeState; outcome: WakeCrashLoopActionRequiredOutcome; notify: boolean } {
+  if (input.launchId === null || input.launchId !== current.lastStartLaunchId) {
+    return { state: current, outcome: "ignored", notify: false };
+  }
+  if (current.blocked) return { state: current, outcome: "already_blocked", notify: false };
+  const notify = (current.actionRequiredNotifiedFingerprint ?? null) !== input.fingerprint;
+  return {
+    state: {
+      ...current,
+      blocked: true,
+      blockedAtMs: input.nowMs,
+      lastLaunchId: input.launchId,
+      needsActionReason: input.reason,
+      blockedByLaunchId: input.launchId,
+      catchupOwed: true,
+    },
+    outcome: "blocked",
+    notify,
+  };
 }
 
 /** A start reported its runtime active: the failed-start streak is over. */
@@ -638,8 +710,8 @@ export class WakeCrashLoopBreaker {
    */
   async recordStartFailure(
     agentId: string,
-    input: { launchId: string | null; reason: string; nowMs: number },
-  ): Promise<{ outcome: WakeCrashLoopStartFailureOutcome; blocked: boolean; startFailureCount: number; retryAfterMs: number | null }> {
+    input: { launchId: string | null; reason: string; lookupReason?: SpawnFailureLookupReason; nowMs: number; noticeFingerprint?: string },
+  ): Promise<{ outcome: WakeCrashLoopStartFailureOutcome; blocked: boolean; startFailureCount: number; retryAfterMs: number | null; notify: boolean }> {
     return this.mutate(agentId, (state) => {
       const applied = applyWakeCrashLoopStartFailure(state, input, this.rules);
       return {
@@ -650,9 +722,38 @@ export class WakeCrashLoopBreaker {
           blocked: applied.state.blocked,
           startFailureCount: applied.state.startFailureCount ?? 0,
           retryAfterMs: applied.state.retryAfterMs ?? null,
+          // The owner is told once per fingerprint, as for a needs-action runtime error.
+          notify: applied.outcome === "blocked"
+            && input.noticeFingerprint !== undefined
+            && (state.actionRequiredNotifiedFingerprint ?? null) !== input.noticeFingerprint,
         },
       };
     });
+  }
+
+  /** See `applyWakeCrashLoopActionRequired`. */
+  async recordActionRequired(
+    agentId: string,
+    input: { launchId: string | null; reason: string; fingerprint: string; nowMs: number },
+  ): Promise<{ outcome: WakeCrashLoopActionRequiredOutcome; notify: boolean }> {
+    return this.mutate(agentId, (state) => {
+      const applied = applyWakeCrashLoopActionRequired(state, input);
+      return { state: applied.state, write: applied.outcome === "blocked", result: { outcome: applied.outcome, notify: applied.notify } };
+    });
+  }
+
+  /** The owner was told about this error: the same one is not news until a fix is tried. */
+  async markActionRequiredNotified(agentId: string, fingerprint: string): Promise<void> {
+    await this.mutate(agentId, (state) => (state.actionRequiredNotifiedFingerprint ?? null) === fingerprint
+      ? { state, result: undefined, write: false }
+      : { state: { ...state, actionRequiredNotifiedFingerprint: fingerprint }, result: undefined, write: true });
+  }
+
+  /** The runtime ran past the error the owner was told about: a later one is news again. */
+  async forgetActionRequiredNotice(agentId: string): Promise<void> {
+    await this.mutate(agentId, (state) => (state.actionRequiredNotifiedFingerprint ?? null) === null
+      ? { state, result: undefined, write: false }
+      : { state: { ...state, actionRequiredNotifiedFingerprint: null }, result: undefined, write: true });
   }
 
   /** See `applyWakeCrashLoopStartSucceeded`. */
@@ -681,10 +782,34 @@ export class WakeCrashLoopBreaker {
       }
       // Not blocked yet, but a start made under the old configuration may still
       // report its failure. Forget that start so its late failure cannot block
-      // the agent under the new configuration.
-      if (state.lastStartLaunchId === null) return { state, result: false, write: false };
-      return { state: { ...state, lastStartLaunchId: null }, result: false, write: true };
+      // the agent under the new configuration. A new configuration also makes
+      // an error the owner was told about news again.
+      if (state.lastStartLaunchId === null && (state.actionRequiredNotifiedFingerprint ?? null) === null) {
+        return { state, result: false, write: false };
+      }
+      return { state: { ...state, lastStartLaunchId: null, actionRequiredNotifiedFingerprint: null }, result: false, write: true };
     });
+  }
+
+  /**
+   * The computer now reports the agent's runtime: a block that was only about
+   * it missing there no longer applies. Same fresh episode as a config change
+   * (the owed catch-up kept); any other block stays. The owner is not told
+   * again if the start still fails: the listing and the start disagreeing is
+   * not something new they can act on.
+   */
+  async liftForRuntimeAvailable(agentId: string): Promise<boolean> {
+    return this.mutate(agentId, (state) => state.blocked && state.needsActionReason === "runtime_not_found"
+      ? {
+        state: {
+          ...freshWakeCrashLoopEpisode(state.episode + 1),
+          catchupOwed: state.catchupOwed === true,
+          actionRequiredNotifiedFingerprint: state.actionRequiredNotifiedFingerprint ?? null,
+        },
+        result: true,
+        write: true,
+      }
+      : { state, result: false, write: false });
   }
 
   async snapshot(agentId: string): Promise<WakeCrashLoopActivityDiagnostic> {

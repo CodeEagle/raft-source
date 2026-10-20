@@ -67,6 +67,18 @@ test("a paused agent's failed start says restarts are paused and how to lift it,
   assert.equal(formatSpawnFailureDetail(intl.formatMessage, undefined, "x"), null);
 });
 
+test("a start paused because the computer lacks the runtime points to the runtime, never to the model or a restart", () => {
+  for (const locale of ["en", "zh-cn"] as const) {
+    const intl = createIntl({ locale, defaultLocale: "en", messages: mergedMessages(locale) });
+    const text = formatSpawnFailureDetail(intl.formatMessage, { reason: "runtime_not_found", autoRestartPaused: true }, "Runtime executable not found.");
+    assert.ok(text?.startsWith("Runtime executable not found."), `${locale}: ${text}`);
+    assert.ok(text.includes(locale === "en" ? "automatic wakes are paused until the runtime is available" : "已暂停自动唤醒"), `${locale}: ${text}`);
+    assert.ok(!text.includes(locale === "en" ? "API key" : "API 密钥") && !text.includes("activity.status."), `${locale}: ${text}`);
+  }
+  const intl = createIntl({ locale: "en", defaultLocale: "en", messages: mergedMessages("en") });
+  assert.equal(formatSpawnFailureDetail(intl.formatMessage, { reason: "runtime_not_found" }, "x"), null, "not paused: keep the daemon detail");
+});
+
 test("task #10: session_needs_reset has its own copy that points to Reset Session, never 'restart the agent'", () => {
   for (const locale of ["en", "zh-cn"] as const) {
     const intl = createIntl({ locale, defaultLocale: "en", messages: mergedMessages(locale) });

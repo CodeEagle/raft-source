@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import { TRACE_EVENT_ROW_V2_PROJECTION_COLUMNS } from "@botiverse/raft-shared";
 import type { Client } from "scopedb";
 import { handleRequest, ingestTraceBundleObject, type TraceUploadWorkerEnv } from "./index";
+import { resetTraceUploadBudgetsForTest } from "./traces/uploadRateLimit";
 
 const SECRET = "scope-secret-for-tests";
 
@@ -437,6 +438,123 @@ test("web trace endpoint reports V2 failure without failing canonical OTLP", asy
   assert.equal(body.scopedbStatus, "success");
   assert.equal(body.v2ProjectorStatus, "failed");
   assert.equal(body.v2RowsProjected, 0);
+});
+
+function captureWarnings(): { lines: string[]; restore: () => void } {
+  const lines: string[] = [];
+  const originalWarn = console.warn;
+  console.warn = (...args: unknown[]) => { lines.push(args.map(String).join(" ")); };
+  return { lines, restore: () => { console.warn = originalWarn; } };
+}
+
+function webTraceRequest(body: Record<string, unknown>): Request {
+  return new Request("https://trace-worker.test/api/web-traces", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Origin: "https://app.slock.ai" },
+    body: JSON.stringify({ attestation: signAttestation(webTraceClaims()), ...body }),
+  });
+}
+
+test("web trace endpoint fails fast with 503 + Retry-After when the OTLP sink hangs", async () => {
+  const { env } = baseEnv();
+  env.TRACE_WEB_CORS_ORIGIN = "https://app.slock.ai";
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_OTLP_TIMEOUT_MS = "1"; // clamps to the 1s floor
+  // A sink that never answers but honours the abort signal, like undici fetch.
+  env.TRACE_INGEST_FETCH = (_input, init) => new Promise<Response>((_resolve, reject) => {
+    const signal = init?.signal;
+    assert.ok(signal, "OTLP post must carry an AbortSignal");
+    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+  });
+  const warnings = captureWarnings();
+  const startedAt = Date.now();
+  let res: Response;
+  try {
+    res = await handleRequest(webTraceRequest({
+      batchId: "web-batch-timeout",
+      records: [spanRecord({ name: "web.interaction.message_send", surface: "web" })],
+    }), env);
+  } finally {
+    warnings.restore();
+  }
+  const elapsedMs = Date.now() - startedAt;
+
+  assert.equal(res.status, 503);
+  assert.ok(elapsedMs < 5_000, `expected a fast failure, took ${elapsedMs}ms`);
+  assert.equal(res.headers.get("Retry-After"), "30");
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), "https://app.slock.ai");
+  assert.deepEqual(await res.json(), { error: "Trace sink unavailable", reason: "sink_timeout" });
+  assert.equal(warnings.lines.length, 1);
+  assert.match(warnings.lines[0], /^\[TraceUploadWorker\] otlp sink failed reason=sink_timeout route=web items=\d+ status=- duration_ms=\d+$/);
+});
+
+test("web trace endpoint maps a refusing OTLP sink (503) to sink_refused without leaking the sink body", async () => {
+  const { env } = baseEnv();
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_FETCH = async () => new Response("memory limiter: data refused", { status: 503 });
+  const warnings = captureWarnings();
+  let res: Response;
+  try {
+    res = await handleRequest(webTraceRequest({
+      batchId: "web-batch-refused",
+      events: [{ type: "event", schema_version: 1, name: "web.page.visible", surface: "web", time: "2026-05-07T08:00:00.010Z" }],
+    }), env);
+  } finally {
+    warnings.restore();
+  }
+
+  assert.equal(res.status, 503);
+  assert.equal(res.headers.get("Retry-After"), "30");
+  assert.equal(res.headers.get("Access-Control-Allow-Origin"), "*");
+  const body = await res.json() as Record<string, unknown>;
+  assert.deepEqual(body, { error: "Trace sink unavailable", reason: "sink_refused" });
+  assert.match(warnings.lines[0], /reason=sink_refused route=web_events items=\d+ status=503 duration_ms=\d+$/);
+  assert.ok(!warnings.lines[0].includes("memory limiter"), "sink failure log carries no payload text");
+});
+
+test("web trace endpoint maps other sink failures to sink_http and sink_network", async () => {
+  for (const [fetchImpl, reason, status] of [
+    [async () => new Response(null, { status: 400 }), "sink_http", "400"],
+    [async () => { throw new TypeError("fetch failed"); }, "sink_network", "-"],
+  ] as const) {
+    const { env } = baseEnv();
+    env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+    env.TRACE_INGEST_FETCH = fetchImpl;
+    const warnings = captureWarnings();
+    let res: Response;
+    try {
+      res = await handleRequest(webTraceRequest({
+        records: [spanRecord({ name: "web.interaction.message_send", surface: "web" })],
+      }), env);
+    } finally {
+      warnings.restore();
+    }
+    assert.equal(res.status, 503);
+    assert.equal(res.headers.get("Retry-After"), "30");
+    assert.deepEqual(await res.json(), { error: "Trace sink unavailable", reason });
+    assert.match(warnings.lines[0], new RegExp(`reason=${reason} route=web items=\\d+ status=${status} duration_ms=`));
+  }
+});
+
+test("successful OTLP posts carry an abort signal and keep the 200 response", async () => {
+  const { env } = baseEnv();
+  const signals: Array<AbortSignal | null | undefined> = [];
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_FETCH = async (_input, init) => {
+    signals.push(init?.signal);
+    return new Response(null, { status: 200 });
+  };
+  const res = await handleRequest(webTraceRequest({
+    records: [spanRecord({ name: "web.interaction.message_send", surface: "web" })],
+    events: [{ type: "event", schema_version: 1, name: "web.page.visible", surface: "web", time: "2026-05-07T08:00:00.010Z" }],
+  }), env);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get("Retry-After"), null);
+  const body = await res.json() as Record<string, unknown>;
+  assert.equal(body.spansIngested, 1);
+  assert.equal(body.eventsIngested, 1);
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every((signal) => signal instanceof AbortSignal && !signal.aborted));
 });
 
 test("feedback report endpoint stores raw report artifact and ledger without trace ingest", async () => {
@@ -1476,7 +1594,7 @@ test("trace upload worker records ScopeDB ingest failure in the upload ledger", 
   const finalLedger = JSON.parse(String(ledgerPuts[1].body));
   assert.equal(finalLedger.r2_status, "success");
   assert.equal(finalLedger.scopedb_status, "failed");
-  assert.equal(finalLedger.error_class, "Error");
+  assert.equal(finalLedger.error_class, "OtlpSinkError");
   assert.equal(finalLedger.error_message_present, true);
 });
 
@@ -1986,4 +2104,183 @@ test("web trace endpoint forwards event only batches to OTLP logs", async () => 
   assert.ok(logRecord.attributes.some((attr: any) =>
     attr.key === "slock.trace_ingest.event_key" &&
     attr.value.stringValue === "web-batch-events:0"));
+});
+
+test("trace bundle create is refused with 429 once the machine's hourly budget is spent (enforce mode)", async () => {
+  resetTraceUploadBudgetsForTest();
+  const { env, bucket } = baseEnv();
+  env.TRACE_UPLOAD_HOURLY_LIMIT = "1";
+  env.TRACE_UPLOAD_RATE_LIMIT_MODE = "enforce";
+  const bundle = Buffer.from("trace");
+  const create = (uploadId: string, nonce: string) => {
+    const metadata = {
+      uploadId,
+      objectKey: `trace-bundles/server-1/machine-1/${uploadId}.jsonl.gz`,
+      bundleId: `bundle-${uploadId}`,
+      bundleSha256: sha256Hex(bundle),
+      bundleSizeBytes: bundle.byteLength,
+      maxBytes: 1024,
+    };
+    return handleRequest(new Request("https://trace-worker.test/api/trace-bundles", {
+      method: "POST",
+      body: JSON.stringify({
+        attestation: signAttestation(traceUploadClaims(metadata, { nonce })),
+        bundleSha256: metadata.bundleSha256,
+        bundleSizeBytes: metadata.bundleSizeBytes,
+      }),
+    }), env);
+  };
+
+  const originalWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const first = await create("upload-1", "nonce-rl-1");
+    assert.equal(first.status, 200);
+    const second = await create("upload-2", "nonce-rl-2");
+    assert.equal(second.status, 429);
+    assert.deepEqual(await second.json(), { error: "Trace bundle upload rate limit exceeded" });
+  } finally {
+    console.warn = originalWarn;
+    resetTraceUploadBudgetsForTest();
+  }
+  // Counted in memory: nothing is written to the bundle store for the budget.
+  assert.equal(bucket.puts.length, 0);
+});
+
+test("trace bundle ingest caps records per name and start minute and logs one summary per dropped bucket", async () => {
+  const { env, bucket } = baseEnv();
+  const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_PER_MINUTE_CAP = "2";
+  env.TRACE_INGEST_FETCH = async (input, init) => {
+    fetchCalls.push({ input, init });
+    return new Response(null, { status: 200 });
+  };
+  const flood = [1, 2, 3, 4, 5].map((i) => JSON.stringify(spanRecord({
+    span_id: `${i}`.repeat(16),
+    name: "daemon.app_source.fire",
+    start_time: `2026-10-16T19:30:0${i}.000Z`,
+    end_time: `2026-10-16T19:30:0${i}.001Z`,
+  })));
+  const other = JSON.stringify(spanRecord({ span_id: "9999999999999999", start_time: "2026-10-16T19:30:09.000Z", end_time: "2026-10-16T19:30:09.001Z" }));
+  const bundle = Buffer.from([...flood, other, ""].join("\n"));
+  const metadata = {
+    uploadId: "upload-cap",
+    objectKey: "trace-bundles/server-1/machine-1/upload-cap.jsonl",
+    bundleId: "bundle-cap",
+    bundleSha256: sha256Hex(bundle),
+    bundleSizeBytes: bundle.byteLength,
+    serverId: "server-1",
+    machineId: "machine-1",
+  };
+  await bucket.put(metadata.objectKey, bufferToArrayBuffer(bundle), {
+    httpMetadata: { contentType: "application/x-ndjson" },
+  });
+
+  const result = await ingestTraceBundleObject(env, metadata);
+
+  assert.equal(result.spans_ingested, 3);
+  assert.equal(result.spans_dropped_rate_cap, 3);
+  assert.equal(result.events_dropped_rate_cap, 0);
+  assert.equal(result.events_ingested, 1);
+  const spanPayload = JSON.parse(fetchCalls[0].init?.body as string);
+  assert.deepEqual(
+    spanPayload.resourceSpans[0].scopeSpans[0].spans.map((s: { spanId: string }) => s.spanId),
+    ["1111111111111111", "2222222222222222", "9999999999999999"],
+  );
+  assert.match(String(fetchCalls[1].input), /\/v1\/logs$/);
+  const logPayload = JSON.parse(fetchCalls[1].init?.body as string);
+  const resource = Object.fromEntries(
+    logPayload.resourceLogs[0].resource.attributes.map((a: { key: string; value: Record<string, unknown> }) => [a.key, Object.values(a.value)[0]]),
+  );
+  assert.equal(resource["slock.machine_id"], "machine-1");
+  const [summary] = logPayload.resourceLogs[0].scopeLogs[0].logRecords;
+  const attrs = Object.fromEntries(
+    summary.attributes.map((a: { key: string; value: Record<string, unknown> }) => [a.key, Object.values(a.value)[0]]),
+  );
+  assert.equal(summary.body.stringValue, "trace_ingest.records_dropped");
+  assert.equal(attrs.reason, "per_machine_rate");
+  assert.equal(attrs.record_name, "daemon.app_source.fire");
+  assert.equal(attrs.minute, "2026-10-16T19:30");
+  assert.equal(attrs.cap, "2");
+  assert.equal(attrs.kept_count, "2");
+  assert.equal(attrs.dropped_count, "3");
+});
+
+test("trace bundle ingest never caps feedback report bundles", async () => {
+  const { env, bucket } = baseEnv();
+  env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+  env.TRACE_INGEST_PER_MINUTE_CAP = "1";
+  env.TRACE_INGEST_FETCH = async () => new Response(null, { status: 200 });
+  const bundle = Buffer.from([1, 2, 3].map((i) => JSON.stringify(spanRecord({ span_id: `${i}`.repeat(16) }))).concat("").join("\n"));
+  const metadata = {
+    uploadId: "upload-report",
+    objectKey: "trace-bundles/server-1/machine-1/upload-report.jsonl",
+    bundleId: "bundle-report",
+    bundleSha256: sha256Hex(bundle),
+    bundleSizeBytes: bundle.byteLength,
+    serverId: "server-1",
+    machineId: "machine-1",
+    feedbackReportId: "4d1c2b3a-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+  };
+  await bucket.put(metadata.objectKey, bufferToArrayBuffer(bundle), {
+    httpMetadata: { contentType: "application/x-ndjson" },
+  });
+
+  const result = await ingestTraceBundleObject(env, metadata);
+
+  assert.equal(result.spans_ingested, 3);
+  assert.equal(result.spans_dropped_rate_cap, undefined);
+});
+
+test("trace bundle ingest leaves standalone events uncapped by default and caps them only with their own setting", async () => {
+  const run = async (eventCap?: string) => {
+    const { env, bucket } = baseEnv();
+    const fetchCalls: Array<{ input: RequestInfo | URL; init?: RequestInit }> = [];
+    env.TRACE_INGEST_OTLP_ENDPOINT = "https://telescope.test/v1/traces";
+    env.TRACE_INGEST_PER_MINUTE_CAP = "1";
+    if (eventCap !== undefined) env.TRACE_INGEST_EVENT_PER_MINUTE_CAP = eventCap;
+    env.TRACE_INGEST_FETCH = async (input, init) => {
+      fetchCalls.push({ input, init });
+      return new Response(null, { status: 200 });
+    };
+    const events = [1, 2, 3].map((i) => JSON.stringify({
+      type: "event",
+      schema_version: 1,
+      name: "daemon.agent.activity.produced",
+      surface: "daemon",
+      time: `2026-10-16T19:30:0${i}.000Z`,
+    }));
+    const bundle = Buffer.from([JSON.stringify(spanRecord()), ...events, ""].join("\n"));
+    const metadata = {
+      uploadId: `upload-events-${eventCap ?? "default"}`,
+      objectKey: `trace-bundles/server-1/machine-1/upload-events-${eventCap ?? "default"}.jsonl`,
+      bundleId: "bundle-events",
+      bundleSha256: sha256Hex(bundle),
+      bundleSizeBytes: bundle.byteLength,
+      serverId: "server-1",
+      machineId: "machine-1",
+    };
+    await bucket.put(metadata.objectKey, bufferToArrayBuffer(bundle), {
+      httpMetadata: { contentType: "application/x-ndjson" },
+    });
+    return { result: await ingestTraceBundleObject(env, metadata), fetchCalls };
+  };
+
+  const byDefault = await run();
+  assert.equal(byDefault.result.events_ingested, 3);
+  assert.equal(byDefault.result.events_dropped_rate_cap, undefined);
+
+  const capped = await run("2");
+  // 2 kept events + 1 summary record for the dropped bucket.
+  assert.equal(capped.result.events_ingested, 3);
+  assert.equal(capped.result.events_dropped_rate_cap, 1);
+  const logPayload = JSON.parse(capped.fetchCalls[1].init?.body as string);
+  const records = logPayload.resourceLogs[0].scopeLogs[0].logRecords;
+  const summary = records.find((r: { body: { stringValue: string } }) => r.body.stringValue === "trace_ingest.records_dropped");
+  const attrs = Object.fromEntries(
+    summary.attributes.map((a: { key: string; value: Record<string, unknown> }) => [a.key, Object.values(a.value)[0]]),
+  );
+  assert.equal(attrs.record_type, "event");
+  assert.equal(attrs.cap, "2");
 });

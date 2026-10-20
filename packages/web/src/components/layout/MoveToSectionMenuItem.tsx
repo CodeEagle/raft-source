@@ -12,7 +12,8 @@ export function MoveToSectionMenuItem({ section, current, onMove }: {
   return (
     <MenuItem
       icon={<FolderInput size={14} />}
-      trailing={current ? <Check size={14} /> : null}
+      trailing={current ? <Check size={16} /> : null}
+      className={current ? "font-bold" : ""}
       onClick={move}
     >
       <span className="flex min-w-0 items-center gap-1">

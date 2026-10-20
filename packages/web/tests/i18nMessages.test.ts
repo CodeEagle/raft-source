@@ -139,9 +139,23 @@ test("Activity and notification batch messages parse and keep placeholder parity
   // stuck on context compaction points to Reset Session).
   // 107 after task #1284 added the usage-limit attention title/body/action
   // messages to the existing notification center.
+  // 110 after RFC 075 phase 2 added `layout.systemNotifications.jointInvite*`
+  // (title/body/accept) for pending joint invites in the notification center.
+  // 169 after task #17 added the Activity Overview's 59 `activity.overview.*`
+  // ids (view toggle, turn header/outcome/actions/problems/reply, empty states).
+  // 170 after `activity.status.runtimeUnavailablePaused` (a start paused
+  // because the computer does not have the runtime says how to lift it).
+  // 175 after the Activity conversation list (#10066) added
+  // `activity.list.*` (mentionedYou, taskNumber, threadChannel, pinned,
+  // allConversations).
+  // 155 after the Activity sidebar inbox (activity_sidebar_inbox_v0) was
+  // retired: its 20 `activity.current.*` / `activity.channelFilter.*` ids for
+  // the Saved/DMs/Done views, source list, search and sort went with it.
+  // 154 after the Activity list dropped `activity.list.mentionedYou` for the
+  // sidebar's @ sticker.
   // An intentional id removal/addition updates this count with the reason;
   // silent drift still goes red.
-  assert.equal(ids.length, 107, "current i18n batch should cover exactly the known 107 message ids");
+  assert.equal(ids.length, 154, "current i18n batch should cover exactly the known 154 message ids");
 
   for (const id of ids) {
     assert.deepEqual(

@@ -2,9 +2,10 @@
  * Hosted runtime providers for external agents — deployment-level configuration
  * and the raft-agent-provider.v1 HTTP client.
  *
- * Configuration is one per deployment: the base URL is fixed by DEPLOYMENT_ENV
- * (staging → preview.antiproton.ai, production → antiproton.ai) and the only
- * setting is the optional secret `ANTIPROTON_PROVISIONING_TOKEN`. The token is bound
+ * Default configuration uses a URL fixed by DEPLOYMENT_ENV
+ * (staging → preview.antiproton.ai, production → antiproton.ai) and the optional
+ * secret `ANTIPROTON_PROVISIONING_TOKEN`. A separately enrolled synthetic staging
+ * server can bind provisions to canary.antiproton.ai with its own token. The token is bound
  * by antiproton to this deployment's Raft origin (`raftOrigin`, see
  * getRaftOrigin) and the provider derives the tenant from `raftServerId`, so
  * every call carries the Raft server explicitly (POST in its body, every other
@@ -15,8 +16,12 @@
  *
  * Contract (botiverse/antiproton#571 + by-raft-agent follow-up):
  *   POST   {base}/provision/agents                     Idempotency-Key: <raftAgentId>
+ *          {raftAgentId, raftServerId, raftOrigin, name, instructions, credential, model?}
+ *          (`model` only when the creator picked one; 422 unknown_model, 409 model_locked;
+ *          a refused POST writes nothing, so a retry with another body is a first create)
  *   PATCH  {base}/provision/agents/:providerAgentId?raftServerId=  {name?, instructions?}
  *   GET|DELETE {base}/provision/agents/by-raft-agent/:raftAgentId?raftServerId=
+ *   GET    {base}/provision/agents/by-raft-agent/:raftAgentId/existence?raftServerId=  {state}
  *   GET    {base}/provision/models?raftServerId=
  *   GET|PUT {base}/provision/agents/by-raft-agent/:raftAgentId/model?raftServerId=  {model: id | null}
  *          (Raft's delete and status path; DELETE idempotent, 404 if never created)
@@ -26,10 +31,13 @@
  *   DELETE {base}/provision/connectors/:connectorId?raftServerId=
  *          (account connections / tenant connectors, see agentConnectionService; 404 = not supported)
  * Errors: `{error:{code,message,param?}}`; 401 token, 404 agent, 409 conflict,
- * 422 invalid, 5xx retryable. There is no model field anywhere.
+ * 422 invalid, 5xx retryable. Every 409 is told apart by `code`
+ * (idempotency_conflict, deleted, agent_id_taken, model_locked); none means
+ * "already created": only a 2xx does.
  */
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { AgentRuntimeProviderKind } from "@botiverse/raft-shared";
+import { UUID_RE } from "../lib/messageId";
 import { withTraceChildSpan } from "../tracing/semanticTrace";
 import { currentRaftTraceId, raftTraceIdHeaders, responseRequestId } from "./externalRequestCorrelation";
 import { createSafeFetch } from "./managedMcpGateway";
@@ -37,6 +45,11 @@ import { createSafeFetch } from "./managedMcpGateway";
 const KEY_ENV = "SLOCK_PROVIDER_CREDENTIAL_KEY";
 const SECRET_VERSION = "arp1";
 export const PROVIDER_REQUEST_TIMEOUT_MS = 15_000;
+/**
+ * A workspace import body is up to ~13.4 MiB of base64 (the provider caps the
+ * request at 16 MiB); 15 s is too short to send that over a slow link.
+ */
+export const PROVIDER_IMPORT_TIMEOUT_MS = 120_000;
 const MAX_TOKEN_BYTES = 4 * 1024;
 const MAX_ERROR_MESSAGE_CHARS = 500;
 
@@ -146,6 +159,13 @@ export function getRaftOrigin(raw = process.env.SERVER_URL): string | null {
 // ---------------------------------------------------------------------------
 
 export const ANTIPROTON_PROVISIONING_TOKEN_ENV = "ANTIPROTON_PROVISIONING_TOKEN";
+export const ANTIPROTON_CANARY_PROVISIONING_TOKEN_ENV = "ANTIPROTON_CANARY_PROVISIONING_TOKEN";
+export type AgentRuntimeProviderTarget = "default" | "canary";
+/** An operator explicitly enrolls exactly one synthetic staging server, never a production server. */
+export function getRaftbenchCanaryServerId(env: NodeJS.ProcessEnv = process.env): string | null {
+  const id = env.RAFTBENCH_CANARY_SERVER_ID?.trim();
+  return env.DEPLOYMENT_ENV === "staging" && id && UUID_RE.test(id) ? id.toLowerCase() : null;
+}
 
 /**
  * The antiproton base URL is fixed per deployment (owner decision), selected by
@@ -172,8 +192,8 @@ export interface ResolvedProviderConfig {
 }
 
 /**
- * One provider configuration per deployment: the base URL fixed by
- * DEPLOYMENT_ENV plus the optional secret `ANTIPROTON_PROVISIONING_TOKEN`
+ * Resolve the frozen provider target: default uses DEPLOYMENT_ENV and
+ * `ANTIPROTON_PROVISIONING_TOKEN`; canary is staging-only with its own secret
  * (bound by antiproton to this deployment's SERVER_URL origin; antiproton
  * derives the tenant from `raftServerId`). No base URL or no token → null: the
  * feature is unavailable, nothing crashes. Never log or return the token.
@@ -181,9 +201,16 @@ export interface ResolvedProviderConfig {
 export function resolveProviderConfig(
   kind: AgentRuntimeProviderKind,
   env: NodeJS.ProcessEnv = process.env,
+  target: AgentRuntimeProviderTarget = "default",
 ): ResolvedProviderConfig | null {
   if (kind !== "antiproton") return null;
   const deploymentEnv = env.DEPLOYMENT_ENV?.trim() ?? "";
+  // Check before test transport overrides too; production cannot select canary.
+  if (target === "canary") {
+    if (deploymentEnv !== "staging") return null;
+    const token = normalizeToken(env[ANTIPROTON_CANARY_PROVISIONING_TOKEN_ENV]);
+    return token ? { kind, baseUrl: "https://canary.antiproton.ai", token } : null;
+  }
   const baseUrl = testTransport?.baseUrl
     ?? (Object.hasOwn(ANTIPROTON_BASE_URL_BY_DEPLOYMENT_ENV, deploymentEnv) ? ANTIPROTON_BASE_URL_BY_DEPLOYMENT_ENV[deploymentEnv] : null);
   const token = normalizeToken(env[ANTIPROTON_PROVISIONING_TOKEN_ENV]);
@@ -192,8 +219,8 @@ export function resolveProviderConfig(
 }
 
 /** Deployment prerequisites: provider env config, SERVER_URL and the secret key for the pending credential. */
-export function isProviderDeploymentConfigured(kind: AgentRuntimeProviderKind): boolean {
-  if (!resolveProviderConfig(kind) || !getRaftOrigin()) return false;
+export function isProviderDeploymentConfigured(kind: AgentRuntimeProviderKind, target: AgentRuntimeProviderTarget = "default"): boolean {
+  if (!resolveProviderConfig(kind, process.env, target) || !getRaftOrigin()) return false;
   try {
     secretKey();
     return true;
@@ -356,6 +383,14 @@ export function providerAgentUsagePath(
   return `/provision/agents/${encodeURIComponent(providerAgentId)}/usage${serverQueryWith(raftServerId, params)}`;
 }
 
+/** The tenant's (this Raft server's) spend: today against its limit, and totals by period. */
+export function providerTenantUsagePath(
+  raftServerId: string,
+  params: { from?: string; to?: string; bucket?: string; byAgent?: "1" },
+): string {
+  return `/provision/usage${serverQueryWith(raftServerId, params)}`;
+}
+
 /**
  * Addressed by the Raft agent id, so Raft can GET/DELETE an agent even when
  * it never learned the provider's id (e.g. the POST answer was lost).
@@ -363,6 +398,46 @@ export function providerAgentUsagePath(
  */
 export function providerAgentByRaftIdPath(raftAgentId: string, raftServerId: string): string {
   return `/provision/agents/by-raft-agent/${encodeURIComponent(raftAgentId)}${serverQuery(raftServerId)}`;
+}
+
+/** Whether the provider ever had the agent: `{state: exists | deleted | never_existed | elsewhere}`, read-only. */
+export function providerAgentExistenceByRaftIdPath(raftAgentId: string, raftServerId: string): string {
+  return `/provision/agents/by-raft-agent/${encodeURIComponent(raftAgentId)}/existence${serverQuery(raftServerId)}`;
+}
+
+/** The platform onboarding budget (hosted Cindy) for one UTC day; platform token only. */
+export function providerOnboardingBudgetPath(day: string): string {
+  return `/provision/budgets/onboarding?date=${encodeURIComponent(day)}`;
+}
+
+/** Whether the server may pick hosted models (`antiproton_model_picker`), at the provider. */
+export function providerServerModelPickerPath(raftServerId: string): string {
+  return `/provision/servers/${encodeURIComponent(raftServerId)}/model-picker`;
+}
+
+/** The server's plan (spend limit tier) at the provider. */
+export function providerServerPlanPath(raftServerId: string): string {
+  return `/provision/servers/${encodeURIComponent(raftServerId)}/plan`;
+}
+
+/** Interrupt the agent's running turn; idempotent (`not_running` from the second call). */
+export function providerAgentStopPath(raftAgentId: string, raftServerId: string): string {
+  return `/provision/agents/by-raft-agent/${encodeURIComponent(raftAgentId)}/stop${serverQuery(raftServerId)}`;
+}
+
+/** One-time workspace import into a hosted agent created with `awaitImport`. */
+export function providerAgentImportPath(raftAgentId: string, raftServerId: string): string {
+  return `/provision/agents/by-raft-agent/${encodeURIComponent(raftAgentId)}/import${serverQuery(raftServerId)}`;
+}
+
+/** What one workspace import may hold (total bytes, file count, bytes per file). */
+export function providerImportLimitsPath(): string {
+  return "/provision/import-limits";
+}
+
+/** Which files an import body would be refused, without importing (writes nothing, takes no import slot). */
+export function providerImportCheckPath(raftServerId: string): string {
+  return `/provision/import-check${serverQuery(raftServerId)}`;
 }
 
 /** The models the provider offers this tenant, and its default. */

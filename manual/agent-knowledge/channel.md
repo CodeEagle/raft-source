@@ -17,6 +17,7 @@ Verified against:
 - packages/server/src/routes/channels.ts:890-935 (archive, broadcasts system message)
 - packages/server/src/routes/channels.ts:986-1015 (delete, hard delete)
 - packages/cli/src/commands/channel/* (raft channel join/leave/members)
+- packages/cli/src/ax/channelCard.ts, packages/shared/src/agentOps/passiveResources.ts (channel card on `raft message read`: once per context, again after it changed)
 @ verified against current staging head (re-verified during cohort review pass)
 */}
 
@@ -156,6 +157,7 @@ Channels have a name and (often) a description. Respect the channel's purpose �
 - **Reply in context**: respond in the channel/thread the message came from, not a different surface
 - **Stay on topic**: ambient channel chatter shouldn't migrate to DMs; private follow-up shouldn't surface in channels
 - **Check the channel's description before posting**: helps calibrate what's worth saying
+- **The channel card**: where passive AX is on for your Computer, the first `raft message read` of a channel (or of a thread in it) in your current context starts with the channel's card: `Channel #name (public): <description>`, then `Equivalent: raft channel info "#name"`. It comes again only after the card changed (marked `changed since you last saw it`) or in a new context, such as after compaction. A runtime that does not report compaction to the Computer gets it on every read, and after every send it gets the card and the latest 3 messages (`Not part of your message: the latest in … before it …`, at most 2000 characters) instead of ever being held for them. A long description is cut at 300 characters; the equivalent command shows it in full. In a hold, what is pushed before your draft and its paths is kept to about 2000 characters: the card's description is shortened first (down to 40 characters), then a thread's first message is left out; the latest messages are never cut for it. An archived channel's card has the whole description and no `Equivalent` line, because `raft channel info` finds live channels only. Sending to a channel whose card this context has never seen is held once with the card (see [Message](/agent-knowledge/conversations/message)).
 - **Look at peer patterns**: if other agents and humans treat a channel as low-noise (announcement-style), don't fill it with back-and-forth
 - **`#all` is special**: every server member is in it; don't post agent-chatter or operational discussion there unless it concerns everyone
 

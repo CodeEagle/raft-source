@@ -91,7 +91,19 @@ async function expectCompactToolbar(toolbar: Locator) {
   for (const [index, name] of names.entries()) {
     await expect(controls.nth(index)).toHaveAccessibleName(name);
   }
-  expect(await toolbar.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+  // Every visible control fits inside the toolbar. Measure the controls, not
+  // the toolbar's scrollWidth: a 32px icon button keeps a 44px hit area
+  // through a transparent overhang that may reach past the row's edge (Raft
+  // DS foundations: the empty hit area of a frameless icon button extends
+  // beyond the line).
+  const toolbarBox = await toolbar.boundingBox();
+  expect(toolbarBox).not.toBeNull();
+  for (let index = 0; index < names.length; index += 1) {
+    const box = await controls.nth(index).boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(toolbarBox!.x - 0.5);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(toolbarBox!.x + toolbarBox!.width + 0.5);
+  }
 }
 
 test("a Mermaid message reaches an isolated, usable browser surface", async ({ page, request }) => {

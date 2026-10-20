@@ -245,6 +245,7 @@ function resetThreadStore(threads: FollowedThread[] = []) {
     openedAt: 0,
     summaries: {},
     followedThreads: threads,
+    followOverrides: {},
     taskUpdatesByMessageId: {},
     focusedThreadChannelId: null,
   });
@@ -1502,6 +1503,70 @@ test("thread local clear only clears the targeted followed thread", () => {
   assert.equal(followedThreads.find((t) => t.threadChannelId === "thread-other")?.unreadCount, 5);
 });
 
+function serveFollowedThreads(rows: Array<FollowedThread & { maxReadSeq?: number; readStateVersion?: number }>) {
+  api.get = (async () => ({ data: { threads: rows } })) as typeof api.get;
+}
+
+test("a followed-list reload does not bring back unread the client just read (no newer activity)", async () => {
+  resetAll();
+  resetThreadStore([makeFollowedThread({ threadChannelId: "thread-target", unreadCount: 3, latestActivitySeq: "9" })]);
+  useThreadStore.getState().clearThreadUnreadLocally("thread-target");
+
+  // RisingWave has not ingested the read yet: the served row is the old one.
+  serveFollowedThreads([makeFollowedThread({ threadChannelId: "thread-target", unreadCount: 3, latestActivitySeq: "9" })]);
+  await useThreadStore.getState().loadFollowedThreads();
+
+  assert.equal(useThreadStore.getState().followedThreads[0]?.unreadCount, 0);
+});
+
+test("a followed-list reload older than the accepted read cursor is adjudicated read", async () => {
+  resetAll();
+  resetThreadStore([makeFollowedThread({ threadChannelId: "thread-target", unreadCount: 3, latestActivitySeq: "9" })]);
+  readStateHandler("read_state:updated")({
+    serverId: "server-read-state",
+    scopeId: "thread-target",
+    maxReadSeq: 9,
+    readStateVersion: 2,
+  });
+
+  serveFollowedThreads([makeFollowedThread({
+    threadChannelId: "thread-target",
+    unreadCount: 3,
+    latestActivitySeq: "9",
+    hasMention: true,
+    maxReadSeq: 4,
+    readStateVersion: 1,
+  })]);
+  await useThreadStore.getState().loadFollowedThreads();
+
+  const [thread] = useThreadStore.getState().followedThreads;
+  assert.equal(thread?.unreadCount, 0);
+  assert.equal(thread?.hasMention, false);
+});
+
+test("a followed-list reload keeps unread that arrived after the read", async () => {
+  resetAll();
+  resetThreadStore([makeFollowedThread({ threadChannelId: "thread-target", unreadCount: 3, latestActivitySeq: "9" })]);
+  readStateHandler("read_state:updated")({
+    serverId: "server-read-state",
+    scopeId: "thread-target",
+    maxReadSeq: 9,
+    readStateVersion: 2,
+  });
+  useThreadStore.getState().clearThreadUnreadLocally("thread-target");
+
+  serveFollowedThreads([makeFollowedThread({
+    threadChannelId: "thread-target",
+    unreadCount: 1,
+    latestActivitySeq: "10",
+    maxReadSeq: 9,
+    readStateVersion: 1,
+  })]);
+  await useThreadStore.getState().loadFollowedThreads();
+
+  assert.equal(useThreadStore.getState().followedThreads[0]?.unreadCount, 1);
+});
+
 test("opening a thread clears its inline summary unread label immediately", () => {
   resetAll();
   api.post = (() => new Promise(() => {})) as typeof api.post;
@@ -1887,3 +1952,220 @@ function seedThreadBadgeAlso(threadChannelId: string, unreadCount: number) {
     followedThreads: [...followedThreads, makeFollowedThread({ threadChannelId, unreadCount })],
   });
 }
+
+test("replies into threads missing from the followed list share one coalesced list reload", async () => {
+  const { vi } = await import("vitest");
+  const { __cancelFollowedThreadsRefreshForTests } = await import("../src/store/socketBridge");
+  resetAll();
+  __cancelFollowedThreadsRefreshForTests();
+  const followedLoads: string[] = [];
+  const realLoadFollowedThreads = useThreadStore.getState().loadFollowedThreads;
+  useThreadStore.setState({
+    loadFollowedThreads: async () => { followedLoads.push("load"); },
+  });
+  vi.useFakeTimers();
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      threadUpdatedHandler()({
+        parentMessageId: `parent-burst-${i}`,
+        threadChannelId: `thread-burst-${i}`,
+        replyCount: 1,
+        lastReplyAt: "2026-10-16T06:00:00.000Z",
+        participantIds: ["sender-1"],
+        latestReply: makeMessage({ id: `burst-reply-${i}`, seq: 20 + i, channelId: `thread-burst-${i}` }),
+      });
+    }
+    assert.equal(followedLoads.length, 0, "no reload per reply");
+    await vi.advanceTimersByTimeAsync(1500);
+    assert.equal(followedLoads.length, 1, "one reload for the burst");
+  } finally {
+    vi.useRealTimers();
+    __cancelFollowedThreadsRefreshForTests();
+    useThreadStore.setState({ loadFollowedThreads: realLoadFollowedThreads });
+  }
+});
+
+test("the followed-thread list loads only the threads with unread replies", async () => {
+  resetAll();
+  const calls: Array<{ url: string; params?: unknown }> = [];
+  api.get = (async (url: string, config?: { params?: unknown }) => {
+    calls.push({ url, params: config?.params });
+    return { data: { threads: [makeFollowedThread({ threadChannelId: "thread-unread", unreadCount: 2 })] } };
+  }) as typeof api.get;
+
+  await useThreadStore.getState().loadFollowedThreads();
+
+  assert.deepEqual(calls, [{ url: "/channels/threads/followed", params: { unreadOnly: 1 } }]);
+  assert.deepEqual(useThreadStore.getState().followedThreads.map((t) => t.threadChannelId), ["thread-unread"]);
+});
+
+test("reading a thread lowers its channel's thread badge right away, before the next list load", async () => {
+  const { summarizeParentThreadUnread } = await import("../src/utils/threadUnreadByParent");
+  resetAll();
+  resetThreadStore([
+    makeFollowedThread({ threadChannelId: "thread-a", parentMessageId: "parent-a", parentChannelId: "general", unreadCount: 2 }),
+    makeFollowedThread({ threadChannelId: "thread-b", parentMessageId: "parent-b", parentChannelId: "general", unreadCount: 1 }),
+  ]);
+  assert.equal(summarizeParentThreadUnread(useThreadStore.getState().followedThreads, "general").count, 2);
+
+  useThreadStore.getState().clearThreadUnreadLocally("thread-a");
+
+  assert.equal(summarizeParentThreadUnread(useThreadStore.getState().followedThreads, "general").count, 1);
+});
+
+test("follow state: a session follow/unfollow wins, then the summary, then the unread list", async () => {
+  const { isThreadFollowed } = await import("../src/store/threadStore");
+  resetAll();
+  resetThreadStore([makeFollowedThread({ threadChannelId: "thread-listed", parentMessageId: "parent-listed" })]);
+  useThreadStore.setState({
+    summaries: {
+      "parent-read-followed": makeThreadSummary({ threadChannelId: "thread-read-followed", unreadCount: 0, followed: true }),
+      "parent-not-followed": makeThreadSummary({ threadChannelId: "thread-not-followed", followed: false }),
+    },
+  });
+  const state = () => useThreadStore.getState();
+
+  // A read followed thread is not in the unread-only list; the summary says it is followed.
+  assert.equal(isThreadFollowed(state(), "parent-read-followed"), true);
+  assert.equal(isThreadFollowed(state(), "parent-not-followed"), false);
+  // No summary (older server): fall back to the list.
+  assert.equal(isThreadFollowed(state(), "parent-listed"), true);
+  assert.equal(isThreadFollowed(state(), "parent-unknown"), false);
+
+  useThreadStore.setState({ followOverrides: { "parent-read-followed": false, "parent-not-followed": true } });
+  assert.equal(isThreadFollowed(state(), "parent-read-followed"), false);
+  assert.equal(isThreadFollowed(state(), "parent-not-followed"), true);
+});
+
+test("a live summary without `followed` keeps the follow state already known", () => {
+  resetAll();
+  useThreadStore.setState({
+    summaries: { "parent-1": makeThreadSummary({ unreadCount: 0, followed: true }) },
+  });
+
+  // thread:updated frames carry no `followed`.
+  useThreadStore.getState().updateSummary("parent-1", makeThreadSummary({ replyCount: 2, unreadCount: 1 }));
+  assert.equal(useThreadStore.getState().summaries["parent-1"]?.followed, true);
+  assert.equal(useThreadStore.getState().summaries["parent-1"]?.replyCount, 2);
+
+  useThreadStore.getState().hydrateSummaries({ "parent-1": makeThreadSummary({ replyCount: 3 }) });
+  assert.equal(useThreadStore.getState().summaries["parent-1"]?.followed, true);
+
+  // A summary that does say it is no longer followed is taken.
+  useThreadStore.getState().hydrateSummaries({ "parent-1": makeThreadSummary({ followed: false }) });
+  assert.equal(useThreadStore.getState().summaries["parent-1"]?.followed, false);
+});
+
+test("follow and unfollow record the session follow state for the parent message", async () => {
+  const { isThreadFollowed } = await import("../src/store/threadStore");
+  resetAll();
+  api.post = (async () => ({ data: {} })) as typeof api.post;
+  api.get = (async () => ({ data: { threads: [] } })) as typeof api.get;
+  useThreadStore.setState({
+    summaries: { "parent-quiet": makeThreadSummary({ threadChannelId: "thread-quiet", unreadCount: 0, followed: false }) },
+  });
+
+  await useThreadStore.getState().followThread("parent-quiet");
+  // The thread has no unread replies, so the reloaded unread-only list does not have it.
+  assert.equal(useThreadStore.getState().followedThreads.length, 0);
+  assert.equal(isThreadFollowed(useThreadStore.getState(), "parent-quiet"), true);
+
+  await useThreadStore.getState().unfollowThread("thread-quiet");
+  assert.equal(isThreadFollowed(useThreadStore.getState(), "parent-quiet"), false);
+});
+
+test("sidebar conversation HTTP receipts share read ingress and preserve arrivals beyond the captured frontier", async () => {
+  resetAll();
+  const originalLoadUnread = useMessageStore.getState().loadUnreadCounts;
+  const originalLoadThreads = useThreadStore.getState().loadFollowedThreads;
+  const refreshed: string[] = [];
+  useMessageStore.setState({ loadUnreadCounts: async () => { refreshed.push("channels"); } });
+  useThreadStore.setState({ loadFollowedThreads: async () => { refreshed.push("threads"); } });
+  const parent = "channel-read-state";
+  const thread = "thread-read-state";
+  const other = "other-thread";
+  resetInbox([makeChannelItem(), makeThreadItem()]);
+  resetThreadStore([makeFollowedThread(), makeFollowedThread({ threadChannelId: other, unreadCount: 4 })]);
+  useMessageStore.setState({
+    channelMessages: {
+      [parent]: [makeMessage({ id: "p1", channelId: parent, seq: 1 })],
+      [thread]: [
+        makeMessage({ id: "t1", channelId: thread, seq: 1 }),
+        makeMessage({ id: "t2", channelId: thread, seq: 2 }),
+        makeMessage({ id: "t3-after-snapshot", channelId: thread, seq: 3 }),
+      ],
+    },
+    unreadCounts: { [parent]: 1, [thread]: 3, [other]: 4 },
+  });
+  api.post = (async (url: string) => {
+    assert.equal(url, `/channels/${parent}/conversation-read-all`);
+    return { data: { serverId: "server-read-state", scopes: [
+      { scopeId: parent, maxReadSeq: 1, readStateVersion: 1 },
+      { scopeId: thread, maxReadSeq: 2, readStateVersion: 1 },
+    ] } };
+  }) as typeof api.post;
+  try {
+    await useMessageStore.getState().markConversationRead(parent);
+    assert.equal(useMessageStore.getState().unreadCounts[parent], undefined);
+    assert.equal(useMessageStore.getState().unreadCounts[thread], 1);
+    assert.equal(useThreadStore.getState().followedThreads.find((row) => row.threadChannelId === thread)?.unreadCount, 1);
+    assert.equal(useThreadStore.getState().followedThreads.find((row) => row.threadChannelId === other)?.unreadCount, 4);
+    assert.deepEqual(refreshed.sort(), ["channels", "threads"]);
+  } finally {
+    useMessageStore.setState({ loadUnreadCounts: originalLoadUnread });
+    useThreadStore.setState({ loadFollowedThreads: originalLoadThreads });
+  }
+});
+
+test("sidebar conversation read response after switching server cannot touch the new server or trigger refresh", async () => {
+  resetAll();
+  let resolveResponse!: (value: { data: unknown }) => void;
+  api.post = (() => new Promise((resolve) => { resolveResponse = resolve; })) as typeof api.post;
+  const operation = useMessageStore.getState().markConversationRead("channel-read-state");
+  useServerStore.setState({ current: { ...useServerStore.getState().current!, id: "new-server" }, serverEpoch: 2 });
+  useMessageStore.setState({ unreadCounts: { "channel-read-state": 7 } });
+  resolveResponse({ data: { serverId: "server-read-state", scopes: [
+    { scopeId: "channel-read-state", maxReadSeq: 99, readStateVersion: 1 },
+  ] } });
+  await operation;
+  assert.equal(useMessageStore.getState().unreadCounts["channel-read-state"], 7);
+});
+
+
+test("late read-all zero cannot erase a newer known reply in an unloaded followed thread", () => {
+  resetAll();
+  resetThreadStore([makeFollowedThread({ unreadCount: 2, latestActivitySeq: "3" })]);
+  readStateHandler("read_state:updated_bulk")({
+    serverId: "server-read-state",
+    scopes: [{ scopeId: "thread-read-state", maxReadSeq: 2, readStateVersion: 1, unreadCount: 0 }],
+  });
+  assert.equal(useThreadStore.getState().followedThreads[0].unreadCount, 2);
+});
+
+test("conversation All Read clears an unopened root despite a lagging positive summary", async () => {
+  resetAll();
+  const root = "unopened-all-read-root";
+  const originalGet = api.get;
+  const originalLoadThreads = useThreadStore.getState().loadFollowedThreads;
+  useThreadStore.setState({ loadFollowedThreads: async () => {} });
+  useMessageStore.setState({ channelMessages: {}, unreadCounts: { [root]: 1 } });
+  api.post = (async () => ({ data: { serverId: "server-read-state", scopes: [
+    { scopeId: root, maxReadSeq: 10, readStateVersion: 2 },
+  ] } })) as typeof api.post;
+  api.get = (async () => ({ data: { channels: { [root]: {
+    unreadCount: 1, readState: { kind: "present", maxReadSeq: "9", readStateVersion: 1, latestActivity: null },
+  } } } })) as typeof api.get;
+  try {
+    await useMessageStore.getState().markConversationRead(root);
+    assert.equal(useMessageStore.getState().unreadCounts[root], undefined);
+    await useMessageStore.getState().loadUnreadCounts();
+    assert.equal(useMessageStore.getState().unreadCounts[root], undefined);
+    useMessageStore.getState().addMessage(makeMessage({ id: "new-after-all-read", channelId: root, seq: 11 }));
+    assert.equal(useMessageStore.getState().unreadCounts[root], 1, "a new live message remains unread");
+    await useMessageStore.getState().loadUnreadCounts();
+    assert.equal(useMessageStore.getState().unreadCounts[root], 1, "a stale summary after that arrival cannot erase it");
+  } finally {
+    api.get = originalGet;
+    useThreadStore.setState({ loadFollowedThreads: originalLoadThreads });
+  }
+});

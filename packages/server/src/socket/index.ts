@@ -13,6 +13,7 @@ import * as messageService from "../services/messageService";
 import { socketConnectedClients, socketDisconnects, syncResumeTotal } from "../metrics";
 import { parseSocketClientKind, socketClientKindRoom, socketServerGuestsRoom, socketUserServerRoom, type SocketClientKind } from "./platformScope";
 import { fanoutWithAck } from "./fanout";
+import { attachDesktopAttentionHandler } from "./desktopAttentionEvents";
 import { onSocketAccessRevoked, type SocketAccessRevocation } from "./accessRevocation";
 import { publishLocalChannelUpdate } from "../services/channelRealtimeEvents";
 import { getActorServerRoleInServer } from "../lib/actorPermissions";
@@ -330,6 +331,8 @@ export function setupSocket(server: http.Server, corsOrigin: string | string[]) 
     socket.on("leave:channel", (channelId: string) => {
       socket.leave(`channel:${channelId}`);
     });
+
+    attachDesktopAttentionHandler(socket, { userId, clientKind });
 
     socket.on("disconnect", (reason) => {
       socketConnectedClients.labels(socket.conn.transport.name).dec();

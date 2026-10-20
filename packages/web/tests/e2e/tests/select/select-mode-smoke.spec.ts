@@ -161,7 +161,7 @@ test("select mode entry + check circles + toolbar render", async ({ page, reques
   // Exactly one message has the filled (yellow) check circle — the one we
   // entered select mode on. Since #7347 the circle is RUI's
   // MessageMultiSelectCheckbox (Base UI): the filled state is the
-  // `data-checked` attribute on the same element, not a bg-soft-signal class.
+  // `data-checked` attribute on the same element, not a bg-palette-yellow class.
   const filledCircles = page.locator(
     '[data-testid^="message-select-circle-"][data-checked]',
   );

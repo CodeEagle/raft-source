@@ -1,18 +1,17 @@
 import type { ExternalMessageAuthorProjection } from "@botiverse/raft-shared";
-import { ProfilePanelBody } from "raft-ui";
+import { PanelAction, ProfilePanelBody, Separator } from "@botiverse/raft-ui";
 import { X } from "lucide-react";
 import { useMemo } from "react";
 import { useIntl } from "react-intl";
 import AvatarSlot from "../ui/AvatarSlot";
-import CloseButton from "../ui/CloseButton";
-import PanelHeader, { PROFILE_HEADER_SURFACE_CLASS } from "../ui/PanelHeader";
+import PanelHeader from "../ui/PanelHeader";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import {
   EXTERNAL_ACTOR_KIND_MESSAGE_IDS,
   formatExternalProviderLabel,
 } from "../message/externalIdentityPresentation";
 
-const HEADER_CONTAINER_PROPS = { "data-testid": "external-identity-header", className: PROFILE_HEADER_SURFACE_CLASS };
+const HEADER_CONTAINER_PROPS = { "data-testid": "external-identity-header" };
 
 export default function ExternalIdentityDetailPanel({
   profile,
@@ -60,46 +59,51 @@ export default function ExternalIdentityDetailPanel({
         mobileBackProps={mobileBackProps}
         containerProps={HEADER_CONTAINER_PROPS}
         actions={
-          <CloseButton
+          // DS header icon button, as on the human and agent profiles.
+          <PanelAction
             onClick={onClose}
-            className={`size-7 items-center justify-center ${onBack ? "flex" : "hidden md:flex"}`}
+            className={onBack ? "flex" : "hidden md:flex"}
+            aria-label={formatMessage({ id: "common.close" })}
             title={formatMessage({ id: "common.close" })}
           >
-            <X size={14} />
-          </CloseButton>
+            <X size={22} aria-hidden="true" />
+          </PanelAction>
         }
       />
 
-      <ProfilePanelBody className="flex-1 overflow-y-auto bg-layer-panel font-sans theme-brutal:bg-white">
+      <ProfilePanelBody className="flex-1 overflow-y-auto bg-layer-canvas">
         {profile.workspaceName ? (
+          <div>
           <div
             data-testid="external-identity-source"
-            className="border-b border-line-muted px-5 py-3 theme-brutal:border-black/10"
+            className="px-5 py-3"
           >
             <SectionEyebrow as="div" className="mb-1">
               {formatMessage({ id: "member.detail.from" })}
             </SectionEyebrow>
-            <div className="text-sm font-bold text-foreground-strong theme-brutal:text-black">
+            <div className="text-callout font-semibold text-foreground">
               {profile.workspaceName}
             </div>
+          </div>
+          <Separator />
           </div>
         ) : null}
 
         <div className="flex items-start gap-4 px-5 py-5">
           <AvatarSlot
-            context="profile-tile"
+            context="profile-hero"
             type="app"
             appAvatarUrl={profile.avatarUrl}
             appInitials={profile.displayName}
           />
           <div className="min-w-0 flex-1 pt-0.5">
-            <div className="truncate text-lg font-bold text-foreground-strong theme-brutal:text-black">
+            <div className="truncate text-headline text-foreground">
               {profile.displayName}
             </div>
-            <div className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
+            <div className="mt-0.5 truncate text-caption text-foreground-hint">
               {subtitle}
             </div>
-            <div className="mt-2 text-sm text-foreground-muted theme-brutal:text-black/60">
+            <div className="mt-2 text-callout text-foreground-muted">
               {formatMessage({ id: "message.externalIdentity.externalProjection" })}
             </div>
           </div>

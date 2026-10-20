@@ -27,6 +27,7 @@ import {
   CardLeading,
   CardTitle,
   Checkbox,
+  InlineCode,
   Input,
   Select,
   SelectContent,
@@ -40,8 +41,10 @@ import {
   SelectSeparator,
   SelectTrigger,
   SelectValue,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import StableField from "./StableField";
+import Banner from "../ui/Banner";
+import SectionEyebrow from "../ui/SectionEyebrow";
 import { KeyValueAddButton } from "../ui/KeyValueInput";
 import Tooltip from "../ui/Tooltip";
 import { reasoningEffortOptionsForModel } from "../../utils/reasoningEffortOptions";
@@ -88,91 +91,25 @@ export function ignoreChange(): void {}
 /**
  * Field-level action (rescan / retry).
  *
- * Both callsites now render the same chrome. This used to branch on whether the
- * page had opted in, so that Agent Details kept raw buttons while Create Agent
- * got tokenised ones; with Agent Details migrated there is nothing left to
- * branch on, and the `className` a caller passes is styling that survives on top
- * of the variant rather than instead of it.
+ * The raft-ui Button variants own the whole appearance: `icon` is the ghost
+ * 32px icon button that sits in a field's label row, `link` is the underlined
+ * ink word inside a status sentence. `className` is deliberately not accepted,
+ * so no callsite style lands on top of the variant.
  */
-export function FieldAction({ tone, className: _legacyClassName, children, ...props }: {
+export function FieldAction({ tone, children, ...props }: {
   tone: "icon" | "link";
-  /** Accepted and DISCARDED. These are the pre-migration hand-rolled styles
-   *  (`font-bold underline`, `ml-auto text-black/40`, …); the tokenised variants
-   *  below own the appearance now. The prop stays on the signature because eight
-   *  callsites still pass it, and deleting it there is churn that would bury this
-   *  change — but it must not reach the Button, or the old look would be layered
-   *  back on top of the new one. Discarding it is what the opted-in path already
-   *  did before Agent Details joined it. */
-  className: string;
   children: React.ReactNode;
-} & React.ButtonHTMLAttributes<HTMLButtonElement>) {
-  void _legacyClassName;
+} & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "className">) {
   return tone === "icon"
-    ? <Button variant="ghost" size="icon-xs" className="ml-auto" {...props}>{children}</Button>
-    // `inline`, not `sm`. `sm` is a CONTROL size — h-7 plus px-2.5 — so the
-    // retry rendered as a 28px-tall box with side padding parked under the
-    // sentence, which is what read as "not inline, lots of padding" in
-    // acceptance. raft-ui 0.5.3 ships `inline` for exactly this case:
-    // `h-auto p-0 align-baseline leading-[inherit]`, i.e. a word in a line of
-    // text that happens to be clickable. No `mt-1` either — a top margin on an
-    // inline action is what forced it onto its own row.
+    ? <Button variant="ghost" size="icon-sm" className="ml-auto" {...props}>{children}</Button>
+    // `inline`, never a control size (those are 32px boxes with side padding):
+    // `h-auto p-0 align-baseline leading-[inherit]` is a clickable word in the
+    // line of text, and with no top margin it stays in the sentence.
     : <Button variant="link" size="inline" {...props}>{children}</Button>;
 }
 
-/**
- * Every field in this form is a reserved-row field.
- *
- * This was a switch between StableField and the older FormField so that Agent
- * Details kept its existing rhythm while Create Agent moved. Both pages are on
- * StableField now, so the indirection is just a name — kept because eight
- * callsites read it, and renaming them would bury the actual change in noise.
- */
+/** Every field in this form is a reserved-row field (StableField). */
 export const Field = StableField;
-
-/**
- * raft-ui builds SelectTrigger on `Button`, so out of the box a select inherits
- * BUTTON metrics (h-8 = 32px, text-sm, font-bold) while `Input` — which has no
- * height, font-size or font-weight token of its own — renders at 44px / 16px /
- * 400. Three axes diverge, and the two controls sit in the same form.
- *
- * `field` re-states the select trigger in INPUT metrics so the two match:
- * content height from `py-2` (as Input does), normal weight, same font size.
- * Height is deliberately not a fixed token — it is derived the same way Input
- * derives it, so the two cannot drift apart if the type scale changes.
- *
- * This belongs in raft-ui, not here: a select trigger is semantically a field,
- * not a button. Reported upstream; until it lands, the app states it explicitly
- * rather than leaving the mismatch visible.
- */
-/* Removed: the field arm now opts in via `chrome="field"` on the Select root.
- * What this constant used to say — "h-auto py-2 text-base font-normal" — is why
- * it had to go: `text-base` is a LITERAL 16px, i.e. brutal's token. Under elegant
- * (14px) it was simply wrong, and because it wasn't `font-field` the option text
- * still lost to the theme's own weight rule. A restated metric cannot follow a
- * token; only the real axis can. Kept out of the `legacy` arm, which is untouched. */
-
-/**
- * Scoped popup metrics for the opt-in pages.
- *
- * The trigger was aligned to input metrics, but the panel it opens was not —
- * the same option read 16px/400 in the trigger and 12px/700 in the list. The
- * popup renders in a portal, outside the field subtree, which is why the field
- * geometry assertions could not see it and did not object.
- *
- * `SelectContent` forwards `className` onto the portal popup, so the options can
- * be brought onto the field contract from the callsite, scoped to this page —
- * no global CSS, no `!important`, and every other raft-ui Select untouched.
- * Written as descendant variants rather than a stylesheet rule so the scope is
- * visible at the callsite instead of hidden in index.css.
- *
- * The real fix belongs in raft-ui: a select is a field, so its trigger and its
- * options should share one type contract instead of each callsite restating it.
- */
-/* Removed for the same reason as FIELD_METRIC_TRIGGER: `chrome="field"` reaches
- * the portal popup through React context, so the options inherit the field
- * contract without the callsite restating 16px/400 at them. */
-
-
 
 export interface RuntimeOption {
   value: string;
@@ -207,7 +144,7 @@ function renderSelectOption(option: RuntimeOption) {
         {option.description ? (
           <span className="flex flex-col">
             <span>{option.label}</span>
-            <span className="text-xs font-normal text-foreground-muted">{option.description}</span>
+            <span className="text-caption font-normal text-foreground-hint">{option.description}</span>
           </span>
         ) : (
           option.label
@@ -328,11 +265,9 @@ export function RuntimeSelectControl({
   );
   return (
     <Select
-      // `chrome` lives on the Select ROOT and reaches the popup through context,
-      // so the trigger and its options share one contract. Restating metrics as
-      // classes on the trigger (the old FIELD_METRIC_* constants) could not do
-      // that — it hardcoded 16px, which is brutal's token, so elegant silently
-      // rendered at the wrong size.
+      // `chrome` lives on the Select ROOT and reaches the portal popup through
+      // context, so the trigger and its options share the field type contract.
+      // Never restate field metrics as classes on the trigger or the popup.
       chrome="field"
       value={value}
       onValueChange={handleValueChange}
@@ -371,7 +306,7 @@ function runtimeModelSourceStatus(
           { id: "agent.runtimeModels.kimiLoginRequired" },
           {
             command: (chunks) => (
-              <code key="command" className="font-mono font-bold">{chunks}</code>
+              <InlineCode key="command">{chunks}</InlineCode>
             ),
           },
         )
@@ -472,6 +407,45 @@ function runtimeFormUnavailableMessageId(
   return error
     ? "agent.runtimeConfig.schemaErrorRefresh"
     : "agent.runtimeConfig.schemaUnavailable";
+}
+
+/** Why the runtime's form is not shown yet. Loading is information (cyan);
+ *  an error or a missing form is a recoverable problem (orange). */
+function RuntimeFormUnavailableNotice({ loading, error, errorCode }: {
+  loading: boolean;
+  error: boolean;
+  errorCode?: string;
+}) {
+  const { formatMessage } = useIntl();
+  return (
+    <Banner intent={loading ? "info" : "warning"} data-testid="schema-runtime-unavailable">
+      {formatMessage({ id: runtimeFormUnavailableMessageId(loading, error, errorCode) })}
+    </Banner>
+  );
+}
+
+/**
+ * The "More" / "Advanced" disclosure: a collapsible section title
+ * (DS `button.rf-section__title`) — 13/18 700 ink-3, sentence case, a 14px
+ * chevron, and `aria-expanded` saying whether the group below is open.
+ */
+export function RuntimeDisclosureToggle({ open, onOpenChange, children }: {
+  open: boolean;
+  onOpenChange?: (open: boolean) => void;
+  children: ReactNode;
+}) {
+  const handleClick = useCallback(() => onOpenChange?.(!open), [onOpenChange, open]);
+  return (
+    <SectionEyebrow
+      as="button"
+      onClick={handleClick}
+      aria-expanded={open}
+      className="flex items-center gap-2 rounded-control outline-none hover:text-foreground focus-visible:shadow-focus"
+    >
+      {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronRight size={14} aria-hidden="true" />}
+      {children}
+    </SectionEyebrow>
+  );
 }
 
 interface RuntimeConfigFieldsProps {
@@ -657,7 +631,7 @@ export function LocalPiPluginsField({ checked, onChange }: { checked: boolean; o
 
 const CLAUDE_COMMAND_INFO_CONTENT_PROPS = {
   side: "bottom",
-  className: "w-72 max-w-[calc(100vw-3rem)] text-left font-normal",
+  className: "w-72 max-w-[calc(100vw-3rem)] text-left",
 } as const;
 
 function ClaudeCommandInfo() {
@@ -674,13 +648,14 @@ function ClaudeCommandInfo() {
       }
       contentProps={CLAUDE_COMMAND_INFO_CONTENT_PROPS}
     >
-      <button
+      <Button
         type="button"
+        variant="ghost"
+        size="icon-sm"
         aria-label={formatMessage({ id: "agent.runtimeConfig.claudeCommandRequirements" })}
-        className="inline-flex size-4 items-center justify-center text-foreground-muted transition-colors hover:text-foreground-strong focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-line-strong"
       >
         <Info size={14} aria-hidden="true" />
-      </button>
+      </Button>
     </Tooltip>
   );
 }
@@ -715,7 +690,7 @@ export function RuntimeEnvVarsField({
   }, [entries, onChange]);
   return (
     <Field label={formatMessage({ id: "agent.runtimeConfig.envVars" })} optional={optional} adopt={false}>
-      {hint && <p className="mb-2 -mt-1 text-xs text-foreground-muted">{hint}</p>}
+      {hint && <p className="mb-2 -mt-1 text-caption text-foreground-hint">{hint}</p>}
       <div className="space-y-2">
         {entries.map((entry, index) => (
           <RuntimeEnvVarRow
@@ -982,7 +957,6 @@ export default function RuntimeConfigFields({
       type="button"
       onClick={runtimeModels.rescan}
       disabled={rescanDisabled || runtimeModels.loading}
-      className="font-bold text-foreground-strong underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
     >
       {intl.formatMessage({ id: "agent.runtimeModels.retry" })}
     </FieldAction>
@@ -1111,7 +1085,6 @@ export default function RuntimeConfigFields({
         <CardHeader>
           <CardLeading>
             <Checkbox
-              size="md"
               checked={fastMode}
               onCheckedChange={handleFastModeChange}
               aria-labelledby="runtime-fast-mode-title"
@@ -1156,10 +1129,9 @@ export default function RuntimeConfigFields({
                 type="button"
                 onClick={onRescanRuntimes}
                 disabled={runtimesRescanning}
-                className="ml-auto text-foreground-muted transition-colors hover:text-foreground-strong disabled:cursor-not-allowed disabled:opacity-50"
                 aria-label={formatMessage({ id: "agent.runtimeConfig.rescanRuntimesAria" })}
               >
-                <RefreshCw size={12} className={runtimesRescanning ? "animate-spin" : ""} />
+                <RefreshCw size={14} className={runtimesRescanning ? "animate-spin" : ""} aria-hidden="true" />
               </FieldAction>
             </Tooltip>
           ) : undefined}
@@ -1190,15 +1162,11 @@ export default function RuntimeConfigFields({
             savedConnections={savedConnectionsForV2}
           />
         ) : (
-          <p className="border border-line-muted bg-warning-soft p-3 text-sm font-bold text-warning-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black" data-testid="schema-runtime-unavailable">
-            {formatMessage({
-              id: runtimeFormUnavailableMessageId(
-                runtimeFormV2.state.status === "loading" || runtimeFormV2.state.status === "idle",
-                runtimeFormV2.state.status === "error",
-                runtimeFormV2.state.status === "error" ? runtimeFormV2.state.errorCode : undefined,
-              ),
-            })}
-          </p>
+          <RuntimeFormUnavailableNotice
+            loading={runtimeFormV2.state.status === "loading" || runtimeFormV2.state.status === "idle"}
+            error={runtimeFormV2.state.status === "error"}
+            errorCode={runtimeFormV2.state.status === "error" ? runtimeFormV2.state.errorCode : undefined}
+          />
         )
       ) : schemaBacked ? (
         formDefinition ? (
@@ -1233,15 +1201,11 @@ export default function RuntimeConfigFields({
             showValidationErrors={showValidationErrors}
           />
         ) : (
-          <p className="border border-line-muted bg-warning-soft p-3 text-sm font-bold text-warning-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black" data-testid="schema-runtime-unavailable">
-            {formatMessage({
-              id: runtimeFormUnavailableMessageId(
-                formDefinitionLoading,
-                formDefinitionError,
-                formDefinitionErrorCode,
-              ),
-            })}
-          </p>
+          <RuntimeFormUnavailableNotice
+            loading={formDefinitionLoading}
+            error={formDefinitionError}
+            errorCode={formDefinitionErrorCode}
+          />
         )
       ) : (
         <>
@@ -1258,7 +1222,7 @@ export default function RuntimeConfigFields({
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-xs"
+                size="icon-sm"
                 onClick={handleEditProviderConnection}
                 aria-label={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
                 title={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
@@ -1282,7 +1246,7 @@ export default function RuntimeConfigFields({
               testId="runtime-built-in-provider-select"
             />
             {showBuiltInRequiredHint && (
-              <p className="mt-1 text-xs font-bold text-brutal-orange">
+              <p className="mt-1 text-footnote font-semibold text-warning-strong">
                 {formatMessage(
                   { id: "agent.runtimeConfig.builtInRequiredHint" },
                   { runtimeName: getRuntimeDisplayName(runtime) },
@@ -1346,7 +1310,6 @@ export default function RuntimeConfigFields({
                   <CardHeader>
                     <CardLeading>
                       <Checkbox
-                        size="md"
                         checked={managedConnectionActive
                           ? selectedProviderConnection?.supportsImageInput === true
                           : builtInProviderSupportsImageInput}
@@ -1419,17 +1382,16 @@ export default function RuntimeConfigFields({
               type="button"
               onClick={runtimeModels.rescan}
               disabled={rescanDisabled || runtimeModels.loading}
-              className="ml-auto text-foreground-muted hover:text-foreground-strong transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               aria-label={intl.formatMessage({ id: "agent.runtimeModels.rescan" })}
             >
-              <RefreshCw size={12} className={runtimeModels.loading ? "animate-spin" : ""} />
+              <RefreshCw size={14} className={runtimeModels.loading ? "animate-spin" : ""} aria-hidden="true" />
             </FieldAction>
           </Tooltip>
         ) : undefined}
         belowControl={<>
           {modelSourceStatusContent && (
             <div
-              className="mt-2 border-l-2 border-line-muted pl-2 text-xs text-foreground-muted"
+              className="mt-2 border-l border-line-hairline pl-2 text-caption text-foreground-muted"
               data-testid="runtime-model-source-status"
             >
               {/* The retry belongs INSIDE the sentence it acts on: "Models could
@@ -1449,7 +1411,7 @@ export default function RuntimeConfigFields({
           )}
           {(selectedModelSuggestionOnly || (machineSourceApplies && runtimeModels.source.kind !== "live"
             && !runtimeModels.loading && runtimeModels.models.some((m) => m.verified === "suggestion_only"))) && (
-            <p className="mt-1.5 text-xs text-foreground-muted">
+            <p className="mt-1.5 text-caption text-foreground-hint">
               {formatMessage({ id: "agent.runtimeConfig.modelSuggestionOnly" })}
             </p>
           )}
@@ -1498,15 +1460,9 @@ export default function RuntimeConfigFields({
           warned people off options that are not actually dangerous. */}
       {showAdvancedSection ? (
         <div>
-          <button
-            type="button"
-            onClick={() => onAdvancedOpenChange?.(!advancedOpen)}
-            aria-expanded={advancedOpen}
-            className="flex items-center gap-1 text-sm font-bold uppercase tracking-wide text-foreground-muted hover:text-foreground-strong"
-          >
-            {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <RuntimeDisclosureToggle open={advancedOpen} onOpenChange={onAdvancedOpenChange}>
             {formatMessage({ id: "agent.runtimeConfig.more" })}
-          </button>
+          </RuntimeDisclosureToggle>
           {/* One level, not two (@cindyz, 2026-09-03). The inner "Advanced" existed
               to separate what can break the agent from ordinary tuning, but both
               words only mean "more stuff" — so the nesting cost a click and did
@@ -1639,17 +1595,11 @@ export function RuntimeFormV2Fields({
       {main.map(renderField)}
       {advanced.length > 0 && (
         <div>
-          <button
-            type="button"
-            onClick={() => setAdvancedOpen(!advancedOpen)}
-            aria-expanded={advancedOpen}
-            className="flex items-center gap-1 text-sm font-bold uppercase tracking-wide text-foreground-muted hover:text-foreground-strong"
-          >
-            {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <RuntimeDisclosureToggle open={advancedOpen} onOpenChange={setAdvancedOpen}>
             {formatMessage({ id: "agent.runtimeConfig.advanced" })}
-          </button>
+          </RuntimeDisclosureToggle>
           {advancedOpen && (
-            <div className="mt-3 border-l border-line-muted theme-brutal:border-l-2 theme-brutal:border-black/10 pl-3">
+            <div className="mt-3 space-y-3 border-l border-line-hairline pl-3">
               {advanced.map(renderField)}
             </div>
           )}

@@ -19,6 +19,7 @@ import {
 import { eq, sql } from "drizzle-orm";
 import { getDb } from "../db/index";
 import {
+  agentMigrationHostedTargets,
   agentMigrationReceiptChannels,
   agentMigrationReceiptOutbox,
   agentMigrations,
@@ -74,6 +75,8 @@ import {
   reprovisionAgentMigrationTransport,
   reissueAgentMigrationTargetLease,
   agentMigrationLostRunRecovery,
+  isComputerTargetMigration,
+  requireComputerTarget,
 } from "./agentMigrationService";
 import {
   beginTestAgentMigration,
@@ -2125,7 +2128,7 @@ test("a pre-flip migration whose transfer run was lost is re-provisioned under a
   assert.equal(rotated.migration.sourceQuiesceReceipt, null);
   assert.equal(rotated.migration.transportExpectedMigrationRevision, rotated.migration.revision);
   assert.equal(rotated.source.message.transportGeneration, rotated.migration.transportGeneration);
-  assert.equal(rotated.target.message.transportGeneration, rotated.migration.transportGeneration);
+  assert.equal(rotated.target?.message.transportGeneration, rotated.migration.transportGeneration);
   assert.notEqual(rotated.source.message.bearerToken, provisioned.source.message.bearerToken);
 
   // Only the generation that was observed missing is replaced (no double rotation).
@@ -2883,4 +2886,73 @@ test("post-flip cancel truthfully retains target authority", async ({ db }) => {
     outcome: "stopped",
   });
   assert.equal(duplicateAck.revision, terminal.revision);
+});
+
+test("migration target kind: the database keeps the Computer and hosted shapes apart", async ({ db }) => {
+  const { user, targetMachine, agent } = await seedMigrationFixture();
+  const provisioned = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    initiatedByUserId: user.id,
+    transportSessionId: "target-kind-session",
+    now: new Date("2026-10-18T05:00:00.000Z"),
+  });
+  const migration = provisioned.migration;
+  assert.equal(migration.targetKind, "computer");
+  assert.equal(isComputerTargetMigration(migration), true);
+  assert.equal(requireComputerTarget(migration).targetMachineId, targetMachine.id);
+
+  const rejects = async (patch: string) => {
+    await assert.rejects(
+      db.execute(sql.raw(`UPDATE agent_migrations SET ${patch} WHERE id = '${migration.id}'`)),
+      (error: unknown) => String((error as { cause?: unknown })?.cause ?? error).includes("agent_migrations_target_kind_shape"),
+    );
+  };
+  // A Computer target must name its machine; a hosted target must name none.
+  await rejects("target_machine_id = NULL");
+  await rejects("target_machine_name_snapshot = NULL");
+  await rejects("target_kind = 'hosted'");
+  await rejects(`target_kind = 'hosted', target_machine_id = NULL`);
+
+  await db.update(agentMigrations)
+    .set({ targetKind: "hosted", targetMachineId: null, targetMachineNameSnapshot: null })
+    .where(eq(agentMigrations.id, migration.id));
+  await db.insert(agentMigrationHostedTargets).values({ migrationId: migration.id, provider: "antiproton" });
+  const [hosted] = await db.select().from(agentMigrations).where(eq(agentMigrations.id, migration.id));
+  assert.equal(hosted.targetKind, "hosted");
+  assert.equal(isComputerTargetMigration(hosted), false);
+  assert.throws(() => requireComputerTarget(hosted), /MIGRATION_TARGET_NOT_COMPUTER/);
+
+  const [detail] = await db.select().from(agentMigrationHostedTargets).where(eq(agentMigrationHostedTargets.migrationId, migration.id));
+  assert.equal(detail.provider, "antiproton");
+  assert.equal(detail.reviewConfirmedAt, null);
+});
+
+test("hosted target: cancel goes to the source daemon only, and lifecycle events name no target machine", async ({ db }) => {
+  const { user, sourceMachine, targetMachine, agent } = await seedMigrationFixture();
+  const provisioned = await beginAgentMigrationProvisioning({
+    agentId: agent.id,
+    targetMachineId: targetMachine.id,
+    initiatedByUserId: user.id,
+    transportSessionId: "hosted-cancel-session",
+    now: new Date("2026-10-18T05:00:00.000Z"),
+  });
+  const requested = await requestAgentMigrationCancellation({
+    agentId: agent.id,
+    migrationRef: provisioned.migration.supportRef,
+    expectedRevision: provisioned.migration.revision,
+    initiatedByUserId: user.id,
+    reason: "owner_cancel",
+    now: new Date("2026-10-18T05:00:01.000Z"),
+  });
+  const hosted = { ...requested.migration, targetKind: "hosted" as const, targetMachineId: null, targetMachineNameSnapshot: null };
+  const deliveries = buildAgentMigrationCancellationDeliveries(hosted);
+  assert.deepEqual(deliveries.map((delivery) => [delivery.machineId, delivery.message.role]), [[sourceMachine.id, "source"]]);
+
+  const flippedEvent = createAgentMigrationLifecycleEvent({ migration: { ...hosted, flippedAt: new Date("2026-10-18T05:00:02.000Z") } });
+  assert.equal(flippedEvent.machineId, undefined);
+
+  // The real row stays a Computer migration and still tells both daemons.
+  const [stored] = await db.select().from(agentMigrations).where(eq(agentMigrations.id, requested.migration.id));
+  assert.deepEqual(buildAgentMigrationCancellationDeliveries(stored).map((delivery) => delivery.message.role), ["source", "target"]);
 });

@@ -423,13 +423,13 @@ test("formatHistory: superseded task root keeps original content and points to c
   assert.match(out, /Current description: current acceptance text/);
 });
 
-test("formatHistory: thread and reply count in header", () => {
+test("formatHistory: a message with a thread shows reply count and replyTarget, not the thread's own id", () => {
   const out = formatHistory("#engineering", {
     messages: [
       { seq: 1, id: "12345678-aaaa-bbbb-cccc-000000000001", createdAt: "2026-04-21T06:00:00.000Z", senderType: "human", senderName: "bob", content: "thread starter", threadId: "t-abc", replyCount: 5 },
     ],
   });
-  assert.match(out, /threadId=t-abc/);
+  assert.doesNotMatch(out, /threadId=/, "the thread's own id is not a second address to reply to");
   assert.match(out, /replyCount=5/);
   assert.match(out, /replyTarget=#engineering:12345678/);
 });
@@ -449,7 +449,7 @@ test("formatHistory: top-level DM message with thread state shows DM reply targe
       { seq: 1, id: "deadbeef-aaaa-bbbb-cccc-000000000001", createdAt: "2026-04-21T06:00:00.000Z", senderType: "human", senderName: "bob", content: "dm thread starter", threadId: "t-dm", replyCount: 2 },
     ],
   });
-  assert.match(out, /threadId=t-dm/);
+  assert.doesNotMatch(out, /threadId=/);
   assert.match(out, /replyCount=2/);
   assert.match(out, /replyTarget=dm:@bob:deadbeef/);
 });

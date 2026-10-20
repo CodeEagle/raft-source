@@ -156,12 +156,11 @@ test("agent profile preview card renders the latest five trajectory entries and 
     assert.match(row.className, /\bflex\b/, "timestamp, status dot, and status text should share one flex row");
     assert.doesNotMatch(row.className, /\bgrid\b/);
   }
-  const activityPreview = activityRows[0].closest("div.border-t-2");
+  // Task #741: the preview is set off by rui's Separator, not a border class.
+  const activityPreview = activityRows[0].closest("div.px-4");
   assert.ok(activityPreview);
-  assert.match(activityPreview.className, /border-line-muted/);
-  assert.match(activityPreview.className, /theme-brutal:border-black/);
+  assert.equal(activityPreview.previousElementSibling?.getAttribute("data-slot"), "separator");
   assert.match(activityRows[0].querySelector("span:last-child")?.className ?? "", /text-foreground-muted/);
-  assert.match(activityRows[0].querySelector("span:last-child")?.className ?? "", /theme-brutal:text-black\/70/);
   assert.equal(screen.queryByText("Step 1"), null, "hover card must cap the preview at five entries");
 
   act(() => {
@@ -193,6 +192,15 @@ test("recent activity preview rows keep the latest five entries oldest-to-newest
       `${Date.UTC(2026, 0, 1, 8, 0, 6)}:status:Step 6`,
     ],
   );
+});
+
+test("recent activity preview skips an entry kind this bundle does not know instead of rendering it", () => {
+  // A newer daemon or server may send a trajectory kind an older web bundle
+  // predates; the preview must not render the raw entry (or crash React).
+  const unknown = { timestamp: Date.UTC(2026, 0, 1, 8, 0, 9), entry: { kind: "tool_end", callId: "c1", ok: false } } as unknown as TrajectoryLogEntry;
+  const rows = getRecentActivityPreviewRows([makeEntry(1), unknown, makeEntry(2)]);
+  assert.deepEqual(rows.map((row) => row.text), ["Step 1", "Step 2"]);
+  for (const row of rows) assert.equal(typeof row.text, "string");
 });
 
 test("agent profile preview card omits recent activity section when the log is empty", () => {
@@ -556,7 +564,7 @@ test("channel participant human fallback renders a minimal profile card", () => 
 
   assert.ok(screen.getByText("Channel Human"));
   assert.ok(screen.getByText("@channel-human"));
-  assert.equal(screen.queryByText("Profile unavailable"), null);
+  assert.ok(screen.queryByText("Profile unavailable") === null);
 });
 
 // Regression: a cross-server @mention whose entity is absent from the local
@@ -603,6 +611,31 @@ test("user hover card renders a graceful fallback when the member is missing", (
 
   assert.ok(screen.getByText("@pi-pmo"), "graceful fallback must render for missing members too");
   assert.ok(screen.getByText("Profile unavailable"));
+});
+
+test("public read-only hover cards show display name and @handle for humans and agents", () => {
+  const { unmount } = renderPreview(
+    <ProfilePreviewCardContent
+      mentionType="user"
+      mentionId="public:user:local"
+      readOnlyProfile={{ displayName: "Cindy Zhang", handle: "cindyz", avatarUrl: null, description: "Designer" }}
+    />,
+  );
+  assert.ok(screen.getByText("Cindy Zhang"));
+  assert.ok(screen.getByText("@cindyz"));
+  assert.ok(screen.queryByText("Profile unavailable") === null);
+  unmount();
+
+  renderPreview(
+    <ProfilePreviewCardContent
+      mentionType="agent"
+      mentionId="public:agent:local"
+      readOnlyProfile={{ displayName: "Helper Agent", handle: "helper", avatarUrl: null, description: "Assistant" }}
+    />,
+  );
+  assert.ok(screen.getByText("Helper Agent"));
+  assert.ok(screen.getByText("@helper"));
+  assert.ok(screen.queryByText("Profile unavailable") === null);
 });
 
 test("hover profile cards for the same agent share one runtime-model probe instead of asking the Computer on every hover", async () => {

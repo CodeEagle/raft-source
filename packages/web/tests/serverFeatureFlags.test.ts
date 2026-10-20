@@ -11,7 +11,6 @@ import { connectSocket, getSocket, resetSocket } from "../src/api/socket";
 import { useAuthStore } from "../src/store/authStore";
 import { useServerStore } from "../src/store/serverStore";
 import {
-  ACTIVITY_SIDEBAR_INBOX_FLAG_KEY,
   ATTACHMENT_COMMENTS_FEATURE_FLAG_KEY,
   REGISTERED_SERVER_FEATURE_FLAG_KEYS,
   getServerFeatureFlagSnapshot,
@@ -23,6 +22,9 @@ import {
   resetServerFeatureFlagsForTests,
   setServerFeatureFlagForTests,
   setServerFeatureFlagRetryBackoffForTests,
+  ACTIVITY_OVERVIEW_WEB_FLAG_KEY,
+  THREAD_UNREAD_BADGE_FLAG_KEY,
+  ACTIVITY_CONVERSATION_LIST_FLAG_KEY,
 } from "../src/store/serverFeatureFlags";
 
 const originalPost = api.post.bind(api);
@@ -59,9 +61,19 @@ test("Slack Bridge master gate is registered and fail-closed before server evalu
   assert.equal(readServerFeatureFlag("server-a", SLACK_BRIDGE_FEATURE_FLAG_KEYS.master), false);
 });
 
-test("Activity sidebar inbox is registered and fail closed before server evaluation", () => {
-  assert.ok(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes(ACTIVITY_SIDEBAR_INBOX_FLAG_KEY));
-  assert.equal(readServerFeatureFlag("server-a", ACTIVITY_SIDEBAR_INBOX_FLAG_KEY), false);
+test("Activity overview is registered and fail closed before server evaluation", () => {
+  assert.ok(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes(ACTIVITY_OVERVIEW_WEB_FLAG_KEY));
+  assert.equal(readServerFeatureFlag("server-a", ACTIVITY_OVERVIEW_WEB_FLAG_KEY), false);
+});
+
+test("thread-unread badge is registered and fail closed before server evaluation", () => {
+  assert.ok(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes(THREAD_UNREAD_BADGE_FLAG_KEY));
+  assert.equal(readServerFeatureFlag("server-a", THREAD_UNREAD_BADGE_FLAG_KEY), false);
+});
+
+test("activity conversation list is registered and fail closed before server evaluation", () => {
+  assert.ok(REGISTERED_SERVER_FEATURE_FLAG_KEYS.includes(ACTIVITY_CONVERSATION_LIST_FLAG_KEY));
+  assert.equal(readServerFeatureFlag("server-a", ACTIVITY_CONVERSATION_LIST_FLAG_KEY), false);
 });
 
 afterEach(() => {

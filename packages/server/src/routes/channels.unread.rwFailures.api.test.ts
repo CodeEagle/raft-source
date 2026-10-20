@@ -8,6 +8,7 @@ import { risingWaveUnavailableResponsesTotal } from "../metrics";
 import { installRisingWaveReadReferences, uninstallRisingWaveReadReferences } from "../test/risingWaveReadReference";
 import { __testRisingWaveInbox, addHuman, createChannel } from "../services/channelService";
 import { createServer, headers, seedUser } from "./channels.api.fixtures";
+import { __setStaleReadStoreForTests } from "./rwStaleRead";
 
 const test = createApiTest();
 
@@ -118,3 +119,60 @@ test("GET /api/channels/unread: a bug after the RisingWave query returned stays 
   assert.deepEqual(await res.json(), { error: "Failed to get unread counts" });
   assert.equal(await counterValue("rw_read_failed") - before, 0);
 });
+
+// RW overload degraded mode (routes/rwStaleRead.ts): with a remembered body,
+// rw_overloaded answers 200 with that body marked stale; nothing else does.
+function memoryStaleStore() {
+  const entries = new Map<string, string>();
+  return {
+    entries,
+    store: {
+      get: async (key: string) => entries.get(key) ?? null,
+      set: async (key: string, value: string) => { entries.set(key, value); },
+    },
+  };
+}
+
+const overloadedQuery = (async () => {
+  throw new RisingWaveOverloadedError(new Error("timeout exceeded when trying to connect"));
+}) as never;
+
+for (const summary of [false, true]) {
+  const path = summary ? "/api/channels/unread?summary=1" : "/api/channels/unread";
+
+  test(`GET ${path}: rw_overloaded serves the user's last good body, marked stale`, async ({ app }) => {
+    const reader = await seedReader(summary ? "stale-summary" : "stale");
+    const other = await seedReader(summary ? "stale-other-summary" : "stale-other");
+    const memory = memoryStaleStore();
+    __setStaleReadStoreForTests(memory.store);
+    try {
+      const fresh = await fetch(`${app.baseUrl}${path}`, { headers: headers(reader.token, reader.serverId) });
+      assert.equal(fresh.status, 200);
+      assert.equal(fresh.headers.get("x-raft-stale"), null);
+      const freshBody = await fresh.json() as Record<string, unknown>;
+      // The remembering write is fire-and-forget; let it land.
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(memory.entries.size, 1);
+
+      const res = await withRisingWave({ getPool: configuredPool, query: overloadedQuery }, () =>
+        fetch(`${app.baseUrl}${path}`, { headers: headers(reader.token, reader.serverId) }));
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get("x-raft-stale"), "rw_overloaded");
+      assert.deepEqual(await res.json(), summary ? { ...freshBody, stale: true } : freshBody);
+
+      // Another user's overload never sees this user's body: no remembered body, so 503.
+      const otherRes = await withRisingWave({ getPool: configuredPool, query: overloadedQuery }, () =>
+        fetch(`${app.baseUrl}${path}`, { headers: headers(other.token, other.serverId) }));
+      assert.equal(otherRes.status, 503);
+
+      // Any other RisingWave failure keeps its own error even with a remembered body.
+      const failed = await withRisingWave({
+        getPool: configuredPool,
+        query: (async () => { throw Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:4566"), { code: "ECONNREFUSED" }); }) as never,
+      }, () => fetch(`${app.baseUrl}${path}`, { headers: headers(reader.token, reader.serverId) }));
+      assert.equal(failed.status, 502);
+    } finally {
+      __setStaleReadStoreForTests(undefined);
+    }
+  });
+}

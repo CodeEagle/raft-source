@@ -13,6 +13,7 @@ import {
 import { getDb } from "../db/index";
 import { dbQueryErrorsTotal } from "../metrics";
 import { closeRisingWavePool, RisingWaveOverloadedError } from "../db/risingwave";
+import { __setStaleReadStoreForTests } from "./rwStaleRead";
 import { installRisingWaveReadReferences, uninstallRisingWaveReadReferences } from "../test/risingWaveReadReference";
 import {
   users, servers,
@@ -21,7 +22,7 @@ import {
   channelHumans,
   channelAgents,
   messages, threadFollows, userChannelReadCursors, inboxNotificationFacts,
-  inboxSuppressionStates, tasks, featureFlags, agentActivityEvents
+  inboxSuppressionStates, tasks, featureFlags, agentActivityEvents, messageMentions
 } from "../db/schema";
 import { addMember, removeMember } from "../services/serverService";
 import { createAgent } from "../services/agentService";
@@ -351,6 +352,8 @@ test("GET /api/channels/threads/followed records followed-thread phases and quer
   assert.deepEqual(processEventNames, [
     "followed_threads.load.started",
     "history.policy.checked",
+    // hasMention: the sidebar unread read (same source as threadUnread.hasMention).
+    "inbox.backend.selected",
     "followed_threads.source_selected",
     "followed_threads.loaded",
     "response.ready",
@@ -372,9 +375,10 @@ test("GET /api/channels/threads/followed records followed-thread phases and quer
       "channels.followed_threads.read_cursors",
       "channels.followed_threads.user_claimants",
       "channels.followed_threads_rw_rows",
+      "channels.unread_counts_by_user",
     ],
   );
-  assert.equal(dbEvents.length, 5, "followed threads query count should stay constant for task-claimant enrichment");
+  assert.equal(dbEvents.length, 6, "followed threads query count should stay constant for task-claimant enrichment");
 
   const dbEventByQuery = new Map(dbEvents.map((event) => [event.attrs?.query_name, event]));
   assert.equal(dbEventByQuery.get("channels.followed_thread_ids_by_user")?.attrs?.phase, "followed_threads.loaded");
@@ -3506,4 +3510,269 @@ test("Thread Done retires only caller-owned Activity residue after the thread so
     body: JSON.stringify({ threadChannelId: randomUUID(), frontierSpace: "storage" }),
   });
   assert.equal(nonexistent.status, 404, "an arbitrary nonexistent id must not become unconditional success");
+});
+
+
+test("unread summary folds followed-thread unread onto parent channels, and followed threads carry hasMention", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("thread-unread-owner@slock.test", "thread-unread-owner");
+  const replier = await seedUser("thread-unread-replier@slock.test", "thread-unread-replier");
+  const server = await createServer("Thread Unread Server", "thread-unread-server", owner.id);
+  await addMember(server.id, replier.id);
+  const quiet = await createChannel(server.id, "thread-unread-quiet");
+  const other = await createChannel(server.id, "thread-unread-other");
+  for (const channel of [quiet, other]) {
+    await addHuman(channel.id, owner.id);
+    await addHuman(channel.id, replier.id);
+  }
+
+  async function followedThread(channelId: string, label: string, opts: { follow?: boolean; done?: boolean } = {}) {
+    const parent = await createMessage(channelId, "user", owner.id, `${label} parent`);
+    const thread = await getOrCreateThread(parent.id, owner.id, "user");
+    if (opts.follow !== false) {
+      await db.insert(threadFollows).values({
+        threadChannelId: thread.id,
+        followerType: "user",
+        followerId: owner.id,
+        parentMessageId: parent.id,
+        reason: "manual",
+        ...(opts.done ? { doneAt: new Date() } : {}),
+      });
+    }
+    return thread;
+  }
+
+  // `quiet` has no unread of its own (the owner wrote every top-level message).
+  const mentioned = await followedThread(quiet.id, "mentioned");
+  const plain = await followedThread(quiet.id, "plain");
+  const allRead = await followedThread(quiet.id, "all read");
+  const done = await followedThread(quiet.id, "done", { done: true });
+  const notFollowed = await followedThread(quiet.id, "not followed", { follow: false });
+  const otherThread = await followedThread(other.id, "other");
+
+  const mention = await createMessage(mentioned.id, "user", replier.id, "@thread-unread-owner look");
+  await db.insert(messageMentions).values({
+    messageId: mention.id,
+    messageSeq: mention.seq,
+    serverId: server.id,
+    channelId: mentioned.id,
+    targetType: "user",
+    targetId: owner.id,
+    handleAtSendTime: "thread-unread-owner",
+    notifiableAtSend: true,
+  });
+  await createMessage(plain.id, "user", replier.id, "plain reply");
+  const readReply = await createMessage(allRead.id, "user", replier.id, "read reply");
+  await db.insert(userChannelReadCursors).values({
+    userId: owner.id,
+    channelId: allRead.id,
+    lastReadSeq: readReply.seq,
+    updatedAt: new Date(),
+  });
+  await createMessage(done.id, "user", replier.id, "reply in a done thread");
+  await createMessage(notFollowed.id, "user", replier.id, "reply in an unfollowed thread");
+  await createMessage(otherThread.id, "user", replier.id, "reply under the other channel");
+  await createMessage(otherThread.id, "user", replier.id, "second reply, still one thread");
+
+  const ownerToken = await tokenForHuman(owner.email);
+  const summaryRes = await fetch(`${app.baseUrl}/api/channels/unread?summary=1`, {
+    headers: headers(ownerToken, server.id),
+  });
+  assert.equal(summaryRes.status, 200);
+  const summary = await summaryRes.json() as {
+    channels: Record<string, { unreadCount: number; hasMention: boolean; parentChannelId?: string }>;
+    threadUnread: Record<string, { count: number; hasMention: boolean }>;
+  };
+  assert.deepEqual(summary.threadUnread, {
+    [quiet.id]: { count: 2, hasMention: true },
+    [other.id]: { count: 1, hasMention: false },
+  });
+  assert.equal(summary.channels[quiet.id], undefined, "the parent's own entry is not synthesized");
+  assert.equal(summary.channels[mentioned.id]?.parentChannelId, quiet.id);
+  assert.equal(summary.channels[otherThread.id]?.parentChannelId, other.id);
+  assert.equal(summary.channels[otherThread.id]?.unreadCount, 2);
+  for (const excluded of [done, notFollowed]) {
+    assert.equal(summary.channels[excluded.id], undefined);
+  }
+  // Only threads with unread replies are resolved to a parent (the lookup
+  // scales with them, not with every follow).
+  assert.equal(summary.channels[allRead.id]?.parentChannelId, undefined);
+
+  const followedRes = await fetch(`${app.baseUrl}/api/channels/threads/followed`, {
+    headers: headers(ownerToken, server.id),
+  });
+  assert.equal(followedRes.status, 200);
+  const followed = (await followedRes.json() as {
+    threads: Array<{ threadChannelId: string; parentChannelId: string; hasMention: boolean; firstUnreadMessageId: string | null }>;
+  }).threads;
+  const byId = new Map(followed.map((thread) => [thread.threadChannelId, thread]));
+  assert.equal(byId.get(mentioned.id)?.hasMention, true);
+  assert.equal(byId.get(mentioned.id)?.firstUnreadMessageId, mention.id);
+  assert.equal(byId.get(plain.id)?.hasMention, false);
+  assert.equal(byId.get(allRead.id)?.hasMention, false);
+  assert.equal(byId.get(otherThread.id)?.parentChannelId, other.id);
+});
+
+
+test("GET /api/channels/threads/followed: an overloaded RW serves the user's last good list, marked stale", async ({ app }) => {
+  const entries = new Map<string, string>();
+  __setStaleReadStoreForTests({
+    get: async (key) => entries.get(key) ?? null,
+    set: async (key, value) => { entries.set(key, value); },
+  });
+  const previousRisingWaveDatabaseUrl = process.env.RISINGWAVE_DATABASE_URL;
+  try {
+    const owner = await seedUser("followed-stale-owner@slock.test", "followed-stale-owner");
+    const other = await seedUser("followed-stale-other@slock.test", "followed-stale-other");
+    const server = await createServer("Followed Stale Server", "followed-stale-server", owner.id);
+    await addMember(server.id, other.id);
+    const channel = await createChannel(server.id, "followed-stale-channel");
+    await addHuman(channel.id, owner.id);
+    await addHuman(channel.id, other.id);
+    const parent = await createMessage(channel.id, "user", owner.id, "stale parent");
+    const thread = await getOrCreateThread(parent.id, owner.id, "user");
+    await createMessage(thread.id, "user", other.id, "reply");
+    await getDb().insert(threadFollows).values({
+      threadChannelId: thread.id, followerType: "user", followerId: owner.id, parentMessageId: parent.id, reason: "manual",
+    });
+    const ownerToken = await tokenForHuman(owner.email);
+    const otherToken = await tokenForHuman(other.email);
+
+    const fresh = await fetch(`${app.baseUrl}/api/channels/threads/followed`, { headers: headers(ownerToken, server.id) });
+    assert.equal(fresh.status, 200);
+    const freshBody = await fresh.json() as { threads: Array<{ threadChannelId: string }> };
+    assert.equal(freshBody.threads[0]?.threadChannelId, thread.id);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    process.env.RISINGWAVE_DATABASE_URL = "postgres://127.0.0.1:4566/slock_rw_stale_test";
+    uninstallRisingWaveReadReferences();
+    __testRisingWaveInbox.set({
+      getPool: () => ({}) as never,
+      query: (async () => {
+        throw new RisingWaveOverloadedError(new Error("timeout exceeded when trying to connect"));
+      }) as never,
+    });
+    const stale = await fetch(`${app.baseUrl}/api/channels/threads/followed`, { headers: headers(ownerToken, server.id) });
+    assert.equal(stale.status, 200);
+    assert.equal(stale.headers.get("x-raft-stale"), "rw_overloaded");
+    assert.deepEqual(await stale.json(), { ...freshBody, stale: true });
+
+    // Nothing remembered for another user: the overload still answers 503.
+    const otherRes = await fetch(`${app.baseUrl}/api/channels/threads/followed`, { headers: headers(otherToken, server.id) });
+    assert.equal(otherRes.status, 503);
+  } finally {
+    __setStaleReadStoreForTests(undefined);
+    __testRisingWaveInbox.reset();
+    installRisingWaveReadReferences();
+    if (previousRisingWaveDatabaseUrl === undefined) delete process.env.RISINGWAVE_DATABASE_URL;
+    else process.env.RISINGWAVE_DATABASE_URL = previousRisingWaveDatabaseUrl;
+    await closeRisingWavePool();
+  }
+});
+
+test("GET /api/channels/threads/followed pages newest-first with a cursor, filters unreadOnly, and keeps the no-limit shape", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("followed-page-owner@slock.test", "followed-page-owner");
+  const replier = await seedUser("followed-page-replier@slock.test", "followed-page-replier");
+  const server = await createServer("Followed Page Server", "followed-page-server", owner.id);
+  await addMember(server.id, replier.id);
+  const channel = await createChannel(server.id, "followed-page-channel");
+  await addHuman(channel.id, owner.id);
+  await addHuman(channel.id, replier.id);
+
+  // Five followed threads, created oldest first; the even ones have an unread reply.
+  const threadIds: string[] = [];
+  const parentCreatedAtByThreadId = new Map<string, string>();
+  for (let i = 0; i < 5; i += 1) {
+    const parent = await createMessage(channel.id, "user", owner.id, `page parent ${i}`);
+    const thread = await getOrCreateThread(parent.id, owner.id, "user");
+    await db.insert(threadFollows).values({
+      threadChannelId: thread.id, followerType: "user", followerId: owner.id, parentMessageId: parent.id, reason: "manual",
+    });
+    const reply = await createMessage(thread.id, "user", replier.id, `page reply ${i}`);
+    if (i % 2 === 1) {
+      await db.insert(userChannelReadCursors).values({ userId: owner.id, channelId: thread.id, lastReadSeq: reply.seq, updatedAt: new Date() });
+    }
+    threadIds.push(thread.id);
+    parentCreatedAtByThreadId.set(thread.id, new Date(parent.createdAt).toISOString());
+  }
+  const token = await tokenForHuman(owner.email);
+  const get = async (query: string) => {
+    const res = await fetch(`${app.baseUrl}/api/channels/threads/followed${query}`, { headers: headers(token, server.id) });
+    return { status: res.status, body: await res.json() as { threads?: Array<{ threadChannelId: string; unreadCount: number; parentMessageCreatedAt?: string }>; next?: string | null } };
+  };
+
+  // No limit: the old shape (all threads, no `next`).
+  const full = await get("");
+  assert.equal(full.status, 200);
+  assert.equal(full.body.threads?.length, 5);
+  assert.equal("next" in full.body, false);
+
+  // Pages of 2, newest activity first, no repeats or gaps, last page has next: null.
+  const seen: string[] = [];
+  let cursor: string | null | undefined;
+  for (let page = 0; page < 4; page += 1) {
+    const res = await get(`?limit=2${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    assert.equal(res.status, 200);
+    seen.push(...(res.body.threads ?? []).map((thread) => thread.threadChannelId));
+    cursor = res.body.next;
+    if (!cursor) break;
+  }
+  assert.deepEqual(seen, [...threadIds].reverse());
+  assert.equal(cursor, null);
+
+  // unreadOnly: the three threads with an unread reply, all channels; pageable too.
+  const unread = await get("?unreadOnly=1");
+  assert.deepEqual(new Set(unread.body.threads?.map((thread) => thread.threadChannelId)), new Set([threadIds[0], threadIds[2], threadIds[4]]));
+  assert.ok(unread.body.threads?.every((thread) => thread.unreadCount > 0));
+  // Each thread carries its parent message's time (the web's jump pill orders by it).
+  for (const thread of unread.body.threads ?? []) {
+    assert.equal(thread.parentMessageCreatedAt, parentCreatedAtByThreadId.get(thread.threadChannelId));
+  }
+  const unreadPage = await get("?unreadOnly=1&limit=2");
+  assert.deepEqual(unreadPage.body.threads?.map((thread) => thread.threadChannelId), [threadIds[4], threadIds[2]]);
+  assert.equal(typeof unreadPage.body.next, "string");
+
+  // Bad parameters are rejected rather than ignored.
+  assert.equal((await get("?limit=0")).status, 400);
+  assert.equal((await get("?limit=201")).status, 400);
+  assert.equal((await get("?limit=2&cursor=not-a-cursor")).status, 400);
+  assert.equal((await get(`?cursor=${encodeURIComponent(String(unreadPage.body.next))}`)).status, 400, "cursor needs limit");
+});
+
+test("GET /api/channels/:id/threads tells the viewer whether they follow each thread (done counts, unfollowed does not)", async ({ app }) => {
+  const db = getDb();
+  const owner = await seedUser("summary-followed-owner@slock.test", "summary-followed-owner");
+  const server = await createServer("Summary Followed Server", "summary-followed-server", owner.id);
+  const channel = await createChannel(server.id, "summary-followed-channel");
+  await addHuman(channel.id, owner.id);
+  const make = async (label: string) => {
+    const parent = await createMessage(channel.id, "user", owner.id, label);
+    const thread = await getOrCreateThread(parent.id, owner.id, "user");
+    await createMessage(thread.id, "user", owner.id, `${label} reply`);
+    return { parent, thread };
+  };
+  const followed = await make("followed");
+  const done = await make("done");
+  const unfollowed = await make("unfollowed");
+  const never = await make("never");
+  await db.insert(threadFollows).values([
+    { threadChannelId: followed.thread.id, followerType: "user", followerId: owner.id, parentMessageId: followed.parent.id, reason: "manual" },
+    { threadChannelId: done.thread.id, followerType: "user", followerId: owner.id, parentMessageId: done.parent.id, reason: "manual", doneAt: new Date() },
+    { threadChannelId: unfollowed.thread.id, followerType: "user", followerId: owner.id, parentMessageId: unfollowed.parent.id, reason: "manual", unfollowedAt: new Date() },
+  ]).onConflictDoNothing();
+  // getOrCreateThread may already have auto-followed the author: make the rows say exactly what the test means.
+  await db.update(threadFollows).set({ unfollowedAt: new Date() }).where(and(eq(threadFollows.threadChannelId, unfollowed.thread.id), eq(threadFollows.followerId, owner.id)));
+  await db.update(threadFollows).set({ doneAt: new Date(), unfollowedAt: null }).where(and(eq(threadFollows.threadChannelId, done.thread.id), eq(threadFollows.followerId, owner.id)));
+  await db.update(threadFollows).set({ unfollowedAt: null, doneAt: null }).where(and(eq(threadFollows.threadChannelId, followed.thread.id), eq(threadFollows.followerId, owner.id)));
+  await db.delete(threadFollows).where(and(eq(threadFollows.threadChannelId, never.thread.id), eq(threadFollows.followerId, owner.id)));
+
+  const token = await tokenForHuman(owner.email);
+  const res = await fetch(`${app.baseUrl}/api/channels/${channel.id}/threads`, { headers: headers(token, server.id) });
+  assert.equal(res.status, 200);
+  const body = await res.json() as Record<string, { followed: boolean }>;
+  assert.equal(body[followed.parent.id]?.followed, true);
+  assert.equal(body[done.parent.id]?.followed, true);
+  assert.equal(body[unfollowed.parent.id]?.followed, false);
+  assert.equal(body[never.parent.id]?.followed, false);
 });

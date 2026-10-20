@@ -8,6 +8,7 @@ import { postReadAllCoalesced } from "./transport/inboxTransport";
 import { registerServerReset } from "./serverResetRegistry";
 import { registerMessagesSyncCoreReset } from "./messageSyncCoreReset";
 import {
+  getAcceptedReadState,
   getAcceptedReadStateProjection,
   notifyChannelReadLocally,
   notifyChannelReadPersistedLocally,
@@ -45,6 +46,12 @@ export interface ThreadSummary {
   participantIds: string[];
   unreadCount: number;
   firstUnreadMessageId: string | null;
+  /**
+   * The current user follows this thread (done or not). Served with summaries
+   * by servers that have it; absent from live `thread:updated` frames and older
+   * servers, so read it through `isThreadFollowed`.
+   */
+  followed?: boolean;
   /** Newest ≤3 conversation replies (system excluded), served upfront for inline previews. */
   latestReplies?: ThreadReplyPreview[];
 }
@@ -58,11 +65,20 @@ export interface FollowedThread {
   parentMessagePreview: string;
   parentMessageSenderType: string;
   parentMessageSenderId: string;
+  /** When the parent message was posted (its place in the channel). Absent on older servers. */
+  parentMessageCreatedAt?: string;
   /** Same-source frontier paired with the accepted row's latest activity. */
   latestActivitySeq: string | null;
   replyCount: number;
   lastReplyAt: string | null;
   unreadCount: number;
+  /**
+   * An unread reply mentions the user (server: same source as the sidebar
+   * summary). Only meaningful while unreadCount > 0; absent on older servers.
+   */
+  hasMention?: boolean;
+  /** First unread reply, the jump target; null when read. Absent on older servers. */
+  firstUnreadMessageId?: string | null;
   /** Canonical legacy-task id for mutation routes; absent on older servers and non-task threads. */
   taskId?: string | null;
   taskNumber: number | null;
@@ -72,12 +88,30 @@ export interface FollowedThread {
   taskClaimedByName: string | null;
 }
 
+type ServedFollowedThread = FollowedThread & { maxReadSeq?: number | string | null; readStateVersion?: number | null };
+
 // Stryker disable all: followed-thread hydration projection is covered by read-state behavior tests; surviving mutants here are no-op/reference variants around the same projection result.
-function applyKnownReadStateProjectionsToFollowedThreads(threads: FollowedThread[]): FollowedThread[] {
+/**
+ * A served followed-thread row can be older than what this client knows: the
+ * read made by opening a thread reaches the ledger through its ack before
+ * RisingWave ingests the cursor, so a reload in that gap brings the old unread
+ * back (badge and jump pill stop dropping). Same adjudication as the Activity
+ * inbox: a row is read when the ledger's newer cursor covers its latest
+ * activity, or when it was cleared here and has no activity since.
+ */
+function applyKnownReadStateProjectionsToFollowedThreads(
+  threads: ServedFollowedThread[],
+  previous: readonly FollowedThread[] = [],
+): FollowedThread[] {
   const serverId = useServerStore.getState().current?.id;
   if (!serverId) return threads;
+  const previousById = new Map(previous.map((thread) => [thread.threadChannelId, thread]));
   let changed = false;
   const projected = threads.map((thread) => {
+    if (thread.unreadCount > 0 && isServedThreadRowRead(serverId, thread, previousById.get(thread.threadChannelId))) {
+      changed = true;
+      return { ...thread, unreadCount: 0, firstUnreadMessageId: null, hasMention: false };
+    }
     const projection = getAcceptedReadStateProjection(serverId, thread.threadChannelId);
     if (!projection?.complete || thread.unreadCount === projection.unreadCount) return thread;
     changed = true;
@@ -86,6 +120,15 @@ function applyKnownReadStateProjectionsToFollowedThreads(threads: FollowedThread
   return changed ? projected : threads;
 }
 // Stryker restore all
+
+function isServedThreadRowRead(serverId: string, thread: ServedFollowedThread, local: FollowedThread | undefined): boolean {
+  const latestSeq = thread.latestActivitySeq;
+  if (latestSeq == null) return false;
+  if (local && local.unreadCount === 0 && local.latestActivitySeq === latestSeq) return true;
+  const ledger = getAcceptedReadState(serverId, thread.threadChannelId);
+  if (!ledger || ledger.readStateVersion <= (thread.readStateVersion ?? 0)) return false;
+  return BigInt(ledger.maxReadSeq) >= BigInt(latestSeq);
+}
 
 function applyThreadUnreadProjectionToSummaries(
   summaries: Record<string, ThreadSummary>,
@@ -198,8 +241,15 @@ interface ThreadState {
    * MessageItem skip a reply belonging to another thread (#4434 class).
    */
   replyScopes: Record<string, ThreadRepliesScope>;
-  /** Threads the user participates in */
+  /**
+   * Followed threads with unread replies (`?unreadOnly=1`): the source of the
+   * sidebar thread badge and the jump pill. Not every followed thread: a read
+   * one is only here until the next load. Ask `isThreadFollowed` for follow state.
+   * Must be replaced, not mutated: threadUnreadByParent caches by identity.
+   */
   followedThreads: FollowedThread[];
+  /** Follow / unfollow done in this session, keyed by parent message ID; wins over summaries. */
+  followOverrides: Record<string, boolean>;
   /** Latest task metadata keyed by parent message ID, including DM-thread parents outside task boards */
   taskUpdatesByMessageId: Record<string, TaskMetadataUpdate>;
   /**
@@ -255,6 +305,15 @@ interface ThreadState {
    */
   ensureOpenThreadChannel: () => Promise<string>;
   /**
+   * Task-modal twin of `ensureOpenThreadChannel`: resolves (creating on first
+   * durable send) the thread anchored in the `taskModal` slot. Reading the
+   * side thread's open* slots for a modal send was the task #750 bug — a
+   * zero-reply task modal must resolve from its own anchor. Same discipline
+   * as the side thread: resolution alone stays local; the slot is bound on
+   * durable accept via the panel's `onChannelResolved`.
+   */
+  ensureTaskModalThreadChannel: () => Promise<string>;
+  /**
    * Re-run resolution for the currently-open thread against the channel's
    * *current* accessibility. Used by ThreadPanel's Retry affordance after an
    * `openThread` failure (see `openThreadError`).
@@ -282,7 +341,7 @@ interface ThreadState {
   /** Load followed threads for the current server */
   loadFollowedThreads: () => Promise<void>;
   /** Update a followed thread from socket event */
-  updateFollowedThread: (threadChannelId: string, updates: Partial<Pick<FollowedThread, "replyCount" | "lastReplyAt" | "unreadCount">>) => void;
+  updateFollowedThread: (threadChannelId: string, updates: Partial<Pick<FollowedThread, "replyCount" | "lastReplyAt" | "unreadCount" | "hasMention" | "firstUnreadMessageId">>) => void;
   /** Update followed-thread task metadata from task socket events */
   updateFollowedThreadTask: (task: TaskMetadataUpdate) => void;
   /** Clear unread count for a thread */
@@ -318,6 +377,44 @@ interface ThreadState {
   undoneThread: (threadChannelId: string) => Promise<void>;
 }
 
+const FOLLOWED_UNREAD_ONLY_PARAMS = { unreadOnly: 1 } as const;
+
+/** A summary without `followed` (live frame, older server) keeps the one already known. */
+function keepKnownFollowed(next: ThreadSummary, previous: ThreadSummary | undefined): ThreadSummary {
+  if (next.followed !== undefined || previous?.followed === undefined) return next;
+  return { ...next, followed: previous.followed };
+}
+
+function withKnownFollowed(
+  next: Record<string, ThreadSummary>,
+  previous: Record<string, ThreadSummary>,
+): Record<string, ThreadSummary> {
+  let out: Record<string, ThreadSummary> | null = null;
+  for (const [parentMessageId, summary] of Object.entries(next)) {
+    const kept = keepKnownFollowed(summary, previous[parentMessageId]);
+    if (kept === summary) continue;
+    out ??= { ...next };
+    out[parentMessageId] = kept;
+  }
+  return out ?? next;
+}
+
+/**
+ * Whether the user follows the thread under `parentMessageId`: a follow or
+ * unfollow done in this session, else the summary's `followed`, else (older
+ * server, no summary yet) whether it is in the followed-thread list.
+ */
+export function isThreadFollowed(
+  state: Pick<ThreadState, "followOverrides" | "summaries" | "followedThreads">,
+  parentMessageId: string,
+): boolean {
+  const override = state.followOverrides[parentMessageId];
+  if (override !== undefined) return override;
+  const followed = state.summaries[parentMessageId]?.followed;
+  if (followed !== undefined) return followed;
+  return state.followedThreads.some((thread) => thread.parentMessageId === parentMessageId);
+}
+
 export const useThreadStore = create<ThreadState>((set, get) => ({
   openParentMessageId: null,
   openIntent: null,
@@ -332,6 +429,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
   summaries: {},
   replyScopes: {},
   followedThreads: [],
+  followOverrides: {},
   taskUpdatesByMessageId: {},
   focusedThreadChannelId: null,
 
@@ -488,6 +586,44 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
     ) {
       throw new Error("Thread context changed while creating the thread");
     }
+    return data.threadChannelId;
+  },
+
+  ensureTaskModalThreadChannel: async () => {
+    const slot = get().taskModal;
+    if (!slot) {
+      throw new Error("No open task modal to resolve");
+    }
+    if (slot.threadChannelId) return slot.threadChannelId;
+    const { parentChannelId, parentMessageId, serverSlug } = slot;
+    if (!parentChannelId) {
+      throw new Error("No open task modal to resolve");
+    }
+
+    const serverEpoch = useServerStore.getState().serverEpoch;
+    const { data } = await api.post(`/channels/${parentChannelId}/threads`, {
+      parentMessageId,
+    });
+    if (typeof data?.threadChannelId !== "string" || data.threadChannelId.length === 0) {
+      throw new Error("Thread creation did not return a channel id");
+    }
+    if (
+      useServerStore.getState().serverEpoch !== serverEpoch
+      || (serverSlug && useServerStore.getState().current?.slug !== serverSlug)
+    ) {
+      throw new Error("Thread context changed while creating the thread");
+    }
+    const current = get().taskModal;
+    if (
+      !current
+      || current.serverSlug !== serverSlug
+      || current.parentChannelId !== parentChannelId
+      || current.parentMessageId !== parentMessageId
+    ) {
+      throw new Error("Thread context changed while creating the thread");
+    }
+    // Same discipline as the side thread: resolution alone stays local; the
+    // slot is bound on durable accept (ThreadPanel's onChannelResolved).
     return data.threadChannelId;
   },
 
@@ -687,7 +823,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
         && typeof openSummary?.threadChannelId === "string"
         && openSummary.threadChannelId.length > 0;
       return {
-        summaries: { ...state.summaries, ...summaries },
+        summaries: { ...state.summaries, ...withKnownFollowed(summaries, state.summaries) },
         replyScopes,
         ...(adoptThreadId ? { openThreadChannelId: openSummary.threadChannelId } : {}),
       };
@@ -718,7 +854,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       return {
         summaries: {
           ...state.summaries,
-          [parentMessageId]: summary,
+          [parentMessageId]: keepKnownFollowed(summary, state.summaries[parentMessageId]),
         },
         ...(adoptThreadId ? { openThreadChannelId: summary.threadChannelId } : {}),
       };
@@ -730,10 +866,13 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
     if (!serverId) return;
     try {
       // Stryker disable next-line StringLiteral: endpoint spelling is existing followed-thread load glue; projection behavior is tested after load.
-      const { data } = await api.get("/channels/threads/followed");
+      // Only the followed threads with unread replies: the full list is
+      // thousands of threads for some users (p99 4.7 MB). Servers without the
+      // filter ignore it and return the full list, which still works.
+      const { data } = await api.get("/channels/threads/followed", { params: FOLLOWED_UNREAD_ONLY_PARAMS });
       if (useServerStore.getState().serverEpoch !== epoch) return;
       // Stryker disable next-line ObjectLiteral: followed-thread setter shape is Zustand glue; projection transform behavior is tested by read-state thread tests.
-      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads) });
+      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads, get().followedThreads) });
     } catch {
       // ignore
     }
@@ -770,7 +909,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       const followedThreads = state.followedThreads.map((t) => {
         if (t.threadChannelId !== threadChannelId || t.unreadCount === 0) return t;
         followedThreadsChanged = true;
-        return { ...t, unreadCount: 0 };
+        return { ...t, unreadCount: 0, firstUnreadMessageId: null };
       });
       const summaries = applyThreadUnreadProjectionToSummaries(
         state.summaries,
@@ -794,7 +933,7 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       const followedThreads = state.followedThreads.map((t) => {
         if (t.threadChannelId !== threadChannelId || t.unreadCount === projection.unreadCount) return t;
         followedThreadsChanged = true;
-        return { ...t, unreadCount: projection.unreadCount };
+        return { ...t, unreadCount: projection.unreadCount, firstUnreadMessageId: projection.firstUnreadMessageId };
       });
       const summaries = applyThreadUnreadProjectionToSummaries(
         state.summaries,
@@ -931,12 +1070,13 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       throw err;
     }
 
+    set((state) => ({ followOverrides: { ...state.followOverrides, [parentMessageId]: true } }));
     // The mutation above is canonical. Refreshing the followed-list projection
     // is best effort: a transient GET failure must not make Activity preserve
     // an Unfollowed badge after the server already committed the Follow.
     try {
-      const { data } = await api.get("/channels/threads/followed");
-      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads) });
+      const { data } = await api.get("/channels/threads/followed", { params: FOLLOWED_UNREAD_ONLY_PARAMS });
+      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads, get().followedThreads) });
     } catch (err) {
       console.error("Failed to refresh followed threads:", err);
     }
@@ -945,9 +1085,14 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
   unfollowThread: async (threadChannelId) => {
     try {
       await api.post("/channels/threads/unfollow", { threadChannelId });
-      set((state) => ({
-        followedThreads: state.followedThreads.filter((t) => t.threadChannelId !== threadChannelId),
-      }));
+      set((state) => {
+        const parentMessageId = state.followedThreads.find((t) => t.threadChannelId === threadChannelId)?.parentMessageId
+          ?? Object.entries(state.summaries).find(([, summary]) => summary.threadChannelId === threadChannelId)?.[0];
+        return {
+          followedThreads: state.followedThreads.filter((t) => t.threadChannelId !== threadChannelId),
+          ...(parentMessageId ? { followOverrides: { ...state.followOverrides, [parentMessageId]: false } } : {}),
+        };
+      });
     } catch (err) {
       console.error("Failed to unfollow thread:", err);
       // Callers that own another projection (for example Activity) must know
@@ -983,9 +1128,9 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       console.error("Failed to mark thread as done:", err);
       // Reload on failure to restore correct state
       // Stryker disable next-line StringLiteral: failure-reload endpoint is legacy recovery glue outside read-state projection behavior.
-      const { data } = await api.get("/channels/threads/followed");
+      const { data } = await api.get("/channels/threads/followed", { params: FOLLOWED_UNREAD_ONLY_PARAMS });
       // Stryker disable next-line ObjectLiteral: done-failure reload setter is legacy recovery glue outside read-state projection behavior.
-      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads) });
+      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads, get().followedThreads) });
     }
   },
 
@@ -995,9 +1140,9 @@ export const useThreadStore = create<ThreadState>((set, get) => ({
       await api.post("/channels/threads/undone", { threadChannelId });
       // Reload to get the full thread data
       // Stryker disable next-line StringLiteral: undone reload endpoint is legacy recovery glue outside read-state projection behavior.
-      const { data } = await api.get("/channels/threads/followed");
+      const { data } = await api.get("/channels/threads/followed", { params: FOLLOWED_UNREAD_ONLY_PARAMS });
       // Stryker disable next-line ObjectLiteral: undone reload setter is legacy recovery glue outside read-state projection behavior.
-      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads) });
+      set({ followedThreads: applyKnownReadStateProjectionsToFollowedThreads(data.threads, get().followedThreads) });
     // Stryker disable next-line BlockStatement: diagnostic-only catch is outside read-state projection behavior.
     } catch (err) {
       // Stryker disable next-line StringLiteral: diagnostic copy is outside read-state projection behavior.
@@ -1025,6 +1170,7 @@ registerServerReset(() =>
     summaries: {},
     replyScopes: {},
     followedThreads: [],
+    followOverrides: {},
     taskUpdatesByMessageId: {},
     focusedThreadChannelId: null,
   })

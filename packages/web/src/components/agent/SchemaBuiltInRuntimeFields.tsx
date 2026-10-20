@@ -1,10 +1,10 @@
 import { getModelLabel, getRuntimeProviderDisplayName } from "@botiverse/raft-shared";
 import type { AgentCreateFormOptionSource } from "@botiverse/raft-shared";
-import { Button, Card, CardHeader, CardLeading, CardTitle, Checkbox, Input } from "raft-ui";
-import { ChevronDown, ChevronRight, Pencil } from "lucide-react";
+import { Button, Card, CardHeader, CardLeading, CardTitle, Checkbox, Input } from "@botiverse/raft-ui";
+import { Pencil } from "lucide-react";
 import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
-import { Field, LocalPiPluginsField, NO_PROVIDER_CONNECTIONS, RuntimeEnvVarsField, RuntimeSelectControl, ignoreChange, providerConnectionIdFromSelectValue, providerConnectionSelectValue, unifiedBuiltInProviderOptions, useCheckedChange, useInputValueChange } from "./RuntimeConfigFields";
+import { Field, LocalPiPluginsField, NO_PROVIDER_CONNECTIONS, RuntimeDisclosureToggle, RuntimeEnvVarsField, RuntimeSelectControl, ignoreChange, providerConnectionIdFromSelectValue, providerConnectionSelectValue, unifiedBuiltInProviderOptions, useCheckedChange, useInputValueChange } from "./RuntimeConfigFields";
 import type { SchemaDrivenRuntimeFieldsProps, SchemaSelectSource } from "./RuntimeConfigFields";
 
 type SchemaDependentSelectSource = Extract<AgentCreateFormOptionSource, { kind: "dependent_select" }>;
@@ -148,7 +148,7 @@ export function SchemaBuiltInRuntimeFields({
           <Button
             type="button"
             variant="ghost"
-            size="icon-xs"
+            size="icon-sm"
             onClick={handleEditProviderConnection}
             aria-label={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
             title={formatMessage({ id: "agent.runtimeConfig.editSavedProvider" })}
@@ -225,7 +225,6 @@ export function SchemaBuiltInRuntimeFields({
             <CardHeader>
               <CardLeading>
                 <Checkbox
-                  size="md"
                   checked={managedConnectionActive
                     ? selectedProviderConnection?.supportsImageInput === true
                     : supportsImageInput}
@@ -268,17 +267,11 @@ export function SchemaBuiltInRuntimeFields({
       </Field>
       {definition.uiSchema.layout.advanced.includes("/envVars") && (
         <div>
-          <button
-            type="button"
-            onClick={() => onAdvancedOpenChange?.(!advancedOpen)}
-            aria-expanded={advancedOpen}
-            className="flex items-center gap-1 text-sm font-bold uppercase tracking-wide text-foreground-muted hover:text-foreground-strong"
-          >
-            {advancedOpen ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <RuntimeDisclosureToggle open={advancedOpen} onOpenChange={onAdvancedOpenChange}>
             {formatMessage({ id: "agent.runtimeConfig.advanced" })}
-          </button>
+          </RuntimeDisclosureToggle>
           {advancedOpen && (
-            <div className="mt-3 border-l border-line-muted theme-brutal:border-l-2 theme-brutal:border-black/10 pl-3">
+            <div className="mt-3 border-l border-line-hairline pl-3">
               {"loadLocalPlugins" in definition.dataSchema.properties && (
                 <LocalPiPluginsField checked={loadLocalPlugins} onChange={onLoadLocalPluginsChange} />
               )}

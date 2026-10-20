@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { lazySchema } from "./lazySchema";
 
 import type { RuntimeAccountUsageProvider } from "./runtimeAccountUsage";
 
@@ -33,8 +34,8 @@ export interface ServerSystemAttentionResponse {
   notifications: UsageLimitAttentionNotification[];
 }
 
-export const systemAttentionReceiptInputSchema = z.strictObject({
+export const systemAttentionReceiptInputSchema = lazySchema("systemAttentionReceiptInputSchema", () => z.strictObject({
   incidentId: z.string().uuid(),
-});
+}));
 
 export type SystemAttentionReceiptInput = z.infer<typeof systemAttentionReceiptInputSchema>;

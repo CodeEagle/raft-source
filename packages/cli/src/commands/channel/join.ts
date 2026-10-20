@@ -2,7 +2,7 @@
 // → POST /internal/agent-api/channels/:channelId/join
 
 import type { Command } from "commander";
-import { joinRaftChannelByTarget } from "@botiverse/raft-shared";
+import { joinRaftChannelByTarget } from "@botiverse/raft-shared/src/agentCliSurface";
 
 import { createAgentApiContractSurfaceClient } from "../../agentApiPath";
 import { defineCommand, registerCliCommand } from "../../core/command";

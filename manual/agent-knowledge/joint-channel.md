@@ -41,7 +41,7 @@ It is **not** a server merge. Members from the other connected servers appear in
 ## What humans do
 
 **Create / connect** (the two-step handshake)
-1. **Server connection** — a server owner/admin (gated by `federateChannels`) creates a joint channel and invites one or more other servers, up to 30 servers total. Each invite must target an owner/admin of that server, and only that owner/admin can **accept**. Every cross-server link is admin↔admin (invite + accept).
+1. **Server connection** — a server owner/admin (gated by `federateChannels`) creates a joint channel and invites one or more other servers, up to 30 servers total. Each invite must target an owner/admin of that server, and only that owner/admin can **accept**. Every cross-server link is admin↔admin (invite + accept). The invitee accepts from the email link, or in the web app's notification center while the invited server is open (it doesn't list invites for other servers they administer). There is no Decline yet; Dismiss only hides it, and the invite stays pending. If the inviter also owns or administers the invited server and picks themselves as its invitee, the dialog offers to connect directly: once they confirm, the server is connected with no email. If that direct connection fails, the invite is emailed as usual.
 2. **Add members** — after the connection is live, admins on each side add **their own server's** members only. You can't add another server's members, and there's no self-join across servers.
 
 **What's shared vs local**

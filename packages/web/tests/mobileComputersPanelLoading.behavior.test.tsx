@@ -124,23 +124,23 @@ test("mobile rows use one icon dot and preserve offline detail when upgrade wins
   renderPanel();
 
   const onlineDot = screen.getByTestId("computer-status-dot-managed-online");
-  assert.ok(onlineDot.className.includes("bg-brutal-lime"));
+  assert.equal(onlineDot.getAttribute("data-presence"), "online");
   assert.equal(onlineDot.getAttribute("title"), null);
   assert.ok(onlineDot.hasAttribute("data-base-ui-tooltip-trigger"), "status text now rides the RUI tooltip trigger");
 
   const offlineDot = screen.getByTestId("computer-status-dot-managed-offline");
-  assert.ok(offlineDot.className.includes("bg-gray-400"));
+  assert.equal(offlineDot.getAttribute("data-presence"), "offline");
   assert.equal(offlineDot.getAttribute("title"), null);
   assert.ok(offlineDot.hasAttribute("data-base-ui-tooltip-trigger"), "status text now rides the RUI tooltip trigger");
 
   const offlineUpgradeDot = screen.getByTestId("computer-status-dot-managed-offline-upgrade");
-  assert.ok(offlineUpgradeDot.className.includes("bg-brutal-pink"));
+  assert.ok(offlineUpgradeDot.className.split(/\s+/).includes("bg-attention"));
   assert.equal(offlineUpgradeDot.getAttribute("title"), null);
   assert.ok(offlineUpgradeDot.hasAttribute("data-base-ui-tooltip-trigger"), "status text now rides the RUI tooltip trigger");
   assert.match(screen.getByTestId("computer-list-item-managed-offline-upgrade").textContent ?? "", /computer offline/);
 
-  assert.ok(screen.getByTestId("computer-status-dot-legacy-online").className.includes("bg-brutal-lime"));
-  assert.ok(screen.getByTestId("computer-status-dot-legacy-offline").className.includes("bg-gray-400"));
+  assert.equal(screen.getByTestId("computer-status-dot-legacy-online").getAttribute("data-presence"), "online");
+  assert.equal(screen.getByTestId("computer-status-dot-legacy-offline").getAttribute("data-presence"), "offline");
 
   for (const id of [
     "managed-online",
@@ -187,9 +187,9 @@ test("mobile rows compare prerelease Computer versions by SemVer (staging ahead:
   renderPanel();
 
   assert.equal((screen.getByTestId("computer-list-item-staging-ahead").textContent ?? "").includes("→"), false);
-  assert.ok(screen.getByTestId("computer-status-dot-staging-ahead").className.includes("bg-brutal-lime"));
+  assert.equal(screen.getByTestId("computer-status-dot-staging-ahead").getAttribute("data-presence"), "online");
   assert.match(screen.getByTestId("computer-list-item-staging-older").textContent ?? "", /→ v1\.0\.40/);
-  assert.ok(screen.getByTestId("computer-status-dot-staging-older").className.includes("bg-brutal-pink"));
+  assert.ok(screen.getByTestId("computer-status-dot-staging-older").className.split(/\s+/).includes("bg-attention"));
 });
 
 test("loading transitions to the true empty state only after fetch terminal", () => {

@@ -33,7 +33,7 @@ test("composer attachment preview renders through RUI composer-attachment parts"
 test("composer attachment preview carries no raw brutal hardcodes", () => {
   assert.doesNotMatch(
     sortableAttachmentRegion,
-    /\b(?:border-black|bg-white|bg-brutal-[a-z]+|text-black)\b/,
+    /\b(?:border-black|bg-white|bg-(?:palette|brutal)-[a-z]+|text-black)\b/,
     "theme chrome belongs to the RUI recipe, not to local hardcodes",
   );
 });

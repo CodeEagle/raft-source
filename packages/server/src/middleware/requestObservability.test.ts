@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import { BasicTracer, MemoryTraceSink, traceEventRowsForSpan, traceSpanFactRowForSpan } from "@botiverse/raft-shared";
 import { httpRequestDuration, httpRequestsTotal } from "../metrics";
 import { __traceUserIdForTests, rememberTraceUserId } from "../tracing/traceUserId";
-import { attachAuthTraceIdentity, bucketHttpStatus, inferHttpCallerKind, normalizeObservedRoutePattern, requestObservabilityMiddleware, setRequestTraceErrorCode } from "./requestObservability";
+import { attachAuthTraceIdentity, bucketHttpStatus, inferHttpCallerKind, normalizeObservedRoutePattern, requestObservabilityMiddleware, setRequestTraceComputerTarget, setRequestTraceErrorCode } from "./requestObservability";
 
 const EXPECTED_LABELS = {
   route_pattern: "/api/servers/:id/members/:memberId/profile",
@@ -461,6 +461,35 @@ test("requestObservabilityMiddleware records a route's error_code on the root sp
   assert.equal(plainSpan!.attrs?.error_code, undefined);
 });
 
+test("a request waiting on a Computer names it on the root span and its finished event", () => {
+  const sink = new MemoryTraceSink();
+  const tracer = new BasicTracer({ sink, traceIdGenerator: () => "5".repeat(32), spanIdGenerator: () => "6".repeat(16) });
+  const req: any = {
+    method: "GET",
+    originalUrl: "/api/servers/s1/machines/m1/runtime-models/codex",
+    url: "/api/servers/s1/machines/m1/runtime-models/codex",
+    baseUrl: "/api/servers",
+    route: { path: "/:id/machines/:machineId/runtime-models/:runtime" },
+    app: { get: (key: string) => (key === "serverTracer" ? tracer : undefined) },
+  };
+  const res: any = new EventEmitter();
+  res.statusCode = 504;
+  res.locals = {};
+  requestObservabilityMiddleware(req, res, () => {});
+  setRequestTraceComputerTarget(res, { machineId: "m1", computerVersion: "1.0.48", daemonVersion: "1.0.48", runtime: "codex", sourceId: "model" });
+  res.emit("finish");
+  const [span] = sink.getAllSpans();
+  const finished = span!.events.find((event) => event.name === "http.response.finished")?.attrs;
+  for (const attrs of [span!.attrs, finished]) {
+    // Hashed when the deployment has a trace identity key (JWT_SECRET); never the raw id.
+    assert.ok(!Object.values(attrs ?? {}).includes("m1"));
+    assert.equal(attrs?.target_computer_version, "1.0.48");
+    assert.equal(attrs?.target_daemon_version, "1.0.48");
+    assert.equal(attrs?.target_runtime, "codex");
+    assert.equal(attrs?.option_source_id, "model");
+  }
+});
+
 // #proj-o11y task #6: an outside client's traceparent is recorded, not
 // continued, so one reused client span cannot fold unrelated requests into
 // one trace. Internal sources (daemon proxy, web session) keep their parent.
@@ -543,4 +572,83 @@ test("a daemon claim from an agent that auth finds external is flagged", () => {
   );
   assert.equal(span.attrs?.trace_parent_policy, "continued");
   assert.equal(span.attrs?.trace_parent_claim_mismatch, true);
+});
+
+test("normalizeObservedRoutePattern drops a stale app-level route once the request is inside a mounted router (task #9)", () => {
+  // An app-level `app.post("/internal/machine/scope-attestation", ...)` that
+  // calls next() leaves req.route behind; inside `app.use("/internal", ...)`
+  // baseUrl is "/internal" before the inner router matches.
+  const req: any = {
+    originalUrl: "/internal/machine/scope-attestation",
+    url: "/machine/scope-attestation",
+    baseUrl: "/internal",
+    route: { path: "/internal/machine/scope-attestation" },
+  };
+  assert.equal(normalizeObservedRoutePattern(req), "/internal/machine/scope-attestation");
+
+  const unrelated: any = {
+    originalUrl: "/internal/agent/abc/upload",
+    url: "/agent/abc/upload",
+    baseUrl: "/internal",
+    route: { path: "/internal/machine/scope-attestation" },
+  };
+  assert.equal(normalizeObservedRoutePattern(unrelated), "unmatched");
+});
+
+test("normalizeObservedRoutePattern keeps templates whose params sit inside a segment or use wildcards", () => {
+  const dotted: any = {
+    originalUrl: "/api/files/report.xlsx",
+    url: "/files/report.xlsx",
+    baseUrl: "/api",
+    route: { path: "/files/:name.:ext" },
+  };
+  assert.equal(normalizeObservedRoutePattern(dotted), "/api/files/:name.:ext");
+
+  const wildcard: any = {
+    originalUrl: "/static/a/b/c.js",
+    url: "/a/b/c.js",
+    baseUrl: "/static",
+    route: { path: "/*splat" },
+  };
+  assert.equal(normalizeObservedRoutePattern(wildcard), "/static/*splat");
+});
+
+test("a real Express app labels the scope-attestation pre-parse route once, at every stage", async () => {
+  const { default: express } = await import("express");
+  const { createServer, request } = await import("node:http");
+  const seen: string[] = [];
+  const app = express();
+  app.post("/internal/machine/scope-attestation", (req, _res, next) => {
+    seen.push(`app:${normalizeObservedRoutePattern(req)}`);
+    next();
+  });
+  const internal = express.Router();
+  internal.post("/machine/scope-attestation", (req, res) => {
+    seen.push(`inner:${normalizeObservedRoutePattern(req)}`);
+    res.status(204).end();
+  });
+  app.use("/internal", (req, _res, next) => {
+    seen.push(`mount:${normalizeObservedRoutePattern(req)}`);
+    next();
+  }, internal);
+  const server = createServer(app);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const { port } = server.address() as { port: number };
+    await new Promise<void>((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, method: "POST", path: "/internal/machine/scope-attestation" }, (res) => {
+        res.resume();
+        res.on("end", resolve);
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+  assert.deepEqual(seen, [
+    "app:/internal/machine/scope-attestation",
+    "mount:/internal/machine/scope-attestation",
+    "inner:/internal/machine/scope-attestation",
+  ]);
 });

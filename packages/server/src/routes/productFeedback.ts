@@ -233,6 +233,9 @@ function sendConversationError(res: Response, error: unknown): boolean {
   if (error instanceof ProductFeedbackSourceUnavailableError) productFeedbackSourceUnavailableLog(error);
   if (error instanceof ProductFeedbackRouteBindingError) productFeedbackRouteBindingLog(error);
   if (error instanceof ProductFeedbackRouteBindingError || error instanceof ProductFeedbackSourceUnavailableError) {
+    // Binding failures are transient in practice (a fresh task's first calls to
+    // Hands); tell clients when retrying is reasonable.
+    if (error instanceof ProductFeedbackRouteBindingError) res.setHeader("Retry-After", "5");
     res.status(503).json({
       error: "Feedback service is temporarily unavailable",
       code: "feedback_integration_unavailable",

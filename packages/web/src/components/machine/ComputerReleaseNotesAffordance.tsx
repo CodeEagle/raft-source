@@ -24,7 +24,7 @@ export default function ComputerReleaseNotesAffordance({ notes }: { notes: Compu
     <>
       <TextLink
         variant="primary"
-        className="text-xs"
+        className="text-footnote"
         aria-haspopup="dialog"
         data-testid="computer-release-notes-open"
         onClick={openNotes}
@@ -39,7 +39,7 @@ export default function ComputerReleaseNotesAffordance({ notes }: { notes: Compu
           testId="computer-release-notes-dialog"
           closeOnBackdrop
         >
-          <div className="max-h-[60vh] overflow-y-auto text-sm text-foreground-strong theme-brutal:text-black">
+          <div className="max-h-[60vh] overflow-y-auto text-callout text-foreground">
             <MarkdownContent source={text} />
           </div>
         </DialogCard>

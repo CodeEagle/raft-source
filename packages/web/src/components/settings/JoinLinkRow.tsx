@@ -1,4 +1,4 @@
-import { Button } from "raft-ui";
+import { Button } from "@botiverse/raft-ui";
 import Tooltip from "../ui/Tooltip";
 import { useCallback } from "react";
 import { Check, Copy, X } from "lucide-react";
@@ -24,9 +24,9 @@ export function JoinLinkRow({
   const handleRequestRevoke = useCallback(() => onRequestRevoke(link), [link, onRequestRevoke]);
 
   return (
-    <div className="border border-line-muted theme-brutal:border-2 theme-brutal:border-black/30 px-3 py-2.5 space-y-1.5">
+    <div className="space-y-1.5 py-3 first:pt-0 last:pb-0">
       <div className="flex items-center gap-2">
-        <div className="min-w-0 flex-1 border border-line-muted bg-layer-panel theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white px-2 py-1 font-mono text-[11px] truncate select-all">
+        <div className="min-w-0 flex-1 select-all truncate rounded-control bg-fill-muted px-2.5 py-1.5 font-mono text-mono-meta text-foreground">
           {buildJoinLinkUrl(link.token)}
         </div>
         <Tooltip content={formatMessage({ id: "settings.joinLinks.copyLink" })}>
@@ -52,7 +52,7 @@ export function JoinLinkRow({
         </Button>
         </Tooltip>
       </div>
-      <div className="text-[11px] text-foreground-muted theme-brutal:text-black/50 font-mono">
+      <div className="font-mono text-mono-meta text-foreground-hint">
         {link.maxUses != null
           ? formatMessage({ id: "settings.joinLinks.usesWithMax" }, { used: link.useCount, max: link.maxUses })
           : formatMessage({ id: "settings.joinLinks.uses" }, { used: link.useCount })}

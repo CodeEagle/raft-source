@@ -157,9 +157,11 @@ function renderSidebar(initialEntry = "/s/server/channel/joined-channel") {
 function assertSectionDescriptionTypography(text: string) {
   const description = screen.getByText(text).closest<HTMLElement>("[data-sidebar-section-description]");
   assert.ok(description, `${text} must use the Sidebar section-description primitive`);
-  assert.match(description.className, /(?:^|\s)text-xs(?:\s|$)/);
-  assert.match(description.className, /(?:^|\s)font-mono(?:\s|$)/);
-  assert.match(description.className, /(?:^|\s)leading-snug(?:\s|$)/);
+  // Raft Design System › Sidebar section empty/help copy: Grotesk 13/18, one
+  // family for every rail (no per-theme typography).
+  assert.match(description.className, /(?:^|\s)text-footnote(?:\s|$)/);
+  assert.match(description.className, /(?:^|\s)font-sans(?:\s|$)/);
+  assert.doesNotMatch(description.className, /theme-brutal:|font-mono|uppercase/);
 }
 
 test("sidebar empty and help descriptions share one typography contract across rails", () => {
@@ -181,6 +183,22 @@ test("sidebar empty and help descriptions share one typography contract across r
   renderSidebar("/s/server/computers");
 
   assertSectionDescriptionTypography("No computers yet");
+});
+
+test("Pinned and Joint channels retain independent disclosure choices after remount", () => {
+  seedSidebar();
+  renderSidebar();
+  fireEvent.click(screen.getByTestId("sidebar-section-toggle-pinned"));
+  fireEvent.click(screen.getByTestId("sidebar-section-toggle-joint-channels"));
+  cleanup();
+  renderSidebar();
+  assert.equal(screen.getByTestId("sidebar-section-toggle-pinned").getAttribute("aria-expanded"), "false");
+  assert.equal(screen.getByTestId("sidebar-section-toggle-joint-channels").getAttribute("aria-expanded"), "false");
+  fireEvent.click(screen.getByTestId("sidebar-section-toggle-pinned"));
+  cleanup();
+  renderSidebar();
+  assert.equal(screen.getByTestId("sidebar-section-toggle-pinned").getAttribute("aria-expanded"), "true");
+  assert.equal(screen.getByTestId("sidebar-section-toggle-joint-channels").getAttribute("aria-expanded"), "false");
 });
 
 test("sidebar sections own their create actions and joint channels remain visible while empty", () => {
@@ -298,9 +316,9 @@ test("custom sections render mixed placement chrome and expose direct management
   const menu = screen.getByRole("menu", { name: "Project options" });
   assert.ok(menu.textContent?.includes("New section…"));
   assert.equal(menu.textContent?.includes("Manage sections…"), false);
-  assert.ok(menu.textContent?.includes("Rename / change icon…"));
+  assert.ok(menu.textContent?.includes("Edit section…"));
   assert.ok(menu.textContent?.includes("Delete section"));
-  assert.ok((menu.textContent?.indexOf("Rename / change icon…") ?? -1) < (menu.textContent?.indexOf("New section…") ?? -1));
+  assert.ok((menu.textContent?.indexOf("Edit section…") ?? -1) < (menu.textContent?.indexOf("New section…") ?? -1));
   assert.ok((menu.textContent?.indexOf("New section…") ?? -1) < (menu.textContent?.indexOf("Delete section") ?? -1));
 });
 
@@ -407,7 +425,9 @@ test("custom sections accept direct-message channel placements", () => {
 
   const customSection = screen.getByTestId("sidebar-custom-section-project");
   assert.ok(customSection.textContent?.includes("Alice"));
-  assert.equal(customSection.textContent?.includes("Alice profile description"), false);
+  // A row looks the same in every section: the custom section shows the
+  // description exactly as Direct Messages does.
+  assert.equal(customSection.textContent?.includes("Alice profile description"), true);
   const dmRow = customSection.querySelector('button[data-sidebar-channel-id="dm-alice"]');
   assert.ok(dmRow);
   assert.ok(dmRow.classList.contains("items-center"));
@@ -453,7 +473,7 @@ test("blank chat sidebar space opens only target-free creation and section actio
   assert.equal(within(menu).queryByRole("menuitem", { name: "Manage sections…" }), null);
   assert.equal(within(menu).queryByText("Sort"), null);
   assert.equal(within(menu).queryByRole("menuitem", { name: "Move to section" }), null);
-  assert.equal(within(menu).queryByRole("menuitem", { name: "Rename / change icon…" }), null);
+  assert.equal(within(menu).queryByRole("menuitem", { name: "Edit section…" }), null);
 });
 
 test("section headers are direct drag activators in persisted visual order", () => {

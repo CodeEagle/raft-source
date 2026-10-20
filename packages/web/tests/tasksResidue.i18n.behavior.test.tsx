@@ -95,8 +95,8 @@ test("catalog pins tasks residue MessageIds with Chinese and ICU", () => {
   assert.equal(en["task.create.addAnother"], "Add Another");
   assert.equal(en["task.create.failed"], "Failed to create task");
   assert.equal(en["task.board.doneCount"], "{count} done");
-  assert.equal(en["task.board.newTask"], "New Task");
-  assert.equal(en["task.badge.legacy"], "LEGACY");
+  assert.equal(en["task.board.newTask"], "Create Task");
+  assert.equal(en["task.badge.legacy"], "Legacy");
   assert.equal(
     en["task.item.deleteConfirm"],
     'Delete task #{taskNumber} "{title}"? This cannot be undone.',
@@ -106,7 +106,7 @@ test("catalog pins tasks residue MessageIds with Chinese and ICU", () => {
   assert.equal(en["task.item.doneAt"], "done {when}");
   assert.equal(en["task.panel.ofTotal"], " of {total}");
   assert.equal(en["task.panel.clearAll"], "Clear All");
-  assert.equal(en["task.panel.createWithNewTask"], "Create one with the New Task button.");
+  assert.equal(en["task.panel.createWithNewTask"], "Create one with the Create Task button.");
   assert.equal(
     en["task.panel.serverWideExcluded"],
     "DM and agent task boards are intentionally excluded from this server-wide view.",
@@ -117,7 +117,7 @@ test("catalog pins tasks residue MessageIds with Chinese and ICU", () => {
   }
   for (const id of IDS) {
     if (id === "task.badge.legacy") {
-      assert.equal(zh[id], "LEGACY", "legacy protocol badge intentionally stays untranslated");
+      assert.equal(zh[id], "Legacy", "legacy protocol badge intentionally stays untranslated");
       continue;
     }
     assert.match(zh[id], /\p{Script=Han}/u, `${id} missing Chinese`);

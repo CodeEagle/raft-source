@@ -1,4 +1,4 @@
-import { parseRaftPermalink } from "@botiverse/raft-shared";
+import { parseRaftPermalink, replaceOutsideMarkdownCode } from "@botiverse/raft-shared";
 import { alias } from "drizzle-orm/pg-core";
 import { and, eq, inArray, isNull } from "drizzle-orm";
 import { getDb } from "../db/index";
@@ -11,8 +11,6 @@ import { errorClassOf, safeAddTraceEvent } from "../tracing/semanticTrace";
 const CJK_URL_BOUNDARY_PUNCTUATION = "，。、；：！？）》」』】》〉”’（《「『【〈“‘";
 const URL_PATTERN = new RegExp(`https?:\\/\\/[^\\s<>"'${CJK_URL_BOUNDARY_PUNCTUATION}]+`, "g");
 const TRAILING_PUNCTUATION = /[),.!?;:，。！？；：]+$/;
-const FENCED_CODE_PATTERN = /```[\s\S]*?```/g;
-const INLINE_CODE_PATTERN = /``[^`]+``|`[^`]+`/g;
 const FULL_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 interface MessagePermalinkRow {
@@ -27,11 +25,6 @@ interface MessagePermalinkRow {
 interface ParsedMatch {
   rawUrl: string;
   parsed: NonNullable<ReturnType<typeof parseRaftPermalink>>;
-}
-
-interface ProtectedMarkdownCode {
-  text: string;
-  restore: (value: string) => string;
 }
 
 export function formatCanonicalAgentMessageRef(row: MessagePermalinkRow): string | null {
@@ -72,24 +65,6 @@ function collectParsedMatches(text: string, serverSlug: string): ParsedMatch[] {
   return matches;
 }
 
-function protectMarkdownCode(text: string): ProtectedMarkdownCode {
-  const placeholders: string[] = [];
-  const protect = (pattern: RegExp, value: string) =>
-    value.replace(pattern, (match) => {
-      const index = placeholders.length;
-      placeholders.push(match);
-      return `\x00CODE${index}\x00`;
-    });
-
-  const protectedText = protect(INLINE_CODE_PATTERN, protect(FENCED_CODE_PATTERN, text));
-
-  return {
-    text: protectedText,
-    restore: (value: string) =>
-      value.replace(/\x00CODE(\d+)\x00/g, (_match, index) => placeholders[Number(index)] ?? ""),
-  };
-}
-
 function replacePermalinkMatches(text: string, replacements: Map<string, string>): string {
   return text.replace(URL_PATTERN, (match) => {
     const trailing = match.match(TRAILING_PUNCTUATION)?.[0] ?? "";
@@ -102,8 +77,8 @@ function replacePermalinkMatches(text: string, replacements: Map<string, string>
 export function replacePermalinksOutsideMarkdownCode(text: string, replacements: Map<string, string>): string {
   if (replacements.size === 0 || !text.includes("http")) return text;
 
-  const protectedMarkdown = protectMarkdownCode(text);
-  return protectedMarkdown.restore(replacePermalinkMatches(protectedMarkdown.text, replacements));
+  // Code is decided by the markdown parser (task #762), not by fence regexes.
+  return replaceOutsideMarkdownCode(text, (chunk) => replacePermalinkMatches(chunk, replacements));
 }
 
 function parsedMatchKey(match: ParsedMatch): string {

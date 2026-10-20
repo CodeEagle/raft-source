@@ -53,7 +53,7 @@ export default function CrossOriginPdfFrame({
   const { formatMessage } = useIntl();
   if (!isPdfPreviewUrlIsolated(src)) {
     return (
-      <div className="flex h-full w-full items-center justify-center p-6 text-center text-sm text-foreground-muted theme-brutal:text-black/70" data-testid="pdf-preview-isolation-refused">
+      <div className="flex h-full w-full items-center justify-center p-6 text-center text-callout text-foreground-muted" data-testid="pdf-preview-isolation-refused">
         {formatMessage({ id: "message.messageItem.pdfPreviewIsolationRefused" })}
       </div>
     );

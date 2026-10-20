@@ -154,35 +154,49 @@ export function readContextGeneration(transportDir: string, deps: ContextGenerat
   }
 }
 
+/** The context id a spawn publishes, decided before the process exists. */
+export type SpawnContextGeneration = { contextId: string; reason: "spawn" | "resume" };
+
 /**
- * Spawn-time write. Resuming `resumeSessionId` reuses the id that session last
- * had; otherwise (fresh spawn, unknown session, or a runtime whose unchanged id
- * would prove nothing because it never reports compaction) a new id.
+ * Resuming `resumeSessionId` reuses the id that session last had; otherwise
+ * (fresh spawn, unknown session, or a runtime whose unchanged id would prove
+ * nothing because it never reports compaction) a new id. Planned by the
+ * daemon before the spawn so the start input it renders is booked under the
+ * same id the CLI will read (glimpse G0).
  */
-export function publishSpawnContextGeneration(
+export function planSpawnContextGeneration(
   transportDir: string,
-  input: { runtime: string; resumeSessionId?: string | null; passiveAx: boolean },
+  input: { runtime: string; resumeSessionId?: string | null },
   deps: ContextGenerationDeps = {},
-): string | null {
+): SpawnContextGeneration {
   const reused = input.resumeSessionId && runtimeReportsCompaction(input.runtime)
     ? readSessions(transportDir, deps)?.sessions[input.resumeSessionId]?.contextId
     : undefined;
-  return reused
-    ? writeContextGeneration(transportDir, { reason: "resume", runtime: input.runtime, passiveAx: input.passiveAx, contextId: reused }, deps)
-    : writeContextGeneration(transportDir, { reason: "spawn", runtime: input.runtime, passiveAx: input.passiveAx }, deps);
+  return reused ? { contextId: reused, reason: "resume" } : { contextId: (deps.newId ?? randomUUID)(), reason: "spawn" };
+}
+
+/** Spawn-time write of `plan` (planned here when the caller has none). */
+export function publishSpawnContextGeneration(
+  transportDir: string,
+  input: { runtime: string; resumeSessionId?: string | null; passiveAx: boolean; plan?: SpawnContextGeneration },
+  deps: ContextGenerationDeps = {},
+): string | null {
+  const plan = input.plan ?? planSpawnContextGeneration(transportDir, input, deps);
+  return writeContextGeneration(transportDir, { reason: plan.reason, runtime: input.runtime, passiveAx: input.passiveAx, contextId: plan.contextId }, deps);
 }
 
 /**
  * The runtime reported `sessionId` via `session_init`. Binds the published id
  * to it, or — when the runtime reports a different session than the one this
  * process started on (`expectedSessionId`: a failed resume that silently
- * started fresh, or a new conversation) — publishes a new id first.
+ * started fresh, or a new conversation) — publishes a new id first. Returns
+ * the id now current (null when none is published).
  */
 export function bindContextGenerationToSession(
   transportDir: string,
   input: { runtime: string; sessionId: string; expectedSessionId: string | null },
   deps: ContextGenerationDeps = {},
-): void {
+): string | null {
   const current = readContextGeneration(transportDir, deps);
   let contextId = current?.contextId ?? null;
   if (current && contextId && input.expectedSessionId && input.expectedSessionId !== input.sessionId) {
@@ -190,6 +204,7 @@ export function bindContextGenerationToSession(
     contextId = writeContextGeneration(transportDir, { reason: "spawn", runtime: input.runtime, passiveAx: current.passiveAx === true }, deps);
   }
   rememberSessionContext(transportDir, input.sessionId, contextId, deps);
+  return contextId;
 }
 
 /**

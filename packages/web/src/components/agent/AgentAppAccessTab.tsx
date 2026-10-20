@@ -1,5 +1,7 @@
-import { Badge, Button } from "raft-ui";
+import { Badge, Button, IconTile, ListRow, ListRowBody, ListRowBottom, ListRowDescription, ListRowGroup, ListRowMeta, ListRowTitle, ListRowTop } from "@botiverse/raft-ui";
+import { AppWindow } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { useIntl } from "react-intl";
 import type {
   AgentAppEventDetail,
@@ -9,6 +11,7 @@ import type {
 import api from "../../api/client";
 import Banner from "../ui/Banner";
 import SectionHeader from "../ui/SectionHeader";
+import StatusDot from "../ui/StatusDot";
 import SurfaceListItem from "../ui/SurfaceListItem";
 import { useTimeFormatter } from "../../hooks/useTimeFormatter";
 import type { MessageId } from "../../i18n/messages";
@@ -54,6 +57,30 @@ const EVENT_STATUS_VARIANT: Record<AgentAppEventSummary["status"], "success" | "
   expired: "muted",
 };
 
+/** The fixed status pixel beside each delivery word (task colours: todo / done / closed). */
+const EVENT_STATUS_PIXEL: Record<AgentAppEventSummary["status"], string> = {
+  delivered: "bg-task-status-done",
+  queued: "bg-task-status-todo",
+  expired: "bg-task-status-closed",
+};
+
+/**
+ * An app row: raft-ui's display-only ListRow (its controls are the targets)
+ * with a neutral IconTile and the app's facts, in a ListRowGroup that draws
+ * the hairline from the text column (16 + 35 + 12). The facts run onto
+ * several lines, so the row hangs them from its top.
+ */
+function AppRow({ children }: { children: ReactNode }) {
+  return (
+    <ListRow interactive={false} className="items-start">
+      <IconTile>
+        <AppWindow />
+      </IconTile>
+      {children}
+    </ListRow>
+  );
+}
+
 function errorText(err: unknown, fallback: string): string {
   const message = (err as { response?: { data?: { error?: unknown } } })?.response?.data?.error;
   return typeof message === "string" && message ? message : fallback;
@@ -63,9 +90,9 @@ function ScopeChips({ scopes }: { scopes: string[] }) {
   return (
     <div className="flex flex-wrap gap-1">
       {scopes.map((scope) => (
-        <span key={scope} className="inline-flex border border-line-muted bg-layer-card px-1.5 py-0.5 text-[10px] font-bold uppercase theme-brutal:border-black theme-brutal:bg-white">
+        <Badge key={scope} appearance="outline">
           {scope}
-        </span>
+        </Badge>
       ))}
     </div>
   );
@@ -115,33 +142,35 @@ function GrantAccessForm({ agentId, onDone, onCancel }: { agentId: string; onDon
 
   return (
     <SurfaceListItem className="space-y-3" interactive={false} data-testid="agent-grant-access-form">
-      <div className="text-sm font-bold text-foreground-strong">{formatMessage({ id: "agent.apps.grantTitle" })}</div>
-      <div className="text-xs text-foreground-muted">{formatMessage({ id: "agent.apps.grantDescription" })}</div>
-      {error && <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>}
+      <div>
+        <div className="text-subhead font-semibold text-foreground">{formatMessage({ id: "agent.apps.grantTitle" })}</div>
+        <div className="mt-0.5 text-callout text-foreground-muted">{formatMessage({ id: "agent.apps.grantDescription" })}</div>
+      </div>
+      {error && <Banner intent="warning" density="sm">{error}</Banner>}
       {apps === null ? (
-        !error && <div className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "common.loading" })}</div>
+        !error && <div className="text-caption text-foreground-hint">{formatMessage({ id: "common.loading" })}</div>
       ) : apps.length === 0 ? (
-        <div className="text-sm text-foreground-muted">{formatMessage({ id: "agent.apps.noGrantableApps" })}</div>
+        <div className="text-callout text-foreground-hint">{formatMessage({ id: "agent.apps.noGrantableApps" })}</div>
       ) : (
-        <div className="grid gap-2">
+        <ListRowGroup>
           {apps.map((app) => (
             <GrantableAppOption key={app.clientId} app={app} selected={selected?.clientId === app.clientId} onChoose={choose} />
           ))}
-        </div>
+        </ListRowGroup>
       )}
       {selected && (
-        <div className="space-y-2">
-          <div className="text-xs font-bold text-foreground-strong">{formatMessage({ id: "agent.apps.grantScopes" })}</div>
+        <div className="space-y-1">
+          <div className="text-footnote font-semibold text-foreground-muted">{formatMessage({ id: "agent.apps.grantScopes" })}</div>
           {selected.scopes.map((scope) => (
             <GrantScopeCheckbox key={scope} scope={scope} checked={scopes.includes(scope)} onToggle={toggleScope} />
           ))}
         </div>
       )}
-      <div className="flex flex-wrap gap-2">
-        <Button size="sm" onClick={handleSubmit} disabled={!selected || scopes.length === 0 || saving}>
+      <div className="flex flex-wrap justify-end gap-2">
+        <Button variant="ghost" size="sm" onClick={onCancel}>{formatMessage({ id: "agent.detail.cancel" })}</Button>
+        <Button variant="primary" size="sm" onClick={handleSubmit} disabled={!selected || scopes.length === 0 || saving}>
           {formatMessage({ id: "agent.apps.grantConfirm" })}
         </Button>
-        <Button variant="outline" size="sm" onClick={onCancel}>{formatMessage({ id: "agent.detail.cancel" })}</Button>
       </div>
     </SurfaceListItem>
   );
@@ -154,7 +183,7 @@ function AppEventRow({ agentId, event }: { agentId: string; event: AgentAppEvent
   const [detail, setDetail] = useState<AgentAppEventDetail | null>(null);
   const [error, setError] = useState("");
 
-  const toggle = async () => {
+  const toggle = useCallback(async () => {
     const next = !open;
     setOpen(next);
     if (!next || detail) return;
@@ -164,36 +193,45 @@ function AppEventRow({ agentId, event }: { agentId: string; event: AgentAppEvent
     } catch (err) {
       setError(errorText(err, formatMessage({ id: "agent.apps.loadEventFailed" })));
     }
-  };
+  }, [open, detail, agentId, event.id, formatMessage]);
+  const handleToggle = useCallback(() => { void toggle(); }, [toggle]);
 
+  // A raft-ui ListRow (`plain`: no leading block, the hairline from the 16px
+  // edge) that opens the event's payload under it. The group is a list, so
+  // the hairline runs between two `li`s.
   return (
-    <SurfaceListItem className="space-y-1.5" interactive={false}>
-      <button type="button" onClick={() => void toggle()} aria-expanded={open} className="block w-full text-left">
-        <div className="flex items-center justify-between gap-3">
-          <div className="min-w-0 text-sm font-bold text-foreground-strong break-words">{event.summary}</div>
-          <Badge appearance="soft" variant={EVENT_STATUS_VARIANT[event.status]} uppercase className="shrink-0 text-[10px]">
-            {formatMessage({ id: `agent.apps.eventStatus.${event.status}` as MessageId })}
-          </Badge>
-        </div>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-foreground-muted">
-          <span className="font-bold">{event.app.name}</span>
-          <span className="font-mono">{event.kind}</span>
-          <span className="font-mono">{formatShortDateTime(event.createdAt)}</span>
-        </div>
-      </button>
+    <li>
+      <ListRow variant="plain" onClick={handleToggle} aria-expanded={open}>
+        <ListRowBody>
+          <ListRowTop>
+            <ListRowTitle>{event.summary}</ListRowTitle>
+            <Badge appearance="soft" variant={EVENT_STATUS_VARIANT[event.status]} className="shrink-0">
+              <StatusDot tone={EVENT_STATUS_PIXEL[event.status]} />
+              {formatMessage({ id: `agent.apps.eventStatus.${event.status}` as MessageId })}
+            </Badge>
+          </ListRowTop>
+          <ListRowBottom>
+            <ListRowDescription>{event.app.name}</ListRowDescription>
+            <ListRowMeta>{event.kind}</ListRowMeta>
+            <ListRowMeta>{formatShortDateTime(event.createdAt)}</ListRowMeta>
+          </ListRowBottom>
+        </ListRowBody>
+      </ListRow>
       {open && (
-        error ? (
-          <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>
-        ) : detail ? (
-          // App-supplied data: shown as inert JSON text, never rendered as links or markup.
-          <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-all border border-line-muted bg-layer-card p-2 font-mono text-[11px] text-foreground-strong theme-brutal:border-black/15">
-            {JSON.stringify(detail.payload, null, 2)}
-          </pre>
-        ) : (
-          <div className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "common.loading" })}</div>
-        )
+        <div className="px-4 pb-3">
+          {error ? (
+            <Banner intent="warning" density="sm">{error}</Banner>
+          ) : detail ? (
+            // App-supplied data: shown as inert JSON text, never rendered as links or markup.
+            <pre className="m-0 max-h-64 overflow-auto whitespace-pre-wrap break-all rounded-container border border-line-hairline bg-layer-code px-3 py-2 font-mono text-mono-code text-foreground">
+              {JSON.stringify(detail.payload, null, 2)}
+            </pre>
+          ) : (
+            <div className="text-caption text-foreground-hint">{formatMessage({ id: "common.loading" })}</div>
+          )}
+        </div>
       )}
-    </SurfaceListItem>
+    </li>
   );
 }
 
@@ -249,12 +287,12 @@ function AgentAppEventsSection({ agentId }: { agentId: string }) {
         <SectionHeader
           label={formatMessage({ id: "agent.apps.eventsTitle" })}
           action={
-            <Button variant="outline" size="sm" onClick={reload} disabled={loading} className="text-[11px]">
+            <Button variant="outline" size="sm" onClick={reload} disabled={loading}>
               {loading ? formatMessage({ id: "common.loading" }) : formatMessage({ id: "agent.apps.refresh" })}
             </Button>
           }
         />
-        <div className="mt-1 text-xs text-foreground-muted">{formatMessage({ id: "agent.apps.eventsDescription" })}</div>
+        <div className="mt-1 text-callout text-foreground-muted">{formatMessage({ id: "agent.apps.eventsDescription" })}</div>
       </div>
       {apps.length > 1 && (
         <div className="flex flex-wrap gap-1.5">
@@ -268,14 +306,14 @@ function AgentAppEventsSection({ agentId }: { agentId: string }) {
           ))}
         </div>
       )}
-      {error && <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>}
+      {error && <Banner intent="warning" density="sm">{error}</Banner>}
       {events.length === 0 && !loading && !error ? (
-        <div className="text-sm text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "agent.apps.noEvents" })}</div>
-      ) : (
-        <div className="space-y-2">
+        <div className="text-callout text-foreground-hint">{formatMessage({ id: "agent.apps.noEvents" })}</div>
+      ) : events.length > 0 ? (
+        <ListRowGroup render={<ul />}>
           {events.map((event) => <AppEventRow key={event.id} agentId={agentId} event={event} />)}
-        </div>
-      )}
+        </ListRowGroup>
+      ) : null}
       {nextCursor && (
         <Button variant="outline" size="sm" onClick={loadMore} disabled={loading}>
           {formatMessage({ id: "agent.apps.loadMore" })}
@@ -340,36 +378,41 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
   const active = items.filter((item) => item.type === "active");
 
   return (
-    <div className="flex-1 overflow-y-auto bg-layer-panel px-5 py-4 space-y-6 theme-brutal:bg-white">
-      {error && <Banner intent="warning" density="sm" className="font-bold">{error}</Banner>}
+    <div className="flex-1 space-y-6 overflow-y-auto bg-layer-canvas px-5 py-4">
+      {error && <Banner intent="warning" density="sm">{error}</Banner>}
 
       {pending.length > 0 && (
         <div className="space-y-3" data-testid="agent-app-pending">
           <SectionHeader label={formatMessage({ id: "agent.apps.pendingTitle" })} count={pending.length} />
-          {pending.map((item) => (
-            <SurfaceListItem key={item.id} className="space-y-2" interactive={false}>
-              <div className="flex items-center justify-between gap-3">
-                <div>
-                  <div className="font-bold text-foreground-strong">{item.clientName}</div>
-                  <div className="text-xs text-foreground-muted">{formatShortDateTime(item.createdAt)}</div>
+          <ListRowGroup>
+            {pending.map((item) => (
+              <AppRow key={item.id}>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="break-words text-subhead font-semibold text-foreground">{item.clientName}</div>
+                      <div className="font-mono text-mono-meta text-foreground-hint">{formatShortDateTime(item.createdAt)}</div>
+                    </div>
+                    <Badge appearance="soft" variant="warning">
+                      <StatusDot tone="bg-task-status-todo" />
+                      {formatMessage({ id: "agent.apps.pending" })}
+                    </Badge>
+                  </div>
+                  <ScopeChips scopes={item.scopes} />
+                  {canManageAgentAccess && (
+                    <div className="flex flex-wrap gap-2">
+                      <IntegrationActionButton path={`/integrations/requests/${item.id}/approve`} body={APPROVE_REQUEST_BODY} failureMessageId="agent.apps.approveFailed" onAct={act}>
+                        {formatMessage({ id: "agent.apps.approve" })}
+                      </IntegrationActionButton>
+                      <IntegrationActionButton variant="outline" path={`/integrations/requests/${item.id}/deny`} body={EMPTY_BODY} failureMessageId="agent.apps.denyFailed" onAct={act}>
+                        {formatMessage({ id: "agent.apps.deny" })}
+                      </IntegrationActionButton>
+                    </div>
+                  )}
                 </div>
-                <Badge appearance="soft" variant="warning" uppercase className="text-[10px]">
-                  {formatMessage({ id: "agent.apps.pending" })}
-                </Badge>
-              </div>
-              <ScopeChips scopes={item.scopes} />
-              {canManageAgentAccess && (
-                <div className="flex flex-wrap gap-2">
-                  <IntegrationActionButton path={`/integrations/requests/${item.id}/approve`} body={APPROVE_REQUEST_BODY} failureMessageId="agent.apps.approveFailed" onAct={act}>
-                    {formatMessage({ id: "agent.apps.approve" })}
-                  </IntegrationActionButton>
-                  <IntegrationActionButton variant="outline" path={`/integrations/requests/${item.id}/deny`} body={EMPTY_BODY} failureMessageId="agent.apps.denyFailed" onAct={act}>
-                    {formatMessage({ id: "agent.apps.deny" })}
-                  </IntegrationActionButton>
-                </div>
-              )}
-            </SurfaceListItem>
-          ))}
+              </AppRow>
+            ))}
+          </ListRowGroup>
         </div>
       )}
 
@@ -378,12 +421,12 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
           <SectionHeader
             label={formatMessage({ id: "agent.detail.applications" })}
             action={loading
-              ? <span className="text-xs font-bold text-foreground-muted">{formatMessage({ id: "common.loading" })}</span>
+              ? <span className="text-caption text-foreground-hint">{formatMessage({ id: "common.loading" })}</span>
               : canManageAgentAccess && !granting
-                ? <Button variant="outline" size="sm" onClick={startGranting} className="text-[11px]">{formatMessage({ id: "agent.apps.grantAccess" })}</Button>
+                ? <Button variant="outline" size="sm" onClick={startGranting}>{formatMessage({ id: "agent.apps.grantAccess" })}</Button>
                 : null}
           />
-          <div className="mt-1 text-xs text-foreground-muted">
+          <div className="mt-1 text-callout text-foreground-muted">
             {formatMessage({ id: "agent.detail.applicationsDescription" })}
           </div>
         </div>
@@ -395,45 +438,50 @@ export default function AgentAppAccessTab({ agentId, canManageAgentAccess }: { a
           />
         )}
         {active.length === 0 ? (
-          <div className="text-sm text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "agent.detail.noConnectedApps" })}</div>
+          <div className="text-callout text-foreground-hint">{formatMessage({ id: "agent.detail.noConnectedApps" })}</div>
         ) : (
-          <div className="space-y-3">
+          <ListRowGroup>
             {active.map((item) => (
-              <SurfaceListItem key={item.id} className="space-y-2" interactive={false}>
-                <div className="flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-bold text-foreground-strong">{item.clientName}</div>
-                    <div className="text-xs text-foreground-muted">{formatShortDateTime(item.createdAt)}</div>
-                    {item.grantSource && (
-                      <div className="text-xs text-foreground-muted">{formatMessage({ id: GRANT_SOURCE_LABEL[item.grantSource] })}</div>
-                    )}
+              <AppRow key={item.id}>
+                <div className="min-w-0 flex-1 space-y-2">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <div className="break-words text-subhead font-semibold text-foreground">{item.clientName}</div>
+                      <div className="font-mono text-mono-meta text-foreground-hint">{formatShortDateTime(item.createdAt)}</div>
+                      {item.grantSource && (
+                        <div className="text-caption text-foreground-hint">{formatMessage({ id: GRANT_SOURCE_LABEL[item.grantSource] })}</div>
+                      )}
+                    </div>
+                    <Badge appearance="soft" variant="success">
+                      <StatusDot presence="online" />
+                      {formatMessage({ id: "agent.detail.active" })}
+                    </Badge>
                   </div>
-                  <Badge appearance="soft" variant="success" uppercase className="text-[10px]">
-                    {formatMessage({ id: "agent.detail.active" })}
-                  </Badge>
-                </div>
-                {item.clientDescription && <div className="text-sm text-foreground-muted">{item.clientDescription}</div>}
-                {item.clientAgentManifestUrl && (
-                  <div className="break-all font-mono text-xs text-foreground-muted">
-                    {formatMessage({ id: "agent.detail.agentManifest" }, { url: item.clientAgentManifestUrl })}
-                  </div>
-                )}
-                <ScopeChips scopes={item.scopes} />
-                <div className="flex flex-wrap gap-2">
-                  {canManageAgentAccess && (
-                    <IntegrationActionButton variant="outline" path={`/integrations/grants/${item.id}/revoke`} body={EMPTY_BODY} failureMessageId="agent.detail.revokeIntegrationFailed" onAct={act}>
-                      {formatMessage({ id: "agent.detail.revoke" })}
-                    </IntegrationActionButton>
+                  {item.clientDescription && <div className="text-callout text-foreground-muted">{item.clientDescription}</div>}
+                  {item.clientAgentManifestUrl && (
+                    <div className="break-all font-mono text-mono-meta text-foreground-hint">
+                      {formatMessage({ id: "agent.detail.agentManifest" }, { url: item.clientAgentManifestUrl })}
+                    </div>
                   )}
-                  {item.clientHomepageUrl && (
-                    <a href={item.clientHomepageUrl} target="_blank" rel="noreferrer" className="text-xs font-bold underline text-foreground-muted self-center">
-                      {formatMessage({ id: "agent.detail.viewService" })}
-                    </a>
+                  <ScopeChips scopes={item.scopes} />
+                  {(canManageAgentAccess || item.clientHomepageUrl) && (
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                      {canManageAgentAccess && (
+                        <IntegrationActionButton variant="outline" path={`/integrations/grants/${item.id}/revoke`} body={EMPTY_BODY} failureMessageId="agent.detail.revokeIntegrationFailed" onAct={act}>
+                          {formatMessage({ id: "agent.detail.revoke" })}
+                        </IntegrationActionButton>
+                      )}
+                      {item.clientHomepageUrl && (
+                        <a href={item.clientHomepageUrl} target="_blank" rel="noreferrer" className="rounded-[2px] text-footnote font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus">
+                          {formatMessage({ id: "agent.detail.viewService" })}
+                        </a>
+                      )}
+                    </div>
                   )}
                 </div>
-              </SurfaceListItem>
+              </AppRow>
             ))}
-          </div>
+          </ListRowGroup>
         )}
       </div>
 

@@ -7,7 +7,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { installerArgs, installerCommand, readInstallerUpgradeEvidence, readLastRemoteUpgradeReceipt, recordRemoteUpgradeLaunch } from "./externalInstaller";
+import { installerArgs, installerCommand, readInstallerUpgradeEvidence, readLastRemoteUpgradeReceipt, recordRemoteUpgradeLaunch, waitForRemoteUpgradeFailureReceipt } from "./externalInstaller";
 import { createHash } from "node:crypto";
 import { bindUpgradeReadyAcknowledgement } from "./residentLifecycleBridge";
 import { COMPUTER_VERSION } from "./version";
@@ -181,6 +181,45 @@ test("native installer resolver freezes one release, checks bytes, caches and ex
     }
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("remote upgrade v2: the launching runner relays an installer that gave up without stopping it, never a promotion", async () => {
+  const home = mkdtempSync(join(tmpdir(), "ru2-watch-"));
+  try {
+    const receipts = join(home, "computer", "installer", "receipts");
+    mkdirSync(receipts, { recursive: true });
+    const name = (id: string) => join(receipts, `${createHash("sha256").update(id).digest("hex")}.json`);
+    let clock = 0;
+    const polls: number[] = [];
+    // The installer writes its receipt on the third poll; another request's receipt is ignored.
+    writeFileSync(name("req-other"), JSON.stringify({ protocol: "raft-computer-installer/v3", id: "req-other", operation: "upgrade", outcome: "failed", exitCode: 1, targetVersion: "1.0.49" }));
+    const sleep = async (ms: number) => {
+      polls.push(ms);
+      clock += ms;
+      if (polls.length === 2) {
+        writeFileSync(name("req-held"), JSON.stringify({ protocol: "raft-computer-installer/v3", id: "req-held", operation: "upgrade", outcome: "held", exitCode: 2, targetVersion: "1.0.49", detail: { reason: "owned by another package manager" } }));
+      }
+    };
+    assert.deepEqual(
+      await waitForRemoteUpgradeFailureReceipt(home, "req-held", { targetVersion: "1.0.49", pollMs: 1_000, sleep, now: () => clock }),
+      { targetVersion: "1.0.49", outcome: "held", reason: "owned by another package manager" },
+    );
+    assert.deepEqual(polls, [1_000, 1_000]);
+
+    writeFileSync(name("req-ok"), JSON.stringify({ protocol: "raft-computer-installer/v3", id: "req-ok", operation: "upgrade", outcome: "promoted", exitCode: 0, targetVersion: "1.0.49" }));
+    assert.equal(await waitForRemoteUpgradeFailureReceipt(home, "req-ok", { sleep, now: () => clock }), null, "a promotion is the successor's to report");
+
+    clock = 0;
+    polls.length = 0;
+    assert.equal(
+      await waitForRemoteUpgradeFailureReceipt(home, "req-silent", { timeoutMs: 10_000, pollMs: 4_000, sleep, now: () => clock }),
+      null,
+      "no receipt by the deadline → nothing, the server's deadline settles it",
+    );
+    assert.deepEqual(polls, [4_000, 4_000, 4_000]);
+  } finally {
     rmSync(home, { recursive: true, force: true });
   }
 });

@@ -1,5 +1,5 @@
 import type { PropsWithChildren } from "react";
-import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
+import { X } from "lucide-react";
 import {
   ToastAction,
   ToastActions,
@@ -14,7 +14,7 @@ import {
   ToastTitle,
   ToastViewport,
   useToastManager,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { useEffect } from "react";
 import { useIntl } from "react-intl";
 import { setToastManager } from "./toastBridge";
@@ -24,7 +24,20 @@ import { setToastManager } from "./toastBridge";
  * The default raft-ui toast close control intentionally uses English fallback
  * copy. The app owns the active locale, so keep the same provider/manager
  * contract while supplying localized visible and accessible dismissal text.
+ *
+ * Raft Design System › Toast: the neutral HUD (raft-ui's raft toast recipe).
+ * A receipt with no "who" leads with one status pixel that says the result —
+ * done lime, a problem orange, information cyan — instead of an icon.
  */
+const TOAST_PIXEL_TONE: Record<string, string> = {
+  success: "bg-task-status-done",
+  warning: "bg-presence-error",
+  error: "bg-presence-error",
+};
+
+function toastPixelTone(intent: string | undefined): string {
+  return (intent && TOAST_PIXEL_TONE[intent]) || "bg-info";
+}
 function LocalizedToastList() {
   const { formatMessage } = useIntl();
   const { toasts } = useToastManager();
@@ -45,8 +58,12 @@ function LocalizedToastList() {
           data-testid="localized-toast-content-row"
         >
           {showIcon ? (
-            <ToastIcon className="size-5 border-0 bg-transparent p-0 shadow-none" data-testid="localized-toast-icon">
-              {intent === "success" ? <CheckCircle2 aria-hidden="true" /> : intent === "warning" || intent === "error" ? <AlertTriangle aria-hidden="true" /> : <Info aria-hidden="true" />}
+            <ToastIcon className="flex size-5 items-center justify-center border-0 bg-transparent p-0 shadow-none" data-testid="localized-toast-icon">
+              <span
+                aria-hidden="true"
+                data-testid="localized-toast-pixel"
+                className={`block size-[9px] rounded-[2px] border-[1.5px] border-sticker-ink ${toastPixelTone(intent)}`}
+              />
             </ToastIcon>
           ) : null}
           <ToastBody className="min-w-0 text-left" data-testid="localized-toast-content">
@@ -60,7 +77,6 @@ function LocalizedToastList() {
             >
               {showClose ? (
                 <ToastClose
-                  className="size-8 p-1"
                   aria-label={dismissLabel}
                   aria-hidden={false}
                   data-testid="localized-toast-close"

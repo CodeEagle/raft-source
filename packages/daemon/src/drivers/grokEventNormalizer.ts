@@ -240,6 +240,7 @@ export class GrokEventNormalizer {
           kind: "tool_call",
           name: existing.name,
           input: update.rawInput ?? parseAccumulatedArguments(existing.arguments),
+          ...(nonEmptyString(update.toolCallId) ? { callId: toolCallId } : {}),
         }];
       }
 
@@ -266,7 +267,7 @@ export class GrokEventNormalizer {
         this.toolCalls.set(toolCallId, existing);
         if (existing.outputEmitted) return [internalProgress(updateKind, update)];
         existing.outputEmitted = true;
-        return [{ kind: "tool_output", name: existing.name }];
+        return [{ kind: "tool_output", name: existing.name, callId: toolCallId, ...grokToolEndOutcome(status, update.rawOutput) }];
       }
 
       case "pending_interaction":
@@ -405,4 +406,17 @@ export class GrokEventNormalizer {
     }
     this.promptIdsByGeneration.delete(generation);
   }
+}
+
+/**
+ * ACP's terminal tool status: `completed` is a successful call; `failed` and
+ * `cancelled` are not, unless the output carries the exit code of a command
+ * that ran (then the call itself was ok and the exit code is recorded).
+ */
+export function grokToolEndOutcome(status: string, rawOutput: unknown): { ok: boolean; exitCode?: number } {
+  const output = rawOutput && typeof rawOutput === "object" ? rawOutput as Record<string, unknown> : {};
+  const exit = output.exit_code ?? output.exitCode;
+  const exitCode = typeof exit === "number" && Number.isInteger(exit) ? exit : undefined;
+  if (exitCode !== undefined) return { ok: true, exitCode };
+  return { ok: status === "completed" };
 }

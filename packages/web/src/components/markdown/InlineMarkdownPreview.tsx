@@ -3,7 +3,7 @@ import ReactMarkdown from "react-markdown";
 import type { Components, Options } from "react-markdown";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
-import { InlineCode } from "raft-ui";
+import { InlineCode } from "@botiverse/raft-ui";
 import { remarkAutolinkBareUrls } from "../../utils/markdownAutolink";
 
 const INLINE_PREVIEW_CODE_CLASS =
@@ -42,7 +42,7 @@ const INLINE_COMPONENTS: Components = {
 
 export default function InlineMarkdownPreview({
   markdown,
-  linkClassName = "text-blue-700 dark:text-blue-300 underline decoration-2 underline-offset-2",
+  linkClassName = "text-foreground-link underline decoration-2 underline-offset-2",
 }: {
   markdown: string;
   linkClassName?: string;

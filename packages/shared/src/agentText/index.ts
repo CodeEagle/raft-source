@@ -9,3 +9,5 @@ export * from "./mentions";
 export * from "./attachments";
 export * from "./knowledge";
 export * from "./search";
+export * from "./hold";
+export * from "./threadTarget";

@@ -147,3 +147,19 @@ test("channel info rejects thread targets before auth bootstrap", async () => {
     },
   );
 });
+
+test("channel info takes the target as --target too, as the card's agents tried after a hold", async () => {
+  const { io, stdout } = memoryIo();
+  const ctx = createCommandContext({
+    io,
+    loadAgentContext: () => agentContext,
+    createApiClient: () => ({
+      request: async (_method: string, path: string): Promise<ApiResponse<unknown>> => path.startsWith("/internal/agent-api/channel-members")
+        ? { ok: true, status: 200, error: null, data: { channel: { ref: "#qa-a", type: "public" }, agents: [], humans: [] } }
+        : { ok: true, status: 200, error: null, data: { runtimeContext: { agentId: "agent-1", serverId: "server-1" }, channels: [{ id: "c1", name: "qa-a", joined: true, type: "channel", description: "Product questions" }], agents: [], humans: [] } },
+    }) as any,
+  });
+
+  await channelInfoCommand.handler(ctx, undefined, { target: "#qa-a" });
+  assert.match(stdout.join(""), /Channel: #qa-a/);
+});

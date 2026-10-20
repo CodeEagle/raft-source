@@ -1,5 +1,6 @@
 import { createIntl, createIntlCache } from "react-intl";
 import type { IntlShape } from "react-intl";
+import type { Presence } from "@botiverse/raft-ui";
 import { en } from "../i18n/messages/en";
 
 const enComputerIntl = createIntl(
@@ -75,9 +76,11 @@ export function countMachinesNeedingAttention(
   return count;
 }
 
+// Raft DS colours: an available upgrade is something waiting for you (the pink
+// attention pixel); presence lights are fixed (online lime, offline stone).
 export function getComputerAttentionDotTone(status: ComputerAttentionStatus): string | undefined {
-  if (status === "upgrade") return "bg-brutal-pink";
-  if (status === "offline") return "bg-gray-400";
+  if (status === "upgrade") return "bg-attention";
+  if (status === "offline") return "bg-presence-offline";
   return undefined;
 }
 
@@ -102,10 +105,16 @@ export function getComputerRowDotStatus(
   return machine.status === "online" ? "online" : "offline";
 }
 
-export function getComputerRowDotTone(status: ComputerRowDotStatus): string {
-  if (status === "upgrade") return "bg-brutal-pink";
-  if (status === "online") return "bg-brutal-lime";
-  return "bg-gray-400";
+/**
+ * The row dot's light, as StatusDot props: liveness is a fixed presence light
+ * (raft-ui `Status presence`: online lime, offline stone); an upgrade waiting
+ * for you is the pink attention pixel, which is not a presence.
+ */
+export function getComputerRowDotLight(
+  status: ComputerRowDotStatus,
+): { presence: Presence; tone?: undefined } | { presence?: undefined; tone: string } {
+  if (status === "upgrade") return { tone: "bg-attention" };
+  return { presence: status };
 }
 
 export type ComputerRowDotTitleDescriptor =

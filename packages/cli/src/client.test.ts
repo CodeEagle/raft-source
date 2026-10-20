@@ -11,6 +11,13 @@ import {
   upstreamLayerForFetchError,
   type CliTransportNormalizedErrorAttrs,
 } from "./transportTrace";
+import { globalFetchJsonTransport, setJsonTransportForTests } from "./client";
+import { afterEach, beforeEach } from "vitest";
+// These tests stub globalThis.fetch; route the client's JSON transport (node:http
+// in production) through it.
+let previousJsonTransport: ReturnType<typeof setJsonTransportForTests>;
+beforeEach(() => { previousJsonTransport = setJsonTransportForTests(globalFetchJsonTransport); });
+afterEach(() => { setJsonTransportForTests(previousJsonTransport); });
 
 const ctx: AgentContext = {
   agentId: "agent-1",

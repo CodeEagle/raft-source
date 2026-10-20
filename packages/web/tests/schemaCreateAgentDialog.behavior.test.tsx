@@ -1817,6 +1817,35 @@ test("codex v2 create: a source that fails to load shows status and retry withou
   assert.equal((postBodies[0] as { formValues: Record<string, unknown> }).formValues.model, "gpt-5.6-sol");
 });
 
+test("codex v2 create: a live model list has a refresh action that re-asks the Computer with refresh=1", async () => {
+  const refreshedSource = runtimeFormFixture("codex.option-source.live.json") as { options: Array<{ value: string; label: string }> };
+  const { sourceCalls } = await renderCodexV2Create([
+    () => runtimeFormFixture("codex.option-source.live.json"),
+    () => ({ ...refreshedSource, options: [{ value: "gpt-7-preview", label: "GPT-7 Preview" }] }),
+  ]);
+  const refresh = await screen.findByTestId("runtime-form-v2-refresh-source-model");
+  assert.equal(refresh.getAttribute("aria-label"), "Refresh this list");
+  // The derived effort list has no source of its own: no refresh action.
+  assert.ok(screen.queryByTestId("runtime-form-v2-refresh-source-reasoningEffort") === null);
+  fireEvent.click(refresh);
+  await waitFor(() => assert.deepEqual(sourceCalls, [
+    "/servers/server-1/machines/machine-1/runtime-forms/v2/codex/option-sources/model",
+    "/servers/server-1/machines/machine-1/runtime-forms/v2/codex/option-sources/model?refresh=1",
+  ]));
+  await pickOption(screen.getByTestId("runtime-form-v2-model"), /GPT-7 Preview/);
+});
+
+test("codex v2 create: a retryable source failure offers Retry below the field, not a second refresh action", async () => {
+  await renderCodexV2Create([() => runtimeFormFixture("codex.option-source.unavailable.json")]);
+  await screen.findByTestId("runtime-form-v2-model-retry");
+  assert.ok(screen.queryByTestId("runtime-form-v2-refresh-source-model") === null);
+  cleanup();
+  // A non-retryable fallback (missing config) has no Retry, so the refresh action stays.
+  await renderCodexV2Create([() => runtimeFormFixture("codex.option-source.fallback.json")]);
+  await screen.findByTestId("runtime-form-v2-model-status");
+  screen.getByTestId("runtime-form-v2-refresh-source-model");
+});
+
 test("codex v2 create: a required field whose source is unavailable shows why, offers retry and blocks submit; fallback is usable", async () => {
   await renderCodexV2Create([() => runtimeFormFixture("codex.option-source.unavailable.json")]);
   const status = await screen.findByTestId("runtime-form-v2-model-status");

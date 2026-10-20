@@ -1,5 +1,5 @@
 import type { ComponentType, ReactNode } from "react";
-import { TooltipProvider } from "raft-ui";
+import { TooltipProvider } from "@botiverse/raft-ui";
 import { BrowserRouter } from "react-router-dom";
 import { AppThemeProvider } from "./theme/AppThemeProvider";
 import { LocaleProvider } from "./i18n/LocaleProvider";

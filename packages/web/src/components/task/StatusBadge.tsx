@@ -13,13 +13,17 @@
 //   </StatusBadge>
 
 import type { ComponentPropsWithRef, ReactNode } from "react";
-import { TaskStatusBadge } from "raft-ui";
+import { TaskStatusBadge } from "@botiverse/raft-ui";
+import type { TaskChipSize } from "@botiverse/raft-ui";
 import type { TaskStatus } from "../../store/taskStore";
 import { TASK_STATUS_UI, toRuiTaskStatus } from "./taskStatusUi";
 
 interface StatusBadgeProps extends Omit<ComponentPropsWithRef<"span">, "children"> {
   status: TaskStatus;
   children?: ReactNode;
+  /** `sm` lines the badge up with the `sm` Badges beside it (e.g. the Activity
+   *  card metadata row); omitted, it keeps the task chip's own size. */
+  size?: TaskChipSize;
   /** Existing callsites pass an icon size; raft-ui sizes the icon from the
    *  token recipe, so this is accepted for compatibility and ignored. */
   iconSize?: number;

@@ -1,3 +1,4 @@
+import { readRuntimeCliNotices } from "./runtimeCliNotices";
 // `raft-computer status` — Computer-level aggregate view (RFC v0.8
 // contract v4 §1/§6/§9). One Computer = one SLOCK_HOME = N server
 // attachments + their per-server daemons + one service. `status`
@@ -26,6 +27,7 @@ import { findLiveServicePidReadOnly } from "./internal/service-pid-fallback";
 import { isDegraded, readTerminalUnlinked } from "./health";
 import { info } from "./output";
 import { COMPUTER_VERSION } from "./version";
+import { SHELL_ENV_CAPTURE_TIMEOUT_MS } from "./shellEnvCapture";
 import { readProcessVersionEvidence } from "./versionEvidence";
 
 type UserSessionReadResult =
@@ -205,6 +207,8 @@ export interface ComputerStatusReport {
   // One row per attached server (v4 §6 aggregate). Empty array when the
   // Computer has no attachments yet.
   servers: ServerStatusRow[];
+  /** Runtimes whose detected CLI version went down since an earlier start, with the fix. */
+  runtimeCliNotices?: string[];
 }
 
 /**
@@ -265,6 +269,7 @@ export async function buildStatusReport(installRoot: string): Promise<ComputerSt
     cliVersion: COMPUTER_VERSION,
     service: serviceWithVersion,
     servers,
+    runtimeCliNotices: await readRuntimeCliNotices(installRoot),
   };
 }
 
@@ -301,8 +306,9 @@ export function formatStatusReport(report: ComputerStatusReport): void {
   info(`Service version: ${formatVersionStatus(report.service.version)}`);
   if (report.service.version.shellEnvironment?.startsWith("unavailable:")) {
     const code = report.service.version.shellEnvironment.slice("unavailable:".length);
+    const cause = code === "SHELL_ENV_TIMEOUT" ? ` Your login shell did not hand back its environment within ${SHELL_ENV_CAPTURE_TIMEOUT_MS / 1000} seconds.` : "";
     info(
-      `  Warning: terminal shell environment import failed (${code}). The service is using the baseline environment; tools available only in your terminal (custom PATH, exported variables) are invisible to agents until your shell init is fixed and the Computer service restarts.`,
+      `  Warning: terminal shell environment import failed when the service started (${code}).${cause} The service is using the baseline environment, so tools available only in your terminal (custom PATH, exported variables) may be invisible to agents.`,
     );
   }
   if (
@@ -314,6 +320,7 @@ export function formatStatusReport(report: ComputerStatusReport): void {
       `  Warning: running service version ${report.service.version.version} differs from this app/CLI version ${report.cliVersion}. Restart the Computer service from the current app/CLI.`,
     );
   }
+  for (const notice of report.runtimeCliNotices ?? []) info(`  Warning: ${notice}`);
   info(`Service log: ${report.service.logPath}`);
   info("");
   if (report.servers.length === 0) {

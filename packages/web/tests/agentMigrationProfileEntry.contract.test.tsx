@@ -19,8 +19,8 @@ import {
 
 afterEach(resetAgentDetailPanelState);
 
-/** The Migrate button in the profile's Agent migration section. */
-async function migrationEntry(name = "Migrate") {
+/** The Move to another Computer button in the profile's Agent migration section. */
+async function migrationEntry(name = "Move to another Computer") {
   const section = await screen.findByTestId("agent-migration-section");
   return within(section).getByRole("button", { name });
 }
@@ -107,7 +107,7 @@ test("post-trial Free projection gates only the new migration entry and routes t
     "After upgrading, you can migrate an agent and its workspace to another computer.",
   ));
   assert.equal(
-    screen.queryByRole("heading", { name: "Move to another computer" }),
+    screen.queryByRole("heading", { name: "Move to another Computer" }),
     null,
   );
   assert.equal(posts.includes("/agents/agent-1/migrate"), false);
@@ -126,7 +126,7 @@ test("post-trial Free projection renders the migration upgrade prompt in zh-CN",
   renderPanel(agent, "zh-cn");
 
   await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "free"));
-  fireEvent.click(await migrationEntry("迁移"));
+  fireEvent.click(await migrationEntry("迁移到另一台计算机"));
 
   assert.ok(screen.getByRole("heading", { name: "升级至 Pro 以迁移 Agent" }));
   assert.ok(screen.getByText(
@@ -165,12 +165,12 @@ test("typed backend plan denial replaces the start dialog with the same upgrade 
 
   await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "pro"));
   fireEvent.click(await migrationEntry());
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
 
   assert.ok(await screen.findByRole("heading", { name: "Upgrade to Pro to migrate agents" }));
   assert.equal(startCalls, 1);
   assert.equal(
-    screen.queryByRole("heading", { name: "Move to another computer" }),
+    screen.queryByRole("heading", { name: "Move to another Computer" }),
     null,
   );
   assert.ok(screen.queryByText("MIGRATION_PRO_PLAN_REQUIRED") === null);
@@ -200,7 +200,7 @@ test("Free projection preserves the current active migration status", async () =
   await waitFor(() => assert.equal(useServerStore.getState().billing?.plan, "free"));
   assert.ok(screen.getByText("Transferring workspace to Target Computer."));
   assert.equal(
-    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Move to another Computer" }),
     null,
     "while a migration runs, the progress block's Cancel is the only action",
   );
@@ -265,9 +265,9 @@ test("migration profile entry starts migration directly without preparing an act
   const entry = await migrationEntry();
   fireEvent.click(entry);
 
-  const dialog = screen.getByRole("dialog", { name: "Move to another computer" });
+  const dialog = screen.getByRole("dialog", { name: "Move to another Computer" });
   assert.equal(dialog.getAttribute("data-slot"), "dialog-content", "the start dialog is the raft-ui Dialog");
-  assert.ok(screen.getByRole("heading", { name: "Move to another computer" }));
+  assert.ok(screen.getByRole("heading", { name: "Move to another Computer" }));
   assert.ok(screen.getByText("Your agent will stop while it migrates, then start again on the new computer."));
   assert.ok(screen.getByText(/Migrating moves the workspace files/));
   assert.ok(screen.getByText(/including MEMORY.md and notes if any/));
@@ -276,7 +276,7 @@ test("migration profile entry starts migration directly without preparing an act
   assert.equal(targetComputerInput.tagName, "INPUT", "the target picker is the raft-ui ComboboxSelect");
   assert.equal(targetComputerInput.value, "Target Computer");
 
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
 
   await waitFor(() => {
     const start = posts.find((post) => post.url === "/agents/agent-1/migrate");
@@ -299,7 +299,7 @@ test("migration profile entry starts migration directly without preparing an act
   const completeStep = screen.getByText("Migration complete").closest('[data-slot="step"]');
   assert.ok(completeStep?.classList.contains("r-step--wait"), "the outcome step stays pending until the migration completes");
   assert.equal(
-    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Move to another Computer" }),
     null,
     "while a migration runs, the progress block's Cancel is the only action",
   );
@@ -359,7 +359,7 @@ test("migration start consumes the canonical support ref and refreshes Cancel ca
   renderPanel(agent);
   await waitFor(() => assert.equal(statusCalls, 1));
   fireEvent.click(await migrationEntry());
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
 
   await waitFor(() => assert.equal(statusCalls, 2));
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
@@ -431,7 +431,7 @@ test("migration target uses the shared selector and submits the selected compute
   fireEvent.click(backupOption);
   await waitFor(() => assert.equal(selector.value, "Backup Computer"));
 
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
   await waitFor(() => {
     assert.deepEqual(
       posts.find((post) => post.url === "/agents/agent-1/migrate")?.body,
@@ -455,7 +455,7 @@ test("migration target selector shows a disabled empty state when no destination
   assert.equal(selector.placeholder, "No other computers available");
   assert.equal(selector.disabled, true);
   assert.equal(
-    (dialogButton("Migrate") as HTMLButtonElement).disabled,
+    (dialogButton("Move to another Computer") as HTMLButtonElement).disabled,
     true,
   );
 });
@@ -509,7 +509,7 @@ test("migration profile entry keeps the latest completed migration visible at 10
   renderPanel(agent);
 
   fireEvent.click(await migrationEntry());
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
 
   await screen.findByText(/The agent migrated to Target Computer and is now running there/);
   assert.equal(
@@ -583,7 +583,7 @@ test("migration profile entry shows typed transport failures inline", async () =
       expected: "The connection between the two computers dropped during the transfer. Make sure both computers are online, then try again.",
     },
   ]) {
-    fireEvent.click(dialogButton("Migrate"));
+    fireEvent.click(dialogButton("Move to another Computer"));
     await screen.findByText(expected);
     assert.ok(screen.getByText(code));
   }
@@ -620,7 +620,7 @@ test("resumable capability error names the Computer and exposes recovery actions
 
   renderPanel(agent);
   fireEvent.click(await migrationEntry());
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
 
   assert.ok(await screen.findByText(
     "Target Computer needs a Raft Computer update before it can move agents. Update Raft Computer on Target Computer to the latest version, restart it, wait for it to reconnect, then try again.",
@@ -633,7 +633,7 @@ test("resumable capability error names the Computer and exposes recovery actions
   assert.equal(technicalDetails.open, false);
   assert.ok(within(technicalDetails).getByText("Technical details"));
 
-  fireEvent.click(screen.getByRole("button", { name: "Try again" }));
+  fireEvent.click(screen.getByRole("button", { name: "Try Again" }));
   await waitFor(() => assert.equal(startCalls, 2));
 
   // Recovery is a content link that opens Computers in a new tab, not a footer action.
@@ -677,7 +677,7 @@ test("computer capability error renders every structured failure as a readable l
 
   renderPanel(agent);
   fireEvent.click(await migrationEntry());
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
 
   assert.ok(await screen.findByText("Fix these computer requirements before starting the migration:"));
   const sourceIssue = screen.getByText(
@@ -719,8 +719,8 @@ test("resumable capability recovery copy and actions render in zh-CN", async () 
   };
 
   renderPanel(agent, "zh-cn");
-  fireEvent.click(await migrationEntry("迁移"));
-  fireEvent.click(dialogButton("迁移"));
+  fireEvent.click(await migrationEntry("迁移到另一台计算机"));
+  fireEvent.click(dialogButton("迁移到另一台计算机"));
 
   assert.ok(await screen.findByText(
     "Source Computer 需要先更新 Raft Computer 才能迁移 Agent。请将 Source Computer 上的 Raft Computer 更新到最新版本，重启并等待重新连接后再试。",
@@ -838,7 +838,7 @@ for (const { state, extra, expectedStep, expectedMessage } of ([
       "exactly the current step shows as in progress",
     );
     assert.equal(
-    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Move to another Computer" }),
     null,
     "while a migration runs, the progress block's Cancel is the only action",
   );
@@ -942,7 +942,7 @@ test("migration profile entry polls active progress until the persisted terminal
   renderPanel(agent);
 
   fireEvent.click(await migrationEntry());
-  fireEvent.click(dialogButton("Migrate"));
+  fireEvent.click(dialogButton("Move to another Computer"));
   await screen.findByText("Stopping the agent on Source Computer so its workspace can be packed.");
   assert.equal(statusCalls, 2);
 
@@ -1403,7 +1403,7 @@ test("migration profile entry shows a retryable automatic-start failure after ar
   assert.ok(screen.getByText("The workspace moved to Target Computer, but the agent did not start automatically."));
   assert.ok(screen.getByText("auto_start_failed"));
   assert.equal(
-    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Migrate" }),
+    within(screen.getByTestId("agent-migration-section")).queryByRole("button", { name: "Move to another Computer" }),
     null,
     "the migration is still active, so the section offers no second Migrate",
   );
@@ -1448,7 +1448,7 @@ test("migration profile entry translates bundle-too-large wire payload without e
   renderPanel(agent);
 
   await screen.findByText("Migration failed");
-  assert.ok(screen.getByText("The workspace is too large to move: compressed, it is over the 3 GiB limit. Largest items: .git/ (2 GiB), archive.tar (1 GiB), media/ (0.5 GiB). Ask the agent to delete large files it no longer needs, or to list them in .raftmigrateignore, then try again."));
+  assert.ok(screen.getByText("The workspace is too large to move: compressed, it is over the 3 GiB limit. Largest items (before compression): .git/ (2 GiB), archive.tar (1 GiB), media/ (0.5 GiB). Ask the agent to delete large files it no longer needs, or to list them in .raftmigrateignore, then try again."));
   assert.ok(screen.getByText("MIGRATION_OBJECT_STORE_BUNDLE_TOO_LARGE"));
   assert.ok(screen.queryByText(wireMessage) === null);
   assert.equal(document.body.textContent?.includes("actualBytes="), false);

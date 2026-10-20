@@ -72,6 +72,7 @@ function oracle(options: {
         "feature_flag_audience_members",
         "users",
         "servers",
+        "server_members",
         "subscriptions",
         "server_lab_enrollments",
         "server_lab_access",

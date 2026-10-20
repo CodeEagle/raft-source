@@ -57,7 +57,7 @@ export function forbiddenMessageForTarget(target: string): string {
 
 export function notFoundMessageForTarget(target: string): string {
   if (isThreadTarget(target)) {
-    return `Thread target not found or not replyable: ${target}. Use #channel:<id> or dm:@peer:<id> where <id> is the parent message's short id (the msg= field) or the thread's own id (the threadId= field); when a message id is given the parent message must exist and belong to that parent target.`;
+    return `Thread target not found or not replyable: ${target}. Use #channel:<id> or dm:@peer:<id> where <id> is the parent message's short id (the msg= field, as in replyTarget); when a message id is given the parent message must exist and belong to that parent target.`;
   }
   return `Channel not found: ${target}`;
 }
@@ -195,6 +195,9 @@ export async function resolveWritableAgentTarget(
     // owner, so Agent A cannot resolve (and therefore cannot write to) Agent
     // B's app conversation.
     const existingDm = await channelService.resolveChannelByName(serverId, agentId, target);
+    if (existingDm?.type === "dm" && await channelService.isAgentMigrationReceiptChannel(existingDm.channelId)) {
+      throw DmTargetResolutionError.migrationReceiptReadOnly(target);
+    }
     if (existingDm?.type === "dm") {
       const canPost = await channelService.canAgentPostToChannel(existingDm.channelId, agentId);
       return canPost ? existingDm : "forbidden";

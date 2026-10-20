@@ -13,32 +13,36 @@ import {
   DialogTitle,
   Field,
   FieldLabel,
-  buttonVariants,
-  useTheme,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { ExternalLink } from "lucide-react";
-import { ComboboxSelect } from "raft-ui/wip";
+import { ComboboxSelect } from "@botiverse/raft-ui/wip";
 import api from "../../api/client";
 import { useServerStore } from "../../store/serverStore";
 import type { Agent } from "../../store/agentStore";
 import type { Machine } from "../../store/machineStore";
+import { HostedModelChoice, hostedModelPickerShown, initialHostedModel, useHostedRuntimeModels } from "../agent/HostedModelChoice";
 import { isMigrationProPlanRequiredError } from "./billing";
 import type { MigrationErrorPresentation } from "./errors";
-import { migrationStartErrorPresentation } from "./presentation";
+import { migrationStartErrorPresentation, migrationTargetLabel } from "./presentation";
 import { MigrationErrorContent } from "./MigrationErrorContent";
 
 interface MigrationStartResponse {
   migrationRef: string;
   state: string;
   sourceMachineId: string;
-  targetMachineId: string;
+  // null for a move to the cloud.
+  targetMachineId: string | null;
   deadlines?: Record<string, string>;
 }
+
+/** The target option for the cloud; never a machine id. */
+const HOSTED_TARGET_CHOICE = "__cloud__";
 
 export function AgentMigrationDialog({
   agent,
   machines,
   sourceMachineId,
+  hostedAvailable = false,
   onClose,
   onProRequired,
   onStarted,
@@ -46,6 +50,8 @@ export function AgentMigrationDialog({
   agent: Agent;
   machines: Machine[];
   sourceMachineId: string | null;
+  /** Offer the cloud as a target (the server's hosted-migration gate; see useHostedMigrationAvailable). */
+  hostedAvailable?: boolean;
   onClose: () => void;
   onProRequired: () => void;
   onStarted: (result: MigrationStartResponse) => Promise<void>;
@@ -58,17 +64,35 @@ export function AgentMigrationDialog({
       machine.isComputer === true
     ),
   [machines, sourceMachineId]);
-  const targetComputerOptions = useMemo(() =>
-    targetComputers.map((machine) => ({ value: machine.id, label: machine.name })),
-  [targetComputers]);
+  const targetComputerOptions = useMemo(() => {
+    const computers = targetComputers.map((machine) => ({ value: machine.id, label: machine.name }));
+    return hostedAvailable
+      ? [...computers, { value: HOSTED_TARGET_CHOICE, label: formatMessage({ id: "agent.migration.hosted.option" }) }]
+      : computers;
+  }, [targetComputers, hostedAvailable, formatMessage]);
   const [targetComputer, setTargetComputer] = useState(targetComputers[0]?.id ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<MigrationErrorPresentation | null>(null);
-  const selectedTargetComputer = targetComputers.some((machine) => machine.id === targetComputer)
-    ? targetComputer
-    : targetComputers[0]?.id ?? "";
+  const hostedSelected = hostedAvailable
+    && (targetComputer === HOSTED_TARGET_CHOICE || targetComputers.length === 0);
+  const selectedTargetComputer = hostedSelected
+    ? HOSTED_TARGET_CHOICE
+    : targetComputers.some((machine) => machine.id === targetComputer)
+      ? targetComputer
+      : targetComputers[0]?.id ?? "";
+  // The model the cloud agent starts on, as in the create-agent form: `null` is
+  // the provider's default, and nothing is picked where the server decides.
+  const hostedModels = useHostedRuntimeModels("antiproton", hostedSelected);
+  const [hostedModelPick, setHostedModelPick] = useState<string | null | undefined>(undefined);
+  const hostedModelsView = hostedModels.state.kind === "ready" ? hostedModels.state.view : null;
+  const hostedModel = hostedModelsView === null || hostedModelsView.locked || !hostedModelPickerShown(hostedModelsView)
+    ? null
+    : hostedModelPick !== undefined ? hostedModelPick : initialHostedModel(hostedModelsView);
   const sourceComputerName = machines.find((machine) => machine.id === sourceMachineId)?.name;
-  const targetComputerName = machines.find((machine) => machine.id === selectedTargetComputer)?.name;
+  const source = migrationTargetLabel(formatMessage, machines, sourceMachineId);
+  const targetComputerName = hostedSelected
+    ? formatMessage({ id: "agent.migration.hosted.targetName" })
+    : machines.find((machine) => machine.id === selectedTargetComputer)?.name;
   const recoveryComputerId = error?.recoveryComputerId;
 
   const handleTargetComputerChange = useCallback((value: string | number | null) => {
@@ -76,12 +100,9 @@ export function AgentMigrationDialog({
     setTargetComputer(String(value));
   }, []);
   // Recovery happens on the Computers page; open it in a new tab so this
-  // dialog (and the chosen target) stays put for the retry.
-  // A real anchor (new tab) dressed as raft-ui's link button, so it reads as
-  // a quiet text link in every theme instead of a primary-colored hyperlink.
-  const { theme } = useTheme();
-  const recoveryLinkClassName = buttonVariants({ theme, variant: "link", size: "inline" })
-    .root({ className: "w-fit gap-1 text-sm" });
+  // dialog (and the chosen target) stays put for the retry. A real anchor
+  // (new tab) written as the DS UI text link: underlined ink, not a hyperlink
+  // colour.
   const recoveryComputersHref = serverSlug
     ? `/s/${serverSlug}/${recoveryComputerId ? `computer/${recoveryComputerId}` : "computers"}`
     : null;
@@ -92,9 +113,9 @@ export function AgentMigrationDialog({
     setSubmitting(true);
     setError(null);
     try {
-      const { data } = await api.post<MigrationStartResponse>(`/agents/${agent.id}/migrate`, {
-        targetComputer: selectedTargetComputer,
-      });
+      const { data } = await api.post<MigrationStartResponse>(`/agents/${agent.id}/migrate`, hostedSelected
+        ? { target: { kind: "hosted", ...(hostedModel ? { hostedModel } : {}) } }
+        : { targetComputer: selectedTargetComputer });
       await onStarted(data);
     } catch (err: unknown) {
       if (isMigrationProPlanRequiredError(err)) {
@@ -105,7 +126,7 @@ export function AgentMigrationDialog({
         sourceComputerName,
         targetComputerName,
         sourceComputerId: sourceMachineId,
-        targetComputerId: selectedTargetComputer,
+        targetComputerId: hostedSelected ? null : selectedTargetComputer,
       }));
     } finally {
       setSubmitting(false);
@@ -127,31 +148,56 @@ export function AgentMigrationDialog({
       >
         <form onSubmit={handleSubmit} className="contents">
           <DialogHeader>
-            <DialogTitle>{formatMessage({ id: "agent.detail.moveToAnotherComputer" })}</DialogTitle>
+            <DialogTitle>
+              {formatMessage({ id: hostedAvailable ? "agent.migration.hosted.dialogTitle" : "agent.detail.moveToAnotherComputer" })}
+            </DialogTitle>
             <DialogClose disabled={submitting} aria-label={formatMessage({ id: "common.close" })} />
           </DialogHeader>
-          <DialogBody className="grid gap-4 font-normal">
+          <DialogBody className="grid gap-4">
             <Field>
               <FieldLabel id="agent-migration-target-computer-label">
-                {formatMessage({ id: "agent.detail.targetComputer" })}
+                {formatMessage({ id: hostedAvailable ? "agent.migration.hosted.targetLabel" : "agent.detail.targetComputer" })}
               </FieldLabel>
               <ComboboxSelect
                 aria-labelledby="agent-migration-target-computer-label"
                 options={targetComputerOptions}
                 value={selectedTargetComputer || null}
                 onValueChange={handleTargetComputerChange}
-                disabled={submitting || targetComputers.length === 0}
+                disabled={submitting || targetComputerOptions.length === 0}
                 placeholder={formatMessage({ id: "agent.detail.noOtherAttachedComputer" })}
                 emptyContent={formatMessage({ id: "ui.selectionPopover.emptyLabel" })}
                 showArrow
                 autoHighlight
               />
             </Field>
-            {/* The one choice first; what happens next follows as plain theme-token text. */}
-            <div className="space-y-2 text-sm leading-relaxed text-foreground-strong">
-              <p>{formatMessage({ id: "agent.detail.migrationModeStopBeforeExport" })}</p>
-              <p>{formatMessage({ id: "agent.detail.migrationSessionResetDetailed" })}</p>
-            </div>
+            {hostedSelected && hostedModelPickerShown(hostedModelsView) ? (
+              <Field>
+                <FieldLabel>{formatMessage({ id: "agent.detail.hostedModel.title" })}</FieldLabel>
+                <HostedModelChoice
+                  state={hostedModels.state}
+                  value={hostedModel}
+                  onChange={setHostedModelPick}
+                  onReload={hostedModels.reload}
+                  testId="agent-migration-hosted-model"
+                />
+              </Field>
+            ) : null}
+            {/* The one choice first; what happens next follows as the dialog's body text. */}
+            {hostedSelected ? (
+              // Said before starting: the move to the cloud is final once confirmed.
+              <ul className="list-disc space-y-2 pl-5" data-testid="agent-migration-hosted-notes">
+                <li>{formatMessage({ id: "agent.migration.hosted.noteStopped" }, { source })}</li>
+                <li>{formatMessage({ id: "agent.migration.hosted.noteFiles" }, { source })}</li>
+                <li>{formatMessage({ id: "agent.migration.hosted.noteSession" })}</li>
+                <li>{formatMessage({ id: "agent.migration.hosted.noteGithub" })}</li>
+                <li>{formatMessage({ id: "agent.migration.hosted.noteFinal" })}</li>
+              </ul>
+            ) : (
+              <div className="space-y-2">
+                <p>{formatMessage({ id: "agent.detail.migrationModeStopBeforeExport" })}</p>
+                <p>{formatMessage({ id: "agent.detail.migrationSessionResetDetailed" })}</p>
+              </div>
+            )}
             {error ? (
               <Banner status="warning" size="sm" role="alert">
                 <MigrationErrorContent presentation={error} />
@@ -162,7 +208,7 @@ export function AgentMigrationDialog({
                 href={recoveryComputersHref}
                 target="_blank"
                 rel="noopener noreferrer"
-                className={recoveryLinkClassName}
+                className="inline-flex w-fit items-center gap-1 rounded-sticker text-callout font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus"
               >
                 {formatMessage({
                   id: recoveryComputerId
@@ -174,22 +220,24 @@ export function AgentMigrationDialog({
             ) : null}
           </DialogBody>
           <DialogFooter>
-            <Button variant="outline" size="md"
+            <Button variant="ghost" size="lg"
               type="button"
               onClick={onClose}
               disabled={submitting}
             >
               {formatMessage({ id: "agent.detail.cancel" })}
             </Button>
-            <Button variant="accent" size="md"
+            <Button variant="accent" size="lg"
               type="submit"
-              disabled={submitting || !selectedTargetComputer}
+              disabled={submitting || !selectedTargetComputer || (hostedSelected && hostedModels.state.kind === "loading")}
             >
               {submitting
                 ? formatMessage({ id: "agent.detail.starting" })
                 : error?.recovery === "open_computers_and_retry"
                   ? formatMessage({ id: "agent.migration.error.tryAgain" })
-                  : formatMessage({ id: "agent.detail.startMigration" })}
+                  : hostedSelected
+                    ? formatMessage({ id: "agent.migration.hosted.start" })
+                    : formatMessage({ id: "agent.detail.startMigration" })}
             </Button>
           </DialogFooter>
         </form>

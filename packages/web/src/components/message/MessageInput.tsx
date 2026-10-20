@@ -2,7 +2,7 @@ import { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } fr
 import { useIntl } from "react-intl";
 import type { IntlShape } from "react-intl";
 import { Send, UserX, Hash, Paperclip, X, FileText, ImagePlus, Monitor, Blocks, ArrowLeftRight } from "lucide-react";
-import { Badge, Button, Composer, ComposerActions, ComposerAttachment, ComposerAttachmentBody, ComposerAttachmentFailedOverlay, ComposerAttachmentFile, ComposerAttachmentImage, ComposerAttachmentMeta, ComposerAttachmentRemove, ComposerAttachments, ComposerAttachmentTitle, ComposerAttachmentUploadingOverlay, ComposerAttachmentUploadProgressBar, ComposerIconButton, ComposerInput, ComposerRoot, ComposerSubmit, ComposerSuggestionAside, ComposerSuggestionContent, ComposerSuggestionGroup, ComposerSuggestionGroupLabel, ComposerSuggestionIcon, ComposerSuggestionList, ComposerSuggestionMeta, ComposerSuggestionTitle, ComposerToolbar, Spinner } from "raft-ui";
+import { Badge, Button, CheckboxIndicator, Composer, ComposerActions, ComposerAttachment, ComposerAttachmentBody, ComposerAttachmentFailedOverlay, ComposerAttachmentFile, ComposerAttachmentImage, ComposerAttachmentMeta, ComposerAttachmentRemove, ComposerAttachments, ComposerAttachmentTitle, ComposerAttachmentUploadingOverlay, ComposerAttachmentUploadProgressBar, ComposerDropOverlay, ComposerDropOverlayLabel, ComposerIconButton, ComposerInput, ComposerRoot, ComposerSubmit, ComposerSuggestionAside, ComposerSuggestionContent, ComposerSuggestionGroup, ComposerSuggestionGroupLabel, ComposerSuggestionIcon, ComposerSuggestionList, ComposerSuggestionMeta, ComposerSuggestionTitle, ComposerToolbar, ComposerToolbarLabel, IconTile, Separator, Spinner } from "@botiverse/raft-ui";
 import {
   DndContext,
   closestCenter,
@@ -42,12 +42,11 @@ import {
 import { useAutocomplete } from "../../hooks/useAutocomplete";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
 import { useRankedComposerSuggestions } from "../../hooks/useRankedComposerSuggestions";
-import { SUPPORTS_FIELD_SIZING, useComposerAutosize } from "./useComposerAutosize";
+import { useComposerAutosize } from "./useComposerAutosize";
 import { AutocompleteOptionRow } from "./AutocompleteOptionRow";
 import { extractClipboardFiles } from "../../utils/clipboardFiles";
 import AvatarSlot from "../ui/AvatarSlot";
 import Banner from "../ui/Banner";
-import CheckMarker from "../ui/CheckMarker";
 import Tooltip from "../ui/Tooltip";
 import AgentActivityDot from "../agent/AgentActivityDot";
 import api from "../../api/client";
@@ -441,7 +440,7 @@ function SortableAttachment({
         aria-label={preview && onPreview ? formatMessage({ id: "message.composer.previewAttachment" }, { file: fileName }) : undefined}
         className={`${preview ? "size-full " : ""}${preview && onPreview ? "cursor-zoom-in" : "cursor-grab active:cursor-grabbing"}`}
       >
-        {/* Image chips: the brutal recipe sizes ComposerAttachmentImage as
+        {/* Image chips: the attachment recipe sizes ComposerAttachmentImage as
             size-full of this body, so the body must fill the fixed 64px
             chip. Left at auto height, a portrait image grew to its natural
             height and spilled over the textarea below (#bug-triage task #11). */}
@@ -501,6 +500,75 @@ function SortableAttachment({
   );
 }
 
+// Banner actions for one recoverable / failed upload. Own components so each
+// row binds its id in a memoized handler (react-perf: no inline closures).
+function RecoverableUploadCancelButton({
+  uploadId,
+  filename,
+  onCancel,
+}: {
+  uploadId: string;
+  filename: string;
+  onCancel: (uploadId: string) => Promise<void>;
+}) {
+  const { formatMessage } = useIntl();
+  const handleClick = useCallback(() => { void onCancel(uploadId); }, [onCancel, uploadId]);
+  return (
+    <Button
+      type="button"
+      size="sm"
+      variant="outline"
+      className="shrink-0"
+      onClick={handleClick}
+      aria-label={formatMessage({ id: "message.composer.cancelRecoveredUploadLabel" }, { file: filename })}
+    >
+      {formatMessage({ id: "message.composer.cancelRecoveredUpload" })}
+    </Button>
+  );
+}
+
+function UploadFailureActions({
+  fileId,
+  fileName,
+  canRetry,
+  onRetry,
+  onRemove,
+}: {
+  fileId: string;
+  fileName: string;
+  canRetry: boolean;
+  onRetry: (id: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  const { formatMessage } = useIntl();
+  const handleRetry = useCallback(() => onRetry(fileId), [onRetry, fileId]);
+  const handleRemove = useCallback(() => onRemove(fileId), [onRemove, fileId]);
+  return (
+    <div className="ml-auto flex shrink-0 items-center gap-1.5">
+      {canRetry && (
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          onClick={handleRetry}
+          aria-label={formatMessage({ id: "message.composer.retryUploadAttachment" }, { file: fileName })}
+        >
+          {formatMessage({ id: "message.composer.tapToRetry" })}
+        </Button>
+      )}
+      <Button
+        type="button"
+        size="icon-sm"
+        variant="ghost"
+        onClick={handleRemove}
+        aria-label={formatMessage({ id: "message.composer.removeAttachment" }, { file: fileName })}
+      >
+        <X size={12} />
+      </Button>
+    </div>
+  );
+}
+
 function MentionCandidateBody({  candidate,
 }: {
   candidate: MentionCandidate;
@@ -526,8 +594,7 @@ function MentionCandidateBody({  candidate,
           data-testid={`mention-actor-type-${candidate.type}`}
           appearance="soft"
           variant="muted"
-          uppercase
-          className="shrink-0 px-1 py-px text-[10px] leading-none"
+          className="shrink-0"
         >
           {actorTypeLabel}
         </Badge>
@@ -553,6 +620,10 @@ function MentionCandidateBody({  candidate,
   );
 }
 
+// Computers and apps have no face: raft-ui's neutral IconTile (DS `rf-tile`),
+// no colour of its own, at the 19px avatar step of the raft compact avatars
+// beside it.
+
 function MentionCandidateAvatar({
   candidate,
   muted,
@@ -562,17 +633,17 @@ function MentionCandidateAvatar({
 }) {
   if (candidate.type === "computer") {
     return (
-      <span data-mention-candidate-avatar="computer" className="flex size-5 shrink-0 items-center justify-center border border-line-muted bg-info-soft theme-brutal:border-black theme-brutal:bg-brutal-cyan/30">
-        <Monitor size={12} aria-hidden />
-      </span>
+      <IconTile size="xs" data-mention-candidate-avatar="computer">
+        <Monitor aria-hidden />
+      </IconTile>
     );
   }
 
   if (candidate.type === "app") {
     return (
-      <span data-mention-candidate-avatar="app" className="flex size-5 shrink-0 items-center justify-center border border-line-muted bg-primary-soft text-foreground-strong theme-brutal:border-black theme-brutal:bg-soft-signal/40 theme-brutal:text-black">
-        <Blocks size={12} aria-hidden />
-      </span>
+      <IconTile size="xs" data-mention-candidate-avatar="app">
+        <Blocks aria-hidden />
+      </IconTile>
     );
   }
 
@@ -583,7 +654,7 @@ function MentionCandidateAvatar({
         type="agent"
         agentAvatarUrl={candidate.avatarUrl}
         badge={muted ? undefined : <MentionCandidateActivityBadge agentId={candidate.id} />}
-        className={muted ? "!border-black/40 opacity-60" : undefined}
+        className={muted ? "opacity-60" : undefined}
       />
     );
   }
@@ -596,7 +667,7 @@ function MentionCandidateAvatar({
       gravatarHash={candidate.gravatarHash}
       email={candidate.email}
       humanPlaceholder={!candidate.avatarUrl && !candidate.gravatarHash && !candidate.email}
-      className={muted ? "!border-black/40 opacity-60 [&_svg]:opacity-50" : undefined}
+      className={muted ? "opacity-60 [&_svg]:opacity-50" : undefined}
     />
   );
 }
@@ -624,7 +695,7 @@ const preventToolbarButtonPointerDownBlur = (e: React.PointerEvent<HTMLButtonEle
   e.preventDefault();
 };
 
-const preventTaskTogglePointerDownBlur = (e: React.PointerEvent<HTMLButtonElement>) => {
+const preventTaskTogglePointerDownBlur = (e: React.PointerEvent<HTMLElement>) => {
   // Keep the composer focused while toggling task mode; the following click
   // still toggles the checkbox without sending.
   e.preventDefault();
@@ -2537,10 +2608,10 @@ export default function MessageInput({
   }, [handleMentionKeyDown, handleChannelKeyDown, filteredMentions, filteredChannels, mention.index, channel.index, doInsertMention, doInsertChannel, handleSubmit]);
 
 
-  const toggleTaskModeWithoutBlur = (e: React.MouseEvent<HTMLButtonElement>) => {
+  const toggleTaskModeWithoutBlur = useCallback((e: React.MouseEvent<HTMLElement>) => {
     e.preventDefault();
     setAlsoCreateTask((prev) => !prev);
-  };
+  }, []);
 
   const hasValidatingAttachments = pendingFiles.some((pf) => pf.uploadStatus === "validating");
   const hasUploadingAttachments = pendingFiles.some((pf) => pf.uploadStatus === "uploading");
@@ -2586,7 +2657,7 @@ export default function MessageInput({
             ? formatMessage({ id: "message.composer.retryFailedTitle" })
             : submitLabelOverride ?? formatMessage({ id: "message.composer.send" });
   // Stryker disable next-line ConditionalExpression: icon branch is covered by MessageInput DOM tests; generated JSX mutants hang tsx.
-  const submitIcon = showSubmitSpinner ? <Spinner size="sm" aria-label={formatMessage({ id: "common.loadingLabel" })} /> : <Send size={14} />;
+  const submitIcon = showSubmitSpinner ? <Spinner size="sm" aria-label={formatMessage({ id: "common.loadingLabel" })} /> : <Send size={18} />;
 
   return (
     <ComposerRoot
@@ -2595,22 +2666,26 @@ export default function MessageInput({
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
       onDrop={handleDrop}
-      className={variant === "compact" ? "relative flex min-w-0 w-full items-center bg-layer-panel theme-brutal:bg-white" : "relative flex min-w-0 w-full items-center border-t border-line-muted bg-layer-panel px-3 pt-3 safe-bottom theme-brutal:border-t-2 theme-brutal:border-black theme-brutal:bg-white"}
+      // Full: the conversation's own composer, on the 20px edge its messages
+      // and header keep (DS: "the composer below" shares the header's edge),
+      // on the panel colour so it covers the timeline it floats over.
+      // Compact: the host docks it (COMPOSER_DOCK_CLASS) and owns the
+      // surface around it.
+      className={variant === "compact" ? "relative flex min-w-0 w-full items-center" : "relative flex min-w-0 w-full items-center bg-layer-canvas px-5 pt-2 safe-bottom"}
     >
       {/* Drop overlay — only visible while a file drag is in progress over
           the composer area. Pointer-events are kept on so the overlay
           itself is the drop target (browser fires drop on the topmost
           element under the cursor at drop time). */}
       {isDraggingFiles && (
-        <div
+        <ComposerDropOverlay
           aria-hidden
           data-testid="composer-drop-overlay"
-          className="absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-accent-strong bg-accent-soft/50 theme-brutal:border-brutal-pink theme-brutal:bg-brutal-pink/15"
         >
-          <span className="rounded-md border border-line-strong bg-layer-panel px-3 py-1.5 text-sm font-bold text-foreground-strong shadow-raft-sm theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:text-black theme-brutal:shadow-brutal-sm">
+          <ComposerDropOverlayLabel>
             {formatMessage({ id: "message.composer.dropToAttach" })}
-          </span>
-        </div>
+          </ComposerDropOverlayLabel>
+        </ComposerDropOverlay>
       )}
       <input
         ref={imageInputRef}
@@ -2630,7 +2705,9 @@ export default function MessageInput({
         onChange={handleAttachmentPickerChange}
       />
 
-      <div className="flex w-full flex-col gap-2">
+      {/* `relative`: the suggestion lists below anchor here, so they span the
+          composer's own column (the frame's width), not the padded root. */}
+      <div className="relative flex w-full flex-col gap-2">
         {activationBanner}
         {error && (
           <Banner intent="warning" density="sm" className="font-bold">
@@ -2651,7 +2728,7 @@ export default function MessageInput({
         )}
 
         {mentionActionNotice && (
-          <div className="rounded-md border border-line-muted bg-fill-muted/50 px-2 py-1 text-[11px] font-bold leading-4 text-foreground-muted theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black/35 theme-brutal:bg-black/[0.04] theme-brutal:text-black/70">
+          <div className="rounded-control bg-fill-muted px-2.5 py-1.5 text-caption font-semibold text-foreground-muted">
             {mentionActionNotice}
           </div>
         )}
@@ -2660,13 +2737,13 @@ export default function MessageInput({
           <Banner
             intent="warning"
             density="sm"
-            className="font-bold"
+            className="grid-cols-[minmax(0,1fr)_auto] font-bold [&>[data-slot=banner-description]]:break-words [&>[data-slot=banner-action]]:col-start-2 [&>[data-slot=banner-action]]:row-start-1 [&>[data-slot=banner-action]]:mt-0"
             actions={(
               <Tooltip content={formatMessage({ id: "message.composer.dismissDeliveryWarning" })}>
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-xs"
+                size="icon-sm"
                 data-slot="button"
                 onClick={dismissDeliveryWarning}
                 className="text-warning-strong"
@@ -2685,13 +2762,13 @@ export default function MessageInput({
           <Banner
             intent="warning"
             density="sm"
-            className="font-bold"
+            className="grid-cols-[minmax(0,1fr)_auto] font-bold [&>[data-slot=banner-description]]:break-words [&>[data-slot=banner-action]]:col-start-2 [&>[data-slot=banner-action]]:row-start-1 [&>[data-slot=banner-action]]:mt-0"
             actions={(
               <Tooltip content={formatMessage({ id: "message.composer.dismissUnresolvedMentions" })}>
               <Button
                 type="button"
                 variant="ghost"
-                size="icon-xs"
+                size="icon-sm"
                 data-slot="button"
                 onClick={dismissUnresolvedMentionWarning}
                 className="text-warning-strong"
@@ -2736,25 +2813,25 @@ export default function MessageInput({
                   { count: visibleRecoverableUploads.length },
                 )}
               </div>
-              <div className="break-words text-xs leading-4">
+              <div className="break-words text-footnote">
                 {formatMessage({ id: "message.composer.recoverableUploadsDescription" })}
               </div>
               <ul className="space-y-1.5">
                 {visibleRecoverableUploads.map((upload) => (
-                  <li key={upload.uploadId} className="flex min-w-0 flex-wrap items-center justify-between gap-2 border-t border-black/20 pt-1.5">
-                    <Tooltip content={upload.filename}>
-                      <span className="min-w-0 flex-1 truncate text-xs font-bold">
-                        {upload.filename}
-                      </span>
-                    </Tooltip>
-                    <button
-                      type="button"
-                      className="shrink-0 rounded-md border border-line-muted bg-layer-panel px-2 py-1 text-xs font-bold text-foreground-strong underline theme-brutal:rounded-none theme-brutal:border-black theme-brutal:bg-white"
-                      onClick={() => { void cancelRecoverableUpload(upload.uploadId); }}
-                      aria-label={formatMessage({ id: "message.composer.cancelRecoveredUploadLabel" }, { file: upload.filename })}
-                    >
-                      {formatMessage({ id: "message.composer.cancelRecoveredUpload" })}
-                    </button>
+                  <li key={upload.uploadId}>
+                    <Separator className="mb-1.5" />
+                    <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+                      <Tooltip content={upload.filename}>
+                        <span className="min-w-0 flex-1 truncate text-footnote font-bold">
+                          {upload.filename}
+                        </span>
+                      </Tooltip>
+                      <RecoverableUploadCancelButton
+                        uploadId={upload.uploadId}
+                        filename={upload.filename}
+                        onCancel={cancelRecoverableUpload}
+                      />
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -2798,11 +2875,11 @@ export default function MessageInput({
           <div
             key={`upload-error-${pf.id}`}
             role="alert"
-            className="flex w-full flex-wrap items-center gap-2 rounded-md border border-line-strong bg-warning px-2 py-1.5 text-xs text-warning-foreground theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-brutal-orange theme-brutal:text-black"
+            className="flex w-full flex-wrap items-center gap-2 rounded-container bg-warning-soft px-3 py-2 text-footnote text-foreground"
           >
             <div className="min-w-0 flex-[1_1_14rem]">
               <div className="break-all font-bold">{pf.file.name}</div>
-              <div className="break-words leading-4">
+              <div className="break-words text-foreground-muted">
                 {pf.uploadError || formatMessage({ id: "message.composer.uploadFailed" })}
               </div>
               {pf.uploadProgress > 0 && (
@@ -2811,26 +2888,13 @@ export default function MessageInput({
                 </div>
               )}
             </div>
-            <div className="ml-auto flex shrink-0 items-center gap-1.5">
-              {pf.uploadCanRetry !== false && (
-                <button
-                  type="button"
-                  onClick={() => retryFile(pf.id)}
-                  aria-label={formatMessage({ id: "message.composer.retryUploadAttachment" }, { file: pf.file.name })}
-                  className="rounded-md border border-line-muted bg-layer-panel px-2 py-1 font-bold text-foreground-strong underline shadow-raft-xs hover:bg-fill-muted theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal-xs theme-brutal:hover:bg-soft-signal"
-                >
-                  {formatMessage({ id: "message.composer.tapToRetry" })}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => removeFile(pendingFiles.findIndex((candidate) => candidate.id === pf.id))}
-                aria-label={formatMessage({ id: "message.composer.removeAttachment" }, { file: pf.file.name })}
-                className="flex size-7 items-center justify-center rounded-md border border-line-strong bg-inactive text-inactive-foreground theme-brutal:rounded-none theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-black theme-brutal:text-white"
-              >
-                <X size={12} />
-              </button>
-            </div>
+            <UploadFailureActions
+              fileId={pf.id}
+              fileName={pf.file.name}
+              canRetry={pf.uploadCanRetry !== false}
+              onRetry={retryFile}
+              onRemove={handleRemovePendingFile}
+            />
           </div>
         ))}
 
@@ -2839,11 +2903,11 @@ export default function MessageInput({
         {/* Accessory chips ride ABOVE the composer card — the same slot as
             pending attachments — so the input itself stays clean. */}
         {accessoryRow ? (
-          <div className="flex flex-wrap items-center gap-1">{accessoryRow}</div>
+          <div className="flex flex-wrap items-center gap-1.5">{accessoryRow}</div>
         ) : null}
 
-        {/* @mention dropdown — direct child of ComposerRoot, placed before <Composer>
-            per RUI spec so it is not clipped by Elegant Composer card's overflow-hidden. */}
+        {/* @mention dropdown — placed before <Composer> (outside the card) per
+            the RUI spec, so the card never clips it. */}
         {mention.show && filteredMentions.flat.length > 0 && (
           <ComposerSuggestionList
             ref={mention.popupRef}
@@ -2906,92 +2970,101 @@ export default function MessageInput({
               </ComposerSuggestionGroup>
             )}
             {filteredMentions.notInChannel.length > 0 && (
-              <ComposerSuggestionGroup separated className="theme-brutal:border-t-2 theme-brutal:border-black">
-                <ComposerSuggestionGroupLabel>
-                  {formatMessage({ id: "message.composer.notInThisChannel" })}
-                </ComposerSuggestionGroupLabel>
-                {filteredMentions.notInChannel.map((candidate, i) => {
-                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + i;
-                  const isSelected = flatIndex === mention.index;
-                  return (
-                    <AutocompleteOptionRow
-                      key={`${candidate.type}:${candidate.id}`}
-                      value={candidate}
-                      flatIndex={flatIndex}
-                      highlighted={isSelected}
-                      className="opacity-60"
-                      onMouseDown={preventAutocompleteOptionMouseDown}
-                      onSelect={handleSelectMentionCandidate}
-                    >
-                      <ComposerSuggestionIcon>
-                        <MentionCandidateAvatar candidate={candidate} muted />
-                      </ComposerSuggestionIcon>
-                      <ComposerSuggestionIcon variant="auxiliary">
-                        <UserX size={12} />
-                      </ComposerSuggestionIcon>
-                      <ComposerSuggestionContent>
-                        <MentionCandidateBody candidate={candidate} />
-                      </ComposerSuggestionContent>
-                    </AutocompleteOptionRow>
-                  );
-                })}
-              </ComposerSuggestionGroup>
+              <>
+                <Separator className="mt-1" />
+                <ComposerSuggestionGroup className="pt-1">
+                  <ComposerSuggestionGroupLabel>
+                    {formatMessage({ id: "message.composer.notInThisChannel" })}
+                  </ComposerSuggestionGroupLabel>
+                  {filteredMentions.notInChannel.map((candidate, i) => {
+                    const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + i;
+                    const isSelected = flatIndex === mention.index;
+                    return (
+                      <AutocompleteOptionRow
+                        key={`${candidate.type}:${candidate.id}`}
+                        value={candidate}
+                        flatIndex={flatIndex}
+                        highlighted={isSelected}
+                        className="opacity-60"
+                        onMouseDown={preventAutocompleteOptionMouseDown}
+                        onSelect={handleSelectMentionCandidate}
+                      >
+                        <ComposerSuggestionIcon>
+                          <MentionCandidateAvatar candidate={candidate} muted />
+                        </ComposerSuggestionIcon>
+                        <ComposerSuggestionIcon variant="auxiliary">
+                          <UserX size={12} />
+                        </ComposerSuggestionIcon>
+                        <ComposerSuggestionContent>
+                          <MentionCandidateBody candidate={candidate} />
+                        </ComposerSuggestionContent>
+                      </AutocompleteOptionRow>
+                    );
+                  })}
+                </ComposerSuggestionGroup>
+              </>
             )}
             {filteredMentions.computers.length > 0 && (
-              <ComposerSuggestionGroup separated className="theme-brutal:border-t-2 theme-brutal:border-black">
-                <ComposerSuggestionGroupLabel>
-                  {formatMessage({ id: "message.composer.computers" })}
-                </ComposerSuggestionGroupLabel>
-                {filteredMentions.computers.map((candidate, i) => {
-                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + filteredMentions.notInChannel.length + i;
-                  const isSelected = flatIndex === mention.index;
-                  return (
-                    <AutocompleteOptionRow
-                      key={`computer:${candidate.id}`}
-                      value={candidate}
-                      flatIndex={flatIndex}
-                      highlighted={isSelected}
-                      onMouseDown={preventAutocompleteOptionMouseDown}
-                      onSelect={handleSelectMentionCandidate}
-                    >
-                      <ComposerSuggestionIcon>
-                        <MentionCandidateAvatar candidate={candidate} muted={false} />
-                      </ComposerSuggestionIcon>
-                      <ComposerSuggestionContent>
-                        <MentionCandidateBody candidate={candidate} />
-                      </ComposerSuggestionContent>
-                    </AutocompleteOptionRow>
-                  );
-                })}
-              </ComposerSuggestionGroup>
+              <>
+                <Separator className="mt-1" />
+                <ComposerSuggestionGroup className="pt-1">
+                  <ComposerSuggestionGroupLabel>
+                    {formatMessage({ id: "message.composer.computers" })}
+                  </ComposerSuggestionGroupLabel>
+                  {filteredMentions.computers.map((candidate, i) => {
+                    const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + filteredMentions.notInChannel.length + i;
+                    const isSelected = flatIndex === mention.index;
+                    return (
+                      <AutocompleteOptionRow
+                        key={`computer:${candidate.id}`}
+                        value={candidate}
+                        flatIndex={flatIndex}
+                        highlighted={isSelected}
+                        onMouseDown={preventAutocompleteOptionMouseDown}
+                        onSelect={handleSelectMentionCandidate}
+                      >
+                        <ComposerSuggestionIcon>
+                          <MentionCandidateAvatar candidate={candidate} muted={false} />
+                        </ComposerSuggestionIcon>
+                        <ComposerSuggestionContent>
+                          <MentionCandidateBody candidate={candidate} />
+                        </ComposerSuggestionContent>
+                      </AutocompleteOptionRow>
+                    );
+                  })}
+                </ComposerSuggestionGroup>
+              </>
             )}
             {filteredMentions.apps.length > 0 && (
-              <ComposerSuggestionGroup separated className="theme-brutal:border-t-2 theme-brutal:border-black">
-                <ComposerSuggestionGroupLabel>
-                  {formatMessage({ id: "message.composer.apps" })}
-                </ComposerSuggestionGroupLabel>
-                {filteredMentions.apps.map((candidate, i) => {
-                  const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + filteredMentions.notInChannel.length + filteredMentions.computers.length + i;
-                  const isSelected = flatIndex === mention.index;
-                  return (
-                    <AutocompleteOptionRow
-                      key={`app:${candidate.id}`}
-                      value={candidate}
-                      flatIndex={flatIndex}
-                      highlighted={isSelected}
-                      onMouseDown={preventAutocompleteOptionMouseDown}
-                      onSelect={handleSelectMentionCandidate}
-                    >
-                      <ComposerSuggestionIcon>
-                        <MentionCandidateAvatar candidate={candidate} muted={false} />
-                      </ComposerSuggestionIcon>
-                      <ComposerSuggestionContent>
-                        <MentionCandidateBody candidate={candidate} />
-                      </ComposerSuggestionContent>
-                    </AutocompleteOptionRow>
-                  );
-                })}
-              </ComposerSuggestionGroup>
+              <>
+                <Separator className="mt-1" />
+                <ComposerSuggestionGroup className="pt-1">
+                  <ComposerSuggestionGroupLabel>
+                    {formatMessage({ id: "message.composer.apps" })}
+                  </ComposerSuggestionGroupLabel>
+                  {filteredMentions.apps.map((candidate, i) => {
+                    const flatIndex = filteredMentions.inChannel.length + filteredMentions.externals.length + filteredMentions.notInChannel.length + filteredMentions.computers.length + i;
+                    const isSelected = flatIndex === mention.index;
+                    return (
+                      <AutocompleteOptionRow
+                        key={`app:${candidate.id}`}
+                        value={candidate}
+                        flatIndex={flatIndex}
+                        highlighted={isSelected}
+                        onMouseDown={preventAutocompleteOptionMouseDown}
+                        onSelect={handleSelectMentionCandidate}
+                      >
+                        <ComposerSuggestionIcon>
+                          <MentionCandidateAvatar candidate={candidate} muted={false} />
+                        </ComposerSuggestionIcon>
+                        <ComposerSuggestionContent>
+                          <MentionCandidateBody candidate={candidate} />
+                        </ComposerSuggestionContent>
+                      </AutocompleteOptionRow>
+                    );
+                  })}
+                </ComposerSuggestionGroup>
+              </>
             )}
           </ComposerSuggestionList>
         )}
@@ -3026,7 +3099,7 @@ export default function MessageInput({
                       )}
                       {isArchived && (
                         <ComposerSuggestionAside>
-                          <Badge appearance="soft" variant="muted" uppercase>
+                          <Badge appearance="soft" variant="muted">
                             {formatMessage({ id: "message.composer.archivedBadge" })}
                           </Badge>
                         </ComposerSuggestionAside>
@@ -3049,7 +3122,6 @@ export default function MessageInput({
             onPaste={handlePaste}
             placeholder={placeholder ?? formatMessage({ id: "message.composer.messagePlaceholder" }, { channel: channelName })}
             maxLength={maxLength}
-            className={`max-h-32 w-full resize-none text-base md:text-sm font-display focus:outline-none leading-5 min-h-5 md:min-h-10 ${SUPPORTS_FIELD_SIZING ? "[field-sizing:content] overflow-y-auto" : ""}`}
             rows={1}
           />
           <ComposerToolbar>
@@ -3064,7 +3136,7 @@ export default function MessageInput({
                   data-slot="button"
                   aria-label={formatMessage({ id: "message.composer.attachImage" })}
                 >
-                  <ImagePlus size={14} />
+                  <ImagePlus size={18} />
                 </ComposerIconButton>
                 </Tooltip>
                 <Tooltip content={formatMessage({ id: "message.composer.attachFile" })}>
@@ -3074,34 +3146,36 @@ export default function MessageInput({
                   data-slot="button"
                   aria-label={formatMessage({ id: "message.composer.attachFile" })}
                 >
-                  <Paperclip size={14} />
+                  <Paperclip size={18} />
                 </ComposerIconButton>
                 </Tooltip>
               </ComposerActions>
             )}
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               {showTaskButton && (
                 <Tooltip content={formatMessage({ id: "message.composer.sendAsTaskTooltip" })}>
-                <button
-                  type="button"
+                {/* raft-ui's composer toolbar label (DS `rf-check` in the
+                    composer bar), drawn as a button so a tap toggles without
+                    taking focus from the input. */}
+                <ComposerToolbarLabel
+                  render={<button type="button" />}
                   role="checkbox"
                   data-testid="composer-as-task-toggle"
                   aria-checked={alsoCreateTask}
-                  className="inline-flex items-center gap-1.5 select-none"
+                  className="rounded-control outline-none focus-visible:shadow-focus"
                   onPointerDown={preventTaskTogglePointerDownBlur}
                   onClick={toggleTaskModeWithoutBlur}
                 >
-                  <CheckMarker
+                  <CheckboxIndicator
                     checked={alsoCreateTask}
                   />
-                  <span className="text-xs font-bold text-foreground-strong theme-brutal:text-black/60">{formatMessage({ id: "message.composer.asTask" })}</span>
-                </button>
+                  {formatMessage({ id: "message.composer.asTask" })}
+                </ComposerToolbarLabel>
                 </Tooltip>
               )}
               <Tooltip content={submitTitle}>
               <ComposerSubmit
                 size="icon-sm"
-                data-tone="pink"
                 data-slot="button"
                 onPointerDown={preventSendButtonPointerDownBlur}
                 disabled={submitBlocked}

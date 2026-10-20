@@ -7,7 +7,7 @@ import { dismissOwnerOnboarding } from "../../fixtures/session";
 // After the channel Tasks tab and the server-wide Tasks page were unified onto
 // TasksPanel (PR #1439, #proj-task task #3), the channel-mode panel:
 //   - exposes Board/List view toggle (default Board)
-//   - shows a +New Task CTA (channel-mode only)
+//   - shows a +Create Task CTA (channel-mode only)
 //   - renders 4 status columns in board view (TODO / IN PROGRESS / IN REVIEW / DONE)
 //   - drops the per-status filter tabs that the legacy TaskBoard exposed —
 //     filtering by status is implicit in the column layout.
@@ -71,8 +71,9 @@ test.describe("channel task board view", () => {
     await expect(page.getByTestId("channel-task-view-list")).toHaveAttribute("aria-checked", "false");
     await expect(page.getByTestId("channel-task-board-view")).toBeVisible();
 
-    // Channel-mode-only CTA.
-    await expect(page.getByRole("button", { name: /new task/i }).first()).toBeVisible();
+    // Channel-mode-only CTA. It says the title of the dialog it opens
+    // (Create Task), per the Raft DS copy rule.
+    await expect(page.getByRole("button", { name: "Create Task", exact: true })).toBeVisible();
 
     // All five status columns render in board view (todo / in_progress /
     // in_review / done / closed). The 5th column (Closed = won't-do) was

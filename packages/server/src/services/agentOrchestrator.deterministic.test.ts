@@ -41,6 +41,8 @@ import {
   type RuntimeAccountUsageProvider,
   MODEL_SEEN_MAX_ITEMS_PER_REPORT,
   SPAWN_FAILURE_RETRY_ONCE_DELAY_MS,
+  TurnSummaryTracker,
+  type ActivityTurnSummary,
 } from "@botiverse/raft-shared";
 import {
   REPLICA_ID,
@@ -64,7 +66,7 @@ import {
   type ReadyReconcilePlanAction,
   RESUME_CATCHUP_UNAVAILABLE_PROMPT,
 } from "./agentOrchestrator";
-import { AGENT_ACTIVITY_WRITER_REGISTRY, classifyDaemonActivityObservation } from "./agentLifecycleReducer";
+import { AGENT_ACTIVITY_WRITER_REGISTRY, buildAgentLifecycleStateSnapshot, classifyDaemonActivityObservation } from "./agentLifecycleReducer";
 import { buildMachineReadModel } from "./machineReadModel";
 import type { AgentRuntimeErrorMirror, MachineMeta, PersistedActivityTypedCarriers, PersistedAgentActivity, ReplicaStateStore } from "./replicaStateStore";
 import { InMemoryWakeCrashLoopStateStore, START_FAILURE_THRESHOLD, WakeCrashLoopBreaker, type WakeCrashLoopEpisodeState, type WakeCrashLoopStateRecord } from "./wakeCrashLoopBreaker";
@@ -687,6 +689,7 @@ class IncrementingNowClock extends FakeClock {
 }
 
 class DeterministicAgentOrchestrator extends AgentOrchestrator {
+  protected override async loadRaftBenchServiceAgentIds(): Promise<Set<string>> { return new Set(); }
   constructor(
     store: ReplicaStateStore = new InMemoryReplicaStateStore(),
     clock?: TestClock,
@@ -5727,6 +5730,44 @@ test("trajectory activity events are durably persisted and hydration matches the
   orchestrator.shutdown();
 });
 
+test("daemon tool outcome fields on Tool finished survive agent:activity ingest into the durable activity log (task #17)", async () => {
+  const clock = new FakeClock();
+  clock.advance(4321);
+  const orchestrator = new PersistedActivityLogDeterministicOrchestrator(new Map(), clock);
+  seedActiveAgent(orchestrator);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:activity",
+    agentId: "agent-1",
+    activity: "working",
+    detail: "Tool finished",
+    detailKind: "tool_end",
+    entries: [
+      { kind: "tool_start", toolName: "Bash", toolInput: "pnpm test", callId: "toolu_1" },
+      {
+        kind: "status",
+        activity: "working",
+        detail: "Tool finished",
+        detailKind: "tool_end",
+        tool: { callId: "toolu_1", ok: true, durationMs: 2500, exitCode: 1 },
+      },
+    ],
+  } as MachineToServerMessage);
+
+  const persisted = (await orchestrator.listRecentActivityLog("agent-1")).map((row) => row.entry);
+  assert.deepEqual(persisted[0], { kind: "tool_start", toolName: "Bash", toolInput: "pnpm test", callId: "toolu_1" });
+  assert.equal(persisted[1]?.kind, "status");
+  assert.deepEqual(persisted[1]?.kind === "status" ? persisted[1].tool : undefined, {
+    callId: "toolu_1",
+    ok: true,
+    durationMs: 2500,
+    exitCode: 1,
+  });
+
+  orchestrator.shutdown();
+});
+
 test("accepted agent:activity ingest threads launchId/clientSeq/probeId/producerFactId all the way to the emitted Socket.IO payload (task #136)", async () => {
   // Stone's BLOCKER review on PR #3257: previous tests only exercised the
   // reducer seam and the applyActivityBroadcastAction seam. This test
@@ -5848,6 +5889,49 @@ test("external plugin activity maps into managed activity trajectory with proven
     assert.equal(entry.producerFactId, `${EXTERNAL_AGENT_ACTIVITY_PROVENANCE}:external-event-2`);
   }
 
+  // The outcome row managed agents record (task #17): ok + the plugin's own duration.
+  assert.deepEqual(toolOutput?.entries[1], {
+    kind: "status",
+    activity: "working",
+    detail: "Tool finished",
+    detailKind: "tool_end",
+    tool: { ok: true },
+    producerFactId: `${EXTERNAL_AGENT_ACTIVITY_PROVENANCE}:external-event-2`,
+  });
+  const toolFailed = mapExternalPluginActivityEvent({
+    eventId: "external-event-2b",
+    hookEventName: "PostToolUseFailure",
+    toolName: "Bash",
+    errorClass: "EPERM",
+    durationMs: 1234.4,
+  });
+  assert.equal(toolFailed?.entries[0]?.kind, "system");
+  const failedOutcome = toolFailed?.entries[1];
+  assert.ok(failedOutcome?.kind === "status" && failedOutcome.detailKind === "tool_end");
+  if (failedOutcome?.kind === "status") assert.deepEqual(failedOutcome.tool, { ok: false, durationMs: 1234 });
+  const snakeDuration = mapExternalPluginActivityEvent({ event_id: "external-event-2c", hook_event_name: "PostToolUse", tool_name: "Read", duration_ms: 87 });
+  const snakeOutcome = snakeDuration?.entries[1];
+  if (snakeOutcome?.kind === "status") assert.deepEqual(snakeOutcome.tool, { ok: true, durationMs: 87 });
+  else assert.fail("PostToolUse with duration_ms must carry a tool_end outcome row");
+
+  // Hosted bridges report the call id, exit code and an explicit ok (task #17).
+  const hostedStart = mapExternalPluginActivityEvent({ eventId: "external-event-2d", hookEventName: "PreToolUse", toolName: "Bash", toolInput: "pnpm test", toolUseId: "toolu_7" });
+  assert.equal(hostedStart?.entries[0]?.kind === "tool_start" ? hostedStart.entries[0].callId : undefined, "toolu_7");
+  const hostedEnd = mapExternalPluginActivityEvent({ event_id: "external-event-2e", hook_event_name: "PostToolUseFailure", tool_name: "Bash", tool_use_id: "toolu_7", exit_code: 1, ok: true, duration_ms: 2500 });
+  const hostedOutcome = hostedEnd?.entries[1];
+  // Explicit ok wins over the hook name: the command ran and exited 1.
+  if (hostedOutcome?.kind === "status") assert.deepEqual(hostedOutcome.tool, { callId: "toolu_7", ok: true, durationMs: 2500, exitCode: 1 });
+  else assert.fail("PostToolUseFailure must carry a tool_end outcome row");
+  // ok: null = outcome unknown (cancelled / result lost): no ok recorded, even on a failure hook.
+  const unknownOutcome = mapExternalPluginActivityEvent({ eventId: "external-event-2g", hookEventName: "PostToolUseFailure", toolName: "Bash", toolUseId: "toolu_8", ok: null });
+  const unknownRow = unknownOutcome?.entries[1];
+  if (unknownRow?.kind === "status") assert.deepEqual(unknownRow.tool, { callId: "toolu_8" });
+  else assert.fail("PostToolUseFailure must carry a tool_end outcome row");
+  const badFields = mapExternalPluginActivityEvent({ eventId: "external-event-2f", hookEventName: "PostToolUse", toolName: "Bash", exitCode: 1.5, ok: "yes" as unknown as boolean });
+  const badOutcome = badFields?.entries[1];
+  if (badOutcome?.kind === "status") assert.deepEqual(badOutcome.tool, { ok: true });
+  else assert.fail("PostToolUse must carry a tool_end outcome row");
+
   const plugin030Output = mapExternalPluginActivityEvent({
     event_id: "external-event-3",
     hook_event_name: "PostToolUse",
@@ -5912,6 +5996,31 @@ test("external agent activity ingest span fact promotes agent server session and
   orchestrator.shutdown();
 });
 
+test("external agent activity ingest span names the statuses and hooks it got, from closed sets only", async () => {
+  const { sink, tracer } = makeDeterministicTracer();
+  const orchestrator = new DeterministicAgentOrchestrator(new InMemoryReplicaStateStore(), undefined, tracer);
+
+  await orchestrator.recordExternalAgentActivity("agent-1", {
+    schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+    coreSessionId: "session-ext-2",
+    // No eventIds: every event is rejected, so nothing is projected (no store
+    // write outlives the test); the span names its inputs before any is processed.
+    events: [
+      { hookEventName: "PreToolUse", status: "working" },
+      { hookEventName: "PostToolUse" },
+      { hookEventName: "PreToolUse" },
+      { hookEventName: "Something user-chosen" },
+      { status: "not-a-status" as never },
+    ],
+  }, "server-1");
+
+  const span = sink.getAllSpans().find((candidate) => candidate.name === "server.external_agent.activity.ingest");
+  assert.ok(span);
+  assert.equal(span.attrs?.status, "working");
+  assert.equal(span.attrs?.hook_event_name, "PostToolUse,PreToolUse,other", "distinct, sorted, unknown names folded");
+  orchestrator.shutdown();
+});
+
 test("external bridge fatal activity broadcasts a visible error instead of staying silent", async () => {
   const orchestrator = new BaseActivityLogPersistenceHarness();
   seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
@@ -5936,6 +6045,213 @@ test("external bridge fatal activity broadcasts a visible error instead of stayi
   assert.equal(emitted.detail, "Bridge fatal: Error");
   assert.equal(emitted.detailKind, "external_activity");
 
+  orchestrator.shutdown();
+});
+
+test("a turn the provider stopped on purpose is calm, not an error, with or without a reported status", async () => {
+  const orchestrator = new BaseActivityLogPersistenceHarness();
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  seedActiveAgent(orchestrator, "agent-2", "machine-1", "external-agent");
+
+  // Hook only (no status protocol): the owner's stop.
+  await orchestrator.recordExternalAgentActivity("agent-1", {
+    schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+    events: [{ eventId: "stopped-hook-1", hookEventName: "BridgeFatal", errorClass: "stopped: by owner", occurredAt: "2026-06-12T01:02:06.000Z" }],
+  }, "server-1");
+  assert.equal(currentExternalActivity(orchestrator, "agent-1")?.activity, "online");
+  assert.equal(currentExternalActivity(orchestrator, "agent-1")?.detail, "Stopped by owner");
+
+  // Status protocol: the runtime reports `error` with it; the stop still wins.
+  await orchestrator.recordExternalAgentActivity("agent-2", {
+    schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+    events: [{ eventId: "stopped-status-1", hookEventName: "BridgeFatal", status: "error", detail: "stopped: agent deleted", errorClass: "stopped: agent deleted", occurredAt: "2026-06-12T01:02:07.000Z" }],
+  }, "server-1");
+  assert.equal(currentExternalActivity(orchestrator, "agent-2")?.activity, "online");
+  assert.equal(currentExternalActivity(orchestrator, "agent-2")?.detail, "Stopped: agent deleted");
+  assert.ok(orchestrator.emittedActivityPayloads.every((payload) => (payload as { activity: string }).activity !== "error"));
+
+  // Any other BridgeFatal is still an error.
+  assert.equal(mapExternalPluginActivityEvent({ eventId: "f", hookEventName: "BridgeFatal", errorClass: "stoppedish", occurredAt: "2026-06-12T01:02:08.000Z" })?.activity, "error");
+  assert.equal(mapExternalPluginActivityEvent({ eventId: "g", hookEventName: "BridgeFatal", errorClass: "stopped: other", occurredAt: "2026-06-12T01:02:08.000Z" })?.detail, "Stopped");
+  orchestrator.shutdown();
+});
+
+class TurnSummaryHarness extends PersistedActivityLogDeterministicOrchestrator {
+  readonly turnRows = new Map<string, ActivityTurnSummary>();
+  readonly upsertCalls: string[][] = [];
+  sentMessages: { at: number; messageId: string }[] = [];
+
+  protected override async upsertTurnSummaries(_agentId: string, turns: readonly { turnKey: string; summary: ActivityTurnSummary }[]): Promise<void> {
+    this.upsertCalls.push(turns.map((turn) => turn.turnKey));
+    for (const turn of turns) this.turnRows.set(turn.turnKey, turn.summary);
+  }
+
+  protected override async loadAgentSentMessagesBetween(_agentId: string, fromMs: number, toMs: number) {
+    return this.sentMessages.filter((send) => send.at >= fromMs && send.at <= toMs);
+  }
+
+  readonly refoldWindows: Array<number | null> = [];
+
+  protected override async loadLastTurnEndBefore(_agentId: string, beforeMs: number): Promise<number | null> {
+    const ends = [...this.turnRows.values()].map((summary) => summary.endedAt).filter((endedAt) => endedAt < beforeMs);
+    const boundary = ends.length > 0 ? Math.max(...ends) : null;
+    this.refoldWindows.push(boundary);
+    return boundary;
+  }
+
+  protected override async loadPersistedActivityLogAfter(agentId: string, afterMs: number, limit: number) {
+    const rows = ((this as any).persistedLogs.get(agentId) ?? []) as Array<{ timestamp: number; entry: TrajectoryEntry }>;
+    return rows.filter((row) => row.timestamp > afterMs).slice(0, limit);
+  }
+}
+
+/** An antiproton-style batch: every event reports a status and most carry a hook (cody, #915). */
+function hostedBatch(events: Array<Record<string, unknown>>) {
+  return { schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA, events } as never;
+}
+
+test("task #17: a status-reporting hosted agent's turns split by its hooks, with tool outcomes, across out-of-order batches", async () => {
+  const clock = new FakeClock();
+  clock.advance(Date.parse("2026-10-16T07:30:00.000Z"));
+  const orchestrator = new TurnSummaryHarness(new Map(), clock);
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  const at = (time: string) => `2026-10-16T07:20:${time}.000Z`;
+  orchestrator.sentMessages = [{ at: Date.parse(at("28")), messageId: "reply-1" }];
+
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch([
+    { eventId: "p1", hookEventName: "UserPromptSubmit", status: "working", occurredAt: at("00") },
+    { eventId: "s1", status: "working", detail: "Using Bash", occurredAt: at("01") },
+    { eventId: "h3", hookEventName: "PreToolUse", status: "working", toolName: "Bash", toolInput: { command: "ls /no/such/dir" }, toolUseId: "t2", occurredAt: at("10") },
+    { eventId: "h4", hookEventName: "PostToolUseFailure", status: "working", toolName: "Bash", toolUseId: "t2", ok: false, occurredAt: at("12") },
+    { eventId: "e1", hookEventName: "Stop", status: "online", occurredAt: at("30") },
+  ]), "server-1");
+  // The status protocol is adopted from the first batch on.
+  assert.ok(orchestrator.statusProtocolAdoptedAt.has("agent-1"));
+  // A later batch with older events of the same turn (a back-dated tool call).
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch([
+    { eventId: "h1", hookEventName: "PreToolUse", status: "working", toolName: "Read", toolInput: { file_path: "src/a.ts" }, toolUseId: "t1", occurredAt: at("03") },
+    { eventId: "h2", hookEventName: "PostToolUse", status: "working", toolName: "Read", toolUseId: "t1", ok: true, durationMs: 40, occurredAt: at("04") },
+  ]), "server-1");
+
+  const turnKey = `external:${EXTERNAL_AGENT_ACTIVITY_PROVENANCE}:p1`;
+  assert.deepEqual([...orchestrator.turnRows.keys()], [turnKey]);
+  const summary = orchestrator.turnRows.get(turnKey)!;
+  assert.equal(summary.outcome, "completed");
+  assert.equal(summary.startedAt, Date.parse(at("00")));
+  assert.equal(summary.endedAt, Date.parse(at("30")));
+  assert.deepEqual(summary.actions, [{ kind: "read_file", count: 1 }, { kind: "search", count: 1 }]);
+  assert.deepEqual(summary.problems, [{ kind: "search", reason: "call_failed", at: Date.parse(at("12")) }]);
+  assert.equal(summary.lastReplyMessageId, "reply-1");
+  orchestrator.shutdown();
+});
+
+test("task #17: without hooks, reported statuses split turns; a brief online between two busy reports does not", async () => {
+  const clock = new FakeClock();
+  clock.advance(Date.parse("2026-10-16T08:00:00.000Z"));
+  const orchestrator = new TurnSummaryHarness(new Map(), clock);
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  const at = (time: string) => `2026-10-16T07:40:${time}.000Z`;
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch([
+    { eventId: "a", status: "working", occurredAt: at("00") },
+    { eventId: "b", status: "online", occurredAt: at("05") },
+    { eventId: "c", status: "working", occurredAt: at("08") },
+    { eventId: "d", status: "online", occurredAt: at("20") },
+    { eventId: "e", status: "thinking", occurredAt: at("50") },
+    { eventId: "f", status: "error", detail: "provider failed", occurredAt: at("55") },
+  ]), "server-1");
+  const summaries = [...orchestrator.turnRows.values()];
+  assert.deepEqual(summaries.map((summary) => [summary.startedAt, summary.endedAt, summary.outcome]), [
+    [Date.parse(at("00")), Date.parse(at("20")), "completed"],
+    [Date.parse(at("50")), Date.parse(at("55")), "failed"],
+  ]);
+  orchestrator.shutdown();
+});
+
+test("task #17: each batch refolds only from the last settled turn on", async () => {
+  const clock = new FakeClock();
+  clock.advance(Date.parse("2026-10-16T09:00:00.000Z"));
+  const orchestrator = new TurnSummaryHarness(new Map(), clock);
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  const turnEvents = (id: string, start: string, end: string) => [
+    { eventId: `${id}-p`, hookEventName: "UserPromptSubmit", status: "working", occurredAt: start },
+    { eventId: `${id}-s`, hookEventName: "Stop", status: "online", occurredAt: end },
+  ];
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch(turnEvents("one", "2026-10-16T08:00:00.000Z", "2026-10-16T08:01:00.000Z")), "server-1");
+  orchestrator.upsertCalls.length = 0;
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch(turnEvents("two", "2026-10-16T08:10:00.000Z", "2026-10-16T08:11:00.000Z")), "server-1");
+  // The second batch starts after turn one settled: only turn two is refolded and written.
+  assert.equal(orchestrator.refoldWindows.at(-1), Date.parse("2026-10-16T08:01:00.000Z"));
+  assert.deepEqual(orchestrator.upsertCalls, [[`external:${EXTERNAL_AGENT_ACTIVITY_PROVENANCE}:two-p`]]);
+  assert.equal(orchestrator.turnRows.size, 2);
+  orchestrator.shutdown();
+});
+
+
+test("task #17: an external turn split across two batches, the later one carrying older events, is rebuilt in event order and equals the daemon fold", async () => {
+  const clock = new FakeClock();
+  clock.advance(Date.parse("2026-10-16T01:10:00.000Z"));
+  const orchestrator = new TurnSummaryHarness(new Map(), clock);
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  const at = (time: string) => `2026-10-16T01:00:${time}.000Z`;
+  orchestrator.sentMessages = [{ at: Date.parse(at("25")), messageId: "reply-1" }];
+
+  // Batch 1 arrives first: the prompt, the first tool call and the turn end.
+  await orchestrator.recordExternalAgentActivity("agent-1", {
+    schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+    events: [
+      { eventId: "e1", hookEventName: "UserPromptSubmit", occurredAt: at("00") },
+      { eventId: "e2", hookEventName: "PreToolUse", toolName: "Bash", toolInput: { command: "grep -rn listRecentActivityLog src" }, toolUseId: "c1", occurredAt: at("05") },
+      { eventId: "e3", hookEventName: "PostToolUse", toolName: "Bash", toolUseId: "c1", occurredAt: at("06") },
+      { eventId: "e6", hookEventName: "Stop", occurredAt: at("30") },
+    ],
+  }, "server-1");
+  const turnKey = `external:${EXTERNAL_AGENT_ACTIVITY_PROVENANCE}:e1`;
+  assert.deepEqual([...orchestrator.turnRows.keys()], [turnKey]);
+  assert.deepEqual(orchestrator.turnRows.get(turnKey)?.actions, [{ kind: "search", count: 1 }]);
+
+  // Batch 2 arrives later with older events of the same turn (a back-dated
+  // tool call): the turn's row is rebuilt, not a second turn.
+  await orchestrator.recordExternalAgentActivity("agent-1", {
+    schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+    events: [
+      { eventId: "e4", hookEventName: "PreToolUse", toolName: "Bash", toolInput: { command: "npx vitest run src/a.test.ts" }, toolUseId: "c2", occurredAt: at("10") },
+      { eventId: "e5", hookEventName: "PostToolUseFailure", toolName: "Bash", toolUseId: "c2", exitCode: 1, ok: true, occurredAt: at("20") },
+    ],
+  }, "server-1");
+  assert.deepEqual([...orchestrator.turnRows.keys()], [turnKey]);
+  const serverSummary = orchestrator.turnRows.get(turnKey)!;
+
+  // The daemon's path over the same activity: same accumulator, same result.
+  const daemon = new TurnSummaryTracker();
+  daemon.begin("agent-1", Date.parse(at("00")), undefined);
+  const frames: [string, TrajectoryEntry][] = [
+    [at("05"), { kind: "tool_start", toolName: "Bash", toolInput: "grep -rn listRecentActivityLog src", callId: "c1" }],
+    [at("06"), { kind: "status", activity: "working", detail: "Tool finished", detailKind: "tool_end", tool: { callId: "c1", ok: true } }],
+    [at("10"), { kind: "tool_start", toolName: "Bash", toolInput: "npx vitest run src/a.test.ts", callId: "c2" }],
+    [at("20"), { kind: "status", activity: "working", detail: "Tool finished", detailKind: "tool_end", tool: { callId: "c2", ok: true, exitCode: 1 } }],
+  ];
+  for (const [time, entry] of frames) daemon.observe("agent-1", [entry], Date.parse(time));
+  daemon.noteSendOutcome("agent-1", { state: "sent", messageId: "reply-1" }, Date.parse(at("25")));
+  const [daemonEntry] = daemon.finish("agent-1", "completed", Date.parse(at("30")));
+  assert.ok(daemonEntry?.kind === "turn_summary");
+  assert.deepEqual(serverSummary, daemonEntry.summary);
+  assert.deepEqual(serverSummary.problems, [{ kind: "run_checks", reason: "exit_nonzero", exitCode: 1, at: Date.parse(at("20")) }]);
+  assert.equal(serverSummary.lastReplyMessageId, "reply-1");
+
+  orchestrator.shutdown();
+});
+
+test("task #17: a daemon turn_summary entry is stored under its start time; an implausible one is not", async () => {
+  const orchestrator = new TurnSummaryHarness(new Map());
+  const summary: ActivityTurnSummary = {
+    v: 1, startedAt: 1_000, endedAt: 2_000, outcome: "completed", actions: [], toolCalls: 0, problems: [], problemCount: 0, messagesSent: 0,
+  };
+  await (orchestrator as any).persistDaemonTurnSummaries("agent-1", [
+    { kind: "status", activity: "online", detail: "Idle", detailKind: "idle" },
+    { kind: "turn_summary", summary },
+    { kind: "turn_summary", summary: { ...summary, startedAt: 3_000, endedAt: 2_000 } },
+  ]);
+  assert.deepEqual([...orchestrator.turnRows.entries()], [["daemon:1000", summary]]);
   orchestrator.shutdown();
 });
 
@@ -9650,6 +9966,7 @@ test("ready reconciliation broadcasts computerVersion with machine capabilities"
       runtimeVersions: { codex: "0.75.1" },
       hostname: undefined,
       os: undefined,
+      deviceClass: null,
       daemonVersion: "0.55.6",
       computerVersion: "0.0.25",
     },
@@ -9693,6 +10010,7 @@ test("ready from an older daemon clears stale runtime versions", async () => {
       runtimeVersions: {},
       hostname: undefined,
       os: undefined,
+      deviceClass: null,
       daemonVersion: "0.55.6",
       computerVersion: undefined,
     },
@@ -13591,7 +13909,7 @@ test("SLO v1 SLI 4: delivery_kind splits mentions from plain deliveries; gave_up
   assert.equal(await trackedOf("mention") - mentionTrackedBefore, 1, "a tracked mention is labeled delivery_kind=mention");
 
   const pending = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:occurrence-sli4-kind");
-  pending.attempts = 24;
+  pending.ackWaitStartedAt -= 120_000; // past the give-up age (task #1295)
   await (orchestrator as any).retryPendingAgentDelivery("delivery:occurrence-sli4-kind", "ack_timeout");
   assert.equal(
     await count({ outcome: "gave_up", delivery_kind: "mention", conn_age: ">6h" }) - mentionGaveUpBefore,
@@ -13732,6 +14050,121 @@ test("SLI 4: a give-up logs the machine, daemon version, kind and connection age
   orchestrator.shutdown();
 });
 
+async function gaveUpDeliveryFixture(deliveryId: string, seq: number) {
+  const clock = new FakeClock();
+  clock.advance(1_000);
+  const orchestrator = new DeterministicAgentOrchestrator(undefined, clock);
+  seedActiveAgent(orchestrator);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs(1));
+  (orchestrator as any).machineConnections.get("machine-1").daemonVersion = "1.0.47";
+  const msg = { type: "agent:deliver" as const, agentId: "agent-1", message: makeAgentMessage("late ack", seq), seq, deliveryId };
+  (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
+  const key = `delivery:${deliveryId}`;
+  const pending = (orchestrator as any).pendingAgentDeliveryAcks.get(key);
+  clock.clearTimeout(pending.timer);
+  pending.ackWaitStartedAt -= 120_000; // past the give-up age (task #1295)
+  const outcome = async (name: string) => (await agentDeliveryOutcomesTotal.get()).values
+    .filter((v) => v.labels.outcome === name).reduce((sum, v) => sum + v.value, 0);
+  const logged: string[] = [];
+  const log = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
+  const ack = () => orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:deliver:ack",
+    agentId: "agent-1",
+    seq,
+    deliveryId,
+  } as MachineToServerMessage);
+  return { clock, orchestrator, key, outcome, logged, log, ack };
+}
+
+test("SLI 4: an ack after the give-up counts as acked_after_gave_up and logs next to gave_up", async () => {
+  const f = await gaveUpDeliveryFixture("late-ack", 91);
+  try {
+    const gaveUpBefore = await f.outcome("gave_up");
+    const lateBefore = await f.outcome("acked_after_gave_up");
+    const ackedBefore = await f.outcome("acked");
+    await (f.orchestrator as any).retryPendingAgentDelivery(f.key, "ack_timeout");
+    assert.equal(await f.outcome("gave_up") - gaveUpBefore, 1);
+    assert.equal((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), false, "the give-up still deletes the record");
+    f.clock.advance(6_000);
+    await f.ack();
+    assert.equal(await f.outcome("acked_after_gave_up") - lateBefore, 1);
+    assert.equal(await f.outcome("acked") - ackedBefore, 0, "a late ack is not an on-time ack");
+    const lines = f.logged.filter((line) => line.includes("agent_delivery.acked_after_gave_up")).map((line) => JSON.parse(line));
+    assert.deepEqual(lines, [{
+      event: "agent_delivery.acked_after_gave_up",
+      machine_id: "machine-1",
+      agent_id: "agent-1",
+      delivery_correlation_id: "late-ack",
+      seq: 91,
+      delivery_kind: "plain",
+      daemon_version: "1.0.47",
+      since_gave_up_ms: 6000,
+    }]);
+    // The daemon re-acks every re-send it got: only the first ack counts.
+    await f.ack();
+    assert.equal(await f.outcome("acked_after_gave_up") - lateBefore, 1);
+  } finally {
+    f.log.mockRestore();
+    f.orchestrator.shutdown();
+  }
+});
+
+test("SLI 4: an ack more than 10 min after the give-up is not counted as acked_after_gave_up", async () => {
+  const f = await gaveUpDeliveryFixture("too-late-ack", 92);
+  try {
+    await (f.orchestrator as any).retryPendingAgentDelivery(f.key, "ack_timeout");
+    const lateBefore = await f.outcome("acked_after_gave_up");
+    f.clock.advance(10 * 60_000);
+    await f.ack();
+    assert.equal(await f.outcome("acked_after_gave_up") - lateBefore, 0);
+  } finally {
+    f.log.mockRestore();
+    f.orchestrator.shutdown();
+  }
+});
+
+test("SLI 4: a delivery re-tracked after its give-up acks as acked, not acked_after_gave_up", async () => {
+  const f = await gaveUpDeliveryFixture("retracked", 94);
+  try {
+    await (f.orchestrator as any).retryPendingAgentDelivery(f.key, "ack_timeout");
+    const lateBefore = await f.outcome("acked_after_gave_up");
+    const ackedBefore = await f.outcome("acked");
+    (f.orchestrator as any).trackPendingAgentDeliveryAck("machine-1", {
+      type: "agent:deliver" as const, agentId: "agent-1", message: makeAgentMessage("late ack", 94), seq: 94, deliveryId: "retracked",
+    }, { scheduleTimeout: false });
+    await f.ack();
+    assert.equal(await f.outcome("acked") - ackedBefore, 1);
+    await f.ack();
+    assert.equal(await f.outcome("acked_after_gave_up") - lateBefore, 0, "the old tombstone went with the re-track");
+  } finally {
+    f.log.mockRestore();
+    f.orchestrator.shutdown();
+  }
+});
+
+test("SLI 4: give-up tombstones are bounded and expire oldest first", async () => {
+  const f = await gaveUpDeliveryFixture("bounded", 93);
+  try {
+    const tombstones = (f.orchestrator as any).gaveUpAgentDeliveries as Map<string, unknown>;
+    const remember = (id: string) => (f.orchestrator as any).rememberGaveUpAgentDelivery(`delivery:${id}`, {
+      machineId: "machine-1",
+      msg: { agentId: "agent-1", seq: 1, deliveryId: id },
+      onlineAtFirstAttempt: true,
+      daemonVersion: "1.0.47",
+    });
+    remember("old");
+    f.clock.advance(10 * 60_000);
+    remember("new");
+    assert.deepEqual([...tombstones.keys()], ["delivery:new"], "an expired tombstone is pruned on the next give-up");
+    for (let i = 0; i < 10_000; i += 1) remember(`fill-${i}`);
+    assert.equal(tombstones.size, 10_000);
+    assert.equal(tombstones.has("delivery:new"), false, "the oldest is evicted at the cap");
+  } finally {
+    f.log.mockRestore();
+    f.orchestrator.shutdown();
+  }
+});
+
 async function arrivedMentionFixture() {
   const clock = new FakeClock();
   clock.advance(1_000);
@@ -13775,7 +14208,7 @@ test("SLI 4: a give-up for a machine not connected here takes its daemon version
   const msg = { type: "agent:deliver" as const, agentId: "agent-1", message: makeAgentMessage("remote", 96), seq: 96, deliveryId: "gave-up-remote" };
   (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
   const remote = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:gave-up-remote");
-  remote.attempts = 24;
+  remote.ackWaitStartedAt -= 120_000; // past the give-up age (task #1295)
   clock.clearTimeout(remote.timer);
   const logged: string[] = [];
   const log = vi.spyOn(console, "log").mockImplementation((...args: unknown[]) => { logged.push(args.map(String).join(" ")); });
@@ -13854,7 +14287,7 @@ test("SLI 4: two concurrent retries of one record give up once, not twice (task 
   (orchestrator as any).trackPendingAgentDeliveryAck("machine-1", msg);
   const pending = (orchestrator as any).pendingAgentDeliveryAcks.get("delivery:race-giveup");
   clock.clearTimeout(pending.timer);
-  pending.attempts = 24;
+  pending.ackWaitStartedAt -= 120_000; // past the give-up age (task #1295)
   const gaveUp = async () => (await agentDeliveryOutcomesTotal.get()).values
     .filter((v) => v.labels.outcome === "gave_up").reduce((sum, v) => sum + v.value, 0);
   const before = await gaveUp();
@@ -14555,6 +14988,160 @@ test("direct websocket delivery retries the original packet until daemon ack arr
   assert.equal(ws.sent.length, 2);
   assert.deepEqual(await orchestrator.receiveMessages("agent-1", false, 0), []);
   orchestrator.shutdown();
+});
+
+async function ackBackoffFixture() {
+  const clock = new FakeClock();
+  const orchestrator = new DeterministicAgentOrchestrator(new InMemoryReplicaStateStore(), clock);
+  seedActiveAgent(orchestrator);
+  const ws = makeFakeWs(1);
+  seedMachineConnection(orchestrator, "machine-1", ws);
+  await orchestrator.deliverMessage("agent-1", makeAgentMessage("ack backoff", 47));
+  await flushMicrotasks();
+  const first = JSON.parse(ws.sent[0] ?? "{}") as Extract<ServerToMachineMessage, { type: "agent:deliver" }>;
+  const key = `delivery:${first.deliveryId}`;
+  const deliveries = () => ws.sent.filter((raw) => (JSON.parse(raw) as { type?: string }).type === "agent:deliver").length;
+  const outcome = async (name: string) => (await agentDeliveryOutcomesTotal.get()).values
+    .filter((v) => v.labels.outcome === name).reduce((sum, v) => sum + v.value, 0);
+  // An ack for some other delivery on the same connection: the daemon is alive.
+  let otherSeq = 1_000;
+  const ackOther = () => orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:deliver:ack",
+    agentId: "agent-1",
+    seq: otherSeq,
+    deliveryId: `other-${otherSeq++}`,
+  } as MachineToServerMessage);
+  // Advance one second at a time; `onTick` runs before each step.
+  const run = async (seconds: number, onTick?: (t: number) => Promise<void>) => {
+    const sendTimes: number[] = [];
+    let ended: number | null = null;
+    for (let t = 1; t <= seconds; t += 1) {
+      if (onTick) await onTick(t);
+      // Keep the socket alive past the 60 s heartbeat timeout.
+      const conn = (orchestrator as any).machineConnections.get("machine-1");
+      if (conn) conn.lastPong = clock.now();
+      const before = deliveries();
+      clock.advance(1_000);
+      await flushMicrotasks(50);
+      if (deliveries() > before) sendTimes.push(t);
+      if (ended === null && !(orchestrator as any).pendingAgentDeliveryAcks.has(key)) ended = t;
+    }
+    return { sendTimes, ended };
+  };
+  return { clock, orchestrator, ws, first, key, deliveries, outcome, ackOther, run };
+}
+
+test("task #1295: ack-timeout re-sends back off 5/10/20/40/40 s and give up 120 s after the first send", async () => {
+  const f = await ackBackoffFixture();
+  const gaveUpBefore = await f.outcome("gave_up");
+  const { sendTimes, ended } = await f.run(200);
+  assert.deepEqual(sendTimes, [5, 15, 35, 75, 115], "re-sends at the backoff points, not every 5 s");
+  assert.equal(ended, 120, "the record ends exactly at the 120 s age bound");
+  assert.equal(await f.outcome("gave_up") - gaveUpBefore, 1);
+  f.orchestrator.shutdown();
+});
+
+test("task #1295: a connection acking other deliveries gets no re-send copy, and the ack still settles the record", async () => {
+  const f = await ackBackoffFixture();
+  const ackedBefore = await f.outcome("acked");
+  const { sendTimes, ended } = await f.run(90, async (t) => {
+    if (t % 2 === 0) await f.ackOther();
+  });
+  assert.deepEqual(sendTimes, [], "no copy while the daemon is visibly working through its backlog");
+  assert.equal(ended, null, "deferring is not giving up");
+  await f.orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:deliver:ack",
+    agentId: "agent-1",
+    seq: f.first.seq,
+    deliveryId: f.first.deliveryId,
+  });
+  assert.equal((f.orchestrator as any).pendingAgentDeliveryAcks.has(f.key), false);
+  assert.equal(await f.outcome("acked") - ackedBefore, 1);
+  f.orchestrator.shutdown();
+});
+
+test("task #1295: deferring still gives up at the 5 min bound", async () => {
+  const f = await ackBackoffFixture();
+  const gaveUpBefore = await f.outcome("gave_up");
+  const { sendTimes, ended } = await f.run(400, async (t) => {
+    if (t % 2 === 0) await f.ackOther();
+  });
+  assert.deepEqual(sendTimes, []);
+  assert.equal(ended, 300, "the record ends at 300 s however busy the connection is");
+  assert.equal(await f.outcome("gave_up") - gaveUpBefore, 1);
+  f.orchestrator.shutdown();
+});
+
+test("task #1295: a reconnect re-sends immediately even while the old connection was acking", async () => {
+  const f = await ackBackoffFixture();
+  await f.run(3, async () => { await f.ackOther(); });
+  const freshWs = makeFakeWs(1);
+  await f.orchestrator.registerMachine("machine-1", "server-1", freshWs as never);
+  await flushMicrotasks(10);
+  const replays = freshWs.sent
+    .map((raw) => JSON.parse(raw) as Extract<ServerToMachineMessage, { type: "agent:deliver" }>)
+    .filter((m) => m.type === "agent:deliver" && m.deliveryId === f.first.deliveryId);
+  assert.equal(replays.length, 1, "the new connection gets the delivery at once");
+  f.orchestrator.shutdown();
+});
+
+test("task #1295: a reconnect after more than 120 s offline re-sends the backlog instead of giving it up", async () => {
+  const f = await ackBackoffFixture();
+  const gaveUpBefore = await f.outcome("gave_up");
+  (f.orchestrator as any).pendingAgentDeliveryAcks.get(f.key).firstAttemptAt -= 180_000;
+  (f.orchestrator as any).pendingAgentDeliveryAcks.get(f.key).ackWaitStartedAt -= 180_000;
+  const freshWs = makeFakeWs(1);
+  await f.orchestrator.registerMachine("machine-1", "server-1", freshWs as never);
+  await flushMicrotasks(10);
+  const replays = freshWs.sent
+    .map((raw) => JSON.parse(raw) as Extract<ServerToMachineMessage, { type: "agent:deliver" }>)
+    .filter((m) => m.type === "agent:deliver" && m.deliveryId === f.first.deliveryId);
+  assert.equal(replays.length, 1, "the new connection gets the delivery");
+  assert.equal(await f.outcome("gave_up") - gaveUpBefore, 0, "not given up on arrival");
+  f.orchestrator.shutdown();
+});
+
+test("task #1295: after a 10 min park the re-send restarts the backoff at 5 s and gives up 120 s after the machine returned", async () => {
+  const f = await ackBackoffFixture();
+  let status: "online" | "offline" = "offline";
+  (f.orchestrator as any).getMachineStatus = async () => status;
+  const pending = (f.orchestrator as any).pendingAgentDeliveryAcks.get(f.key);
+  (f.orchestrator as any).parkPendingAgentDeliveryAck(f.key, pending, "machine_offline");
+  const gaveUpBefore = await f.outcome("gave_up");
+  const parked = await f.run(600);
+  assert.deepEqual(parked.sendTimes, [], "nothing is sent while parked");
+  assert.equal(parked.ended, null);
+  status = "online";
+  // The parked probe runs every 30 s; 600 s is on a probe point, so the
+  // machine is seen back at the next one, 30 s in.
+  const back = await f.run(200);
+  const resumedAt = back.sendTimes[0];
+  assert.ok(resumedAt !== undefined && resumedAt <= 30, "re-sent at the first probe after the machine returned");
+  assert.deepEqual(
+    back.sendTimes.map((t) => t - resumedAt),
+    [0, 5, 15, 35, 75, 115],
+    "the backoff starts again at 5 s from the re-send",
+  );
+  assert.equal(back.ended, resumedAt + 120, "and gives up 120 s after the machine returned");
+  assert.equal(await f.outcome("gave_up") - gaveUpBefore, 1);
+  f.orchestrator.shutdown();
+});
+
+test("task #1295: an ack after a deferred, age-based give-up still counts as acked_after_gave_up", async () => {
+  const f = await ackBackoffFixture();
+  const lateBefore = await f.outcome("acked_after_gave_up");
+  const { ended } = await f.run(304, async (t) => {
+    if (t % 2 === 0 && t < 300) await f.ackOther();
+  });
+  assert.equal(ended, 300);
+  await f.orchestrator.handleMachineMessage("machine-1", {
+    type: "agent:deliver:ack",
+    agentId: "agent-1",
+    seq: f.first.seq,
+    deliveryId: f.first.deliveryId,
+  });
+  assert.equal(await f.outcome("acked_after_gave_up") - lateBefore, 1);
+  f.orchestrator.shutdown();
 });
 
 test("machine reconnect replays an unacknowledged queued start without a second user action", async () => {
@@ -20856,4 +21443,499 @@ test("getActivities: one batch read per source for the whole list, same results 
     reference.shutdown();
     orchestrator.shutdown();
   }
+});
+
+// task #1268: a `pending` ready is the FIRST frame of a fresh connection (its
+// `conn.runtimes` is null), so the "previous" inventory it is laid over must
+// come from the persisted column; an `incomplete` ready keeps the unprobed
+// runtimes' previous state. Both are fanned out as explicit `runtimeDetection`.
+class PersistedInventoryOrchestrator extends ReadyReconcileDeterministicOrchestrator {
+  persisted: Array<{ machineId: string; runtimes: string[] }> = [];
+  persistedInventory: { runtimes: string[]; runtimeVersions: Record<string, string> } | null = { runtimes: ["codex"], runtimeVersions: { codex: "0.75.1" } };
+  /** When set, the DB write waits on it: models a persist that has not converged (or keeps failing). */
+  persistGate: Promise<void> | null = null;
+  protected override async loadPersistedMachineInventory() {
+    return this.persistedInventory;
+  }
+  protected override async persistMachineCapabilities(machineId: string, runtimes: string[]) {
+    if (this.persistGate) await this.persistGate;
+    this.persisted.push({ machineId, runtimes: [...runtimes] });
+  }
+}
+
+test("task #1268: a fresh connection's first ready is pending: the persisted inventory is fanned out unchanged with runtimeDetection pending and nothing is persisted", async () => {
+  const orchestrator = new PersistedInventoryOrchestrator();
+  const captured: Array<{ room: string; event: string; payload: unknown }> = [];
+  (orchestrator as unknown as { io: ReturnType<typeof makeFakeServerIO> }).io = makeFakeServerIO(captured);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, daemonVersion: "0.55.6", runningAgents: [],
+  } as MachineToServerMessage);
+
+  const events = captured.filter((entry) => entry.event === "machine:capabilities");
+  assert.equal(events.length, 1);
+  const pending = events[0]!.payload as { runtimes: string[]; runtimeVersions: Record<string, string>; runtimeDetection?: { status: string } };
+  assert.deepEqual(pending.runtimes, ["codex"], "the persisted inventory is retained, never an empty list");
+  assert.deepEqual(pending.runtimeVersions, { codex: "0.75.1" });
+  assert.equal(pending.runtimeDetection?.status, "pending");
+  assert.deepEqual(orchestrator.persisted, [], "a pending ready is status only");
+  orchestrator.shutdown();
+});
+
+test("task #1268: pending then incomplete on a fresh connection keeps the unfinished runtime from the persisted inventory in both the fan-out and the write", async () => {
+  const orchestrator = new PersistedInventoryOrchestrator();
+  const captured: Array<{ room: string; event: string; payload: unknown }> = [];
+  (orchestrator as unknown as { io: ReturnType<typeof makeFakeServerIO> }).io = makeFakeServerIO(captured);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready",
+    capabilities: [],
+    runtimes: ["claude"],
+    runtimeVersions: { claude: "2.0.0" },
+    runtimeDetection: { status: "incomplete", reason: "deadline", unfinishedRuntimes: ["codex"], durationMs: 90000 },
+    runningAgents: [],
+  } as MachineToServerMessage);
+
+  const events = captured.filter((entry) => entry.event === "machine:capabilities");
+  assert.equal(events.length, 2);
+  const incomplete = events[1]!.payload as { runtimes: string[]; runtimeVersions: Record<string, string>; runtimeDetection?: { status: string; unfinishedRuntimes?: string[]; reason?: string } };
+  assert.deepEqual(incomplete.runtimes, ["claude", "codex"], "probed claude is new; unprobed codex keeps its persisted presence");
+  assert.deepEqual(incomplete.runtimeVersions, { claude: "2.0.0", codex: "0.75.1" }, "the unprobed runtime keeps its previous version");
+  assert.equal(incomplete.runtimeDetection?.status, "incomplete");
+  assert.deepEqual(incomplete.runtimeDetection?.unfinishedRuntimes, ["codex"]);
+  assert.equal(incomplete.runtimeDetection?.reason, "deadline");
+  assert.deepEqual(orchestrator.persisted, [{ machineId: "machine-1", runtimes: ["claude", "codex"] }], "the write keeps the unprobed runtime too");
+  orchestrator.shutdown();
+});
+
+test("task #1268: a synchronous daemon's ready carries no detection state and persists as before", async () => {
+  const orchestrator = new PersistedInventoryOrchestrator();
+  const captured: Array<{ room: string; event: string; payload: unknown }> = [];
+  (orchestrator as unknown as { io: ReturnType<typeof makeFakeServerIO> }).io = makeFakeServerIO(captured);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["grok"], runtimeVersions: {}, runningAgents: [],
+  } as MachineToServerMessage);
+  const events = captured.filter((entry) => entry.event === "machine:capabilities");
+  assert.equal(events.length, 1);
+  assert.equal("runtimeDetection" in (events[0]!.payload as object), false);
+  assert.deepEqual(orchestrator.persisted, [{ machineId: "machine-1", runtimes: ["grok"] }]);
+  orchestrator.shutdown();
+});
+
+// task #1268: repeated ready (pending, then complete) must not double-start or
+// double-wake; a wake that did not start stays pending and is retried by the
+// next ready. Reconcile + wake side effects are observed through stubs, with
+// the DB-backed gate reads replaced by a fixed open lifecycle snapshot.
+class RepeatedReadyWakeOrchestrator extends ReadyReconcileDeterministicOrchestrator {
+  wakeAttempts: Array<{ agentId: string; messageId: string }> = [];
+  wakeSucceeds = true;
+  protected override async loadWakePlanInput(agentId: string, status: Parameters<ReadyReconcileDeterministicOrchestrator["loadWakePlanInput"]>[1]) {
+    return {
+      state: buildAgentLifecycleStateSnapshot({
+        controlGate: "open",
+        dbStatus: status,
+        resetMode: null,
+        runtimeState: (this as any).agentStateCache.get(agentId)?.runtimeState,
+      }),
+    };
+  }
+  protected override async applyWakeAction(context: Parameters<ReadyReconcileDeterministicOrchestrator["applyWakeAction"]>[0], message: AgentMessage) {
+    this.wakeAttempts.push({ agentId: context.agentId, messageId: message.message_id ?? "" });
+    if (this.wakeSucceeds) {
+      const cached = (this as any).agentStateCache.get(context.agentId);
+      if (cached) cached.runtimeState = "starting";
+      return { status: "queued", reason: "wake_accepted" } as Awaited<ReturnType<ReadyReconcileDeterministicOrchestrator["applyWakeAction"]>>;
+    }
+    return { status: "dropped", reason: "wake_suppressed" } as Awaited<ReturnType<ReadyReconcileDeterministicOrchestrator["applyWakeAction"]>>;
+  }
+}
+
+function seedInboxWake(orchestrator: AgentOrchestrator, agentId: string, seq: number) {
+  (orchestrator as any).agentInboxes.set(agentId, { inbox: [makeAgentMessage(`wake ${seq}`, seq)], pendingReceive: null });
+}
+function inboxLength(orchestrator: AgentOrchestrator, agentId: string): number {
+  return (orchestrator as any).agentInboxes.get(agentId)?.inbox.length ?? 0;
+}
+
+test("task #1268: pending then complete ready wakes a pending-inbox agent exactly once (the started wake drains the inbox entry)", async () => {
+  const orchestrator = new RepeatedReadyWakeOrchestrator();
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  seedInboxWake(orchestrator, "agent-1", 7);
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(orchestrator.wakeAttempts.length, 1, "the pending ready reconciles and wakes");
+  assert.equal(inboxLength(orchestrator, "agent-1"), 0, "a started wake removes the inbox entry");
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["codex"], runtimeVersions: {}, runtimeDetection: { status: "complete", durationMs: 10 }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(orchestrator.wakeAttempts.length, 1, "the complete ready finds nothing to wake: no second start");
+  assert.deepEqual(orchestrator.sentToMachine.map((m) => m.type).filter((t) => t === "agent:start" || t === "agent:stop"), [], "no start/stop frames were sent by either reconcile");
+  orchestrator.shutdown();
+});
+
+test("task #1268: a wake that did not start stays pending and the complete ready retries it", async () => {
+  const orchestrator = new RepeatedReadyWakeOrchestrator();
+  orchestrator.wakeSucceeds = false;
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  seedInboxWake(orchestrator, "agent-1", 8);
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(orchestrator.wakeAttempts.length, 1);
+  assert.equal(inboxLength(orchestrator, "agent-1"), 1, "a wake that did not start keeps the inbox entry");
+
+  orchestrator.wakeSucceeds = true;
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["codex"], runtimeVersions: {}, runtimeDetection: { status: "complete", durationMs: 10 }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(orchestrator.wakeAttempts.length, 2, "the complete ready retries the wake");
+  assert.deepEqual(orchestrator.wakeAttempts.map((w) => w.messageId), ["msg-8", "msg-8"], "the same pending message, not a duplicate");
+  assert.equal(inboxLength(orchestrator, "agent-1"), 0);
+  orchestrator.shutdown();
+});
+
+test("task #1268: pending then complete ready for a running agent sends no start or stop twice", async () => {
+  const orchestrator = new RepeatedReadyWakeOrchestrator();
+  seedActiveAgent(orchestrator, "agent-1", "machine-1");
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: ["agent-1"],
+  } as MachineToServerMessage);
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["codex"], runtimeVersions: {}, runtimeDetection: { status: "complete", durationMs: 10 }, runningAgents: ["agent-1"],
+  } as MachineToServerMessage);
+  assert.equal((orchestrator as any).agentStateCache.get("agent-1").status, "active");
+  assert.deepEqual(orchestrator.sentToMachine.map((m) => m.type).filter((t) => t === "agent:start" || t === "agent:stop"), []);
+  assert.equal(orchestrator.wakeAttempts.length, 0);
+  orchestrator.shutdown();
+});
+
+test("task #1268: getMachineRuntimeDetection reads the owner connection's state and null for synchronous daemons", async () => {
+  const orchestrator = new PersistedInventoryOrchestrator();
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  assert.equal(await orchestrator.getMachineRuntimeDetection("machine-1"), null);
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal((await orchestrator.getMachineRuntimeDetection("machine-1"))?.status, "pending");
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["claude"], runtimeVersions: {}, runtimeDetection: { status: "incomplete", reason: "deadline", unfinishedRuntimes: ["codex"], durationMs: 1 }, runningAgents: [],
+  } as MachineToServerMessage);
+  const incomplete = await orchestrator.getMachineRuntimeDetection("machine-1");
+  assert.equal(incomplete?.status, "incomplete");
+  assert.deepEqual(incomplete?.unfinishedRuntimes, ["codex"]);
+  assert.equal(await orchestrator.getMachineRuntimeDetection("machine-unknown"), null);
+  orchestrator.shutdown();
+});
+
+test("task #1268 (archer): when the persisted inventory cannot be read, a pending fan-out carries no inventory fields and an incomplete ready persists nothing", async () => {
+  const orchestrator = new PersistedInventoryOrchestrator();
+  orchestrator.persistedInventory = null;
+  const captured: Array<{ room: string; event: string; payload: unknown }> = [];
+  (orchestrator as unknown as { io: ReturnType<typeof makeFakeServerIO> }).io = makeFakeServerIO(captured);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["claude"], runtimeVersions: { claude: "2.0.0" }, runtimeDetection: { status: "incomplete", reason: "deadline", unfinishedRuntimes: ["codex"], durationMs: 1 }, runningAgents: [],
+  } as MachineToServerMessage);
+  const events = captured.filter((entry) => entry.event === "machine:capabilities").map((entry) => entry.payload as Record<string, unknown>);
+  assert.equal(events.length, 2);
+  assert.equal("runtimes" in events[0]!, false, "pending without a known previous inventory sends no runtimes key");
+  assert.equal((events[0]!.runtimeDetection as { status: string }).status, "pending");
+  assert.equal("runtimes" in events[1]!, false, "incomplete without a known previous inventory sends no runtimes key either");
+  assert.equal((events[1]!.runtimeDetection as { status: string }).status, "incomplete");
+  assert.deepEqual(orchestrator.persisted, [], "nothing is written over unknown old values");
+  orchestrator.shutdown();
+});
+
+test("task #1268 (reviewer): the replica meta written on ready carries THIS round's detection state, not the previous one", async () => {
+  const store = new InMemoryReplicaStateStore();
+  const orchestrator = new PersistedInventoryOrchestrator(store);
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+  const metaState = async () => {
+    const meta = await store.getMachineMeta("machine-1");
+    return meta?.probeRuntimeDetection ? (JSON.parse(meta.probeRuntimeDetection) as { status: string }).status : null;
+  };
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(await metaState(), "pending", "the meta written by the pending ready says pending");
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["claude"], runtimeVersions: {}, runtimeDetection: { status: "complete", durationMs: 5 }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(await metaState(), "complete", "the meta written by the complete ready says complete, not the earlier pending");
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["claude"], runtimeVersions: {}, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(await metaState(), null, "a synchronous ready clears the state");
+  assert.equal(await orchestrator.getMachineRuntimeDetection("machine-1"), null);
+  orchestrator.shutdown();
+});
+
+test("task #1268 (archer): a non-owner replica reads this round's detection state through the shared replica meta — pending, then complete, then cleared by a synchronous ready", async () => {
+  const shared = new ControlledReplicaState();
+  const owner = new PersistedInventoryOrchestrator(new ControlledReplicaStateStore(shared, "replica-a"));
+  const other = new PersistedInventoryOrchestrator(new ControlledReplicaStateStore(shared, "replica-b"));
+  seedMachineConnection(owner, "machine-1", makeFakeWs());
+
+  await owner.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal((await other.getMachineRuntimeDetection("machine-1"))?.status, "pending", "the non-owner sees pending right after the owner's pending ready (migration there is refused)");
+
+  await owner.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["codex"], runtimeVersions: {}, runtimeDetection: { status: "complete", durationMs: 7 }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal((await other.getMachineRuntimeDetection("machine-1"))?.status, "complete", "after the complete ready the non-owner sees complete, not the stale pending");
+
+  await owner.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["codex"], runtimeVersions: {}, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(await other.getMachineRuntimeDetection("machine-1"), null, "a synchronous ready clears the state on both replicas");
+  assert.equal(await owner.getMachineRuntimeDetection("machine-1"), null);
+  owner.shutdown();
+  other.shutdown();
+});
+
+test("task #1268 (archer): a complete ready whose inventory write has not converged leaves the non-owner replica at pending; complete appears only after convergence", async () => {
+  const shared = new ControlledReplicaState();
+  const owner = new PersistedInventoryOrchestrator(new ControlledReplicaStateStore(shared, "replica-a"));
+  const other = new PersistedInventoryOrchestrator(new ControlledReplicaStateStore(shared, "replica-b"));
+  seedMachineConnection(owner, "machine-1", makeFakeWs());
+  await owner.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimeDetection: { status: "pending" }, runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal((await other.getMachineRuntimeDetection("machine-1"))?.status, "pending");
+
+  let release!: () => void;
+  owner.persistGate = new Promise<void>((resolve) => { release = resolve; });
+  const completeReady = owner.handleMachineMessage("machine-1", {
+    type: "ready", capabilities: [], runtimes: ["codex"], runtimeVersions: {}, runtimeDetection: { status: "complete", durationMs: 7 }, runningAgents: [],
+  } as MachineToServerMessage);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal((await other.getMachineRuntimeDetection("machine-1"))?.status, "pending", "the inventory write has not landed: the non-owner (and migration gate) still see pending");
+  assert.equal((await owner.getMachineRuntimeDetection("machine-1"))?.status, "pending", "the owner too: an old inventory is never shown as confirmed before the write");
+  assert.deepEqual(owner.persisted, []);
+
+  release();
+  await completeReady;
+  assert.deepEqual(owner.persisted, [{ machineId: "machine-1", runtimes: ["codex"] }]);
+  assert.equal((await owner.getMachineRuntimeDetection("machine-1"))?.status, "complete");
+  assert.equal((await other.getMachineRuntimeDetection("machine-1"))?.status, "complete", "convergence publishes complete to the replica meta");
+  owner.shutdown();
+  other.shutdown();
+});
+
+test("ready persists a known deviceClass and stores null for an unknown or missing one", async () => {
+  const persisted: Array<string | null | undefined> = [];
+  const orchestrator = new (class extends ReadyReconcileDeterministicOrchestrator {
+    protected override async persistMachineCapabilities(
+      _machineId: string,
+      _runtimes: string[],
+      _hostname?: string,
+      _os?: string,
+      _daemonVersion?: string | null,
+      deviceClass?: string | null,
+    ) {
+      persisted.push(deviceClass);
+    }
+  })();
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+
+  for (const deviceClass of ["mini", "toaster", undefined]) {
+    await orchestrator.handleMachineMessage("machine-1", {
+      type: "ready",
+      runtimes: ["codex"],
+      daemonVersion: "1.0.0",
+      runningAgents: [],
+      ...(deviceClass ? { deviceClass } : {}),
+    } as MachineToServerMessage);
+  }
+
+  assert.deepEqual(persisted, ["mini", null, null]);
+  orchestrator.shutdown();
+});
+
+test("host identity: ready asks for it, a well-formed reply is stored, and a malformed one is dropped", async () => {
+  const requested: string[] = [];
+  const stored: Array<[string, string]> = [];
+  const orchestrator = new (class extends ReadyReconcileDeterministicOrchestrator {
+    protected override async requestHostIdentity(machineId: string, serverId: string): Promise<void> {
+      requested.push(`${machineId}@${serverId}`);
+    }
+    protected override async storeHostIdentity(machineId: string, _serverId: string, hostIdHash: string): Promise<void> {
+      stored.push([machineId, hostIdHash]);
+    }
+  })();
+  seedMachineConnection(orchestrator, "machine-1", makeFakeWs());
+
+  await orchestrator.handleMachineMessage("machine-1", {
+    type: "ready",
+    runtimes: ["codex"],
+    daemonVersion: "1.0.0",
+    runningAgents: [],
+  } as MachineToServerMessage);
+  assert.equal(requested.length, 1);
+  assert.match(requested[0]!, /^machine-1@/);
+
+  await orchestrator.handleMachineMessage("machine-1", { type: "machine:host_identity", hostIdHash: "c".repeat(32) } as MachineToServerMessage);
+  await orchestrator.handleMachineMessage("machine-1", { type: "machine:host_identity", hostIdHash: "not-a-hash" } as MachineToServerMessage);
+  assert.deepEqual(stored, [["machine-1", "c".repeat(32)]]);
+  orchestrator.shutdown();
+});
+
+test("a hosted subagent's events are logged under the subagent and never change the parent's status or end its turn", async () => {
+  const clock = new FakeClock();
+  clock.advance(Date.parse("2026-10-17T20:00:00.000Z"));
+  const logs = new Map<string, Array<{ timestamp: number; entry: TrajectoryEntry }>>();
+  const orchestrator = new PersistedActivityLogDeterministicOrchestrator(logs, clock);
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  const marker = { parentToolUseId: "toolu_parent", subagentType: "researcher", taskId: "task-1" };
+  try {
+    // The parent is working on its send_to_agent call.
+    await orchestrator.recordExternalAgentActivity("agent-1", {
+      schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+      events: [{ eventId: "parent-pre", hookEventName: "PreToolUse", toolName: "send_to_agent", tool_use_id: "toolu_parent", occurredAt: "2026-10-17T19:59:00.000Z" }],
+    }, "server-1");
+    const parentBefore = (orchestrator as any).agentActivity.get("agent-1");
+    assert.equal(parentBefore?.activity, "working");
+
+    const result = await orchestrator.recordExternalAgentActivity("agent-1", {
+      schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+      events: [
+        { eventId: "child-start", hookEventName: "SubagentStart", subagent: { ...marker, phase: "started" }, occurredAt: "2026-10-17T19:59:01.000Z" },
+        { eventId: "child-pre", hookEventName: "PreToolUse", toolName: "Read", tool_use_id: "toolu_child", subagent: { ...marker, phase: "active" }, occurredAt: "2026-10-17T19:59:02.000Z" },
+        { eventId: "child-post", hookEventName: "PostToolUse", toolName: "Read", tool_use_id: "toolu_child", subagent: { ...marker, phase: "active" }, occurredAt: "2026-10-17T19:59:03.000Z" },
+        // Even a child's turn end or reported status is not the parent's.
+        { eventId: "child-stop", hookEventName: "Stop", status: "online", subagent: { ...marker, phase: "active" }, occurredAt: "2026-10-17T19:59:04.000Z" },
+        {
+          eventId: "child-end",
+          hookEventName: "SubagentStop",
+          subagent: { ...marker, phase: "ended", outcome: "done", reportChars: 1234, report: "the report text" } as never,
+          occurredAt: "2026-10-17T19:59:05.000Z",
+        },
+      ],
+    }, "server-1");
+
+    assert.deepEqual(result, { acceptedCount: 4, rejectedCount: 1, droppedCount: 0 }, "the child's Stop has nothing of its own to log");
+    assert.deepEqual((orchestrator as any).agentActivity.get("agent-1"), parentBefore, "the parent's status is untouched");
+    assert.equal(await orchestrator.isExternalStatusProtocolAdopted("agent-1"), false, "a child's status does not adopt the status protocol");
+
+    const childRows = (logs.get("agent-1") ?? []).map((row) => row.entry).filter((entry) => (entry as { subagent?: unknown }).subagent);
+    assert.deepEqual(childRows.map((entry) => entry.kind === "status" ? `status:${entry.detailKind}` : entry.kind === "system" ? `system:${entry.title}` : entry.kind), [
+      "system:Subagent started",
+      "tool_start",
+      "system:Tool output: Read",
+      "status:tool_end",
+      "system:Subagent finished",
+    ]);
+    const finished = childRows.at(-1);
+    assert.equal(finished?.kind === "system" ? finished.text : null, "done");
+    assert.deepEqual((finished as { subagent?: unknown }).subagent, { ...marker, phase: "ended", outcome: "done", reportChars: 1234 }, "ids and enums only; unknown fields dropped");
+    assert.equal(
+      (logs.get("agent-1") ?? []).some((row) => row.entry.kind === "status" && (row.entry as { subagent?: unknown }).subagent && row.entry.detailKind !== "tool_end"),
+      false,
+      "no child status row that could read as the parent's state or turn boundary",
+    );
+  } finally {
+    orchestrator.shutdown();
+  }
+});
+
+test("a subagent row records the parent's live status as every replica sees it, not this replica's stale cache", async () => {
+  class RowActivityCapture extends DeterministicAgentOrchestrator {
+    readonly rowActivities: string[] = [];
+    protected override async persistActivityEvent(_agentId: string, activity: string): Promise<boolean> {
+      this.rowActivities.push(activity);
+      return true;
+    }
+  }
+  const store = new InMemoryReplicaStateStore();
+  const replicaA = new RowActivityCapture(store);
+  const replicaB = new RowActivityCapture(store);
+  seedActiveAgent(replicaA, "agent-1", "machine-1", "external-agent");
+  seedActiveAgent(replicaB, "agent-1", "machine-1", "external-agent");
+  try {
+    // Replica B saw the parent idle earlier; replica A then saw it start its send_to_agent call.
+    (replicaB as any).agentActivity.set("agent-1", { activity: "online", detail: "", detailKind: "ready", updatedAt: 1 });
+    await replicaA.recordExternalAgentActivity("agent-1", {
+      schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+      events: [{ eventId: "parent-pre", hookEventName: "PreToolUse", toolName: "send_to_agent", occurredAt: new Date().toISOString() }],
+    }, "server-1");
+    assert.equal((await store.getAgentActivity("agent-1"))?.activity, "working");
+
+    // The child's event lands on replica B.
+    await replicaB.recordExternalAgentActivity("agent-1", {
+      schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+      events: [{ eventId: "child-pre", hookEventName: "PreToolUse", toolName: "Read", subagent: { taskId: "task-1", phase: "active" }, occurredAt: new Date().toISOString() }],
+    }, "server-1");
+    assert.deepEqual(replicaB.rowActivities, ["working"]);
+    assert.equal((replicaB as any).agentActivity.get("agent-1")?.activity, "online", "the child changed nothing on replica B either");
+  } finally {
+    replicaA.shutdown();
+    replicaB.shutdown();
+  }
+});
+
+test("a hosted subagent's steps never count toward a parent turn, even one still open while the subagent runs", async () => {
+  const clock = new FakeClock();
+  clock.advance(Date.parse("2026-10-17T21:00:00.000Z"));
+  const orchestrator = new TurnSummaryHarness(new Map(), clock);
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  const at = (time: string) => `2026-10-17T20:50:${time}.000Z`;
+  const subagent = { parentToolUseId: "toolu_spawn", taskId: "task-1", phase: "active" };
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch([
+    { eventId: "p1", hookEventName: "UserPromptSubmit", status: "working", occurredAt: at("00") },
+    { eventId: "spawn", hookEventName: "PreToolUse", status: "working", toolName: "send_to_agent", toolUseId: "toolu_spawn", occurredAt: at("01") },
+    { eventId: "spawned", hookEventName: "PostToolUse", status: "working", toolName: "send_to_agent", toolUseId: "toolu_spawn", ok: true, occurredAt: at("02") },
+    // The child runs while the parent's turn is still open.
+    { eventId: "c-start", hookEventName: "SubagentStart", subagent: { ...subagent, phase: "started" }, occurredAt: at("03") },
+    { eventId: "c-pre", hookEventName: "PreToolUse", toolName: "Bash", toolInput: { command: "grep -rn foo src" }, toolUseId: "toolu_c1", subagent, occurredAt: at("04") },
+    { eventId: "c-post", hookEventName: "PostToolUseFailure", toolName: "Bash", toolUseId: "toolu_c1", ok: false, subagent, occurredAt: at("05") },
+    { eventId: "e1", hookEventName: "Stop", status: "online", occurredAt: at("10") },
+  ]), "server-1");
+
+  const summary = orchestrator.turnRows.get(`external:${EXTERNAL_AGENT_ACTIVITY_PROVENANCE}:p1`);
+  assert.ok(summary);
+  assert.equal(summary.toolCalls, 1, "only the parent's own send_to_agent call");
+  assert.deepEqual(summary.problems, [], "the child's failed call is the subagent's, not the parent turn's");
+  orchestrator.shutdown();
+});
+
+test("a batch of only subagent events does not refold the parent's turns", async () => {
+  const clock = new FakeClock();
+  clock.advance(Date.parse("2026-10-17T21:30:00.000Z"));
+  const orchestrator = new TurnSummaryHarness(new Map(), clock);
+  seedActiveAgent(orchestrator, "agent-1", "machine-1", "external-agent");
+  const subagent = { taskId: "task-1", phase: "active" };
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch([
+    { eventId: "p1", hookEventName: "UserPromptSubmit", status: "working", occurredAt: "2026-10-17T21:20:00.000Z" },
+  ]), "server-1");
+  const refolds = orchestrator.refoldWindows.length;
+  const result = await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch([
+    { eventId: "c-pre", hookEventName: "PreToolUse", toolName: "Read", subagent, occurredAt: "2026-10-17T21:21:00.000Z" },
+    { eventId: "c-post", hookEventName: "PostToolUse", toolName: "Read", subagent, occurredAt: "2026-10-17T21:21:01.000Z" },
+  ]), "server-1");
+  assert.equal(result.acceptedCount, 2);
+  assert.equal(orchestrator.refoldWindows.length, refolds, "no turn rebuild for child-only batches");
+  // A parent event in a later batch still refolds.
+  await orchestrator.recordExternalAgentActivity("agent-1", hostedBatch([
+    { eventId: "e1", hookEventName: "Stop", status: "online", occurredAt: "2026-10-17T21:22:00.000Z" },
+  ]), "server-1");
+  assert.equal(orchestrator.refoldWindows.length, refolds + 1);
+  orchestrator.shutdown();
 });

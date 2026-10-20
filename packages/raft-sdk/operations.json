@@ -1,6 +1,6 @@
 {
   "schema": "raft-sdk-operations.v1",
-  "version": "e2c1ac20eee73b19",
+  "version": "f3f6adc6fd7b5a3a",
   "operations": [
     {
       "name": "identity.whoami",
@@ -279,7 +279,7 @@
     {
       "name": "messages.send",
       "toolName": "messages_send",
-      "description": "Send a message to a channel, DM, or thread. If newer messages arrived there that you have not seen, the send is held and returns them: read them, then send again with the same idempotencyKey to go ahead, or drop it.",
+      "description": "Send a message to a channel, DM, or thread. If newer messages arrived there that you have not seen (or, with conversation cards on, the conversation's description is new to your context), the send is held and returns them: read them, then send again with the same idempotencyKey to go ahead, or drop it.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -330,6 +330,10 @@
                 "name"
               ]
             }
+          },
+          "targetConfirmed": {
+            "type": "boolean",
+            "description": "The top-level target is intentional even though you last read one of its threads (answering a thread_target interrupt)."
           }
         },
         "required": [
@@ -359,7 +363,7 @@
     {
       "name": "messages.reply",
       "toolName": "messages_reply",
-      "description": "Reply where a received message came from (its conversation or thread). Held like messages.send when newer messages arrived there.",
+      "description": "Reply where a received message came from (its conversation or thread). Held like messages.send when newer messages arrived there or its description is new to your context.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -419,6 +423,10 @@
                 "name"
               ]
             }
+          },
+          "targetConfirmed": {
+            "type": "boolean",
+            "description": "The top-level target is intentional even though you last read one of its threads (answering a thread_target interrupt)."
           }
         },
         "required": [
@@ -488,6 +496,10 @@
             "type": "integer",
             "description": "Skip this many results (paging).",
             "minimum": 0
+          },
+          "cursor": {
+            "type": "string",
+            "description": "A previous page's nextCursor, unchanged; continues a recent-sort search exactly (use instead of offset)."
           }
         }
       },
@@ -924,6 +936,20 @@
                 "maxLength": 120,
                 "description": "Only for type agent:create."
               },
+              "hosting": {
+                "type": "string",
+                "enum": [
+                  "computer",
+                  "antiproton"
+                ],
+                "description": "Where the new agent runs: \"antiproton\" proposes a cloud agent (one that runs in Raft's cloud, not on a Computer); omit it or use \"computer\" for a Computer the human picks. The human can change it. Only for type agent:create."
+              },
+              "model": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Cloud agent model id, only with hosting: \"antiproton\"; omit for the default. An id the cloud runtime does not offer is refused, and the refusal lists the offered ids. Only for type agent:create."
+              },
               "channel": {
                 "type": "string",
                 "minLength": 1,
@@ -986,6 +1012,21 @@
                   "maxLength": 120
                 },
                 "description": "Only for type integration:approve_agent_login, integration:install_marketplace_app, integration:register_app, integration:update_app_registration."
+              },
+              "setupUrl": {
+                "type": "string",
+                "maxLength": 2000,
+                "description": "Only for type integration:install_marketplace_app, integration:register_app, integration:update_app_registration."
+              },
+              "setupDescription": {
+                "type": "string",
+                "maxLength": 1000,
+                "description": "Only for type integration:install_marketplace_app, integration:register_app, integration:update_app_registration."
+              },
+              "setupRevision": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Only for type integration:install_marketplace_app."
               },
               "clientNameSha256": {
                 "type": "string",

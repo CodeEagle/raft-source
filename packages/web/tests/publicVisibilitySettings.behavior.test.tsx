@@ -130,7 +130,7 @@ test("turning public access off is immediate and does not require confirmation",
 
   renderWithIntl(<PublicVisibilitySection />, { locale: "zh-cn" });
   const toggle = await screen.findByTestId("public-visibility-switch");
-  assert.match(screen.getByTestId("public-visibility-section").textContent ?? "", /目前没有标记为「访客可见」的频道/);
+  assert.match(screen.getByTestId("public-visibility-section").textContent ?? "", /目前没有标记为「对访客可见」的频道/);
   fireEvent.click(toggle);
 
   await waitFor(() => assert.deepEqual(writes, [false]));
@@ -195,4 +195,78 @@ test("rollout flag off hides the owner surface and performs no API read", () => 
   renderWithIntl(<PublicVisibilitySection />);
   assert.equal(screen.queryByTestId("public-visibility-section"), null);
   assert.equal(reads, 0);
+});
+
+test("Guest joining sits under 'Make this server public'; the channel list is a first-level heading after a divider", async () => {
+  // cindyz, #wg-rbac task #127: Guest joining only applies to a public server,
+  // so it is the public switch's second-level setting; the channel list is
+  // about the whole public server and sits beside the switch, after a divider.
+  seed("owner");
+  api.get = (async () => ({
+    data: { publiclyVisible: true, publicGuestJoinEnabled: false, slug: "public-test", exposedChannels: [] },
+  })) as typeof api.get;
+
+  renderWithIntl(<PublicVisibilitySection />);
+  const guestSetting = await screen.findByTestId("public-guest-join-setting");
+  const primary = screen.getByTestId("public-visibility-primary");
+  const channels = screen.getByTestId("public-visibility-channels");
+  assert.ok(primary.contains(screen.getByTestId("public-visibility-switch")), "the public switch heads the first group");
+  assert.ok(primary.contains(guestSetting), "Guest joining belongs to the public switch's group");
+  assert.ok(!primary.contains(channels), "the channel list is not inside that group");
+  assert.ok(primary.parentElement === channels.parentElement, "the channel list is a sibling of the group: same level");
+  assert.ok(primary.compareDocumentPosition(channels) & Node.DOCUMENT_POSITION_FOLLOWING, "after it");
+  const heading = channels.querySelector("h3");
+  assert.ok(heading !== null && /Channels visible to anyone/i.test(heading.textContent ?? ""), "the channel list has a heading of the same rank as the public switch's");
+});
+
+test("after the owner switches public access, the server list reloads so the public marks update at once", async () => {
+  seed("owner");
+  const gets: string[] = [];
+  api.get = (async (url: string) => {
+    gets.push(url);
+    if (url === "/servers") return { data: [] };
+    return { data: { publiclyVisible: true, publicGuestJoinEnabled: false, slug: "public-test", exposedChannels: [] } };
+  }) as typeof api.get;
+  api.patch = (async (_url: string, body: { publiclyVisible: boolean }) => ({
+    data: { publiclyVisible: body.publiclyVisible, publicGuestJoinEnabled: false },
+  })) as typeof api.patch;
+
+  renderWithIntl(<PublicVisibilitySection />);
+  const toggle = await screen.findByTestId("public-visibility-switch");
+  assert.equal(gets.filter((url) => url === "/servers").length, 0);
+  fireEvent.click(toggle);
+  await waitFor(() => assert.equal(gets.filter((url) => url === "/servers").length, 1, "one fresh server-list load"));
+});
+
+test("owner turns search engine access off under a public server; the switch is inert while private", async () => {
+  seed("owner");
+  let publiclyVisible = true;
+  api.get = (async () => ({
+    data: {
+      publiclyVisible,
+      publicGuestJoinEnabled: false,
+      publicSearchEnabled: true,
+      slug: "public-test",
+      exposedChannels: [],
+    },
+  })) as typeof api.get;
+  const writes: Array<{ url: string; body: unknown }> = [];
+  api.patch = (async (url: string, body: { publicSearchEnabled: boolean }) => {
+    writes.push({ url, body });
+    return { data: { publicSearchEnabled: body.publicSearchEnabled } };
+  }) as typeof api.patch;
+
+  renderWithIntl(<PublicVisibilitySection />);
+  const searchSwitch = await screen.findByTestId("public-search-switch");
+  await waitFor(() => assert.equal(searchSwitch.getAttribute("aria-checked"), "true"));
+  fireEvent.click(searchSwitch);
+  await waitFor(() => assert.equal(searchSwitch.getAttribute("aria-checked"), "false"));
+  assert.deepEqual(writes, [{ url: "/servers/server-1/public-search", body: { publicSearchEnabled: false } }]);
+
+  cleanup();
+  publiclyVisible = false;
+  renderWithIntl(<PublicVisibilitySection />);
+  const privateSwitch = await screen.findByTestId("public-search-switch");
+  await waitFor(() => assert.ok(privateSwitch.hasAttribute("disabled") || privateSwitch.getAttribute("aria-disabled") === "true"));
+  assert.equal(privateSwitch.getAttribute("aria-checked"), "false", "a private server is not shown as searchable");
 });

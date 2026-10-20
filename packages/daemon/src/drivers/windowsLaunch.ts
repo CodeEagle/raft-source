@@ -1,13 +1,9 @@
+import { ambientProcessEnv } from "../processEnvPatch";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { RuntimeExecutableNotFoundError } from "../spawnFailureErrors";
 import { NodeHostUnavailableError, resolveNodeHostLaunch } from "./nodeHostLaunch";
-import {
-  WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS,
-  lookupCommandOnPath,
-  type CommandLookup,
-  type ProbeDeps,
-} from "./probe";
+import { type CommandLookup, formatCommandLookupTiming, lookupCommandOnPath, lookupCommandOnPathAsync, type ProbeDeps, WINDOWS_COMMAND_RESOLVE_TIMEOUT_MS } from "./probe";
 
 /**
  * Runtime launches never go through cmd.exe.
@@ -133,7 +129,7 @@ function launchFailure(runtimeId: string, reason: WindowsLaunchFailureReason, me
 function resolveNodeForShim(runtimeId: string, shimPath: string, deps: WindowsLaunchDeps): { command: string; env?: NodeJS.ProcessEnv } {
   try {
     const host = resolveNodeHostLaunch({
-      env: deps.env ?? process.env,
+      env: deps.env ?? ambientProcessEnv(),
       execPath: deps.execPath,
       execIsElectron: deps.execIsElectron,
       execIsSea: deps.execIsSea,
@@ -150,6 +146,40 @@ function resolveNodeForShim(runtimeId: string, shimPath: string, deps: WindowsLa
   const sibling = path.win32.join(path.win32.dirname(shimPath), "node.exe");
   if (existsSyncFn(sibling)) return { command: sibling };
   const nodeLookup = lookupCommandOnPath("node", deps);
+  const onPath = nodeLookup.command;
+  if (onPath && !isWindowsBatchFile(onPath)) return { command: onPath };
+  if (!onPath && lookupMissReason(nodeLookup) !== "not_on_path") {
+    const reason = lookupMissReason(nodeLookup);
+    throw launchFailure(runtimeId, reason, describeUndecidedLookup(runtimeId, "node", reason));
+  }
+  throw launchFailure(
+    runtimeId,
+    "node_unavailable",
+    `Cannot start ${runtimeId} on Windows: ${path.win32.basename(shimPath)} runs a Node.js script, but node.exe was not found next to it or on PATH. Install Node.js (https://nodejs.org) and restart Raft Computer, or install a native ${runtimeId} executable.`,
+  );
+}
+
+/**
+ * task #1277 — {@link resolveNodeForShim} off the event loop: the `node` PATH
+ * lookup runs through the bounded probe child; every other step is file I/O.
+ */
+async function resolveNodeForShimAsync(runtimeId: string, shimPath: string, deps: WindowsLaunchDeps): Promise<{ command: string; env?: NodeJS.ProcessEnv }> {
+  try {
+    const host = resolveNodeHostLaunch({
+      env: deps.env ?? ambientProcessEnv(),
+      execPath: deps.execPath,
+      execIsElectron: deps.execIsElectron,
+      execIsSea: deps.execIsSea,
+      hasNodeRuntime: deps.hasNodeRuntime,
+    });
+    return { command: host.command, env: host.env };
+  } catch (error) {
+    if (!(error instanceof NodeHostUnavailableError)) throw error;
+  }
+  const existsSyncFn = deps.existsSyncFn ?? existsSync;
+  const sibling = path.win32.join(path.win32.dirname(shimPath), "node.exe");
+  if (existsSyncFn(sibling)) return { command: sibling };
+  const nodeLookup = await lookupCommandOnPathAsync("node", deps);
   const onPath = nodeLookup.command;
   if (onPath && !isWindowsBatchFile(onPath)) return { command: onPath };
   if (!onPath && lookupMissReason(nodeLookup) !== "not_on_path") {
@@ -197,6 +227,36 @@ export function resolveWindowsDirectLaunch(
   );
 }
 
+/** task #1277 — {@link resolveWindowsDirectLaunch} off the event loop. */
+export async function resolveWindowsDirectLaunchAsync(
+  runtimeId: string,
+  command: string,
+  args: string[],
+  deps: WindowsLaunchDeps = {},
+): Promise<DirectLaunch> {
+  const existsSyncFn = deps.existsSyncFn ?? existsSync;
+  let current = command;
+  let shim = command;
+  for (let depth = 0; depth <= MAX_SHIM_DEPTH; depth += 1) {
+    if (!isWindowsBatchFile(current)) {
+      if (![".js", ".mjs", ".cjs"].includes(path.win32.extname(current).toLowerCase())) {
+        return { command: current, args, shell: false };
+      }
+      const node = await resolveNodeForShimAsync(runtimeId, shim, deps);
+      return { command: node.command, args: [current, ...args], ...(node.env ? { env: node.env } : {}), shell: false };
+    }
+    const next = windowsShimTargets(current, deps).find((candidate) => existsSyncFn(candidate));
+    if (!next) break;
+    shim = current;
+    current = next;
+  }
+  throw launchFailure(
+    runtimeId,
+    "batch_target_unresolved",
+    `Cannot start ${runtimeId} on Windows: ${path.win32.basename(command)} is a batch wrapper (.cmd/.bat) whose target program could not be found, and Raft does not start runtimes through cmd.exe. Reinstall ${runtimeId} with npm (npm install -g) or install its native .exe, then restart Raft Computer.`,
+  );
+}
+
 /**
  * Launch spec for a runtime CLI found by name. Off Windows the name is passed
  * to spawn unchanged (PATH lookup by the OS), as before.
@@ -214,7 +274,10 @@ export function resolveRuntimeLaunch(
   if (!command) {
     const reason = lookupMissReason(lookup);
     if (reason !== "not_on_path") {
-      throw launchFailure(runtimeId, reason, describeUndecidedLookup(runtimeId, commandName, reason));
+      // task #1240: the per-child timing rides on the log message (phase, ms,
+      // budget, outcome), never on the user-facing copy, which stays neutral.
+      const timing = formatCommandLookupTiming(lookup.timing);
+      throw launchFailure(runtimeId, reason, `${describeUndecidedLookup(runtimeId, commandName, reason)}${timing ? ` [lookup: ${timing}]` : ""}`);
     }
     throw launchFailure(
       runtimeId,

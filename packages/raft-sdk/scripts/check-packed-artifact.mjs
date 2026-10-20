@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import {
   mkdirSync,
+  readdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -38,6 +39,9 @@ try {
     "dist/cjs/index.cjs",
     "dist/esm/index.js",
     "dist/index.d.ts",
+    "dist/cjs/agent.cjs",
+    "dist/esm/agent.js",
+    "dist/agent.d.ts",
     "operations.json",
     "package.json",
   ];
@@ -50,7 +54,11 @@ try {
     `packed artifact must not contain source or build scripts: ${files.join(", ")}`,
   );
 
-  for (const file of ["dist/cjs/index.cjs", "dist/esm/index.js", "dist/index.d.ts"]) {
+  // Every emitted file, the shared chunks included.
+  const distFiles = readdirSync(join(root, "dist"), { recursive: true })
+    .map((file) => join("dist", String(file)))
+    .filter((file) => /\.(c?js|d\.ts)$/.test(file));
+  for (const file of distFiles) {
     const body = readFileSync(join(root, file), "utf8");
     assert(!body.includes("@botiverse/raft-shared"), `${file} leaked an unpublished workspace import`);
     assert(!body.includes("workspace:"), `${file} leaked a workspace protocol reference`);
@@ -89,6 +97,15 @@ try {
     if (typeof sdk.createRaft({ serverUrl: "https://raft.example", credential: "sk_agent_pack_smoke" }).invoke !== "function")
       throw new Error("raft.invoke missing from bundle");
     if (typeof sdk.RaftSdkConfigurationError !== "function") throw new Error("error export missing");
+    if (typeof sdk.createRaftFromStore !== "function") throw new Error("createRaftFromStore export missing");
+    const appsRaft = sdk.createRaft({
+      serverUrl: "https://raft.example", credential: "sk_agent_pack_smoke",
+      fetch: async () => Response.json({ appId: "system.cleaner", revision: 1, schema: {}, defaults: {}, overrides: {}, effective: {} }),
+    });
+    const appConfig = await appsRaft.apps.getConfig({ appId: "system.cleaner" });
+    if (!appConfig.ok || appConfig.state !== "config" || !appConfig.text.startsWith("App: system.cleaner"))
+      throw new Error("packed raft.apps.getConfig failed");
+    if (typeof appsRaft.profile.updateAvatar !== "function") throw new Error("raft.profile.updateAvatar missing from bundle");
     const receiver = sdk.createRaftClient({
       serverUrl: "https://raft.example", credential: "sk_agent_pack_smoke",
       fetch: async () => Response.json({ events: [{ sender_type: "human", content: "hello" }],
@@ -160,6 +177,45 @@ try {
     { cwd: consumer, encoding: "utf8" },
   );
 
+  // `./agent`: the agent layer, built on the root. Shared code is one chunk, so
+  // classes and brands are the same value from either entry.
+  const agentSmoke = `
+    const agent = await LOAD_AGENT;
+    const root = await LOAD_ROOT;
+    if (typeof agent.createRaftAgent !== "function") throw new Error("createRaftAgent export missing");
+    if (typeof agent.createRaftAgentFromStore !== "function") throw new Error("createRaftAgentFromStore export missing");
+    if ("createRaftClient" in agent) throw new Error("./agent must not export the program-layer client");
+    if ("createRaftAgent" in root) throw new Error("the root must not export createRaftAgent");
+    const raft = agent.createRaftAgent({ serverUrl: "https://raft.example", credential: "sk_agent_pack_smoke" });
+    if (typeof raft.invoke !== "function" || typeof raft.routes.messages.send !== "function")
+      throw new Error("createRaftAgent client incomplete");
+    if (typeof root.createRaft({ serverUrl: "https://raft.example", credential: "sk_agent_pack_smoke" }).invoke !== "function")
+      throw new Error("deprecated createRaft alias missing");
+    for (const name of ["RaftSdkConfigurationError", "RaftCredentialError", "SeenFrontier", "raftbenchFailedReport", "raftbenchFailureKind", "RAFT_OPERATIONS"]) {
+      if (agent[name] === undefined || agent[name] !== root[name]) throw new Error(name + " differs between the root and ./agent");
+    }
+    try {
+      agent.createRaftAgent({ serverUrl: "", credential: "sk_agent_smoke" });
+      throw new Error("invalid configuration unexpectedly passed");
+    } catch (error) {
+      if (!(error instanceof root.RaftSdkConfigurationError)) throw error;
+    }
+  `;
+  execFileSync(
+    process.execPath,
+    ["--input-type=module", "--eval", agentSmoke
+      .replace("LOAD_AGENT", 'import("@botiverse/raft-sdk/agent")')
+      .replace("LOAD_ROOT", 'import("@botiverse/raft-sdk")')],
+    { cwd: consumer, encoding: "utf8" },
+  );
+  execFileSync(
+    process.execPath,
+    ["--input-type=commonjs", "--eval", `(async () => {${agentSmoke
+      .replace("LOAD_AGENT", 'require("@botiverse/raft-sdk/agent")')
+      .replace("LOAD_ROOT", 'require("@botiverse/raft-sdk")')}})()`],
+    { cwd: consumer, encoding: "utf8" },
+  );
+
   writeFileSync(
     join(consumer, "consumer.ts"),
     `import {
@@ -179,7 +235,18 @@ try {
   type RaftApiResult,
   type RaftAppConfig,
 } from "@botiverse/raft-sdk";
+import {
+  createRaftAgent,
+  type CreateRaftAgentOptions,
+  type RaftAgent,
+  type SendMessageOutcome,
+} from "@botiverse/raft-sdk/agent";
 import { z } from "zod";
+
+const agentOptions: CreateRaftAgentOptions = { serverUrl: "https://raft.example", credential: "sk_agent_type_smoke" };
+const agentClient: RaftAgent = createRaftAgent(agentOptions);
+const sent: Promise<SendMessageOutcome> = agentClient.messages.send({ target: "#sdk-smoke", content: "hello" });
+void sent;
 
 // The SDK's published types must not widen the consumer's own zod typing
 // (a bundled zod-openapi "declare module 'zod/v4'" once made this fail).

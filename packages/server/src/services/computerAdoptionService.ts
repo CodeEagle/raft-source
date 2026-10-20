@@ -311,6 +311,7 @@ async function adoptMatchedLegacyMachine(input: {
           .update(computers)
           .set({
             apiKeyHash: material.apiKeyHash,
+            apiKeyHmac: material.apiKeyHmac,
             apiKeyPrefix: material.apiKeyPrefix,
             name: desiredName,
           })
@@ -355,6 +356,7 @@ async function adoptMatchedLegacyMachine(input: {
           .update(computers)
           .set({
             apiKeyHash: material.apiKeyHash,
+            apiKeyHmac: material.apiKeyHmac,
             apiKeyPrefix: material.apiKeyPrefix,
             name: desiredName,
           })
@@ -368,6 +370,7 @@ async function adoptMatchedLegacyMachine(input: {
           serverId: matchedMachine.serverId,
           name: desiredName,
           apiKeyHash: material.apiKeyHash,
+          apiKeyHmac: material.apiKeyHmac,
           apiKeyPrefix: material.apiKeyPrefix,
           attachedByUserId: input.userId,
           machineId: matchedMachine.id,

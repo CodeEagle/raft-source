@@ -421,6 +421,18 @@ test("hidden CLI dispatch executes isolated service, takeover, supervisor and bu
     const oauth = run(["__verify-bundled-oauth"]);
     assert.equal(oauth.status, 0, oauth.stderr);
     assert.equal(oauth.stdout.trim(), "oauth-bundle-ok");
+    const kimi = run(["__verify-bundled-kimi"]);
+    assert.equal(kimi.status, 0, kimi.stderr);
+    assert.equal(kimi.stdout.trim(), "kimi-bundle-ok");
+    // task #1268: the hosted daemon's runtime detection child re-executes this
+    // entry; it streams one JSON line per runtime and ends with `done`.
+    const detect = run(["__detect-runtimes"]);
+    assert.equal(detect.status, 0, detect.stderr);
+    const lines = detect.stdout.trim().split(/\r?\n/).map((line) => JSON.parse(line) as { event: string; runtime?: string; detection?: { ids: string[] } });
+    assert.ok(lines.length >= 2, "at least one checked line and the done line");
+    assert.ok(lines.slice(0, -1).every((line) => line.event === "checked" && typeof line.runtime === "string"));
+    assert.equal(lines[lines.length - 1]!.event, "done");
+    assert.ok(Array.isArray(lines[lines.length - 1]!.detection?.ids));
   } finally {
     rmSync(home, { recursive: true, force: true });
   }

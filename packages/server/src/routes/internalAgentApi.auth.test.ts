@@ -5327,6 +5327,56 @@ test("agent-api activity ingest is read-gated and rejects transcript paths", asy
   });
   assert.equal(forbidden.status, 400);
   assert.equal((await forbidden.json() as { code?: string }).code, "transcript_path_forbidden");
+
+  // Unknown fields are stripped and reported, not a whole-batch 400 that would
+  // stall the sender's cursor; the tool outcome fields are accepted.
+  let forwarded: unknown[] = [];
+  Object.assign(app.app.get("agentOrchestrator"), {
+    recordExternalAgentActivity: async (_agentId: string, request: { events: unknown[] }) => {
+      forwarded = request.events;
+      return { acceptedCount: request.events.length, rejectedCount: 0, droppedCount: 0 };
+    },
+  });
+  const newer = await fetch(`${app.baseUrl}/internal/agent-api/activity`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+    body: JSON.stringify({
+      schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+      events: [{
+        eventId: "activity-route-3",
+        hookEventName: "PostToolUse",
+        toolName: "Bash",
+        tool_use_id: "toolu_1",
+        exit_code: 1,
+        ok: true,
+        futureField: { nested: true },
+      }],
+    }),
+  });
+  assert.equal(newer.status, 200);
+  assert.deepEqual(await newer.json(), { ok: true, acceptedCount: 1, rejectedCount: 0, droppedCount: 0, ignoredFields: ["futureField"] });
+  assert.deepEqual(forwarded, [{
+    eventId: "activity-route-3",
+    hookEventName: "PostToolUse",
+    toolName: "Bash",
+    tool_use_id: "toolu_1",
+    exit_code: 1,
+    ok: true,
+  }]);
+
+  // A hosted subagent's marker reaches ingest (validated there), not stripped.
+  const subagent = { parentToolUseId: "toolu_parent", taskId: "task-1", phase: "ended", outcome: "done", reportChars: 12 };
+  const child = await fetch(`${app.baseUrl}/internal/agent-api/activity`, {
+    method: "POST",
+    headers: jsonHeaders(fixture.readOnlyApiKey),
+    body: JSON.stringify({
+      schema: EXTERNAL_AGENT_ACTIVITY_INGEST_SCHEMA,
+      events: [{ eventId: "activity-route-4", hookEventName: "SubagentStop", subagent }],
+    }),
+  });
+  assert.equal(child.status, 200);
+  assert.deepEqual(await child.json(), { ok: true, acceptedCount: 1, rejectedCount: 0, droppedCount: 0 }, "nothing stripped");
+  assert.deepEqual(forwarded, [{ eventId: "activity-route-4", hookEventName: "SubagentStop", subagent }]);
 });
 
 test("agent-api message resolve is registered and gated by read capability", async ({ app }) => {

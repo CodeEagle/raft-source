@@ -167,7 +167,7 @@ interface ChannelState {
     userIds?: string[];
     targetServerSlug?: string;
     invitedPeople?: string[];
-    jointInvites?: Array<{ targetServerSlug: string; invitedPeople: string[] }>;
+    jointInvites?: Array<{ targetServerSlug: string; invitedPeople: string[]; sameAdmin?: boolean }>;
     actionCardMessageId?: string;
     actionCardConfirmationVersion?: number;
   }) => Promise<Channel>;
@@ -181,7 +181,7 @@ interface ChannelState {
   deleteChannel: (channelId: string) => Promise<void>;
   disconnectJointChannel: (channelId: string) => Promise<void>;
   resendJointChannelInvite: (channelId: string) => Promise<{ resentCount: number }>;
-  inviteJointChannelServer: (channelId: string, input: { targetServerSlug: string; invitedPeople: string[] }) => Promise<Channel>;
+  inviteJointChannelServer: (channelId: string, input: { targetServerSlug: string; invitedPeople: string[]; sameAdmin?: boolean }) => Promise<Channel>;
   setActivityMuteState: (channelId: string, state: { activityMuted: boolean; muteFromSeq: string | number | null; activityMuteSupported?: boolean; prefsVersion?: number }) => void;
   setMessageDisplayPrefsState: (channelId: string, prefs: { collapseLongMessages: boolean; prefsVersion?: number }) => void;
   archiveChannel: (channelId: string) => Promise<Channel>;

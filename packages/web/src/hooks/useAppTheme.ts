@@ -2,20 +2,16 @@ import { createContext, useContext } from "react";
 import type {
   AppAppearanceMode,
   AppResolvedMode,
-  AppThemeId,
   AppThemePreferences,
-  AppThemePreset,
 } from "../theme/appTheme";
 
 export interface AppThemeContextValue {
-  preset: AppThemePreset;
   preferences: AppThemePreferences;
+  /** The chosen appearance: light, dark, or follow the system. */
+  mode: AppAppearanceMode;
+  /** What is on screen right now. */
   resolvedMode: AppResolvedMode;
-  setPreferences: (preferences: AppThemePreferences) => void;
   setMode: (mode: AppAppearanceMode) => void;
-  setThemeForMode: (mode: AppResolvedMode, themeId: AppThemeId) => void;
-  /** Compatibility setter for callers that have not migrated off presets. */
-  setPreset: (preset: AppThemePreset) => void;
 }
 
 export const AppThemeContext = createContext<AppThemeContextValue | null>(null);

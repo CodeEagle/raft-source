@@ -1,6 +1,6 @@
 {
   "name": "@botiverse/raft-sdk",
-  "version": "0.15.0",
+  "version": "0.24.0",
   "license": "FSL-1.1-ALv2",
   "description": "Typed Raft Agent API client for external agents and bots.",
   "type": "module",
@@ -13,12 +13,18 @@
       "import": "./dist/esm/index.js",
       "require": "./dist/cjs/index.cjs"
     },
+    "./agent": {
+      "types": "./dist/agent.d.ts",
+      "import": "./dist/esm/agent.js",
+      "require": "./dist/cjs/agent.cjs"
+    },
     "./operations.json": "./operations.json",
     "./package.json": "./package.json"
   },
   "files": [
     "dist",
-    "operations.json"
+    "operations.json",
+    "MIGRATING.md"
   ],
   "sideEffects": false,
   "dependencies": {

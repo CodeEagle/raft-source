@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useIntl } from "react-intl";
-import { Spinner } from "raft-ui";
+import { Spinner } from "@botiverse/raft-ui";
 import type { HostedAgentModelView } from "@botiverse/raft-shared";
 import api from "../../api/client";
 import SectionEyebrow from "../ui/SectionEyebrow";
 import { RuntimeChoiceCombobox } from "./RuntimeChoiceCombobox";
 import type { RuntimeOption } from "./RuntimeConfigFields";
+import { hostedModelPickerShown } from "./HostedModelChoice";
 
 /** Item value of "follow the provider's default"; stored as `model: null`. */
 const DEFAULT_CHOICE = "__hosted_default__";
@@ -98,22 +99,23 @@ export function AgentHostedRuntimeModel({ agentId }: { agentId: string }) {
 
   const handlePick = useCallback((next: string) => { void handleChange(next); }, [handleChange]);
 
-  if (state.kind === "hidden") return null;
+  // Where the server may not pick (`antiproton_model_picker` off), Raft decides: no picker at all.
+  if (state.kind === "hidden" || (state.kind === "ready" && !hostedModelPickerShown(view))) return null;
   return (
-    <div className="border-t border-line-muted theme-brutal:border-black/10 px-5 py-4" data-testid="agent-hosted-runtime-model">
+    <div className="border-t border-line-hairline px-5 py-4" data-testid="agent-hosted-runtime-model">
       <SectionEyebrow as="div" className="mb-2">
         {formatMessage({ id: "agent.detail.hostedModel.title" })}
       </SectionEyebrow>
       {state.kind === "loading" ? (
         <Spinner size="xs" aria-label={formatMessage({ id: "agent.workspace.loading" })} />
       ) : state.kind === "error" ? (
-        <p className="text-xs font-bold text-warning-strong theme-brutal:text-brutal-orange">
+        <p className="text-footnote font-semibold text-warning-strong">
           {formatMessage({ id: "agent.detail.hostedModel.loadFailed" })}
         </p>
       ) : view!.locked ? (
         <div className="space-y-1" data-testid="agent-hosted-runtime-model-locked">
-          <p className="text-sm text-foreground-strong theme-brutal:text-black">{view!.label ?? view!.model}</p>
-          <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
+          <p className={view!.label ? "text-callout text-foreground" : "break-all font-mono text-mono-meta text-foreground"}>{view!.label ?? view!.model}</p>
+          <p className="text-caption text-foreground-hint">
             {formatMessage({ id: "agent.detail.hostedModel.locked" })}
           </p>
         </div>
@@ -129,11 +131,11 @@ export function AgentHostedRuntimeModel({ agentId }: { agentId: string }) {
             testId="agent-hosted-runtime-model-select"
           />
           {view!.source === "admin" && (
-            <p className="text-xs text-foreground-muted theme-brutal:text-black/60">
+            <p className="text-caption text-foreground-hint">
               {formatMessage({ id: "agent.detail.hostedModel.adminDefault" })}
             </p>
           )}
-          <p className="text-xs text-foreground-muted theme-brutal:text-black/60" aria-live="polite" data-testid="agent-hosted-runtime-model-notice">
+          <p className={!saving && (notice === "failed" || notice === "not_offered") ? "text-caption font-semibold text-warning-strong" : "text-caption text-foreground-hint"} aria-live="polite" data-testid="agent-hosted-runtime-model-notice">
             {saving
               ? formatMessage({ id: "agent.detail.hostedModel.saving" })
               : notice === "saved"

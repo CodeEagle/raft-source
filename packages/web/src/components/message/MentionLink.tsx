@@ -1,7 +1,7 @@
 import { useContext, useRef, useCallback } from "react";
 import type { ReactNode } from "react";
 import { IntlContext } from "react-intl";
-import { MessageReferenceText, PreviewCard, PreviewCardContent, PreviewCardTrigger } from "raft-ui";
+import { MessageReferenceText, PreviewCard, PreviewCardContent, PreviewCardTrigger } from "@botiverse/raft-ui";
 import type { ExternalMessageAuthorProjection } from "@botiverse/raft-shared";
 import { en } from "../../i18n/messages/en";
 import { useAuthStore } from "../../store/authStore";
@@ -96,8 +96,10 @@ export default function MentionLink({ mentionType, mentionId, onNavigate, onNavi
         // glyphs (line-height), which made a `-top-1` badge read as floating
         // above the row rather than sitting on the mention's corner. Anchor it
         // down onto the corner and slightly further right (artin, 7-28).
-        className={`pointer-events-none absolute -right-1.5 top-0 size-2 shrink-0 rounded-full border border-black ${
- agentReadState === "read" ? "bg-brutal-lime" : "bg-white"
+        // A DS square pixel (radius 2, ink edge): lime once read, a white
+        // sticker until then.
+        className={`pointer-events-none absolute -right-1.5 top-0 size-2 shrink-0 rounded-[2px] border-[1.5px] border-sticker-ink ${
+ agentReadState === "read" ? "bg-success" : "bg-sticker-paper"
  }`}
       />
       </Tooltip>
@@ -145,7 +147,7 @@ export default function MentionLink({ mentionType, mentionId, onNavigate, onNavi
         >
           {children}
         </PreviewCardTrigger>
-        <PreviewCardContent sideOffset={6} collisionPadding={6} className="w-[280px]">
+        <PreviewCardContent sideOffset={6} collisionPadding={6}>
           <ExternalIdentityPreviewBody
             displayName={fallbackExternal?.displayName ?? fallbackLabel ?? ""}
             provider={fallbackExternal?.provider}
@@ -174,7 +176,7 @@ export default function MentionLink({ mentionType, mentionId, onNavigate, onNavi
       >
         {children}
       </PreviewCardTrigger>
-      <PreviewCardContent sideOffset={6} collisionPadding={6} className="w-[280px]">
+      <PreviewCardContent sideOffset={6} collisionPadding={6}>
         <ProfilePreviewCardContent
           mentionType={mentionType}
           mentionId={mentionId}

@@ -57,26 +57,29 @@ function renderRow(machine: Machine, latest: string | null = "1.0.40") {
 }
 
 const rowText = () => screen.getByTestId("computer-list-item-computer-1").textContent ?? "";
-// The dot text rides the RUI tooltip; the tone class is the visible signal.
+// The dot text rides the RUI tooltip; the tone class is the visible signal
+// (Raft DS: an upgrade waiting is the pink attention pixel, online is lime).
 const dotTone = () => screen.getByTestId("computer-status-dot-computer-1").className;
+// Liveness is raft-ui Status `presence`, published as data-presence.
+const dotPresence = () => screen.getByTestId("computer-status-dot-computer-1").getAttribute("data-presence");
 
 test("22. new version with web upgrade off: arrow + upgrade dot", () => {
   renderRow(computer());
   assert.match(rowText(), /computer v1\.0\.38→ v1\.0\.40/);
-  assert.match(dotTone(), /bg-brutal-pink/);
+  assert.match(dotTone(), /(?:^|\s)bg-attention(?:\s|$)/);
 });
 
 test("22. up to date: no arrow, online dot, run label shows the version", () => {
   renderRow(computer({ computerVersion: "1.0.40" }));
   assert.equal(rowText().includes("→"), false);
   assert.match(rowText(), /computer v1\.0\.40/);
-  assert.match(dotTone(), /bg-brutal-lime/);
+  assert.equal(dotPresence(), "online");
 });
 
 test("22. offline with a new version keeps the arrow", () => {
   renderRow(computer({ status: "offline" }));
   assert.match(rowText(), /computer offline→ v1\.0\.40/);
-  assert.match(dotTone(), /bg-brutal-pink/);
+  assert.match(dotTone(), /(?:^|\s)bg-attention(?:\s|$)/);
 });
 
 test("22. no published version known: no arrow", () => {
@@ -87,19 +90,19 @@ test("22. no published version known: no arrow", () => {
 test("22. prerelease below the release (1.0.40-rc.1 vs 1.0.40): arrow to v1.0.40", () => {
   renderRow(computer({ computerVersion: "1.0.40-rc.1" }));
   assert.match(rowText(), /computer v1\.0\.40-rc\.1→ v1\.0\.40/);
-  assert.match(dotTone(), /bg-brutal-pink/);
+  assert.match(dotTone(), /(?:^|\s)bg-attention(?:\s|$)/);
 });
 
 test("22. staging build ahead of the release: no arrow, online dot", () => {
   renderRow(computer({ computerVersion: "1.0.41-staging.20261003090435.sha.4f9786e3e10a" }));
   assert.equal(rowText().includes("→"), false);
-  assert.match(dotTone(), /bg-brutal-lime/);
+  assert.equal(dotPresence(), "online");
 });
 
 test("22. older staging build (1.0.39-staging.* vs 1.0.40): arrow to v1.0.40", () => {
   renderRow(computer({ computerVersion: "1.0.39-staging.20260925080000.sha.89abcdef0123" }));
   assert.match(rowText(), /→ v1\.0\.40/);
-  assert.match(dotTone(), /bg-brutal-pink/);
+  assert.match(dotTone(), /(?:^|\s)bg-attention(?:\s|$)/);
 });
 
 test("an online Computer under 10% free disk shows a low-disk chip with the free space", () => {

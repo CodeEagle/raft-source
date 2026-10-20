@@ -1,6 +1,6 @@
 import AvatarListRow from "../components/ui/AvatarListRow";
 import AvatarSlot from "../components/ui/AvatarSlot";
-import { Badge, Spinner } from "raft-ui";
+import { Badge, Spinner } from "@botiverse/raft-ui";
 import type { Server } from "../store/serverStore";
 import { useCallback, useMemo } from "react";
 import { useIntl } from "react-intl";
@@ -44,15 +44,18 @@ export function MarketplaceServerRow({
     "aria-label": ariaLabel,
     title: rowTitle,
   }), [ariaLabel, installInFlight, rowTitle, selected, serverId]);
+  // Raft Design System › ListRow (raft-ui, through AvatarListRow): one row of
+  // the server list's inset card, the picked server in cyan-soft. While an
+  // install is in flight every row is disabled, and a disabled row greys its
+  // words without a fill.
   return (
     <AvatarListRow
       avatar={(
         <AvatarSlot
-          context="surface-list"
+          context="list-row"
           type="server"
           serverAvatarUrl={server.avatarUrl}
           serverInitial={server.name.slice(0, 1)}
-          className="mt-1"
         />
       )}
       name={server.name}
@@ -64,7 +67,7 @@ export function MarketplaceServerRow({
           data-testid="marketplace-install-pending-row-spinner"
         />
       ) : !installed ? (
-        <Badge appearance="outline" uppercase>
+        <Badge variant="muted" appearance="soft">
           {formatMessage({ id: !entry
             ? "pages.humanLogin.serverUnavailableCompact"
             : canInstall
@@ -72,10 +75,8 @@ export function MarketplaceServerRow({
               : "pages.humanLogin.adminNeededCompact" })}
         </Badge>
       ) : null}
-      align="start"
       selected={selected}
       onClick={handleClick}
-      className={`min-h-14 ${installInFlight ? "opacity-60" : ""}`}
       buttonProps={buttonProps}
     />
   );

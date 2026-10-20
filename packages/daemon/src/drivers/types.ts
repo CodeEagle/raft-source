@@ -5,6 +5,7 @@ import type { RuntimeCompactionInterruption } from "@botiverse/raft-shared";
 import type { ActiveSpan, AgentConfig, AgentMessage, RuntimeModelSourceOutcome, SubagentLineage, Tracer, AxSurfaceText } from "@botiverse/raft-shared";
 import type { AgentProxyInboxCoordinator } from "../agentCredentialProxy";
 import type { AgentAppInboxStore } from "../agentAppInbox";
+import type { SpawnContextGeneration } from "../contextGeneration";
 
 // ── Runtime Contracts ──
 // Behavior-level contracts that describe how the daemon should interact with a
@@ -101,8 +102,12 @@ export type ParsedEvent =
   | { kind: "session_init"; sessionId: string }
   | ({ kind: "thinking"; text: string; runtimeTurn?: RuntimeTurnAttribution } & SubagentLineage)
   | ({ kind: "text"; text: string; runtimeTurn?: RuntimeTurnAttribution } & SubagentLineage)
-  | ({ kind: "tool_call"; name: string; input: any } & SubagentLineage)
-  | ({ kind: "tool_output"; name: string } & SubagentLineage)
+  // `callId` is the runtime's id for the call when it reports one; `tool_output`
+  // with the same id ends that call. `ok` is whether the tool call itself
+  // succeeded (a non-zero `exitCode` is still ok); `durationMs` is the
+  // runtime's own measurement, used instead of the daemon's when present.
+  | ({ kind: "tool_call"; name: string; input: any; callId?: string } & SubagentLineage)
+  | ({ kind: "tool_output"; name: string; callId?: string; ok?: boolean; durationMs?: number; exitCode?: number } & SubagentLineage)
   | { kind: "compaction_started" }
   | { kind: "compaction_finished" }
   | {
@@ -125,6 +130,14 @@ export type ParsedEvent =
       nativeReasonPresent?: boolean;
       reasonProvenance?: "runtime_error_event" | "codex_native_reason" | "daemon_fallback";
       terminalReason?: "compaction_failed_or_exhausted";
+      /**
+       * task #379: the runtime declared a provider limit. Either kind takes the
+       * existing `rate_limited` delivery backoff (recoverable, cleared by real
+       * progress); `quota_exhausted` means the window is used up until it
+       * resets, `transient_rate_limit` is a short throttle. `resetsAt` is only
+       * set when the runtime reported it; it is never inferred.
+       */
+      providerLimit?: { kind: "quota_exhausted" | "transient_rate_limit"; resetsAt?: string };
       compaction?: RuntimeCompactionInterruption;
       startupRequestMethod?:
         | "initialize"
@@ -171,6 +184,12 @@ export type ParsedEvent =
       subagentType?: string;
       /** Claude `system` task-lifecycle envelope id. */
       taskId?: string;
+      /**
+       * task #1260 — terminal status of a `task_notification` envelope, the
+       * closed vocabulary Claude documents (completed | failed | stopped).
+       * Absent on other phases and on an unknown status value.
+       */
+      taskStatus?: "completed" | "failed" | "stopped";
       /** Bounded tool name from the envelope's `last_tool_name`, if present. */
       lastToolName?: string;
       payloadBytes?: number;
@@ -191,8 +210,8 @@ export type ParsedEvent =
     }
   | {
       kind: "runtime_recovery";
-      source: "codex_resume_missing_rollout" | "codex_resume_thread_writer_busy" | "grok_resume_missing_session";
-      resumeErrorClass: "missing_rollout" | "thread_writer_busy" | "missing_session";
+      source: "codex_resume_missing_rollout" | "codex_resume_thread_writer_busy" | "codex_resume_archived" | "grok_resume_missing_session";
+      resumeErrorClass: "missing_rollout" | "thread_writer_busy" | "archived" | "missing_session";
       recoveryAction: "fallback_fresh_thread";
       message: string;
       details?: string;
@@ -264,7 +283,20 @@ export interface SpawnContext {
   slockHome?: string;
   launchId?: string | null;
   processInstanceId?: string | null;
+  /**
+   * task #1277 — cancels this start attempt. Aborted when the agent is stopped
+   * or the attempt is replaced while the driver is still resolving or
+   * spawning; never by a connection change. Drivers pass it to their bounded
+   * probe children and must not create a child once it is aborted.
+   */
+  launchSignal?: AbortSignal;
   agentCredentialProxyInboxCoordinator?: AgentProxyInboxCoordinator;
+  /**
+   * RFC 072 context id this spawn publishes, planned by the daemon so the
+   * start input it books and the id the CLI reads are the same (glimpse G0).
+   * Absent: the transport plans its own.
+   */
+  contextGeneration?: SpawnContextGeneration;
   /** Shared per-agent Computer-local app Inbox used by the credential proxy. */
   agentAppInbox?: AgentAppInboxStore;
   cliTransportTraceDir?: string | null;
@@ -318,6 +350,13 @@ export interface RuntimeProbeResult {
   available: boolean;
   version?: string;
   diagnostic?: string;
+  /**
+   * task #1240 — bounded one-line timing of the PATH lookup behind this probe
+   * (phase, ms, budget, outcome per child; no values, output or paths). Goes
+   * to the detection trace event; it is not a diagnostic, so a healthy
+   * runtime does not warn because of it.
+   */
+  lookupTiming?: string;
   /** Set only when `available` is false. Absent means unknown (treated as a failure). */
   unavailableReason?: RuntimeProbeUnavailableReason;
 }

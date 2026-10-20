@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { Readable } from "node:stream";
 import { currentDate } from "@botiverse/raft-shared";
 import { and, eq } from "drizzle-orm";
 
@@ -105,8 +104,8 @@ export type StoreExternalInboundAttachmentInput = Readonly<{
 export async function storeExternalInboundAttachment(
   input: StoreExternalInboundAttachmentInput,
 ): Promise<typeof attachments.$inferSelect> {
-  if (!input.storage.putStream) {
-    throw new Error("Attachment storage does not support bounded streaming writes");
+  if (typeof input.storage.put !== "function") {
+    throw new Error("Attachment storage does not support buffered writes");
   }
   if (
     !Number.isSafeInteger(input.declaredSizeBytes)
@@ -195,37 +194,39 @@ export async function storeExternalInboundAttachment(
     }),
   }, input.db, now);
 
+  // The provider byte generator can throw transiently before any bytes are
+  // produced (e.g. an attachment credential lease lost to a concurrent
+  // claimant). Handing that generator to `putStream` via `Readable.from`
+  // turns the throw into an unhandled 'error' event that escapes the awaited
+  // put and crashes the process. Buffer the validated bytes first so every
+  // generator failure is an ordinary rejected promise the caller classifies.
   let actualSizeBytes = 0;
   const hash = createHash("sha256");
   let sniffPrefix = Buffer.alloc(0);
-  const boundedBytes = async function* () {
-    for await (const rawChunk of input.bytes) {
-      const chunk = Buffer.from(rawChunk);
-      actualSizeBytes += chunk.length;
-      if (actualSizeBytes > input.declaredSizeBytes || actualSizeBytes > input.maximumSizeBytes) {
-        throw new Error("External inbound attachment stream exceeded its declared bound");
-      }
-      hash.update(chunk);
-      if (sniffPrefix.length < 512) {
-        sniffPrefix = Buffer.concat([sniffPrefix, chunk.subarray(0, 512 - sniffPrefix.length)]);
-      }
-      yield chunk;
+  // Pre-allocate the declared size once. Chunks copy directly in, so a 200MB
+  // pro attachment does not sit in a second concatenated copy during the put.
+  const body = Buffer.allocUnsafe(input.declaredSizeBytes);
+  for await (const rawChunk of input.bytes) {
+    const chunk = Buffer.from(rawChunk);
+    actualSizeBytes += chunk.length;
+    if (actualSizeBytes > input.declaredSizeBytes || actualSizeBytes > input.maximumSizeBytes) {
+      throw new Error("External inbound attachment stream exceeded its declared bound");
     }
-    if (actualSizeBytes !== input.declaredSizeBytes) {
-      throw new Error("External inbound attachment stream length did not match provider metadata");
+    chunk.copy(body, actualSizeBytes - chunk.length);
+    hash.update(chunk);
+    if (sniffPrefix.length < 512) {
+      sniffPrefix = Buffer.concat([sniffPrefix, chunk.subarray(0, 512 - sniffPrefix.length)]);
     }
-    if (!declaredMimeMatchesBytes(input.mimeType, sniffPrefix)) {
-      throw new Error("External inbound attachment bytes did not match the declared MIME type");
-    }
-  };
+  }
+  if (actualSizeBytes !== input.declaredSizeBytes) {
+    throw new Error("External inbound attachment stream length did not match provider metadata");
+  }
+  if (!declaredMimeMatchesBytes(input.mimeType, sniffPrefix)) {
+    throw new Error("External inbound attachment bytes did not match the declared MIME type");
+  }
 
   return withFileUploadQuota(input.serverId, input.declaredSizeBytes, async () => {
-    await input.storage.putStream!(
-      storageKey,
-      Readable.from(boundedBytes()),
-      input.mimeType,
-      input.declaredSizeBytes,
-    );
+    await input.storage.put(storageKey, body, input.mimeType);
     const contentHash = hash.digest("hex");
     await input.beforePublish?.();
     return input.db.transaction((tx) => createIdempotentPendingAttachmentProjectionWithExecutor(tx, {

@@ -8,6 +8,8 @@ let _redisPub: Redis | null = null;
 let _redisReplicaSub: Redis | null = null;
 let _redisUrl: string | null = null;
 let _redisOpts: RedisOptions | null = null;
+let _redisBounded: Redis | null = null;
+let _redisShutDown = false;
 
 function attachRedisClientMetrics(name: string, client: Redis) {
   client.on("error", (err) => {
@@ -33,6 +35,10 @@ export function initRedis(redisUrl: string) {
   if (needsIPv6) opts.family = 6;
   _redisUrl = redisUrl;
   _redisOpts = opts;
+  // A bounded client from an earlier init must not be reused against the new one.
+  if (_redisBounded) void _redisBounded.quit().catch(() => {});
+  _redisBounded = null;
+  _redisShutDown = false;
 
   _redis = new Redis(redisUrl, opts);
   _redisPub = new Redis(redisUrl, opts);
@@ -42,6 +48,27 @@ export function initRedis(redisUrl: string) {
   for (const [name, client] of [["redis", _redis], ["redis_pub", _redisPub], ["redis_sub", _redisSub], ["redis_replica_sub", _redisReplicaSub]] as const) {
     attachRedisClientMetrics(name, client);
   }
+}
+
+/**
+ * Dedicated client for short, latency-bound commands (the public search
+ * service bucket, task #4). Its own connection, so a slow command never holds
+ * the shared one; a command past `commandTimeoutMs` is rejected by the client,
+ * and while disconnected commands fail at once instead of queueing. Null when
+ * Redis is not configured.
+ */
+export function getBoundedRedis(commandTimeoutMs: number): Redis | null {
+  if (!_redisUrl || !_redisOpts || _redisShutDown) return null;
+  if (!_redisBounded) {
+    _redisBounded = new Redis(_redisUrl, {
+      ..._redisOpts,
+      commandTimeout: commandTimeoutMs,
+      maxRetriesPerRequest: 0,
+      enableOfflineQueue: false,
+    });
+    attachRedisClientMetrics("redis_bounded", _redisBounded);
+  }
+  return _redisBounded;
 }
 
 /** General-purpose Redis client (commands, pub, locks, caches) */
@@ -100,10 +127,16 @@ export function isRedisAvailable(): boolean {
 }
 
 export async function shutdownRedis() {
+  // The bounded client is closed with the others and never handed out again
+  // until the next initRedis (a closed client would only fail every command).
+  const bounded = _redisBounded;
+  _redisBounded = null;
+  _redisShutDown = true;
   await Promise.all([
     _redis?.quit(),
     _redisPub?.quit(),
     _redisSub?.quit(),
     _redisReplicaSub?.quit(),
+    bounded?.quit(),
   ]);
 }

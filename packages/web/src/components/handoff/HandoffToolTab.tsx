@@ -1,6 +1,6 @@
 import { useCallback } from "react";
 import type { KeyboardEvent } from "react";
-import { SegmentedControlCount, SegmentedControlItem, SegmentedControlLabel } from "raft-ui";
+import { SegmentedControlCount, SegmentedControlItem, SegmentedControlLabel } from "@botiverse/raft-ui";
 
 import { TOOL_LABEL } from "./handoffSessions";
 import type { LocalSession } from "./handoffSessions";

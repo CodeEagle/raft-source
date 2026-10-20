@@ -156,6 +156,7 @@ test("critical producers keep their intended born-read policy", () => {
     "task.converted_summary": "born-read",
     // #9: task status transitions are a collaboration signal — born-read for the actor.
     "task.lifecycle_thread": "born-read",
+    "onboarding.hosted_recap_wake": "born-read",
     // Zero-audience / lifecycle churn records no fact.
     "channel.self_unfollow_thread": "skip",
     "task.deleted_summary": "skip",

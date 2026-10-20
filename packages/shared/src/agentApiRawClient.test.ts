@@ -11,7 +11,14 @@ import {
   type AgentApiRawTransport,
   type AgentApiRawTransportRequest,
 } from "./agentApiRawClient";
+const raftbenchRunId = "00000000-0000-4000-8000-000000000001";
+const raftbenchCoverage = { from: "2026-10-17T00:00:00Z", to: "2026-10-18T00:00:00Z", fetchedMessages: 0, exhausted: true, stopReason: "window_end", notRead: ["Tool outcomes not read"] };
+const raftbenchContext = { runId: raftbenchRunId, revision: 1, sourceText: "Coverage: no synthetic source messages", sources: [], coverage: raftbenchCoverage, nextCursor: null };
+const raftbenchReport = { runId: raftbenchRunId, revision: 1, status: "complete", patterns: [], gaps: [] };
+const raftbenchReceipt = { runId: raftbenchRunId, revision: 1, status: "complete", receiptId: "00000000-0000-4000-8000-000000000002", coverage: raftbenchCoverage };
 const validResponses: Record<AgentApiRouteKey, unknown> = {
+  raftbenchContext,
+  raftbenchSubmit: raftbenchReceipt,
   feedbackLocatorIngest: {
     status: "accepted",
     receipt_id: "00000000-0000-4000-8000-000000000001",
@@ -652,6 +659,8 @@ const validResponses: Record<AgentApiRouteKey, unknown> = {
 };
 
 const methodInputs: Record<AgentApiRouteKey, unknown[]> = {
+  raftbenchContext: [{ runId: raftbenchRunId }],
+  raftbenchSubmit: [raftbenchReport],
   feedbackLocatorIngest: [{
     artifact_kind: "raft-feedback-locator-v0",
     event_kind: "feedback-locator:created",
@@ -822,6 +831,8 @@ test("raw client exposes every contract client binding and sends generated route
   assert.deepEqual(
     requests.map(({ routeKey, method, path, body }) => ({ routeKey, method, path, body })),
     [
+      { routeKey: "raftbenchContext", method: "GET", path: `/internal/agent-api/raftbench/context?runId=${raftbenchRunId}`, body: undefined },
+      { routeKey: "raftbenchSubmit", method: "POST", path: "/internal/agent-api/raftbench/submit", body: raftbenchReport },
       {
         routeKey: "feedbackLocatorIngest",
         method: "POST",

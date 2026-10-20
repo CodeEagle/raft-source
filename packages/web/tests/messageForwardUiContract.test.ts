@@ -72,8 +72,9 @@ test("multi-target composer is split into bounded modules and preserves batch se
   assert.match(mobile, /data-testid="forward-mobile-note-layout"/);
   assert.match(mobile, /data-testid="forward-mobile-note-scroll"/);
   assert.match(mobile, /data-testid="forward-mobile-preview-actions"/);
-  // Footer separator rides the semantic hairline (Brutal re-adds its 2px rule).
-  assert.match(mobile, /className="shrink-0 border-t border-line-hairline/);
+  // Both note docks are the shared composer dock (seam above, 12px around).
+  assert.match(mobile, /className=\{`\$\{COMPOSER_DOCK_CLASS\} bg-layer-canvas/);
+  assert.match(desktop, /className=\{COMPOSER_DOCK_CLASS\} data-testid="forward-desktop-note-actions"/);
   assert.match(mobile, /onOpenAttachment=\{onOpenAttachment\}/);
   assert.match(desktop, /<MessageInput/);
   assert.match(mobile, /<MessageInput/);

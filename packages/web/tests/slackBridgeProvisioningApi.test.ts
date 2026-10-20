@@ -41,6 +41,7 @@ function response(stage: SlackBridgeSetupStage): SlackBridgeProvisioningResponse
         bindings: [],
         audiences: [],
         lastVerifiedAt: null,
+        agentMentionSync: null,
         failingSurface: stage === "connect" ? "install" : null,
       },
     },
@@ -245,20 +246,22 @@ test("managed replacement crosses strict DELETE before PUT, preflight, and enabl
   assert.deepEqual(view.snapshot.channelPairs, enabled.snapshot.channelPairs);
 });
 
-test("production adapter fails closed on an incomplete OAuth authority response", async () => {
+test("production adapter shows a read-only OAuth stage without authority and never starts OAuth", async () => {
   let oauthStarts = 0;
-  const invalid = { ...response("oauth"), oauthAuthority: null };
+  const readOnly = { ...response("oauth"), oauthAuthority: null };
   const client: SlackBridgeProvisioningHttpClient = {
-    async get() { return { data: invalid }; },
+    async get() { return { data: readOnly }; },
     async post() {
       oauthStarts += 1;
-      return { data: invalid };
+      return { data: readOnly };
     },
-    async put() { return { data: invalid }; },
+    async put() { return { data: readOnly }; },
   };
   const provider = createSlackBridgeProvisioningProvider(client);
 
-  await assert.rejects(provider.load(), /OAuth stage requires current server-grant authority/);
+  assert.equal((await provider.load()).snapshot.stage, "oauth");
+  assert.equal((await provider.beginOAuth()).kind, "view");
+  assert.equal((await provider.beginReauthorization!()).kind, "view");
   assert.equal(oauthStarts, 0);
 });
 
@@ -295,6 +298,7 @@ test("production adapter rejects malformed health and never upgrades it to conne
       bindings: [{ id: "binding", state: "mystery" }],
       audiences: [],
       lastVerifiedAt: "2032-01-02T03:04:05.000Z",
+      agentMentionSync: null,
       failingSurface: null,
     },
   };
@@ -360,6 +364,7 @@ test("production adapter rejects duplicate or orphan health authority", async ()
       }],
       audiences: [{ bindingId: "binding-orphan", status: "matched" }],
       lastVerifiedAt: null,
+      agentMentionSync: null,
       failingSurface: "audience",
     },
   };

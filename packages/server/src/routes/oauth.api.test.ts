@@ -768,6 +768,7 @@ test("App client credentials discover only their active installation on an exact
   assert.deepEqual(await discovered.json(), {
     installation_id: installation.id,
     server_id: targetServer.id,
+    setup: { status: "not_required", url: null, description: null, revision: 1, completedAt: null },
   });
 
   const scopedAlias = await fetch(`${app.baseUrl}/oidc/${targetServer.id}/api/oauth/installations/lookup`, {
@@ -1669,6 +1670,8 @@ test("public Marketplace OAuth lookup identifies an uninstalled app without disc
     allowedScopes: null,
     marketplace: true,
     availability: "install_required",
+    setupUrl: null,
+    setupDescription: null,
     installation: { serverId: contextServer.id, canInstall: true },
   });
 

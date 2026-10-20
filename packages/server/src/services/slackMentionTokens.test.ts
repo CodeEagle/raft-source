@@ -4,13 +4,17 @@ import { test } from "vitest";
 import {
   extractSlackUsergroupMentions,
   parseSlackAgentUsergroupMarker,
+  parseSlackHumanUsergroupMarker,
   renderSlackUsergroupMentions,
   slackAgentHandleCandidates,
   slackAgentUsergroupMarker,
+  slackHumanHandleCandidates,
+  slackHumanUsergroupMarker,
 } from "./slackMentionTokens";
 
 const SERVER_ID = "11111111-1111-4111-8111-111111111111";
 const AGENT_ID = "22222222-2222-4222-8222-222222222222";
+const USER_ID = "33333333-3333-4333-8333-333333333333";
 
 test("Slack Agent handle candidates are deterministic and collision-ready", () => {
   assert.deepEqual(slackAgentHandleCandidates({
@@ -57,6 +61,25 @@ test("managed Slack usergroup markers round-trip only exact Raft coordinates", (
   assert.deepEqual(parseSlackAgentUsergroupMarker(marker), { serverId: SERVER_ID, agentId: AGENT_ID });
   assert.equal(parseSlackAgentUsergroupMarker(`${marker}:extra`), null);
   assert.equal(parseSlackAgentUsergroupMarker("ordinary-team"), null);
+});
+
+test("human usergroup markers are distinct from Agent markers in both directions", () => {
+  const marker = slackHumanUsergroupMarker(SERVER_ID, USER_ID);
+  assert.equal(marker, `raft-user:${SERVER_ID}:${USER_ID}`);
+  assert.deepEqual(parseSlackHumanUsergroupMarker(marker), { serverId: SERVER_ID, userId: USER_ID });
+  assert.equal(parseSlackHumanUsergroupMarker(`${marker}:extra`), null);
+  assert.equal(parseSlackHumanUsergroupMarker("ordinary-team"), null);
+  assert.equal(parseSlackAgentUsergroupMarker(marker), null);
+  assert.equal(parseSlackHumanUsergroupMarker(slackAgentUsergroupMarker(SERVER_ID, AGENT_ID)), null);
+  assert.throws(() => slackHumanUsergroupMarker(SERVER_ID, "not-a-uuid"));
+});
+
+test("Slack human handle candidates follow the Agent handle rules", () => {
+  assert.deepEqual(slackHumanHandleCandidates({
+    name: "Richard",
+    serverSlug: "Example Org",
+    userId: USER_ID,
+  }), ["richard", "richard-example-org", "richard-33333333"]);
 });
 
 test("Slack usergroups render by exact provider id while plain @ text stays inert", () => {

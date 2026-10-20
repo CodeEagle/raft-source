@@ -412,10 +412,19 @@ test("real corpus: catalog MessageId filter drops exact 6 keys/6 hits (billing+s
   // 136 -> 110 keys / 164 -> 132 hits: removing the Workspace grid layout
   // deleted its panel-title protocol literals (#channel / @name / task #N) in
   // MainLayout, Sidebar, member rows, MessageSearchPage and src/components/workspace.
-  assert.equal(current.length, 110, `final disposition baseline keys; got ${current.length}`);
+  // 132 -> 130 hits: the Sidebar channel row's two `"99+"` caps moved out of
+  // JSX into one helper shared by the badge's message and thread segments.
+  // 110 -> 108 keys / 130 -> 127 hits: ActionCard's `@` / `#` prefixes left
+  // JSX for template strings in useActionCardDetail (task #752).
+  // 108 -> 98 keys / 127 -> 117 hits: the Raft Design System rewrite redrew
+  // PaletteAuditPage on DS tokens, retiring ten legacy-palette research
+  // literals (`brutal-pink`, `bg-palette-lavender/40`, `#E08585`, …).
+  // 117 -> 116 hits: the Sidebar DM and pinned-agent rows draw through one
+  // SidebarPeerRowBody, so their two `"99+"` caps are one.
+  assert.equal(current.length, 98, `final disposition baseline keys; got ${current.length}`);
   assert.equal(
     current.reduce((n, e) => n + e.count, 0),
-    132,
+    116,
 
     "final disposition baseline hits",
   );
@@ -435,7 +444,7 @@ test("real corpus: catalog MessageId filter drops exact 6 keys/6 hits (billing+s
     }),
   );
 
-  assert.equal(baseline.length, 110);
+  assert.equal(baseline.length, 98); // 108 -> 98: see the PaletteAuditPage note above
 
   assert.equal(
     baseline.filter((e) => e.path === "src/components/agent/AgentScopesPanel.tsx").length,
@@ -470,7 +479,7 @@ test("boundary: @/#/99+/technical/object English stay; safe glue leaves baseline
     "safe translated template glue must be filtered",
   );
   assert.ok(
-    bySource((s) => s === "@theme" || s === "#E08585" || s.includes("bg-brutal-lavender"))
+    bySource((s) => s === "@theme" || s === "file:line" || s === "packages/web/src/index.css")
       .length >= 3,
     "technical-token research bucket must remain",
   );

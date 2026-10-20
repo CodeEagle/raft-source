@@ -1,10 +1,96 @@
-import { Button, Card, CardContent, CardHeader, CardTitle } from "raft-ui";
+import type { CSSProperties } from "react";
 import { useIntl } from "react-intl";
 import RootFallbackScroller from "./RootFallbackScroller";
 
 function reloadApp() {
   window.location.reload();
 }
+
+/**
+ * Crash-screen styling. These screens render when the app has already thrown —
+ * possibly because styling itself failed — so they must not depend on the
+ * design system to draw an error about the design system. Every value reads
+ * the Raft Design System token first (so light/dark follow the app when the
+ * tokens are there) and falls back to the DS light literal when they are not.
+ * Inline literals are intentional here (scripts/check-color-tokens.mjs
+ * INLINE_STYLE_EXEMPT).
+ */
+export const FALLBACK_STYLE = {
+  page: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    background: "var(--layer-canvas, #ffffff)",
+    color: "var(--foreground, #141111)",
+    fontFamily: 'var(--font-sans, "Space Grotesk", system-ui, sans-serif)',
+  },
+  // Raft Design System › Dialog: the popover layer, 16px radius, 20px padding,
+  // a seam edge plus the float shadow.
+  card: {
+    width: "100%",
+    padding: 20,
+    borderRadius: 16,
+    background: "var(--layer-popover, #ffffff)",
+    color: "var(--foreground, #141111)",
+    boxShadow: "0 0 0 1px var(--line-seam, #14111173), var(--elevation-float, 0 1px 0 #1411110a, 0 12px 32px -12px #14111152)",
+  },
+  title: { margin: 0, fontSize: 17, lineHeight: "22px", fontWeight: 700 },
+  body: { margin: "6px 0 0", fontSize: 15, lineHeight: "20px", color: "var(--foreground-muted, #141111ad)" },
+  // Raft Design System › Code: the code surface with a hairline, Space Mono 13/20.
+  code: {
+    marginTop: 16,
+    padding: "8px 12px",
+    borderRadius: 10,
+    border: "1px solid var(--line-hairline, #14111126)",
+    background: "var(--layer-code, #ffffff)",
+    color: "var(--foreground, #141111)",
+    fontFamily: 'var(--font-mono, "Space Mono", ui-monospace, monospace)',
+    fontSize: 13,
+    lineHeight: "20px",
+  },
+  summary: { fontFamily: 'var(--font-sans, "Space Grotesk", system-ui, sans-serif)', fontSize: 13, lineHeight: "18px", fontWeight: 600, cursor: "pointer" },
+  pre: { margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere", font: "inherit" },
+  detailPre: { margin: "8px 0 0", maxHeight: 192, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", font: "inherit", color: "var(--foreground-muted, #141111ad)" },
+  actions: { display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 8, marginTop: 20 },
+  // Raft Design System › Button: 44 tall, 8px radius, 15/20 700, never a shadow.
+  // The one pink primary per screen…
+  primaryButton: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: 44,
+    padding: "0 16px",
+    borderRadius: 8,
+    border: "1.5px solid var(--sticker-ink, #141111)",
+    background: "var(--attention-400, #ff99c3)",
+    color: "var(--sticker-ink, #141111)",
+    font: "inherit",
+    fontSize: 15,
+    lineHeight: "20px",
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+    cursor: "pointer",
+  },
+  // …and the quiet ghost button for the way out.
+  ghostButton: {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    height: 44,
+    padding: "0 16px",
+    borderRadius: 8,
+    border: "1.5px solid transparent",
+    background: "transparent",
+    color: "var(--foreground, #141111)",
+    font: "inherit",
+    fontSize: 15,
+    lineHeight: "20px",
+    fontWeight: 700,
+    whiteSpace: "nowrap",
+    cursor: "pointer",
+  },
+} satisfies Record<string, CSSProperties>;
 
 export default function RootErrorFallback({
   error,
@@ -16,61 +102,48 @@ export default function RootErrorFallback({
   const { formatMessage } = useIntl();
 
   return (
-    <RootFallbackScroller className="flex min-h-full items-center justify-center bg-layer-canvas p-6 font-display safe-top safe-bottom theme-brutal:bg-brutal-cream">
-      <Card
-        className="w-full max-w-2xl border border-line-muted bg-layer-panel shadow-raft-lg theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white theme-brutal:shadow-brutal"
+    <RootFallbackScroller className="safe-top safe-bottom" style={FALLBACK_STYLE.page}>
+      <div
         role="alert"
         aria-live="assertive"
+        style={{ ...FALLBACK_STYLE.card, maxWidth: 672 }}
       >
-        <CardHeader className="border-b border-line-muted px-6 py-4 theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal">
-          <CardTitle
-            render={
-              <h1 className="text-xl font-bold text-foreground-strong theme-brutal:text-black">
-                {formatMessage({ id: "errorBoundary.title" })}
-              </h1>
-            }
-          />
-        </CardHeader>
+        <h1 style={FALLBACK_STYLE.title}>
+          {formatMessage({ id: "errorBoundary.title" })}
+        </h1>
 
-        <CardContent className="p-6">
-          <div className="mb-4 rounded-md border border-line-muted bg-layer-inset p-3 font-mono text-sm leading-relaxed text-foreground-strong theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">
-            <pre className="whitespace-pre-wrap break-words">{error.message}</pre>
-          </div>
+        <div style={FALLBACK_STYLE.code}>
+          <pre style={FALLBACK_STYLE.pre}>{error.message}</pre>
+        </div>
 
-          {error.stack ? (
-            <details className="mb-4 rounded-md border border-line-muted bg-layer-inset p-3 text-xs text-foreground-muted theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">
-              <summary className="font-bold text-foreground-strong theme-brutal:text-black">
-                {formatMessage({ id: "errorBoundary.stack" })}
-              </summary>
-              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono">
-                {error.stack}
-              </pre>
-            </details>
-          ) : null}
+        {error.stack ? (
+          <details style={FALLBACK_STYLE.code}>
+            <summary style={FALLBACK_STYLE.summary}>
+              {formatMessage({ id: "errorBoundary.stack" })}
+            </summary>
+            <pre style={FALLBACK_STYLE.detailPre}>
+              {error.stack}
+            </pre>
+          </details>
+        ) : null}
 
-          {componentStack ? (
-            <details open className="mb-4 rounded-md border border-line-muted bg-layer-inset p-3 text-xs text-foreground-muted theme-brutal:border-2 theme-brutal:border-black theme-brutal:bg-white">
-              <summary className="font-bold text-foreground-strong theme-brutal:text-black">
-                {formatMessage({ id: "errorBoundary.componentStack" })}
-              </summary>
-              <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono">
-                {componentStack}
-              </pre>
-            </details>
-          ) : null}
+        {componentStack ? (
+          <details open style={FALLBACK_STYLE.code}>
+            <summary style={FALLBACK_STYLE.summary}>
+              {formatMessage({ id: "errorBoundary.componentStack" })}
+            </summary>
+            <pre style={FALLBACK_STYLE.detailPre}>
+              {componentStack}
+            </pre>
+          </details>
+        ) : null}
 
-          <div className="mt-6 flex justify-end">
-            <Button
-              variant="accent"
-              size="md"
-              onClick={reloadApp}
-              className="font-bold"
-            >
-              {formatMessage({ id: "errorBoundary.reloadApp" })}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
+        <div style={FALLBACK_STYLE.actions}>
+          <button type="button" onClick={reloadApp} style={FALLBACK_STYLE.primaryButton}>
+            {formatMessage({ id: "errorBoundary.reloadApp" })}
+          </button>
+        </div>
+      </div>
     </RootFallbackScroller>
   );
 }

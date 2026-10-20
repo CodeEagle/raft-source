@@ -45,9 +45,9 @@ import {
   type ApnsDeliveryInput,
   type ApnsPushProvider,
 } from "./pushService";
-import { MOBILE_PUSH_DELIVERY_FEATURE_FLAG_KEY } from "./featureFlagService";
 import { runWithTraceSpan } from "../tracing/semanticTrace";
 
+const RETIRED_MOBILE_PUSH_DELIVERY_FLAG_KEY = "mobile_push_delivery_v0";
 
 process.env.JWT_SECRET ||= "push-service-test-secret";
 
@@ -577,10 +577,9 @@ test("mobile APNs honors each server member all, mentions, and none push mode", 
   }
 });
 
-test("mobile push feature gate kill switch suppresses APNs, terminally skips, and never replays", async ({ db }) => {
+test("the retired mobile push delivery gate no longer suppresses APNs", async ({ db }) => {
 
   const deliveries: ApnsDeliveryInput[] = [];
-  const scheduled: Promise<void>[] = [];
   __setApnsPushProviderForTests({
     async send(input) {
       deliveries.push(input);
@@ -588,7 +587,7 @@ test("mobile push feature gate kill switch suppresses APNs, terminally skips, an
     },
   });
   __setMobilePushDeliveryRuntimeForTests({
-    schedule: (work) => scheduled.push(work()),
+    schedule: () => {},
     sleep: async () => {},
     jitterMs: () => 1,
   });
@@ -604,40 +603,38 @@ test("mobile push feature gate kill switch suppresses APNs, terminally skips, an
       topic: "ai.slock.app",
       env: "production",
     });
-    const [seededFlag] = await getDb().select().from(featureFlags).where(
-      eq(featureFlags.key, MOBILE_PUSH_DELIVERY_FEATURE_FLAG_KEY),
-    );
-    assert.equal(seededFlag?.enabled, true);
-    assert.equal(seededFlag?.defaultEnabled, true);
-    assert.equal(seededFlag?.killSwitch, false);
-    await getDb().update(featureFlags).set({ killSwitch: true }).where(
-      eq(featureFlags.key, MOBILE_PUSH_DELIVERY_FEATURE_FLAG_KEY),
-    );
+    const retiredRows = await getDb().update(featureFlags).set({ killSwitch: true }).where(
+      eq(featureFlags.key, RETIRED_MOBILE_PUSH_DELIVERY_FLAG_KEY),
+    ).returning();
+    assert.equal(retiredRows.length, 1, "the legacy kill switch must exist for this regression");
+    const sink = new MemoryTraceSink();
+    const tracer = new BasicTracer({ sink });
+    const span = tracer.startSpan("server.push.retired_gate", { surface: "server", kind: "internal" });
 
-    await recordInboxNotificationFacts([{
-      receiverType: "user",
-      receiverId: owner.id,
-      serverId: server.id,
-      kind: "channel",
-      sourceChannelId: channel.id,
-      messageId: message.id,
-      messageSeq: message.seq,
-      activityAt: message.createdAt,
-    }]);
-    await Promise.all(scheduled.splice(0));
+    await runWithTraceSpan(span, async () => {
+      await recordInboxNotificationFacts([{
+        receiverType: "user",
+        receiverId: owner.id,
+        serverId: server.id,
+        kind: "channel",
+        sourceChannelId: channel.id,
+        messageId: message.id,
+        messageSeq: message.seq,
+        activityAt: message.createdAt,
+      }]);
+      await drainMobilePushOutbox();
+    }, tracer);
+    span.end();
+    const events = sink.getAllSpans().flatMap((recorded) => recorded.events);
+    assert.ok(events.some((event) => event.name === "push.mobile.delivery.attempt"),
+      "the trace sink must capture actual mobile delivery");
+    assert.equal(events.some((event) => event.attrs?.gate_key === RETIRED_MOBILE_PUSH_DELIVERY_FLAG_KEY), false,
+      "no retired-gate evaluation or suppression should be traced");
 
-    assert.equal(deliveries.length, 0, "disabled server switch must not call the APNs provider");
+    assert.equal(deliveries.length, 1, "the legacy row must not gate APNs delivery");
     const [outbox] = await getDb().select().from(mobilePushOutbox).where(eq(mobilePushOutbox.messageId, message.id));
-    assert.equal(outbox?.status, "skipped");
-    assert.equal(outbox?.attemptedCount, 0);
-
-    await getDb().update(featureFlags).set({ killSwitch: false }).where(
-      eq(featureFlags.key, MOBILE_PUSH_DELIVERY_FEATURE_FLAG_KEY),
-    );
-    await drainMobilePushOutbox();
-    assert.equal(deliveries.length, 0, "re-enabling the gate must not replay terminally skipped rows");
-    const [stillSkipped] = await getDb().select().from(mobilePushOutbox).where(eq(mobilePushOutbox.messageId, message.id));
-    assert.equal(stillSkipped?.status, "skipped");
+    assert.equal(outbox?.status, "sent");
+    assert.equal(outbox?.attemptedCount, 1);
   } finally {
     __resetApnsPushProviderForTests();
     __resetMobilePushDeliveryRuntimeForTests();

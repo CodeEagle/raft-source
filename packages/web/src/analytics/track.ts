@@ -52,11 +52,18 @@ export function setProductEventServerIdGetter(getter: () => string | undefined):
   serverIdGetter = getter;
 }
 
+/**
+ * `options.serverId` pins the event to the server a flow started in, for flows
+ * that finish later (the user may have switched servers by then). Without it
+ * the event goes to the current server.
+ */
 export function trackEvent<E extends ProductEventName>(
   event: E,
-  props?: ProductEventProperties<E>,
+  ...[props, options = {}]: {} extends ProductEventProperties<E>
+    ? [props?: ProductEventProperties<E>, options?: { serverId?: string }]
+    : [props: ProductEventProperties<E>, options?: { serverId?: string }]
 ): void {
-  const serverId = serverIdGetter();
+  const serverId = options.serverId ?? serverIdGetter();
   if (!serverId || allowedByServer.get(serverId) === false) return;
   if (queue.length >= MAX_QUEUED_EVENTS) return;
   const properties: Record<string, string | number | boolean> = {};

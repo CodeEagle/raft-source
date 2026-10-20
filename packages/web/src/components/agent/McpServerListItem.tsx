@@ -1,9 +1,10 @@
 import Banner from "../ui/Banner";
-import { Button } from "raft-ui";
-import { ChevronDown, ChevronUp, FlaskConical, Info, Link2, Pencil, Trash2, Unplug } from "lucide-react";
+import { Badge, Button, DescriptionDetails, DescriptionItem, DescriptionList, DescriptionTerm, IconTile, ListRow } from "@botiverse/raft-ui";
+import type { Presence } from "@botiverse/raft-ui";
+import { Blocks, ChevronDown, ChevronUp, FlaskConical, Info, Link2, Pencil, Trash2, Unplug } from "lucide-react";
 import type { IntlShape } from "react-intl";
 import type { ManagedMcpServerView } from "@botiverse/raft-shared";
-import SurfaceListItem from "../ui/SurfaceListItem";
+import StatusDot from "../ui/StatusDot";
 import Tooltip from "../ui/Tooltip";
 import api from "../../api/client";
 import { normalizeManagedMcpToolDescription } from "./managedMcpToolDescription";
@@ -15,6 +16,14 @@ const TOOL_TOOLTIP_CONTENT_PROPS = {
   align: "end",
   className: "max-h-64 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto px-3 py-2 font-normal",
 } as const;
+
+/** OAuth state as a DS status chip: a fixed presence light plus its word. */
+const OAUTH_STATUS_CHIP: Record<ManagedMcpServerView["oauthStatus"], { variant: "success" | "warning" | "primary" | "muted"; presence: Presence }> = {
+  connected: { variant: "success", presence: "online" },
+  error: { variant: "warning", presence: "error" },
+  pending: { variant: "primary", presence: "busy" },
+  disconnected: { variant: "muted", presence: "offline" },
+};
 
 type McpServerListItemProps = {
   server: ManagedMcpServerView;
@@ -51,6 +60,7 @@ export function McpServerListItem({
 }: McpServerListItemProps) {
   const toolsOpen = expandedTools.has(server.id);
   const connectionReady = server.authMode !== "oauth" || server.oauthStatus === "connected";
+  const oauthChip = OAUTH_STATUS_CHIP[server.oauthStatus] ?? OAUTH_STATUS_CHIP.disconnected;
 
   const handleConnect = useCallback(() => {
     void connectOAuth(server);
@@ -80,161 +90,173 @@ export function McpServerListItem({
     });
   }, [setExpandedTools, toolsOpen, server.id]);
 
+  // Raft Design System › ListRow inside an inset list: raft-ui's display-only
+  // ListRow (its buttons are the targets) with a neutral IconTile and the
+  // server's facts. The ListRowGroup draws the hairline from the text column
+  // (16 + 35 + 12); the facts run onto several lines, so they hang from the top.
   return (
-    <SurfaceListItem interactive={false}>
-  <div className="flex items-start gap-3">
-    <div className="flex min-w-0 flex-1 items-start gap-3">
+    <ListRow interactive={false} className="items-start">
+      <IconTile>
+        <Blocks />
+      </IconTile>
       <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <h4 className="break-words text-sm font-bold text-foreground-strong theme-brutal:text-black">{server.name}</h4>
-          {!server.enabled && <span className="border border-line-muted bg-fill-muted px-1.5 py-0.5 text-[10px] font-bold uppercase theme-brutal:border-black theme-brutal:bg-gray-200">{formatMessage({ id: "agent.mcp.disabledBadge" })}</span>}
-          <span className="border border-line-muted bg-layer-panel px-1.5 py-0.5 text-[10px] font-bold uppercase theme-brutal:border-black theme-brutal:bg-white">{server.provider}</span>
-          {server.authMode === "oauth" ? (
-            <span className={`border border-line-muted px-1.5 py-0.5 text-[10px] font-bold uppercase theme-brutal:border-black ${server.oauthStatus === "connected" ? "bg-success-soft text-success-strong theme-brutal:bg-brutal-lime theme-brutal:text-black" : server.oauthStatus === "error" ? "bg-danger-soft text-danger-strong theme-brutal:bg-brutal-red/30 theme-brutal:text-black" : "bg-accent-soft text-accent-strong theme-brutal:bg-brutal-lavender/40 theme-brutal:text-black"}`}>
-              {formatMessage({ id: "agent.mcp.oauthStatus" }, { status: server.oauthStatus })}
-            </span>
-          ) : server.hasCredentials ? (
-            <span className="border border-line-muted bg-accent-soft px-1.5 py-0.5 text-[10px] font-bold uppercase text-accent-strong theme-brutal:border-black theme-brutal:bg-brutal-lavender/40 theme-brutal:text-black">{formatMessage({ id: "agent.mcp.credentialsStoredBadge" })}</span>
-          ) : null}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <h4 className="min-w-0 break-words text-subhead font-semibold text-foreground">{server.name}</h4>
+              {!server.enabled && (
+                <Badge appearance="soft" variant="muted">
+                  <StatusDot presence="offline" />
+                  {formatMessage({ id: "agent.mcp.disabledBadge" })}
+                </Badge>
+              )}
+              <Badge appearance="outline">{server.provider}</Badge>
+              {server.authMode === "oauth" ? (
+                <Badge appearance="soft" variant={oauthChip.variant}>
+                  <StatusDot presence={oauthChip.presence} />
+                  {formatMessage({ id: "agent.mcp.oauthStatus" }, { status: server.oauthStatus })}
+                </Badge>
+              ) : server.hasCredentials ? (
+                <Badge appearance="soft">{formatMessage({ id: "agent.mcp.credentialsStoredBadge" })}</Badge>
+              ) : null}
+            </div>
+            {server.description && <p className="mt-0.5 text-callout text-foreground-muted">{server.description}</p>}
+            <p className="mt-1 break-all font-mono text-mono-meta text-foreground-hint">{server.endpointUrl}</p>
+            {scope === "agent" && server.usage && (
+              <DescriptionList direction="horizontal" className="mt-2">
+                <DescriptionItem>
+                  <DescriptionTerm>{formatMessage({ id: "agent.mcpUsage.callsLabel" })}</DescriptionTerm>
+                  <DescriptionDetails>
+                    {formatMessage(
+                      { id: "agent.mcpUsage.callCount" },
+                      { count: server.usage.invocationCount },
+                    )}
+                  </DescriptionDetails>
+                </DescriptionItem>
+                <DescriptionItem>
+                  <DescriptionTerm>{formatMessage({ id: "agent.mcpUsage.lastUsedLabel" })}</DescriptionTerm>
+                  <DescriptionDetails>
+                    <span className="font-mono text-mono-meta">
+                      {formatDate(new Date(server.usage.lastInvokedAt), {
+                        year: "numeric",
+                        month: "short",
+                        day: "numeric",
+                      })}{" "}
+                      {formatTime(new Date(server.usage.lastInvokedAt), {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}
+                    </span>
+                  </DescriptionDetails>
+                </DescriptionItem>
+                <DescriptionItem>
+                  <DescriptionTerm>{formatMessage({ id: "agent.mcpUsage.lastToolLabel" })}</DescriptionTerm>
+                  <DescriptionDetails>
+                    <span className="min-w-0 break-all font-mono text-mono-meta">{server.usage.lastToolName}</span>
+                  </DescriptionDetails>
+                </DescriptionItem>
+              </DescriptionList>
+            )}
+            {server.lastCheckError && (
+              <Banner intent="warning" density="sm" className="mt-3">{server.lastCheckError}</Banner>
+            )}
+          </div>
+          {scope === "server" && canManageServer && (
+            <div className="flex shrink-0 items-center gap-0.5">
+              {server.authMode === "oauth" && server.oauthStatus !== "connected" && (
+                <Tooltip content={formatMessage({ id: "agent.mcp.connectName" }, { name: server.name })}>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label={formatMessage({ id: "agent.mcp.connectName" }, { name: server.name })}
+                    disabled={busyId === server.id}
+                    onClick={handleConnect}
+                  >
+                    <Link2 size={16} />
+                  </Button>
+                </Tooltip>
+              )}
+              {server.authMode === "oauth" && server.oauthStatus === "connected" && (
+                <Tooltip content={formatMessage({ id: "agent.mcp.disconnectName" }, { name: server.name })}>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label={formatMessage({ id: "agent.mcp.disconnectName" }, { name: server.name })}
+                    disabled={busyId === server.id}
+                    onClick={handleDisconnect}
+                  >
+                    <Unplug size={16} />
+                  </Button>
+                </Tooltip>
+              )}
+              <Tooltip content={formatMessage({ id: "agent.mcp.testRefreshTools" })}>
+                <Button
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={formatMessage({ id: "agent.mcp.testName" }, { name: server.name })}
+                  disabled={busyId === server.id || !connectionReady}
+                  onClick={handleTest}
+                >
+                  <FlaskConical size={16} />
+                </Button>
+              </Tooltip>
+              <Tooltip content={formatMessage({ id: "agent.mcp.editServer" })}>
+                <Button size="icon-sm" variant="ghost" aria-label={formatMessage({ id: "agent.mcp.editName" }, { name: server.name })} onClick={handleEdit}>
+                  <Pencil size={16} />
+                </Button>
+              </Tooltip>
+              <Tooltip content={formatMessage({ id: "agent.mcp.deleteServer" })}>
+                <Button size="icon-sm" variant="ghost" aria-label={formatMessage({ id: "agent.mcp.deleteName" }, { name: server.name })} onClick={handleDelete}>
+                  <Trash2 size={16} />
+                </Button>
+              </Tooltip>
+            </div>
+          )}
         </div>
-        {server.description && <p className="mt-1 text-sm text-foreground-muted theme-brutal:text-black/70">{server.description}</p>}
-        <p className="mt-1 break-all font-mono text-xs text-foreground-placeholder theme-brutal:text-black/50">{server.endpointUrl}</p>
-        {scope === "agent" && server.usage && (
-          <dl className="mt-3 grid gap-2 text-xs text-foreground-muted sm:grid-cols-3 theme-brutal:text-black/65">
-            <div>
-              <dt className="font-bold text-foreground-strong theme-brutal:text-black">
-                {formatMessage({ id: "agent.mcpUsage.callsLabel" })}
-              </dt>
-              <dd>
-                {formatMessage(
-                  { id: "agent.mcpUsage.callCount" },
-                  { count: server.usage.invocationCount },
-                )}
-              </dd>
-            </div>
-            <div>
-              <dt className="font-bold text-foreground-strong theme-brutal:text-black">
-                {formatMessage({ id: "agent.mcpUsage.lastUsedLabel" })}
-              </dt>
-              <dd>
-                {formatDate(new Date(server.usage.lastInvokedAt), {
-                  year: "numeric",
-                  month: "short",
-                  day: "numeric",
-                })}{" "}
-                {formatTime(new Date(server.usage.lastInvokedAt), {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })}
-              </dd>
-            </div>
-            <div>
-              <dt className="font-bold text-foreground-strong theme-brutal:text-black">
-                {formatMessage({ id: "agent.mcpUsage.lastToolLabel" })}
-              </dt>
-              <dd className="break-all font-mono">{server.usage.lastToolName}</dd>
-            </div>
-          </dl>
-        )}
-        {server.lastCheckError && (
-          <Banner intent="warning" density="sm" className="mt-3 font-bold">{server.lastCheckError}</Banner>
-        )}
-      </div>
-    </div>
-    {scope === "server" && canManageServer && (
-      <div className="flex shrink-0 items-center gap-1">
-        {server.authMode === "oauth" && server.oauthStatus !== "connected" && (
-          <Tooltip content={formatMessage({ id: "agent.mcp.connectName" }, { name: server.name })}>
-            <Button
-              size="icon-sm"
-              variant="success"
-              aria-label={formatMessage({ id: "agent.mcp.connectName" }, { name: server.name })}
-              disabled={busyId === server.id}
-              onClick={handleConnect}
-            >
-              <Link2 size={14} />
-            </Button>
-          </Tooltip>
-        )}
-        {server.authMode === "oauth" && server.oauthStatus === "connected" && (
-          <Tooltip content={formatMessage({ id: "agent.mcp.disconnectName" }, { name: server.name })}>
-            <Button
-              size="icon-sm"
-              aria-label={formatMessage({ id: "agent.mcp.disconnectName" }, { name: server.name })}
-              disabled={busyId === server.id}
-              onClick={handleDisconnect}
-            >
-              <Unplug size={14} />
-            </Button>
-          </Tooltip>
-        )}
-        <Tooltip content={formatMessage({ id: "agent.mcp.testRefreshTools" })}>
-          <Button
-            size="icon-sm"
-            aria-label={formatMessage({ id: "agent.mcp.testName" }, { name: server.name })}
-            disabled={busyId === server.id || !connectionReady}
-            onClick={handleTest}
-          >
-            <FlaskConical size={14} />
-          </Button>
-        </Tooltip>
-        <Tooltip content={formatMessage({ id: "agent.mcp.editServer" })}>
-          <Button size="icon-sm" aria-label={formatMessage({ id: "agent.mcp.editName" }, { name: server.name })} onClick={handleEdit}>
-            <Pencil size={14} />
-          </Button>
-        </Tooltip>
-        <Tooltip content={formatMessage({ id: "agent.mcp.deleteServer" })}>
-          <Button size="icon-sm" variant="danger" aria-label={formatMessage({ id: "agent.mcp.deleteName" }, { name: server.name })} onClick={handleDelete}>
-            <Trash2 size={14} />
-          </Button>
-        </Tooltip>
-      </div>
-    )}
-  </div>
 
-  <button
-    type="button"
-    className="mt-3 flex items-center gap-1 text-xs font-bold text-foreground-muted underline hover:text-foreground-strong theme-brutal:text-black/70 theme-brutal:hover:text-black"
-    aria-expanded={toolsOpen}
-    onClick={handleToolsToggle}
-  >
-    {toolsOpen ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-    {formatMessage({ id: "agent.mcp.toolCount" }, { count: server.toolCatalog.length })}
-  </button>
-  {toolsOpen && (
-    <div className="mt-2 max-h-80 overflow-y-auto border-y border-line-muted bg-fill-muted/40">
-      <div className="grid grid-cols-1 sm:grid-cols-2">
-        {server.toolCatalog.map((tool) => {
-          const label = tool.title || tool.name;
-          const description = tool.description ? normalizeManagedMcpToolDescription(tool.description) : null;
-          return (
-            <div key={tool.name} className="flex min-h-16 items-start gap-2 border-b border-line-muted px-2.5 py-2 sm:even:border-l sm:even:border-line-muted">
-              <span className="min-w-0 flex-1 break-words">
-                <span className="flex items-start gap-1">
-                  <strong className="min-w-0 flex-1 text-sm leading-5 text-foreground-strong theme-brutal:text-black">{label}</strong>
-                  {description && (
-                    <Tooltip
-                      content={<span className="block text-left">{description}</span>}
-                      contentProps={TOOL_TOOLTIP_CONTENT_PROPS}
-                    >
-                      <button type="button" className="mt-0.5 shrink-0 text-foreground-placeholder hover:text-foreground-strong theme-brutal:text-black/45 theme-brutal:hover:text-black" aria-label={formatMessage({ id: "agent.mcp.aboutTool" }, { name: label })}>
-                        <Info size={13} />
-                      </button>
-                    </Tooltip>
-                  )}
-                </span>
-                {description && <span className="mt-0.5 line-clamp-2 text-xs leading-4 text-foreground-muted theme-brutal:text-black/55">{description}</span>}
-              </span>
+        <button
+          type="button"
+          className="mt-2 flex items-center gap-1 rounded-[2px] text-footnote font-semibold text-foreground underline decoration-[1.5px] underline-offset-[3px] outline-none focus-visible:shadow-focus"
+          aria-expanded={toolsOpen}
+          onClick={handleToolsToggle}
+        >
+          {toolsOpen ? <ChevronUp size={14} aria-hidden="true" /> : <ChevronDown size={14} aria-hidden="true" />}
+          {formatMessage({ id: "agent.mcp.toolCount" }, { count: server.toolCatalog.length })}
+        </button>
+        {toolsOpen && (
+          <div className="mt-2 max-h-80 overflow-y-auto rounded-container bg-fill-muted">
+            <div className="grid grid-cols-1 sm:grid-cols-2">
+              {server.toolCatalog.map((tool) => {
+                const label = tool.title || tool.name;
+                const description = tool.description ? normalizeManagedMcpToolDescription(tool.description) : null;
+                return (
+                  <div key={tool.name} className="flex min-h-16 items-start gap-2 border-b border-line-hairline px-3 py-2 sm:even:border-l sm:even:border-line-hairline">
+                    <span className="min-w-0 flex-1 break-words">
+                      <span className="flex items-start gap-1">
+                        <strong className={`min-w-0 flex-1 text-foreground ${tool.title ? "text-callout font-semibold" : "font-mono text-mono-meta font-bold"}`}>{label}</strong>
+                        {description && (
+                          <Tooltip
+                            content={<span className="block text-left">{description}</span>}
+                            contentProps={TOOL_TOOLTIP_CONTENT_PROPS}
+                          >
+                            <button type="button" className="mt-0.5 shrink-0 rounded-[2px] text-foreground-muted outline-none hover:text-foreground focus-visible:shadow-focus" aria-label={formatMessage({ id: "agent.mcp.aboutTool" }, { name: label })}>
+                              <Info size={14} />
+                            </button>
+                          </Tooltip>
+                        )}
+                      </span>
+                      {description && <span className="mt-0.5 line-clamp-2 text-caption text-foreground-hint">{description}</span>}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
+            {server.toolCatalog.length === 0 && (
+              <p className="px-3 py-3 text-caption text-foreground-hint">{formatMessage({ id: "agent.mcp.testToDiscoverTools" })}</p>
+            )}
+          </div>
+        )}
       </div>
-      {server.toolCatalog.length === 0 && (
-        <p className="px-2.5 py-3 text-xs text-foreground-muted theme-brutal:text-black/50">{formatMessage({ id: "agent.mcp.testToDiscoverTools" })}</p>
-      )}
-    </div>
-  )}
-
-    </SurfaceListItem>
+    </ListRow>
   );
 }

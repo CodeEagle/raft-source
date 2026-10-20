@@ -29,7 +29,7 @@ export function PermalinkReferenceChip({
       variant="link"
       label={channelLabel}
       trailing={quotedMessageUnavailable ? undefined : (
-        <span className="text-[10px] font-normal leading-none text-foreground-placeholder theme-brutal:text-black/50">msg</span>
+        <span className="font-mono text-label font-normal leading-none text-foreground-hint">msg</span>
       )}
     />
   );

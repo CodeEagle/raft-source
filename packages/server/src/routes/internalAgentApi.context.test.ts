@@ -15,6 +15,7 @@ import { agents, users } from "../db/schema";
 import { createServer } from "../services/serverService";
 import { createAgent } from "../services/agentService";
 import { mintAgentCredential } from "../services/agentCredentialService";
+import { createFeatureFlag, createFeatureFlagRule, REMINDER_APP_FEATURE_FLAG_KEY, VAULT_APP_FEATURE_FLAG_KEY } from "../services/featureFlagService";
 
 const test = createApiTest({ humanActivityMuteFlagDefaultEnabled: true, onboardingOpenerFlagDefaultEnabled: false });
 
@@ -98,4 +99,17 @@ test("GET /context is gated by the read capability", async ({ app }) => {
   const body = await res.json() as { code?: string; requiredCapability?: string };
   assert.equal(body.code, "capability_not_authorized");
   assert.equal(body.requiredCapability, "read");
+});
+
+test("GET /context reports the server's app rollout flags, the values a Computer gets at agent start", async ({ app }) => {
+  const { server } = await seed();
+  const agent = await createAgent(server.id, "ctx-features", { runtime: "external", model: "external" });
+  const minted = await mintAgentCredential({ agentId: agent.id, scopes: ["read"], name: "ctx", createdByUserId: null });
+  const features = async () => (await (await getContext(app.baseUrl, minted.apiKey)).json() as AgentApiAgentContextResponse).features;
+
+  assert.deepEqual(await features(), { reminderApp: false, vaultApp: false }, "no flags: both off");
+  await createFeatureFlag({ key: REMINDER_APP_FEATURE_FLAG_KEY, randomizationUnit: "server", defaultEnabled: false });
+  await createFeatureFlagRule({ flagKey: REMINDER_APP_FEATURE_FLAG_KEY, stage: "server", decision: "allow", values: [server.id] });
+  await createFeatureFlag({ key: VAULT_APP_FEATURE_FLAG_KEY, randomizationUnit: "server", defaultEnabled: false });
+  assert.deepEqual(await features(), { reminderApp: true, vaultApp: false });
 });

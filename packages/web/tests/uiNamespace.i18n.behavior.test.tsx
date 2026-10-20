@@ -4,6 +4,7 @@ import "./helpers/domSetup";
 import type { ReactElement } from "react";
 import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
+import { Popover } from "@botiverse/raft-ui";
 
 import ServerSwitcherMenu from "../src/components/ui/ServerSwitcherMenu";
 import QuotedMessageCard from "../src/components/ui/cards/QuotedMessageCard";
@@ -100,7 +101,9 @@ function assertNoRawPlaceholders(scope: HTMLElement = document.body) {
 test("ServerSwitcherMenu renders the finalized Chinese actions + reorder placeholder under zh-cn", () => {
   seedServerStore();
   renderZh(
-    <ServerSwitcherMenu open onClose={() => {}} serverUnreadCounts={{}} />,
+    <Popover open>
+      <ServerSwitcherMenu onClose={() => {}} serverUnreadCounts={{}} />
+    </Popover>,
   );
 
   // Footer action.

@@ -8,29 +8,33 @@ function readSource(path: string): string {
   return readFileSync(resolve(repoRoot, path), "utf8");
 }
 
-// The settings row delegates its visual scale and palette to RUI. These
-// attributes are the public component contract; pixel equality is checked in
-// the browser because a source check cannot measure the theme recipe.
-test("agent runtime configuration badges use standard RUI props without local visual overrides", () => {
+// DS PropertyList + StatusChip: the Runtime value is the DS runtime chip
+// (`.rf-runtime`: the cyan-soft Badge in Space Mono 12 400). The model, reasoning
+// and mode values are plain facts — no colour, model ids in Space Mono — because
+// a colour block must mean identity, status, signal or consequence.
+test("agent runtime configuration rows render the DS runtime chip and plain-fact values", () => {
   const source = readSource("src/components/agent/AgentDetailPanel.tsx");
+  assert.match(source, /const RUNTIME_CHIP_CLASS = "font-mono text-mono-meta font-normal";/);
   const runtime = [...source.matchAll(/<RuntimeAccountUsageGateChip\b([^>]*?)>/g)];
   assert.equal(runtime.length, 1);
-  assert.match(runtime[0]![1], /appearance="solid"/);
+  assert.match(runtime[0]![1], /appearance="soft"/);
   assert.match(runtime[0]![1], /variant="information"/);
-  assert.doesNotMatch(runtime[0]![1], /\b(?:className|style)=/);
+  assert.match(runtime[0]![1], /className=\{RUNTIME_CHIP_CLASS\}/);
+  assert.doesNotMatch(runtime[0]![1], /\bstyle=/);
+  // The usage chip names itself from a plain string child.
+  assert.match(source, /className=\{RUNTIME_CHIP_CLASS\}\s*>[\s\S]*?\{formatRuntimeLabelWithStatus\(currentRuntimeConfig\.runtime, formatMessage\)\}\s*<\/RuntimeAccountUsageGateChip>/);
+  // The profile hero carries the same chip with its cpu icon.
+  assert.match(source, /<Badge appearance="soft" variant="information" className=\{RUNTIME_CHIP_CLASS\} data-testid="agent-profile-runtime-chip">\s*<Cpu size=\{14\} aria-hidden="true" \/>/);
 
-  for (const [field, variant] of [["model", "accent"], ["reasoning", "primary"], ["mode", "warning"]]) {
+  for (const field of ["model", "reasoning", "mode"]) {
     const label = `label={formatMessage({ id: "agent.runtimeConfig.${field}" })}`;
     const index = source.indexOf(label);
     assert.notEqual(index, -1, `${field} label missing`);
-    // The value is either a `value={…}` prop (KeyValueRow) or the first child of an
-    // InfoRow (label | value rows); either way it must be the standard Badge.
-    const badge = source.slice(index).match(/(?:value=\{\s*|<\/?InfoRow[^>]*>\s*|label=\{[^}]*\}\)\}>\s*)<Badge\b([^>]*?)>/);
-    assert.ok(badge, `${field} must use the standard Badge`);
-    assert.match(badge[1], /appearance="soft"/);
-    assert.ok(badge[1].includes(`variant="${variant}"`));
-    assert.doesNotMatch(badge[1], /\b(?:className|style)=/);
+    const value = source.slice(index, index + 600);
+    assert.doesNotMatch(value.split("</InfoRow>")[0]!, /<Badge\b/, `${field} is a plain fact, not a coloured chip`);
   }
+  const model = source.slice(source.indexOf('label={formatMessage({ id: "agent.runtimeConfig.model" })}'));
+  assert.match(model, /^[^]*?<span className="min-w-0 break-all font-mono">\{currentRuntimeModelLabel\}<\/span>/);
 });
 
 test("machine runtime chips use the shared badge recipe without forcing a legacy border or height", () => {
@@ -41,9 +45,12 @@ test("machine runtime chips use the shared badge recipe without forcing a legacy
     readSource("src/components/machine/BulkResetOptionCard.tsx"),
     readSource("src/components/machine/MachineAgentRow.tsx"),
   ].join("\n");
-  const branch = source.match(/const chipClassName = detected([\s\S]*?);/);
-  assert.ok(branch);
-  assert.match(branch[1], /bg-info-soft text-info-strong/);
-  assert.match(branch[1], /bg-fill-muted text-foreground-muted/);
-  assert.doesNotMatch(branch[1], /h-6|border-2/);
+  // Raft DS runtime tags: the badge recipe draws them from props alone —
+  // cyan-soft when detected, stone-soft when not — with no local class
+  // override of colour, border or height.
+  const chips = [...source.matchAll(/<RuntimeAccountUsageGateChip\b([^>]*?)>/g)];
+  assert.equal(chips.length, 1);
+  assert.match(chips[0]![1], /appearance="soft"/);
+  assert.match(chips[0]![1], /variant=\{detected \? "information" : "muted"\}/);
+  assert.doesNotMatch(chips[0]![1], /\b(?:className|style)=/);
 });

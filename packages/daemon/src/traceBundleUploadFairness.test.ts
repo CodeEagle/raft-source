@@ -64,6 +64,23 @@ const ROTATING = Array.from({ length: 6 }, (_, i) => `daemon-trace-2026-05-08T00
 const CLI = "daemon-trace-cli-transport-2026-05-08T00-00-00-000Z-1000.jsonl";
 const DIAG = "daemon-trace-diag-2026-05-08T00-00-00-000Z-1000.jsonl";
 
+// task #381 (skyzh CI audit, staging Test 38593933027): `stop()` only clears
+// timers; it does not wait for a pass already running. A pass keeps writing in
+// `trace-uploads/` (its uploader-state temp file and rename) after its last
+// receipt, so a test that tears down on "N receipts exist" can race that write
+// and fail `rm` with ENOTEMPTY. Teardown must wait for the pass to end, and
+// asserts that nothing is still in flight so the race fails deterministically.
+function trackPasses(uploader: { uploadOnce: (...args: never[]) => Promise<unknown> }) {
+  let finished = 0;
+  let inFlight = 0;
+  const real = uploader.uploadOnce.bind(uploader);
+  uploader.uploadOnce = (async (...args: never[]) => {
+    inFlight += 1;
+    try { return await real(...args); } finally { inFlight -= 1; finished += 1; }
+  }) as typeof uploader.uploadOnce;
+  return { finished: () => finished, inFlight: () => inFlight };
+}
+
 test("selectFilesForPass takes families in turn, oldest first within each", () => {
   const sorted = [...ROTATING, CLI, DIAG].sort().map((name) => `/t/${name}`);
   assert.deepEqual(
@@ -245,6 +262,7 @@ test("an interval tick while a pass is still uploading does not start a second p
       },
     });
 
+    const passes = trackPasses(uploader as never);
     uploader.start();
     fire(0); // initial pass starts and blocks on its first upload
     await waitFor(() => shasSent.length === 1, "the first upload to start");
@@ -253,9 +271,12 @@ test("an interval tick while a pass is still uploading does not start a second p
     await new Promise((r) => setTimeout(r, 50));
     assert.equal(shasSent.length, 1, "no second pass started while the first is uploading");
     release();
-    await waitFor(async () => (await receipts(machineDir)).length === 4, "the first pass to finish");
+    await waitFor(async () => (await receipts(machineDir)).length === 4, "the first pass to upload its 4 files");
+    // The 4th receipt is not the end of the pass: it still writes its state.
+    await waitFor(() => passes.finished() >= 1, "the first pass to finish");
     assert.equal(new Set(shasSent).size, shasSent.length, `no file uploaded twice: ${shasSent.length} attestations`);
     uploader.stop();
+    assert.equal(passes.inFlight(), 0, "no pass may still be writing in trace-uploads/ at teardown");
   } finally {
     await rm(machineDir, { recursive: true, force: true });
   }
@@ -282,13 +303,15 @@ test("a pass that uploaded nothing does not schedule a catch-up (#9105 review)",
         return jsonResponse({ error: "upload server unavailable" }, 503);
       },
     });
+    const passes = trackPasses(uploader as never);
     uploader.start();
     fire(0);
     await waitFor(() => attempts >= 4, "the pass to try its 4 files");
-    await new Promise((r) => setTimeout(r, 50));
+    await waitFor(() => passes.finished() >= 1, "the failing pass to finish");
     assert.equal((await receipts(machineDir)).length, 0);
     assert.equal(pending.some((entry) => entry.ms === 15_000), false, "a failing pass must not speed up retries");
     uploader.stop();
+    assert.equal(passes.inFlight(), 0, "no pass may still be writing in trace-uploads/ at teardown");
   } finally {
     await rm(machineDir, { recursive: true, force: true });
   }

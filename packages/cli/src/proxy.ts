@@ -2,7 +2,18 @@
 // Ported from packages/daemon/src/proxy.ts — only the fetch dispatcher
 // parts; WebSocket proxy is not needed in the CLI.
 
-import { fetch as undiciFetch, ProxyAgent, type Dispatcher } from "undici";
+import type { Dispatcher } from "undici";
+
+// undici is loaded on first use, not at startup: a managed agent's `raft` call
+// talks to the loopback agent proxy through Node's built-in fetch and never
+// needs it, and loading it costs every call ~11 MiB and ~0.15 s of CPU.
+let undiciModule: Promise<typeof import("undici")> | undefined;
+function loadUndici(): Promise<typeof import("undici")> {
+  return (undiciModule ??= import("undici"));
+}
+
+/** undici's `fetch`, loading undici on the first call. */
+export const undiciFetch: typeof import("undici").fetch = async (...args) => (await loadUndici()).fetch(...args);
 
 const fetchDispatcherCache = new Map<string, Dispatcher>();
 
@@ -235,10 +246,10 @@ export function shouldBypassProxy(targetUrl: string, env: NodeJS.ProcessEnv): bo
     });
 }
 
-export function buildFetchDispatcher(
+export async function buildFetchDispatcher(
   targetUrl: string,
   env: NodeJS.ProcessEnv = process.env,
-): Dispatcher | undefined {
+): Promise<Dispatcher | undefined> {
   const proxyUrl = getProxyUrlForTarget(targetUrl, env);
   if (!proxyUrl) return undefined;
   if (shouldBypassProxy(targetUrl, env)) return undefined;
@@ -246,7 +257,13 @@ export function buildFetchDispatcher(
   const cached = fetchDispatcherCache.get(proxyUrl);
   if (cached) return cached;
 
-  const dispatcher = new ProxyAgent(proxyUrl);
+  const { ProxyAgent } = await loadUndici();
+  const dispatcher = new ProxyAgent({
+    uri: proxyUrl,
+    // undici 8 forwards plain-http requests to the proxy without CONNECT
+    // unless asked; keep 7.x's tunnel-everything behavior (as the daemon does).
+    proxyTunnel: true,
+  });
   fetchDispatcherCache.set(proxyUrl, dispatcher);
   return dispatcher;
 }
@@ -260,7 +277,7 @@ export async function fetchWithCanonicalProxy(
   const proxyConfigured = Boolean(getProxyUrlForTarget(targetUrl, env)) && !shouldBypassProxy(targetUrl, env);
   let dispatcher: Dispatcher | undefined;
   try {
-    dispatcher = buildFetchDispatcher(targetUrl, env);
+    dispatcher = await buildFetchDispatcher(targetUrl, env);
   } catch (cause) {
     throw new CanonicalFetchTransportError({ url: targetUrl, cause, proxyUsed: proxyConfigured });
   }

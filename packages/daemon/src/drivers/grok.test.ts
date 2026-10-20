@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { ChildProcess, execFileSync } from "node:child_process";
@@ -18,6 +18,12 @@ import {
 } from "./grok";
 import type { ParsedEvent, SpawnContext } from "./types";
 import { createChildProcessEventProbe, type EventProbe } from "../testing/drydock";
+import type { runProbeChild } from "./probeChild";
+
+/** task #1277: plays a sync execFileSync stand-in through the async probe-child seam (same error objects, same verdicts). */
+function viaProbeChild(execFileSyncFn: typeof execFileSync): typeof runProbeChild {
+  return async (command, args) => ({ stdout: String(execFileSyncFn(command, [...args]) ?? ""), stderr: "" });
+}
 
 const grokConfig: AgentConfig = {
   name: "grok-agent",
@@ -865,7 +871,7 @@ test("Grok auth capabilities without a catalog are not proof of missing authenti
     const whichNotFound = (() => { throw Object.assign(new Error("which exited 1"), { status: 1 }); }) as unknown as typeof execFileSync;
     assert.deepEqual(await detectGrokModelsFromAcp({
       env: { PATH: path.join(root, "missing-bin") }, cwd: root,
-      deps: { platform: "linux", execFileSyncFn: whichNotFound, homeDir: path.join(root, "no-home") },
+      deps: { platform: "linux", runProbeChildFn: viaProbeChild(whichNotFound), homeDir: path.join(root, "no-home") },
     }), { kind: "error", retryable: true, code: "runtime_not_found", reason: "not_installed" });
     assert.deepEqual(await detectGrokModelsFromAcp({
       env: { PATH: path.join(root, "missing-bin") }, cwd: root, deps: { platform: "linux", homeDir: path.join(root, "no-home") },
@@ -995,7 +1001,7 @@ test("task #1242: a runtime_not_found detection carries the verdict of the looku
       }) as unknown as typeof execFileSync;
       const outcome = await detectGrokModelsFromAcp({
         env: { PATH: path.join(root, "missing-bin") }, cwd: root,
-        deps: { platform: "linux", execFileSyncFn, homeDir: path.join(root, "no-home") },
+        deps: { platform: "linux", runProbeChildFn: viaProbeChild(execFileSyncFn), homeDir: path.join(root, "no-home") },
       });
       assert.deepEqual(outcome, { kind: "error", retryable: true, code: "runtime_not_found", reason }, reason);
       assert.equal(lookups, 1, `${reason}: exactly one lookup decided this detection`);
@@ -1030,6 +1036,249 @@ test("task #1242: a Grok launch whose PATH lookup timed out reaches the start ca
     assert.deepEqual(activity.spawnFailure, { reason: "runtime_not_found", lookupReason: "lookup_timed_out" });
     assert.equal(activity.detail, thrown.message);
     assert.doesNotMatch(activity.detail, /Install/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #1277: grok form detection no longer blocks the daemon's event loop on the PATH lookup", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-nonblocking-"));
+  try {
+    const { binDir } = installScriptedGrok(root);
+    // A `which` that answers slowly stands in for a cold PATH scan; the
+    // synchronous lookup held the whole daemon for its duration.
+    const slowWhich = path.join(binDir, "which");
+    writeFileSync(slowWhich, `#!/bin/sh\nsleep 0.4\necho ${path.join(binDir, "grok")}\n`);
+    chmodSync(slowWhich, 0o755);
+    let ticks = 0;
+    const ticker = setInterval(() => { ticks += 1; }, 20);
+    try {
+      const outcome = await detectGrokModelsFromAcp({
+        env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` },
+        cwd: root,
+        deps: { platform: "linux", homeDir: path.join(root, "no-home") },
+      });
+      assert.equal(outcome.kind, "live", JSON.stringify(outcome));
+      assert.ok(ticks >= 5, `the event loop ran ${ticks} ticks during the 400 ms lookup; a blocking lookup would run none`);
+    } finally {
+      clearInterval(ticker);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #1277 (review): a cancelled grok form detection does not fall back to a home binary and never starts the ACP child", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-abort-"));
+  try {
+    const { binDir, logPath } = installScriptedGrok(root);
+    // The scripted grok lives in the user-local fallback directory, so an
+    // aborted lookup that still consulted the fallback would find it.
+    const home = path.join(root, "home");
+    mkdirSync(path.join(home, ".local", "bin"), { recursive: true });
+    writeFileSync(path.join(home, ".local", "bin", "grok"), readFileSync(path.join(binDir, "grok")));
+    chmodSync(path.join(home, ".local", "bin", "grok"), 0o755);
+    const controller = new AbortController();
+    await assert.rejects(
+      detectGrokModelsFromAcp({
+        env: { ...process.env, PATH: path.join(root, "missing-bin") },
+        cwd: root,
+        deps: {
+          platform: "linux",
+          homeDir: home,
+          signal: controller.signal,
+          runProbeChildFn: async () => {
+            controller.abort();
+            throw Object.assign(new Error("which aborted"), { code: "ABORT_ERR" });
+          },
+        },
+      }),
+      (error: unknown) => error instanceof Error && (error as { code?: unknown }).code === "ABORT_ERR",
+      "a cancelled detection rejects with the abort, not with a verdict",
+    );
+    assert.equal(existsSync(logPath), false, "the ACP child must not have been started after the cancel");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #1277 (review): a cancel that lands between the lookup and the ACP spawn stops the detection before the child starts", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-abort-gap-"));
+  try {
+    const { binDir, logPath } = installScriptedGrok(root);
+    const controller = new AbortController();
+    await assert.rejects(
+      detectGrokModelsFromAcp({
+        env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` },
+        cwd: root,
+        deps: {
+          platform: "linux",
+          homeDir: path.join(root, "no-home"),
+          signal: controller.signal,
+          // The lookup succeeds; the cancel arrives as it returns.
+          runProbeChildFn: async () => {
+            controller.abort();
+            return { stdout: `${path.join(binDir, "grok")}\n`, stderr: "" };
+          },
+        },
+      }),
+      (error: unknown) => error instanceof Error && (error as { code?: unknown }).code === "ABORT_ERR",
+    );
+    assert.equal(existsSync(logPath), false, "the ACP child must not start after a cancel that arrived before the spawn");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #1277 (review): a cancel while the ACP child is active kills it and rejects with the abort, well before the deadline", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-abort-active-"));
+  try {
+    const { binDir } = installScriptedGrok(root);
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    setTimeout(() => controller.abort(), 150);
+    await assert.rejects(
+      detectGrokModelsFromAcp({
+        env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`, SCRIPTED_GROK_SCENARIO: "detect_slow" },
+        cwd: root,
+        timeoutMs: 10_000,
+        deps: { platform: "linux", homeDir: path.join(root, "no-home"), signal: controller.signal },
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof Error && (error as { code?: unknown }).code === "ABORT_ERR");
+        const cleanup = (error as { cleanup?: { childExited: boolean; waitedMs: number } }).cleanup;
+        assert.ok(cleanup, "a cancel that killed the ACP child reports its cleanup");
+        assert.equal(cleanup.childExited, true, "the ACP child's exit was observed, not assumed");
+        return true;
+      },
+    );
+    assert.ok(Date.now() - startedAt < 5000, "the cancel ended the detection, not the 10 s deadline");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reviewer counterexample (Huaihuai, #9791): cancelled Grok form detection never launches ACP through a home fallback", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "review-abort-grok-"));
+  const marker = path.join(root, "started");
+  const bin = path.join(root, ".local", "bin");
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(path.join(bin, "grok"), "#!" + process.execPath + "\n" + `require('node:fs').writeFileSync(${JSON.stringify(marker)},'started');\n`, { mode: 0o755 });
+  const controller = new AbortController();
+  controller.abort();
+  try {
+    await detectGrokModelsFromAcp({ env: { ...process.env, HOME: root }, timeoutMs: 2000, deps: { platform: "linux", homeDir: root, signal: controller.signal } }).catch(() => undefined);
+    assert.equal(existsSync(marker), false, "an already cancelled operation launched ACP");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reviewer counterexample (Huaihuai, #9791): an active-cancel against a Grok that ignores SIGTERM still ends the process, and the rejection says so", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-detect-abort-sigterm-"));
+  try {
+    const binDir = path.join(root, "bin");
+    mkdirSync(binDir, { recursive: true });
+    const pidFile = path.join(root, "grok.pid");
+    // A grok that ignores SIGTERM, records its pid and never answers: only a
+    // SIGKILL to its process group ends it.
+    writeFileSync(path.join(binDir, "grok"), `#!${process.execPath}
+process.on("SIGTERM", () => {});
+require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+process.stdin.resume();
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+    const controller = new AbortController();
+    const startedAt = Date.now();
+    let pid = 0;
+    const abortOnceStarted = setInterval(() => {
+      if (!existsSync(pidFile)) return;
+      pid = Number(readFileSync(pidFile, "utf8"));
+      clearInterval(abortOnceStarted);
+      controller.abort();
+    }, 20);
+    try {
+      await assert.rejects(
+        detectGrokModelsFromAcp({
+          env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}` },
+          cwd: root,
+          timeoutMs: 10_000,
+          deps: { platform: "linux", homeDir: path.join(root, "no-home"), signal: controller.signal },
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof Error && (error as { code?: unknown }).code === "ABORT_ERR");
+          const cleanup = (error as { cleanup?: { childExited: boolean; waitedMs: number } }).cleanup;
+          assert.deepEqual(cleanup && { childExited: cleanup.childExited }, { childExited: true }, "the exit was observed");
+          return true;
+        },
+      );
+    } finally {
+      clearInterval(abortOnceStarted);
+    }
+    assert.ok(pid > 0, "the scripted grok started");
+    assert.throws(() => process.kill(pid, 0), "the Grok process is gone after the rejection, SIGTERM-immune or not");
+    assert.ok(Date.now() - startedAt < 8000, "the cancel ended the detection, not the deadline");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #1277 (launch): a grok spawn with an already-cancelled launch signal creates no child and rejects with the abort", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-launch-cancel-"));
+  try {
+    const { binDir, logPath } = installScriptedGrok(root);
+    const controller = new AbortController();
+    controller.abort();
+    const driver = new GrokDriver();
+    const previous = { PATH: process.env.PATH, SCRIPTED_GROK_LOG: process.env.SCRIPTED_GROK_LOG };
+    process.env.PATH = `${binDir}${path.delimiter}${previous.PATH ?? ""}`;
+    process.env.SCRIPTED_GROK_LOG = logPath;
+    try {
+      await assert.rejects(
+        driver.spawn({ ...makeSpawnContext(root), launchSignal: controller.signal }),
+        (error: unknown) => error instanceof Error && (error as { code?: unknown }).code === "ABORT_ERR",
+      );
+    } finally {
+      process.env.PATH = previous.PATH;
+      if (previous.SCRIPTED_GROK_LOG === undefined) delete process.env.SCRIPTED_GROK_LOG; else process.env.SCRIPTED_GROK_LOG = previous.SCRIPTED_GROK_LOG;
+    }
+    assert.equal(existsSync(logPath), false, "no grok child was started");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("task #1277 (launch): a launch cancelled while the PATH lookup is running creates no child", async () => {
+  if (process.platform === "win32") return;
+  const root = mkdtempSync(path.join(os.tmpdir(), "grok-launch-cancel-mid-"));
+  try {
+    const { binDir, logPath } = installScriptedGrok(root);
+    const slowWhich = path.join(binDir, "which");
+    writeFileSync(slowWhich, `#!/bin/sh\nsleep 0.5\necho ${path.join(binDir, "grok")}\n`);
+    chmodSync(slowWhich, 0o755);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 100);
+    const driver = new GrokDriver();
+    const previous = { PATH: process.env.PATH, SCRIPTED_GROK_LOG: process.env.SCRIPTED_GROK_LOG };
+    process.env.PATH = `${binDir}${path.delimiter}${previous.PATH ?? ""}`;
+    process.env.SCRIPTED_GROK_LOG = logPath;
+    try {
+      await assert.rejects(
+        driver.spawn({ ...makeSpawnContext(root), launchSignal: controller.signal }),
+        (error: unknown) => error instanceof Error && (error as { code?: unknown }).code === "ABORT_ERR",
+      );
+    } finally {
+      process.env.PATH = previous.PATH;
+      if (previous.SCRIPTED_GROK_LOG === undefined) delete process.env.SCRIPTED_GROK_LOG; else process.env.SCRIPTED_GROK_LOG = previous.SCRIPTED_GROK_LOG;
+    }
+    assert.equal(existsSync(logPath), false, "no grok child was started after the cancel");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

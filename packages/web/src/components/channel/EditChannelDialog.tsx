@@ -2,23 +2,32 @@ import {
   Badge,
   Button,
   Drawer,
+  DrawerActions,
+  DrawerBody,
   DrawerClose,
   DrawerContent,
   DrawerDescription,
+  DrawerFooter,
+  DrawerHeader,
   DrawerTitle,
+  FormSection,
   Input,
+  PanelAction,
+  PanelActions,
+  Separator,
   Switch,
   Textarea,
   toast,
-} from "raft-ui";
+} from "@botiverse/raft-ui";
 import { reportConversionFailure } from "../../utils/conversionDiagnostics";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 import type { ChangeEvent, ComponentProps, FormEvent, ReactNode } from "react";
 import { useIntl } from "react-intl";
 import { formatNameValidationError } from "../../i18n/nameValidation";
 import { Archive, ArchiveRestore, Check, Eye, EyeOff, Hash, Info, Lock, LogOut, Mail, Trash2, Unplug, X } from "lucide-react";
 import { useChannelStore } from "../../store/channelStore";
 import { useServerStore } from "../../store/serverStore";
+import { useAuthStore } from "../../store/authStore";
 import { ChannelPreferencesSection } from "./ChannelPreferencesSection";
 import ChannelWorkspaceSettings from "./ChannelWorkspaceSettings";
 import {
@@ -32,6 +41,7 @@ import {
   validateServerSlugReferenceReason,
 } from "@botiverse/raft-shared";
 import Banner from "../ui/Banner";
+import SectionEyebrow from "../ui/SectionEyebrow";
 import Tooltip from "../ui/Tooltip";
 import ConfirmDialog from "../ConfirmDialog";
 import { useAppNavigate } from "../../hooks/useAppNavigate";
@@ -49,6 +59,9 @@ import { useChannelConversionState } from "../../hooks/useChannelConversionState
 import type { ChannelConversionJobView as ConversionJobState, ServerPlan } from "@botiverse/raft-shared";
 import type { ConversionObservationToken, ConversionAttemptBaseline } from "../../store/conversionObservationStore";
 import JointAttachmentUploadSection, { useActiveAttachmentUploads } from "./JointAttachmentUploadSection";
+import { SameAdminJointNotice } from "./SameAdminJointNotice";
+import { ROW_DESCRIPTION_CLASS, ROW_TITLE_CLASS } from "./channelSettingsClasses";
+import { findSameAdminJointTarget, parseInvitedPeopleText } from "../../utils/jointSameAdmin";
 
 const CHANNEL_SETTINGS_FORM_ID = "channel-settings-form";
 
@@ -89,9 +102,12 @@ function ChannelSettingsSheet({
       onOpenChange={handleOpenChange}
       onOpenChangeComplete={handleOpenChangeComplete}
     >
+      {/* DS Sheet (drawer): slides in from the right, full height; raft-ui's
+          drawer recipe draws the popover surface, seam edge and float shadow
+          and caps it at 420 (the whole width on a phone). */}
       <DrawerContent
         data-testid="channel-settings-sheet"
-        className="theme-aware-channel-settings inset-y-0 right-0 h-dvh w-full max-w-[min(100vw,34rem)] [--drawer-content-height:100dvh] [--drawer-inset:0px] flex-col border-0 theme-brutal:rounded-none theme-brutal:border-l-2 theme-brutal:border-line-strong bg-layer-canvas-muted theme-brutal:bg-brutal-cream text-foreground-strong"
+        className="inset-y-0 right-0 h-dvh w-full [--drawer-content-height:100dvh] [--drawer-inset:0px] flex-col"
       >
         {children}
       </DrawerContent>
@@ -158,6 +174,7 @@ export default function EditChannelDialog({
   const [inviteServerSlugServerError, setInviteServerSlugServerError] = useState("");
   const [invitePeopleServerError, setInvitePeopleServerError] = useState("");
   const [inviteSubmitError, setInviteSubmitError] = useState("");
+  const [inviteSameAdminConfirmed, setInviteSameAdminConfirmed] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showArchiveConfirm, setShowArchiveConfirm] = useState(false);
   const [showVisibilityConfirm, setShowVisibilityConfirm] = useState(false);
@@ -196,6 +213,10 @@ export default function EditChannelDialog({
   const channels = useChannelStore((s) => s.channels);
   const channel = channels.find((c) => c.id === channelId);
   const plan = useServerStore((s) => s.current?.plan) || "free";
+  const currentServerSlug = useServerStore((s) => s.current?.slug ?? null);
+  const currentServerName = useServerStore((s) => s.current?.name ?? "");
+  const servers = useServerStore((s) => s.servers);
+  const currentUser = useAuthStore((s) => s.user);
   const guestJoinableLimit = getEffectiveLimits(plan as ServerPlan).maxGuestJoinableChannelsPerServer;
   const guestJoinableCount = channels.filter((candidate) =>
     candidate.serverId === channel?.serverId
@@ -451,10 +472,16 @@ export default function EditChannelDialog({
     ? channel.jointPendingInvites.some((invite) => invite.fromServerId === channel.serverId)
     : channel?.jointPeerStatus === "pending";
   const normalizedInviteServerSlug = inviteServerSlug.trim();
-  const normalizedInvitePeople = invitePeopleText
-    .split(/[\n,]+/)
-    .map((person) => person.trim())
-    .filter(Boolean);
+  const normalizedInvitePeople = parseInvitedPeopleText(invitePeopleText);
+  // RFC 075 §4.5: inviting yourself on a server you administer connects
+  // directly (no email) once explicitly confirmed.
+  const inviteSameAdminTarget = findSameAdminJointTarget({
+    servers,
+    currentServerSlug,
+    user: currentUser,
+    targetServerSlug: normalizedInviteServerSlug,
+    invitedPeople: normalizedInvitePeople,
+  });
   const inviteServerSlugValidation = validateServerSlugReferenceReason(normalizedInviteServerSlug);
   const inviteFormValid =
     inviteServerSlugValidation === null && normalizedInvitePeople.length > 0;
@@ -922,20 +949,37 @@ export default function EditChannelDialog({
       setInviteSubmitError(formatMessage({ id: "channel.edit.maxServers" }, { max: MAX_JOINT_CHANNEL_SERVERS }));
       return;
     }
+    if (inviteSameAdminTarget && !inviteSameAdminConfirmed) {
+      setInviteSubmitError(formatMessage({ id: "channel.jointInvite.sameAdmin.confirmRequired" }));
+      return;
+    }
 
     setInviteBusy(true);
     try {
-      await inviteJointChannelServer(channelId, {
+      const updated = await inviteJointChannelServer(channelId, {
         targetServerSlug: normalizedInviteServerSlug,
         invitedPeople: normalizedInvitePeople,
+        ...(inviteSameAdminTarget ? { sameAdmin: true } : {}),
       });
+      // The server falls back to email if the direct accept fails, so read
+      // the outcome from the returned server list instead of assuming it.
+      const connectedDirectly = inviteSameAdminTarget !== null && updated.jointServers?.some(
+        (server) => server.serverSlug === inviteSameAdminTarget.slug && server.status === "active",
+      ) === true;
       setInviteServerSlug("");
       setInvitePeopleText("");
+      setInviteSameAdminConfirmed(false);
       setInviteTouched({ serverSlug: false, people: false });
-      setInviteStatus(formatMessage(
-        { id: "channel.edit.inviteSentCount" },
-        { count: normalizedInvitePeople.length },
-      ));
+      // Anyone else on the list was still emailed.
+      const emailedCount = connectedDirectly ? normalizedInvitePeople.length - 1 : normalizedInvitePeople.length;
+      setInviteStatus([
+        ...(connectedDirectly && inviteSameAdminTarget
+          ? [formatMessage({ id: "channel.jointInvite.sameAdmin.connected" }, { server: inviteSameAdminTarget.name })]
+          : []),
+        ...(emailedCount > 0
+          ? [formatMessage({ id: "channel.edit.inviteSentCount" }, { count: emailedCount })]
+          : []),
+      ].join(" "));
     } catch (err: unknown) {
       const axiosErr = err as { response?: { data?: { error?: string; code?: string } } };
       const code = axiosErr.response?.data?.code;
@@ -1056,6 +1100,7 @@ export default function EditChannelDialog({
 
   const handleInviteServerSlugChange = useCallback((e: ChangeEvent<HTMLInputElement>) => {
     setInviteServerSlug(e.target.value);
+    setInviteSameAdminConfirmed(false);
     setInviteServerSlugServerError("");
     setInviteSubmitError("");
     setInviteStatus("");
@@ -1066,6 +1111,7 @@ export default function EditChannelDialog({
   );
   const handleInvitePeopleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     setInvitePeopleText(e.target.value);
+    setInviteSameAdminConfirmed(false);
     setInvitePeopleServerError("");
     setInviteSubmitError("");
     setInviteStatus("");
@@ -1092,27 +1138,27 @@ export default function EditChannelDialog({
   // boundary — shared-resource management vs lifecycle — and leaves
   // "Leave channel" to the members section (it edits my own membership).
   const leaveActionButton = showLeaveAction && (
-    <Button size="sm"
+    <Button size="lg"
       variant="warning"
       type="button"
       onClick={openLeaveConfirm}
-      className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
+      className="w-full"
     >
-      <LogOut size={14} />
+      <LogOut size={16} />
       {formatMessage({ id: "channel.edit.leaveChannel" })}
     </Button>
   );
   const visibilityActionButton = !isJointChannel && showVisibilityAction && (
-    <Button size="sm"
+    <Button size="lg"
       variant="warning"
       type="button"
       onClick={openVisibilityConfirm}
       disabled={isArchived || visibilityBusy}
-      className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+      className="w-full"
     >
       {isAllChannel
-        ? currentVisibility === "private" ? <Eye size={14} /> : <EyeOff size={14} />
-        : currentVisibility === "private" ? <Hash size={14} /> : <Lock size={14} />}
+        ? currentVisibility === "private" ? <Eye size={16} /> : <EyeOff size={16} />
+        : currentVisibility === "private" ? <Hash size={16} /> : <Lock size={16} />}
       {visibilityBusy
         ? formatMessage({ id: "channel.edit.updating" })
         : isAllChannel
@@ -1127,45 +1173,45 @@ export default function EditChannelDialog({
   const lifecycleActionButtons = !isAllChannel && (
     <>
       {effectiveCapabilities.archiveChannels && (isArchived ? (
-        <Button size="sm"
-          variant="success"
+        <Button size="lg"
+          variant="outline"
           type="button"
           onClick={handleUnarchive}
           disabled={archiveBusy}
-          className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full"
         >
-          <ArchiveRestore size={14} />
+          <ArchiveRestore size={16} />
           {archiveBusy ? formatMessage({ id: "channel.edit.unarchiving" }) : formatMessage({ id: "channel.edit.unarchiveChannel" })}
         </Button>
       ) : (
-        <Button size="sm"
+        <Button size="lg"
           variant="warning"
           type="button"
           onClick={openArchiveConfirm}
-          className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
+          className="w-full"
         >
-          <Archive size={14} />
+          <Archive size={16} />
           {formatMessage({ id: "channel.edit.archiveChannel" })}
         </Button>
       ))}
       {!isArchived && effectiveCapabilities.deleteChannels && (showCompletedJointSettings ? (
-        <Button size="sm"
+        <Button size="lg"
           variant="danger"
           type="button"
           onClick={openDeleteConfirm}
-          className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
+          className="w-full"
         >
-          <Unplug size={14} />
+          <Unplug size={16} />
           {formatMessage({ id: "channel.edit.disconnectChannel" })}
         </Button>
       ) : (
-        <Button size="sm"
+        <Button size="lg"
           variant="danger"
           type="button"
           onClick={openDeleteConfirm}
-          className="flex w-full items-center justify-center gap-1.5 px-4 py-2 text-sm"
+          className="w-full"
         >
-          <Trash2 size={14} />
+          <Trash2 size={16} />
           {formatMessage({ id: "channel.edit.deleteChannel" })}
         </Button>
       ))}
@@ -1179,8 +1225,8 @@ export default function EditChannelDialog({
     <OverflowActionRow
       icon={
         isAllChannel
-          ? currentVisibility === "private" ? <Eye size={14} /> : <EyeOff size={14} />
-          : currentVisibility === "private" ? <Hash size={14} /> : <Lock size={14} />
+          ? currentVisibility === "private" ? <Eye size={16} /> : <EyeOff size={16} />
+          : currentVisibility === "private" ? <Hash size={16} /> : <Lock size={16} />
       }
       label={
         visibilityBusy
@@ -1201,7 +1247,7 @@ export default function EditChannelDialog({
   const archiveActionRow = !isAllChannel && effectiveCapabilities.archiveChannels && (
     isArchived ? (
       <OverflowActionRow
-        icon={<ArchiveRestore size={14} />}
+        icon={<ArchiveRestore size={16} />}
         label={archiveBusy ? formatMessage({ id: "channel.edit.unarchiving" }) : formatMessage({ id: "channel.edit.unarchiveChannel" })}
         onClick={handleUnarchive}
         disabled={archiveBusy}
@@ -1209,7 +1255,7 @@ export default function EditChannelDialog({
       />
     ) : (
       <OverflowActionRow
-        icon={<Archive size={14} />}
+        icon={<Archive size={16} />}
         label={formatMessage({ id: "channel.edit.archiveChannel" })}
         onClick={openArchiveConfirm}
         testId="channel-settings-archive-action"
@@ -1223,7 +1269,7 @@ export default function EditChannelDialog({
   const deleteActionRow = !isAllChannel && effectiveCapabilities.deleteChannels && (
     showCompletedJointSettings ? (
       <OverflowActionRow
-        icon={<Unplug size={14} />}
+        icon={<Unplug size={16} />}
         label={formatMessage({ id: "channel.edit.disconnectChannel" })}
         onClick={openDeleteConfirm}
         danger
@@ -1232,7 +1278,7 @@ export default function EditChannelDialog({
       />
     ) : (
       <OverflowActionRow
-        icon={<Trash2 size={14} />}
+        icon={<Trash2 size={16} />}
         label={formatMessage({ id: "channel.edit.deleteChannel" })}
         onClick={openDeleteConfirm}
         danger
@@ -1259,28 +1305,25 @@ export default function EditChannelDialog({
   );
 
   const guestAccessSection = canManageGuestAccess && (
-    <section className="mt-5" data-testid="channel-settings-guest-access">
-      <h3 className="text-base font-bold text-foreground-strong">
-        {formatMessage({ id: "channel.edit.guestAccessTitle" })}
-      </h3>
-      <p className="mt-1 text-xs font-normal text-foreground-muted">
-        {formatMessage({ id: "channel.edit.guestAccessDescription" })}
-      </p>
-      {guestJoinableLimit >= 0 && <p className="mt-2 text-xs font-semibold text-foreground-muted" data-testid="channel-settings-guest-joinable-usage">
+    <FormSection
+      data-testid="channel-settings-guest-access"
+      title={formatMessage({ id: "channel.edit.guestAccessTitle" })}
+      description={formatMessage({ id: "channel.edit.guestAccessDescription" })}
+    >
+      {guestJoinableLimit >= 0 && <p className="font-mono text-mono-meta text-foreground-hint" data-testid="channel-settings-guest-joinable-usage">
         {formatMessage({ id: "channel.edit.guestJoinableUsage" }, { count: guestJoinableCount, limit: guestJoinableLimit })}
       </p>}
-      <div className="mt-2 divide-y divide-black/10">
+      <div>
         <div className="flex items-center justify-between gap-3 py-3">
           <div className="min-w-0">
-            <h4 id="channel-settings-guest-visible-label" className="text-sm font-medium text-foreground-strong">
+            <h4 id="channel-settings-guest-visible-label" className={ROW_TITLE_CLASS}>
               {formatMessage({ id: "channel.edit.guestVisibleTitle" })}
             </h4>
-            <p className="mt-1 text-xs font-normal text-foreground-muted">
+            <p className={ROW_DESCRIPTION_CLASS}>
               {formatMessage({ id: "channel.edit.guestVisibleDescription" })}
             </p>
           </div>
           <Switch
-            size="md"
             checked={channel?.guestVisible === true}
             disabled={guestPolicyBusy}
             onCheckedChange={handleGuestVisibleChange}
@@ -1288,26 +1331,25 @@ export default function EditChannelDialog({
             data-testid="channel-settings-guest-visible-switch"
           />
         </div>
-        {channel?.name !== "all" && <div className="flex items-center justify-between gap-3 py-3">
+        {channel?.name !== "all" && <><Separator /><div className="flex items-center justify-between gap-3 py-3">
           <div className="min-w-0">
-            <h4 id="channel-settings-guest-joinable-label" className="text-sm font-medium text-foreground-strong">
+            <h4 id="channel-settings-guest-joinable-label" className={ROW_TITLE_CLASS}>
               {formatMessage({ id: "channel.edit.guestJoinableTitle" })}
             </h4>
-            <p className="mt-1 text-xs font-normal text-foreground-muted">
+            <p className={ROW_DESCRIPTION_CLASS}>
               {formatMessage({ id: "channel.edit.guestJoinableDescription" })}
             </p>
           </div>
           <Switch
-            size="md"
             checked={channel?.guestJoinable === true}
             disabled={guestPolicyBusy}
             onCheckedChange={handleGuestJoinableChange}
             aria-labelledby="channel-settings-guest-joinable-label"
             data-testid="channel-settings-guest-joinable-switch"
           />
-        </div>}
+        </div></>}
       </div>
-    </section>
+    </FormSection>
   );
 
   // final11 生命周期四合一: visibility (Make Private) / Archive / Delete /
@@ -1317,7 +1359,7 @@ export default function EditChannelDialog({
   // (-mx-4) so they align with the host drawer's own action rows.
   const leaveActionRow = showLeaveAction && (
     <OverflowActionRow
-      icon={<LogOut size={14} />}
+      icon={<LogOut size={16} />}
       label={formatMessage({ id: "channel.edit.leaveChannel" })}
       onClick={openLeaveConfirm}
       testId="channel-overflow-leave"
@@ -1341,7 +1383,6 @@ export default function EditChannelDialog({
       onCancel={conversionCancelObservationId ? undefined : cancelConversion}
       onOpenChannel={onClose}
       cancelBusy={conversionCancelBusy}
-      headingClassName="text-base font-bold text-foreground-strong theme-brutal:text-black"
       onStart={startConversion}
     />
   );
@@ -1353,44 +1394,155 @@ export default function EditChannelDialog({
       onCancel={cancelAttachmentUpload}
     />
   );
+  const showInfoSection = isPanel && showManageActions && showChannelInfoSettings;
+  const jointFormSectionAbove = Boolean(jointConversionSection)
+    || ((showCompletedJointSettings || conversionInProgress) && activeAttachmentUploads.length > 0);
+  const settingsForm = (
+    <form id={CHANNEL_SETTINGS_FORM_ID} onSubmit={handleSubmit} className="space-y-5">
+      {error && (
+        <Banner
+          intent="warning"
+          role="alert"
+          data-testid="channel-settings-save-error"
+        >
+          {error}
+        </Banner>
+      )}
+      {canEditChannel && showChannelInfoSettings && (
+        <section className="space-y-3">
+          <div className="space-y-3">
+            <FormField
+              label={formatMessage({ id: "channel.edit.nameLabel" })}
+              htmlFor="channel-settings-name"
+              required
+              hint={
+                isAllChannel
+                  ? formatMessage({ id: "channel.edit.allCannotRename" })
+                  : showCompletedJointSettings
+                    ? formatMessage({ id: "channel.edit.jointNameShared" })
+                    : undefined
+              }
+            >
+              <Input
+                id="channel-settings-name"
+                type="text"
+                value={name}
+                onChange={handleNameChange}
+                className="w-full"
+                placeholder={formatMessage({ id: "channel.edit.namePlaceholder" })}
+                required
+                autoFocus={!isPanel}
+                disabled={isAllChannel || isArchived}
+              />
+            </FormField>
+            <FormField
+              label={formatMessage({ id: "channel.edit.descriptionLabel" })}
+              htmlFor="channel-settings-description"
+              optional
+            >
+              <Textarea
+                id="channel-settings-description"
+                value={description}
+                onChange={handleDescriptionChange}
+                className="w-full"
+                placeholder={formatMessage({ id: "channel.edit.descriptionPlaceholder" })}
+                rows={2}
+                disabled={isArchived}
+              />
+            </FormField>
+            {isPanel && (
+              /* Save/Cancel live inside the editable section in panel
+                 mode. The same action also commits an optional Slack
+                 bridge selection without closing the drawer. */
+              <>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    type="button"
+                    onClick={resetDraft}
+                    disabled={!hasSavableDraft || saving}
+                    size="sm"
+                    variant="ghost"
+                    data-testid="channel-settings-discard-draft"
+                  >
+                    {formatMessage({ id: "settings.common.cancel" })}
+                  </Button>
+                  <Button
+                    type="button"
+                    onClick={handleSaveInline}
+                    disabled={!hasSavableDraft || saving || isArchived}
+                    size="sm"
+                    variant={saveStatus ? "success" : "accent"}
+                    data-testid="channel-settings-save-inline"
+                  >
+                    {saving
+                      ? formatMessage({ id: "channel.edit.saving" })
+                      : saveStatus
+                        ? <><Check size={16} aria-hidden="true" /> {saveStatus}</>
+                        : formatMessage({ id: "channel.edit.saveChanges" })}
+                  </Button>
+                </div>
+                {saveStatus && (
+                  <span
+                    className="sr-only"
+                    role="status"
+                    aria-live="polite"
+                    data-testid="channel-settings-save-status"
+                  >
+                    {saveStatus}
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+          {/* Inside the Info FormSection the next section's rule divides
+              it; a form standing alone keeps its own. */}
+          {!showInfoSection && <Separator className="mt-5" />}
+        </section>
+      )}
+    </form>
+  );
+
   // Shared body: the standalone sheet and the overflow-drawer panel
   // (task #187) render identical sections — only the chrome differs.
   const settingsBody = (
     <>
       {isJointChannel && showCompletedJointSettings && ((!conversionReceipt && !convertSucceeded) || conversionProgressDismissed) && (
         <section
-          className="space-y-4 border-b border-line-muted pb-5 theme-brutal:border-black/10"
+          className="space-y-4"
           data-testid="channel-settings-joint-section"
         >
           <div>
             <div className="flex items-center gap-1.5">
-              <h4 className="text-sm font-medium text-foreground-strong">
+              <SectionEyebrow tone="muted" role="heading" aria-level={4}>
                 {formatMessage({ id: "channel.edit.connectedServers" })}
-              </h4>
+              </SectionEyebrow>
               <Tooltip content={formatMessage({ id: "channel.edit.connectedServersRule" })}>
                 <button
                   type="button"
-                  className="flex size-5 items-center justify-center text-foreground-muted hover:text-foreground-strong focus:outline-none"
+                  className="flex size-6 items-center justify-center rounded-control text-foreground-hint outline-none hover:bg-fill-pressed hover:text-foreground focus-visible:shadow-focus"
                   aria-label={formatMessage({ id: "channel.edit.connectedServersRule" })}
                   data-testid="channel-settings-joint-servers-rule"
                 >
-                  <Info size={14} aria-hidden="true" />
+                  <Info size={16} aria-hidden="true" />
                 </button>
               </Tooltip>
             </div>
             {jointServers.length > 0 ? (
-              <div className="mt-2 divide-y divide-black/10" data-testid="channel-settings-joint-servers">
-                {jointServers.map((server) => (
-                  <div key={`${server.serverId}:${server.status}`} className="flex items-center justify-between gap-3 py-3" data-testid="channel-settings-joint-server-row">
+              <div className="mt-2" data-testid="channel-settings-joint-servers">
+                {jointServers.map((server, index) => (
+                  <Fragment key={`${server.serverId}:${server.status}`}>
+                  {index > 0 ? <Separator /> : null}
+                  <div className="flex items-center justify-between gap-3 py-3" data-testid="channel-settings-joint-server-row">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium text-foreground-strong">{server.serverName || server.serverSlug}</div>
-                      <div className="mt-1 truncate text-xs font-normal text-foreground-muted">
-                        {server.serverSlug}{server.isCurrentServer ? ` · ${formatMessage({ id: "channel.edit.thisServer" })}` : ""}
+                      <div className={`truncate ${ROW_TITLE_CLASS}`}>{server.serverName || server.serverSlug}</div>
+                      {/* The slug is an id (machine type); "this server" is words. */}
+                      <div className="mt-0.5 truncate text-caption text-foreground-hint">
+                        <span className="font-mono text-mono-meta">{server.serverSlug}</span>{server.isCurrentServer ? ` · ${formatMessage({ id: "channel.edit.thisServer" })}` : ""}
                       </div>
                     </div>
                     <div className="flex shrink-0 items-center gap-2">
                       {"plan" in server && server.plan && (
-                        <Badge appearance="soft" variant={server.plan === "paid" ? "accent" : "muted"} data-testid="channel-settings-joint-server-plan">
+                        <Badge appearance="outline" data-testid="channel-settings-joint-server-plan">
                           {formatMessage({ id: server.plan === "paid" ? "channel.edit.serverPlanPaid" : "billing.free" })}
                         </Badge>
                       )}
@@ -1399,17 +1551,18 @@ export default function EditChannelDialog({
                       </Badge>
                     </div>
                   </div>
+                  </Fragment>
                 ))}
               </div>
             ) : (
-              <p className="text-sm text-foreground-muted">{formatMessage({ id: "channel.edit.connectedMetaUnavailable" })}</p>
+              <p className="mt-1 text-callout text-foreground-hint">{formatMessage({ id: "channel.edit.connectedMetaUnavailable" })}</p>
             )}
           </div>
           {capabilities.federateChannels && hasCurrentServerPendingJointInvites && !isArchived && (
             <div className="space-y-2">
               <div className="flex justify-end" data-testid="channel-settings-joint-resend-row">
-                <Button type="button" onClick={handleResendJointInvite} disabled={resendBusy} size="sm" variant={resendStatus ? "success" : "outline"} className="disabled:cursor-not-allowed disabled:opacity-50">
-                  {resendStatus ? <Check size={14} aria-hidden="true" /> : <Mail size={14} aria-hidden="true" />}
+                <Button type="button" onClick={handleResendJointInvite} disabled={resendBusy} size="sm" variant={resendStatus ? "success" : "outline"}>
+                  {resendStatus ? <Check size={16} aria-hidden="true" /> : <Mail size={16} aria-hidden="true" />}
                   <span className="grid w-max whitespace-nowrap" data-testid="channel-settings-joint-resend-label-grid">
                     <span aria-hidden="true" className="invisible col-start-1 row-start-1">{formatMessage({ id: "channel.edit.resendInvite" })}</span>
                     <span aria-hidden="true" className="invisible col-start-1 row-start-1">{formatMessage({ id: "channel.edit.resending" })}</span>
@@ -1421,161 +1574,66 @@ export default function EditChannelDialog({
                 </Button>
               </div>
               {resendStatus && <span className="sr-only" role="status" aria-live="polite" data-testid="channel-settings-joint-resend-status">{resendStatus}</span>}
-              {resendError && <p className="text-xs font-normal text-brutal-red" role="alert">{resendError}</p>}
+              {resendError && <p className="text-caption font-semibold text-danger-strong" role="alert">{resendError}</p>}
             </div>
           )}
           {capabilities.federateChannels && !isArchived && (
-            <div className="space-y-3 border-t border-line-muted pt-4 theme-brutal:border-black/10" data-testid="channel-settings-joint-invite">
-              <h4 className="text-sm font-medium text-foreground-strong">{formatMessage({ id: "channel.edit.inviteServerSection" })}</h4>
+            <div className="space-y-3" data-testid="channel-settings-joint-invite">
+              <Separator className="mb-4" />
+              <SectionEyebrow as="div" tone="muted" role="heading" aria-level={4}>{formatMessage({ id: "channel.edit.inviteServerSection" })}</SectionEyebrow>
               {jointServerLimitReached ? (
-                <p className="text-sm font-normal text-foreground-muted">{formatMessage({ id: "channel.edit.maxServers" }, { max: MAX_JOINT_CHANNEL_SERVERS })}</p>
+                <p className="text-callout text-foreground-hint">{formatMessage({ id: "channel.edit.maxServers" }, { max: MAX_JOINT_CHANNEL_SERVERS })}</p>
               ) : (
                 <form className="space-y-3" data-testid="channel-settings-joint-invite-form" onSubmit={handleInviteJointServer} noValidate>
-                  <FormField label={formatMessage({ id: "channel.edit.serverSlugLabel" })} labelStyle="plain" required htmlFor="channel-settings-joint-server-slug" error={inviteServerSlugError}>
+                  <FormField label={formatMessage({ id: "channel.edit.serverSlugLabel" })} required htmlFor="channel-settings-joint-server-slug" error={inviteServerSlugError}>
                     <SlugInput id="channel-settings-joint-server-slug" name="targetServerSlug" type="text" value={inviteServerSlug} onChange={handleInviteServerSlugChange} onBlur={handleInviteServerSlugBlur} placeholder={formatMessage({ id: "channel.edit.serverSlugPlaceholder" })} required autoCapitalize="none" autoCorrect="off" spellCheck={false} aria-invalid={inviteServerSlugError ? "true" : undefined} disabled={inviteBusy} />
                   </FormField>
-                  <FormField label={formatMessage({ id: "channel.edit.invitedPeopleLabel" })} labelStyle="plain" required hint={formatMessage({ id: "channel.edit.invitedPeopleHint" })} htmlFor="channel-settings-joint-invited-people" error={invitePeopleError}>
+                  <FormField label={formatMessage({ id: "channel.edit.invitedPeopleLabel" })} required hint={formatMessage({ id: "channel.edit.invitedPeopleHint" })} htmlFor="channel-settings-joint-invited-people" error={invitePeopleError}>
                     <Textarea id="channel-settings-joint-invited-people" name="invitedPeople" value={invitePeopleText} onChange={handleInvitePeopleChange} onBlur={handleInvitePeopleBlur} className="w-full" placeholder={formatMessage({ id: "channel.edit.invitedPeoplePlaceholder" })} rows={2} required data-invalid={Boolean(invitePeopleError)} disabled={inviteBusy} />
                   </FormField>
+                  {inviteSameAdminTarget && (
+                    <SameAdminJointNotice
+                      sourceServerName={currentServerName}
+                      targetServerName={inviteSameAdminTarget.name}
+                      confirmed={inviteSameAdminConfirmed}
+                      onConfirmedChange={setInviteSameAdminConfirmed}
+                      disabled={inviteBusy}
+                    />
+                  )}
                   <div className="flex justify-end" data-testid="channel-settings-joint-send-invite-row">
-                    <Button type="submit" disabled={inviteBusy || !inviteFormValid} size="sm" variant="accent" className="disabled:cursor-not-allowed disabled:opacity-50" data-testid="channel-settings-joint-send-invite"><Mail size={14} />{inviteBusy ? formatMessage({ id: "channel.edit.inviting" }) : formatMessage({ id: "channel.edit.sendInvite" })}</Button>
+                    <Button type="submit" disabled={inviteBusy || !inviteFormValid} size="sm" variant="outline" data-testid="channel-settings-joint-send-invite"><Mail size={16} aria-hidden="true" />{inviteBusy ? formatMessage({ id: "channel.edit.inviting" }) : formatMessage({ id: "channel.edit.sendInvite" })}</Button>
                   </div>
-                  {inviteSubmitError && <Banner intent="warning" className="font-normal" data-testid="channel-settings-joint-invite-submit-error">{inviteSubmitError}</Banner>}
-                  {inviteStatus && <p className="text-xs font-normal text-foreground-muted" role="status">{inviteStatus}</p>}
+                  {inviteSubmitError && <Banner intent="warning" data-testid="channel-settings-joint-invite-submit-error">{inviteSubmitError}</Banner>}
+                  {inviteStatus && <p className="text-caption text-foreground-hint" role="status">{inviteStatus}</p>}
                 </form>
               )}
             </div>
           )}
+          <Separator className="mt-5" />
         </section>
       )}
       {jointConversionSection}
       {jointAttachmentUploadSection}
-      {isPanel && showManageActions && showChannelInfoSettings && (
+      {showInfoSection ? (
         /* The one-word Info section owns the name/description form and its
            description directly; repeating a subordinate "Channel info"
            heading would flatten the hierarchy. Members with only Leave/Mute
            (no manage capability) never see an empty header. */
-        <div className="mt-5 mb-3">
-          <h3
-            className="text-base font-bold text-foreground-strong"
-            data-testid="channel-settings-manage-group"
-          >
-            {formatMessage({ id: "message.chatPanel.overflow.manageGroup" })}
-          </h3>
-          <p
-            className="mt-1 text-xs font-normal text-foreground-muted"
-            data-testid="channel-settings-info-description"
-          >
-            {formatMessage({ id: "message.channelSettings.infoDescription" })}
-          </p>
-        </div>
+        <FormSection
+          data-testid="channel-settings-manage-group"
+          title={formatMessage({ id: "message.chatPanel.overflow.manageGroup" })}
+          description={formatMessage({ id: "message.channelSettings.infoDescription" })}
+        >
+          {settingsForm}
+        </FormSection>
+      ) : (
+        <>
+          {/* The joint sections above end at the next section's rule; a
+              form standing alone below them draws that rule itself. */}
+          {jointFormSectionAbove && <Separator />}
+          {settingsForm}
+        </>
       )}
-      <form id={CHANNEL_SETTINGS_FORM_ID} onSubmit={handleSubmit} className="space-y-5">
-        {error && (
-          <Banner
-            intent="warning"
-            className="font-bold"
-            role="alert"
-            data-testid="channel-settings-save-error"
-          >
-            {error}
-          </Banner>
-        )}
-        {canEditChannel && showChannelInfoSettings && (
-          <section className="space-y-3 border-b border-line-muted pb-5 theme-brutal:border-black/10">
-            <div className="space-y-3">
-                  <FormField
-                    label={formatMessage({ id: "channel.edit.nameLabel" })}
-                    labelStyle="plain"
-                    className="[&>label]:!font-medium"
-                    htmlFor="channel-settings-name"
-                    required
-                    hint={
-                      isAllChannel
-                        ? formatMessage({ id: "channel.edit.allCannotRename" })
-                        : showCompletedJointSettings
-                          ? formatMessage({ id: "channel.edit.jointNameShared" })
-                          : undefined
-                    }
-                  >
-                    <Input
-                      id="channel-settings-name"
-                      type="text"
-                      value={name}
-                      onChange={handleNameChange}
-                      className="w-full"
-                      placeholder={formatMessage({ id: "channel.edit.namePlaceholder" })}
-                      required
-                      autoFocus={!isPanel}
-                      disabled={isAllChannel || isArchived}
-                    />
-                  </FormField>
-                  <FormField
-                    label={formatMessage({ id: "channel.edit.descriptionLabel" })}
-                    labelStyle="plain"
-                    className="[&>label]:!font-medium"
-                    htmlFor="channel-settings-description"
-                    optional
-                  >
-                    <Textarea
-                      id="channel-settings-description"
-                      value={description}
-                      onChange={handleDescriptionChange}
-                      className="w-full"
-                      placeholder={formatMessage({ id: "channel.edit.descriptionPlaceholder" })}
-                      rows={2}
-                      disabled={isArchived}
-                    />
-                  </FormField>
-                  {isPanel && (
-                    /* Save/Cancel live inside the editable section in panel
-                       mode. The same action also commits an optional Slack
-                       bridge selection without closing the drawer. */
-                    <>
-                      <div className="flex justify-end gap-2">
-                        <Button
-                          type="button"
-                          onClick={resetDraft}
-                          disabled={!hasSavableDraft || saving}
-                          size="sm"
-                          variant="outline"
-                          className="disabled:cursor-not-allowed disabled:opacity-50"
-                          data-testid="channel-settings-discard-draft"
-                        >
-                          {formatMessage({ id: "settings.common.cancel" })}
-                        </Button>
-                        <Button
-                          type="button"
-                          onClick={handleSaveInline}
-                          disabled={!hasSavableDraft || saving || isArchived}
-                          size="sm"
-                          variant={saveStatus ? "success" : "accent"}
-                          className="disabled:cursor-not-allowed disabled:opacity-50"
-                          data-testid="channel-settings-save-inline"
-                        >
-                          {saving
-                            ? formatMessage({ id: "channel.edit.saving" })
-                            : saveStatus
-                              ? <><Check size={12} aria-hidden="true" /> {saveStatus}</>
-                              : formatMessage({ id: "channel.edit.saveChanges" })}
-                        </Button>
-                      </div>
-                      {saveStatus && (
-                        <span
-                          className="sr-only"
-                          role="status"
-                          aria-live="polite"
-                          data-testid="channel-settings-save-status"
-                        >
-                          {saveStatus}
-                        </span>
-                      )}
-                    </>
-                  )}
-            </div>
-          </section>
-        )}
-      </form>
       {canEditChannel && !isArchived && (channel?.type === "channel" || channel?.type === "private") && (
         <ChannelSlackBridgeField
           editor={bridgeEditor}
@@ -1608,12 +1666,12 @@ export default function EditChannelDialog({
                renders without manage capability. */
             <>
               {showChannelInfoSettings && ((showManageActions && (visibilityActionRow || archiveActionRow || deleteActionRow)) || (isArchived && archiveActionRow) || leaveActionRow || (!isArchived && stopAgentsRow)) && (
-                <section className="mt-5" data-testid="channel-settings-lifecycle-group">
-                  <h3 className="text-base font-bold text-foreground-strong">
-                    {formatMessage({ id: "message.chatPanel.overflow.lifecycleGroup" })}
-                  </h3>
+                <FormSection
+                  data-testid="channel-settings-lifecycle-group"
+                  title={formatMessage({ id: "message.chatPanel.overflow.lifecycleGroup" })}
+                >
                   <div
-                    className="mt-2 flex flex-col gap-2 [&_[data-slot=button-content]]:!justify-center"
+                    className="flex flex-col gap-2 [&_[data-slot=button-content]]:!justify-center"
                     data-testid="channel-settings-action-zone"
                   >
                     {showManageActions && visibilityActionRow}
@@ -1622,38 +1680,32 @@ export default function EditChannelDialog({
                     {!isArchived && stopAgentsRow}
                     {showManageActions && deleteActionRow}
                   </div>
-                </section>
+                </FormSection>
               )}
             </>
           ) : (
             showChannelInfoSettings && (showLeaveAction || showManageActions || (isArchived && effectiveCapabilities.archiveChannels)) && (
-              <section className="mt-5 space-y-3">
-                <div>
-                  <h3 className="text-xs font-bold tracking-wide text-foreground-muted">
-                    {formatMessage({ id: "message.channelSettings.actionsTitle" })}
-                  </h3>
-                  <p className="mt-1 text-xs text-foreground-muted">
-                    {formatMessage({ id: "message.channelSettings.actionsDescription" })}
-                  </p>
-                </div>
+              <FormSection
+                title={formatMessage({ id: "message.channelSettings.actionsTitle" })}
+                description={formatMessage({ id: "message.channelSettings.actionsDescription" })}
+              >
                 <div className="flex flex-col gap-3">
                   {leaveActionButton}
                   {visibilityActionButton}
                   {lifecycleActionButtons}
                 </div>
-              </section>
+              </FormSection>
             )
           )}
     </>
   );
 
   const saveButton = canEditChannel && (
-    <Button size="sm"
+    <Button size="lg"
       variant="accent"
       type="submit"
       form={CHANNEL_SETTINGS_FORM_ID}
       disabled={saving || isArchived}
-      className="px-4 py-2 text-sm disabled:opacity-50 disabled:cursor-not-allowed"
     >
       {saving ? formatMessage({ id: "channel.edit.saving" }) : formatMessage({ id: "channel.edit.saveChanges" })}
     </Button>
@@ -1669,55 +1721,60 @@ export default function EditChannelDialog({
            v2: identity lives in the yellow header, so the panel drops
            its own title and keeps only a hairline from the members
            strip above. */
-        <div className="safe-bottom border-t border-line-muted px-4 pt-3 theme-brutal:border-black/10" data-testid="channel-settings-panel">
+        <div className="safe-bottom border-t border-line-hairline px-4 pt-3" data-testid="channel-settings-panel">
           {settingsBody}
         </div>
       ) : (
         <ChannelSettingsSheet isDirty={isDirty} onClose={onClose}>
-          <div className="flex shrink-0 items-center justify-between gap-4 border-b border-line-muted bg-primary-soft px-4 py-3 text-foreground-strong theme-brutal:border-b-2 theme-brutal:border-black theme-brutal:bg-soft-signal theme-brutal:text-black">
-            <div className="min-w-0">
-              <p className="text-[10px] font-bold tracking-wide text-foreground-muted theme-brutal:text-black/55">
+          {/* DS drawer head: 56 tall, a seam under it, the title with the
+              channel as its subtitle (words in Grotesk, the #name in Mono)
+              and a borderless close — the panel-head icon action (raft-ui
+              PanelAction) in the panel-head actions slot, which lands its
+              glyph on the head's edge. */}
+          <DrawerHeader className="flex-row justify-between">
+            {/* Reading order stays eyebrow → title → #name; the grid draws the
+                title on the first line and "Channel #name" under it. */}
+            <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-x-1.5">
+              <p className="col-start-1 row-start-2 text-caption text-foreground-hint">
                 {formatMessage({ id: "message.channelSettings.eyebrow" })}
               </p>
-              <DrawerTitle id="channel-settings-title" className="truncate font-display text-xl font-bold text-foreground-strong theme-brutal:text-black">
+              <DrawerTitle id="channel-settings-title" className="col-span-2 col-start-1 row-start-1 truncate">
                 {formatMessage({ id: "message.channelSettings.title" })}
               </DrawerTitle>
-              <DrawerDescription className="truncate font-mono text-xs text-foreground-muted theme-brutal:text-black/60">
+              <DrawerDescription className="col-start-2 row-start-2 min-w-0 truncate font-mono text-mono-meta text-foreground-hint">
                 #{initialName}
               </DrawerDescription>
             </div>
-            <DrawerClose
-              render={(
-                <Button size="sm"
-                  variant="outline"
-                  type="button"
-                  className="p-1"
-                  aria-label={formatMessage({ id: "message.channelSettings.close" })}
-                />
-              )}
-            >
-              <X size={20} />
-            </DrawerClose>
-          </div>
+            <PanelActions>
+              <DrawerClose
+                render={<PanelAction aria-label={formatMessage({ id: "message.channelSettings.close" })} />}
+              >
+                <X />
+              </DrawerClose>
+            </PanelActions>
+          </DrawerHeader>
 
-          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <DrawerBody className="min-h-0 flex-1 overflow-y-auto">
             {settingsBody}
-          </div>
+          </DrawerBody>
 
-          <div className="safe-bottom flex shrink-0 justify-end gap-3 border-t border-line-muted theme-brutal:border-t-2 theme-brutal:border-black bg-layer-canvas-muted theme-brutal:bg-brutal-cream px-4 py-3">
-            <DrawerClose
-              render={(
-                <Button size="sm"
-                  variant="outline"
-                  type="button"
-                  className="px-4 py-2 text-sm"
-                />
-              )}
-            >
-              {formatMessage({ id: "settings.common.cancel" })}
-            </DrawerClose>
-            {saveButton}
-          </div>
+          {/* Cancel / Save save together (DS wide-sheet footer): ghost and the
+              one pink button, over a seam. */}
+          <DrawerFooter className="safe-bottom">
+            <DrawerActions>
+              <DrawerClose
+                render={(
+                  <Button size="lg"
+                    variant="ghost"
+                    type="button"
+                  />
+                )}
+              >
+                {formatMessage({ id: "settings.common.cancel" })}
+              </DrawerClose>
+              {saveButton}
+            </DrawerActions>
+          </DrawerFooter>
         </ChannelSettingsSheet>
       )}
 
@@ -1728,7 +1785,7 @@ export default function EditChannelDialog({
           message={formatMessage({ id: "channel.edit.confirmArchive" }, { name: initialName })}
           confirmLabel={formatMessage({ id: "channel.edit.archiveAction" })}
           loadingLabel={formatMessage({ id: "channel.edit.archiving" })}
-          confirmColor="bg-brutal-orange"
+          confirmVariant="warning"
           layer={1}
           onConfirm={handleArchiveConfirm}
           onClose={closeArchiveConfirm}
@@ -1758,7 +1815,7 @@ export default function EditChannelDialog({
               : currentVisibility === "private" ? formatMessage({ id: "channel.edit.confirmPublicAction" }) : formatMessage({ id: "channel.edit.confirmPrivateAction" })
           }
           loadingLabel={formatMessage({ id: "channel.edit.updating" })}
-          confirmColor="bg-brutal-orange"
+          confirmVariant="warning"
           layer={1}
           onConfirm={handleVisibilityChange}
           onClose={closeVisibilityConfirm}
@@ -1772,7 +1829,7 @@ export default function EditChannelDialog({
           message={formatMessage({ id: "channel.edit.confirmLeave" }, { name: initialName })}
           confirmLabel={formatMessage({ id: "channel.edit.leaveAction" })}
           loadingLabel={formatMessage({ id: "channel.edit.leaving" })}
-          confirmColor="bg-brutal-orange"
+          confirmVariant="warning"
           confirmTestId={isPanel ? "channel-overflow-leave-confirm" : undefined}
           layer={1}
           onConfirm={handleLeaveConfirm}

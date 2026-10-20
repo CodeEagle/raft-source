@@ -19,6 +19,7 @@ import {
   agentMigrationTransferSummarySchema,
   currentDate,
   type AgentMigrationControlManifest,
+  type AgentMigrationHostedImportLimits,
   type AgentMigrationSourceQuiesceReceipt,
   type AgentMigrationTerminalFailureCode,
   type AgentMigrationTransferSummary,
@@ -30,6 +31,7 @@ import { FencedAuthorizationDeniedError, lockActorMembershipRow } from "../lib/a
 import { userCanActOnAgentResource } from "../lib/actorPermissions";
 import {
   agentMigrationChunkReceipts,
+  agentMigrationHostedTargets,
   agentMigrationReceiptChannels,
   agentMigrations,
   agentRuntimeProfiles,
@@ -49,6 +51,35 @@ import {
 import { getStorage, type StorageBackend } from "./storageService";
 
 export type AgentMigrationRow = typeof agentMigrations.$inferSelect;
+
+/**
+ * A migration whose target is a Computer. Every path that talks to the target
+ * daemon (leases, chunk grants, flip, arrival, target cancel) takes this type:
+ * a hosted target has no machine, and reaching one of those paths with it is a
+ * bug that must fail closed rather than address a machine that doesn't exist.
+ */
+export type ComputerTargetMigration<T extends Pick<AgentMigrationRow, "targetKind" | "targetMachineId" | "targetMachineNameSnapshot"> = AgentMigrationRow> =
+  T & { targetKind: "computer"; targetMachineId: string; targetMachineNameSnapshot: string };
+
+export function isComputerTargetMigration<T extends Pick<AgentMigrationRow, "targetKind" | "targetMachineId" | "targetMachineNameSnapshot">>(
+  row: T,
+): row is ComputerTargetMigration<T> {
+  return row.targetKind === "computer" && row.targetMachineId !== null && row.targetMachineNameSnapshot !== null;
+}
+
+/** The target a lease and control manifest name: the target machine, or the hosted identity. */
+export function migrationTargetControlIdentity(
+  row: Pick<AgentMigrationRow, "targetKind" | "targetMachineId" | "targetMachineNameSnapshot">,
+): string {
+  return isComputerTargetMigration(row) ? row.targetMachineId : HOSTED_MIGRATION_TARGET_CONTROL_IDENTITY;
+}
+
+export function requireComputerTarget<T extends Pick<AgentMigrationRow, "targetKind" | "targetMachineId" | "targetMachineNameSnapshot">>(
+  row: T,
+): ComputerTargetMigration<T> {
+  if (!isComputerTargetMigration(row)) throw new Error("MIGRATION_TARGET_NOT_COMPUTER");
+  return row;
+}
 export type AgentMigrationState = AgentMigrationRow["state"];
 export type AgentMigrationTransportFailureCode = AgentMigrationTerminalFailureCode;
 
@@ -107,6 +138,18 @@ export const AGENT_MIGRATION_AUTO_START_REMEDIATION_WINDOW_MS = 2 * 60 * 1000;
 export const AGENT_MIGRATION_ORPHANED_ARRIVAL_GRACE_MS = 5 * 60 * 1000;
 export const AGENT_MIGRATION_AUTO_START_REMEDIATION_LEASE_MS = 30_000;
 export const DEFAULT_AGENT_MIGRATION_TRANSPORT_MAX_BYTES = MAX_AGENT_MIGRATION_TRANSPORT_BYTES;
+/**
+ * Compressed bundle cap for a hosted target. The import itself holds at most
+ * the provider's limits (10 MiB today); this only stops a workspace that is
+ * mostly code repositories early, before it is uploaded at all.
+ */
+export const DEFAULT_HOSTED_AGENT_MIGRATION_TRANSPORT_MAX_BYTES = 256 * 1024 * 1024;
+/**
+ * What a hosted migration's source lease and control manifest name as the
+ * target. The source daemon only needs a non-empty value that differs from its
+ * own machine id; it never addresses it.
+ */
+export const HOSTED_MIGRATION_TARGET_CONTROL_IDENTITY = "raft-hosted";
 export const AGENT_MIGRATION_AUTO_START_LEASE_MS = 30_000;
 // The lease (tokens and presigned URLs) must outlive the longest migration;
 // the deadlines, not the lease, stop a stalled one.
@@ -129,9 +172,14 @@ export interface AgentMigrationActorFence {
   capability: "migrateAgents" | "controlAgentRuntime";
 }
 
-export interface BeginAgentMigrationInput {
+export interface AgentMigrationHostedTargetInput {
+  provider: "antiproton";
+  hostedModel: string | null;
+  importLimits: AgentMigrationHostedImportLimits;
+}
+
+interface BeginAgentMigrationBaseInput {
   agentId: string;
-  targetMachineId: string;
   initiatedByUserId?: string | null;
   actorFence?: AgentMigrationActorFence;
   now?: Date;
@@ -140,12 +188,17 @@ export interface BeginAgentMigrationInput {
   arrivalDeadlineMs?: number;
 }
 
-export interface BeginAgentMigrationProvisioningInput extends BeginAgentMigrationInput {
+export type BeginAgentMigrationInput = BeginAgentMigrationBaseInput & (
+  | { targetMachineId: string; hostedTarget?: undefined }
+  | { targetMachineId?: undefined; hostedTarget: AgentMigrationHostedTargetInput }
+);
+
+export type BeginAgentMigrationProvisioningInput = BeginAgentMigrationInput & {
   transportProvider?: "object_store";
   transportSessionId?: string;
   transportLeaseMs?: number;
   transportMaxBytes?: number;
-}
+};
 
 export type AgentMigrationTransportLeaseMessage = Extract<ServerToMachineMessage, { type: "machine:migration_transport:lease" }>;
 
@@ -159,6 +212,19 @@ export interface AgentMigrationProvisioningResult {
   migration: AgentMigrationRow;
   source: AgentMigrationTransportLeaseDelivery;
   target: AgentMigrationTransportLeaseDelivery;
+}
+
+/** A hosted target has no daemon, so only the source gets a lease. */
+export interface HostedAgentMigrationProvisioningResult {
+  migration: AgentMigrationRow;
+  source: AgentMigrationTransportLeaseDelivery;
+}
+
+/** A rotated generation: the target lease is null for a hosted target. */
+export interface AgentMigrationReprovisionResult {
+  migration: AgentMigrationRow;
+  source: AgentMigrationTransportLeaseDelivery;
+  target: AgentMigrationTransportLeaseDelivery | null;
 }
 
 export interface AgentMigrationObjectStoreTransferProvision {
@@ -201,7 +267,7 @@ export type AgentMigrationTransferLeaseReadyVerdict =
     };
 
 export type ZenMigratingDeliveryDecision =
-  | { action: "deliver"; reason: "no-active-migration" | "target-starting" }
+  | { action: "deliver"; reason: "no-active-migration" | "target-starting" | "hosted-provider-holds" }
   | { action: "queue"; reason: "zen-migrating" }
   | { action: "deadline-expired"; reason: "prep-deadline" | "transfer-deadline" | "arrival-deadline" };
 
@@ -405,6 +471,7 @@ export async function recordAgentMigrationSourceQuiesced(input: {
       machineId: input.sourceMachineId,
       role: "source",
       transportToken: input.transportToken,
+      now,
     });
     if (!row.transportGeneration || !row.transportLeaseId) {
       throw new Error("MIGRATION_RESUMABLE_PROTOCOL_REQUIRED");
@@ -476,6 +543,7 @@ export async function recordAgentMigrationSourceBuildProgress(input: {
       machineId: input.sourceMachineId,
       role: "source",
       transportToken: input.transportToken,
+      now,
     });
     if (report.migrationGeneration !== row.transportGeneration) {
       throw new Error("MIGRATION_GENERATION_STALE");
@@ -536,6 +604,7 @@ export async function registerAgentMigrationControlManifest(input: {
       machineId: input.sourceMachineId,
       role: "source",
       transportToken: input.transportToken,
+      now,
     });
     if (!row.sourceQuiesceReceipt || !row.sourceQuiescedAt) {
       throw new Error("MIGRATION_SOURCE_NOT_QUIESCED");
@@ -594,12 +663,14 @@ export async function getAgentMigrationResumableControl(input: {
   machineId: string;
   role: "source" | "target";
   transportToken: string;
+  now?: Date;
 }): Promise<{ control: AgentMigrationControlManifest; controlSha256: string; uploadComplete: boolean }> {
   const db = getDb();
+  const now = input.now ?? currentDate();
   const [row] = await db.select().from(agentMigrations)
     .where(eq(agentMigrations.id, input.migrationId))
     .limit(1);
-  assertResumableMigrationActor(row, input);
+  assertResumableMigrationActor(row, { ...input, now });
   if (!row.transportControlManifest || !row.transportControlSha256) {
     throw new Error("MIGRATION_CONTROL_MANIFEST_MISSING");
   }
@@ -619,12 +690,14 @@ export async function planAgentMigrationChunkTransfers(input: {
   transportToken: string;
   cursor?: number;
   storage?: StorageBackend | null;
+  now?: Date;
 }): Promise<AgentMigrationChunkTransferPlan> {
   const db = getDb();
+  const now = input.now ?? currentDate();
   const [row] = await db.select().from(agentMigrations)
     .where(eq(agentMigrations.id, input.migrationId))
     .limit(1);
-  assertResumableMigrationActor(row, input);
+  assertResumableMigrationActor(row, { ...input, now });
   if (
     !row.transportControlManifest
     || !row.transportControlSha256
@@ -638,7 +711,7 @@ export async function planAgentMigrationChunkTransfers(input: {
   if (input.role === "target" && !row.transportUploadCompletedAt) {
     throw new Error("MIGRATION_NOT_READY");
   }
-  if (currentDate().getTime() >= row.transportExpiresAt.getTime()) {
+  if (now.getTime() >= row.transportExpiresAt.getTime()) {
     throw new Error("MIGRATION_LEASE_EXPIRED");
   }
   const storage = input.storage ?? getStorage();
@@ -660,7 +733,7 @@ export async function planAgentMigrationChunkTransfers(input: {
       : receipt.sourceReceiptAt !== null && receipt.targetReceiptAt === null));
   const batch = candidates.slice(0, AGENT_MIGRATION_CHUNK_URL_BATCH_LIMIT);
   const expiresIn = storagePresignExpiresInSeconds(
-    Math.max(1_000, row.transportExpiresAt.getTime() - currentDate().getTime()),
+    Math.max(1_000, row.transportExpiresAt.getTime() - now.getTime()),
   );
   const chunks = await Promise.all(batch.map(async (receipt) => ({
     index: receipt.chunkIndex,
@@ -738,6 +811,7 @@ export async function prepareAgentMigrationStreamedChunk(input: {
       machineId: input.sourceMachineId,
       role: "source",
       transportToken: input.transportToken,
+      now,
     });
     if (
       input.migrationGeneration !== row.transportGeneration
@@ -783,7 +857,7 @@ export async function prepareAgentMigrationStreamedChunk(input: {
   });
   if (receipt.sourceReceiptAt) return { uploaded: true, url: null };
   const expiresIn = storagePresignExpiresInSeconds(
-    Math.max(1_000, row.transportExpiresAt!.getTime() - currentDate().getTime()),
+    Math.max(1_000, row.transportExpiresAt!.getTime() - now.getTime()),
   );
   return {
     uploaded: false,
@@ -863,7 +937,7 @@ export async function recordAgentMigrationChunkReceipt(input: {
       .where(eq(agentMigrations.id, input.migrationId))
       .limit(1)
       .for("update");
-    assertResumableMigrationActor(row, input);
+    assertResumableMigrationActor(row, { ...input, now });
     if (
       input.migrationGeneration !== row.transportGeneration
       || input.leaseId !== row.transportLeaseId
@@ -926,6 +1000,7 @@ export async function completeAgentMigrationResumableUpload(input: {
       machineId: input.sourceMachineId,
       role: "source",
       transportToken: input.transportToken,
+      now,
     });
     if (
       row.transportGeneration !== input.migrationGeneration
@@ -984,6 +1059,7 @@ function assertResumableMigrationActor(
     machineId: string;
     role: "source" | "target";
     transportToken: string;
+    now: Date;
   },
 ): asserts row is AgentMigrationRow {
   if (
@@ -1008,7 +1084,7 @@ function assertResumableMigrationActor(
   if (!expectedHash || !safeHashEquals(expectedHash, sha256(input.transportToken))) {
     throw new Error("MIGRATION_TRANSPORT_TOKEN_INVALID");
   }
-  if (!row.transportExpiresAt || currentDate().getTime() >= row.transportExpiresAt.getTime()) {
+  if (!row.transportExpiresAt || input.now.getTime() >= row.transportExpiresAt.getTime()) {
     throw new Error("MIGRATION_LEASE_EXPIRED");
   }
 }
@@ -1035,7 +1111,7 @@ function validateControlManifestForMigration(
     || control.identity.leaseId !== row.transportLeaseId
     || control.identity.agentId !== row.agentId
     || control.identity.sourceMachineId !== row.sourceMachineId
-    || control.identity.targetMachineId !== row.targetMachineId
+    || control.identity.targetMachineId !== migrationTargetControlIdentity(row)
     || control.bundle.contentType !== AGENT_MIGRATION_BUNDLE_CONTENT_TYPE
     || !Number.isSafeInteger(control.bundle.totalBytes)
     || control.bundle.totalBytes <= 0
@@ -1127,7 +1203,7 @@ function assertChunkRowsMatchControl(
   }
 }
 
-function resumableChunkStorageKey(sessionId: string, generation: string, chunkIndex: number): string {
+export function resumableChunkStorageKey(sessionId: string, generation: string, chunkIndex: number): string {
   const safeGeneration = createHash("sha256").update(generation).digest("hex").slice(0, 24);
   return `agent-migrations/${sessionId}/resumable/${safeGeneration}/chunks/${chunkIndex}`;
 }
@@ -1153,7 +1229,8 @@ function sortJsonValue(value: unknown): unknown {
     }, {});
 }
 
-function targetImportView(row: AgentMigrationRow): AgentMigrationTargetImportView {
+function targetImportView(input: AgentMigrationRow): AgentMigrationTargetImportView {
+  const row = requireComputerTarget(input);
   return {
     migrationId: row.id,
     migrationRef: row.supportRef,
@@ -1203,9 +1280,10 @@ async function isAgentHeldByTarget(executor: DatabaseExecutor, row: AgentMigrati
 
 async function finalizeAgentHolderProjection(
   executor: DatabaseExecutor,
-  migration: AgentMigrationRow,
+  input: AgentMigrationRow,
   now: Date,
 ): Promise<void> {
+  const migration = requireComputerTarget(input);
   const [updatedAgent] = await executor.update(agents)
     .set({
       machineId: migration.targetMachineId,
@@ -1223,9 +1301,10 @@ async function finalizeAgentHolderProjection(
 
 async function finalizeRuntimeProfileProjection(
   executor: DatabaseExecutor,
-  migration: AgentMigrationRow,
+  input: AgentMigrationRow,
   now: Date,
 ): Promise<void> {
+  const migration = requireComputerTarget(input);
   const [profile] = await executor.select()
     .from(agentRuntimeProfiles)
     .where(eq(agentRuntimeProfiles.agentId, migration.agentId))
@@ -1298,7 +1377,8 @@ export function createAgentMigrationLifecycleEvent(input: {
   return createAgentLifecycleEvent({
     serverId: migration.serverId,
     agentId: migration.agentId,
-    machineId: migration.flippedAt ? migration.targetMachineId : migration.sourceMachineId,
+    // A flipped hosted migration has no target machine; the event then names none.
+    machineId: migration.flippedAt ? migration.targetMachineId ?? undefined : migration.sourceMachineId,
     eventType,
     actor: "server",
     source: "server",
@@ -1328,7 +1408,7 @@ function deadlineForState(row: Pick<AgentMigrationRow, "state" | "prepDeadlineAt
 }
 
 export function planZenMigratingDelivery(input: {
-  migration: Pick<AgentMigrationRow, "state" | "prepDeadlineAt" | "transferDeadlineAt" | "arrivalDeadlineAt"> | null;
+  migration: Pick<AgentMigrationRow, "state" | "prepDeadlineAt" | "transferDeadlineAt" | "arrivalDeadlineAt"> & Partial<Pick<AgentMigrationRow, "targetKind">> | null;
   now?: Date;
 }): ZenMigratingDeliveryDecision {
   if (!input.migration || !isActiveState(input.migration.state)) {
@@ -1336,6 +1416,12 @@ export function planZenMigratingDelivery(input: {
   }
   if (input.migration.state === "starting") {
     return { action: "deliver", reason: "target-starting" };
+  }
+  // After the switch to hosted the agent is external: messages go to the
+  // provider, which holds them until the workspace import lands. No Computer
+  // arrival deadline applies; the hosted completion path watches this state.
+  if (input.migration.state === "arriving" && input.migration.targetKind === "hosted") {
+    return { action: "deliver", reason: "hosted-provider-holds" };
   }
   const now = input.now ?? currentDate();
   const { deadline, reason } = deadlineForState(input.migration);
@@ -1428,6 +1514,7 @@ export async function sweepElapsedAgentMigrationDeadline(input: {
         ),
         and(
           eq(agentMigrations.state, "arriving"),
+          eq(agentMigrations.targetKind, "computer"),
           lt(agentMigrations.arrivalDeadlineAt, now),
         ),
       ))
@@ -1546,7 +1633,7 @@ export async function getLatestAgentMigration(
  *   3. The Agent row FOR UPDATE, then the capability-or-creator decision on the locked role and creator.
  * The caller's resource rows (`machines`, `agent_migrations`) come after.
  */
-async function lockAgentMigrationActorAuthority(
+export async function lockAgentMigrationActorAuthority(
   executor: DatabaseExecutor,
   agentId: string,
   fence: AgentMigrationActorFence,
@@ -1590,24 +1677,32 @@ async function insertAgentMigration(
   if (!agent) throw new Error("AGENT_NOT_FOUND");
   if (!agent.machineId) throw new Error("AGENT_HAS_NO_SOURCE_MACHINE");
 
-  // Lock both machine rows in a stable order so migration creation serializes
-  // with Computer deletion after terminal history becomes FK-independent.
+  // Lock the machine rows in a stable order so migration creation serializes
+  // with Computer deletion after terminal history becomes FK-independent. A
+  // hosted target has no machine row; only the source is locked.
+  const machineIds = input.hostedTarget ? [agent.machineId] : [agent.machineId, input.targetMachineId];
   const migrationMachines = await executor.select()
     .from(machines)
     .where(and(
       eq(machines.serverId, agent.serverId),
-      inArray(machines.id, [agent.machineId, input.targetMachineId]),
+      inArray(machines.id, machineIds),
     ))
     .orderBy(asc(machines.id))
     .for("update");
   const sourceMachine = migrationMachines.find((machine) => machine.id === agent.machineId);
-  const targetMachine = migrationMachines.find((machine) => machine.id === input.targetMachineId);
   if (!sourceMachine) throw new Error("AGENT_HAS_NO_SOURCE_MACHINE");
-  if (!targetMachine || targetMachine.serverId !== agent.serverId) {
-    throw new Error("TARGET_MACHINE_NOT_IN_AGENT_SERVER");
-  }
-  if (targetMachine.id === agent.machineId) {
-    throw new Error("TARGET_MACHINE_MATCHES_SOURCE");
+  let target: { kind: "computer"; machineId: string; name: string } | { kind: "hosted" };
+  if (input.hostedTarget) {
+    target = { kind: "hosted" };
+  } else {
+    const targetMachine = migrationMachines.find((machine) => machine.id === input.targetMachineId);
+    if (!targetMachine || targetMachine.serverId !== agent.serverId) {
+      throw new Error("TARGET_MACHINE_NOT_IN_AGENT_SERVER");
+    }
+    if (targetMachine.id === agent.machineId) {
+      throw new Error("TARGET_MACHINE_MATCHES_SOURCE");
+    }
+    target = { kind: "computer", machineId: targetMachine.id, name: targetMachine.name };
   }
 
   for (let attempt = 0; attempt < 5; attempt += 1) {
@@ -1616,9 +1711,10 @@ async function insertAgentMigration(
         serverId: agent.serverId,
         agentId: agent.id,
         sourceMachineId: agent.machineId,
-        targetMachineId: targetMachine.id,
+        targetKind: target.kind,
+        targetMachineId: target.kind === "computer" ? target.machineId : null,
         sourceMachineNameSnapshot: sourceMachine.name,
-        targetMachineNameSnapshot: targetMachine.name,
+        targetMachineNameSnapshot: target.kind === "computer" ? target.name : null,
         receiptChannelId: null,
         supportRef: supportRefFactory(),
         contractVersion: 2,
@@ -1664,6 +1760,16 @@ async function insertAgentMigration(
         agentId: row.agentId,
         createdAt: now,
       });
+      if (input.hostedTarget) {
+        await executor.insert(agentMigrationHostedTargets).values({
+          migrationId: row.id,
+          provider: input.hostedTarget.provider,
+          hostedModel: input.hostedTarget.hostedModel,
+          importLimits: input.hostedTarget.importLimits,
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
       return withReceiptSurface;
     }
   }
@@ -1675,7 +1781,10 @@ function buildTransportLeaseDelivery(input: {
   role: "source" | "target";
   token: string;
 }): AgentMigrationTransportLeaseDelivery {
-  const { migration, role, token } = input;
+  const { role, token } = input;
+  // Only a Computer target has a daemon to lease to. The source lease names
+  // the target by its control identity, which for hosted is not a machine.
+  const migration = role === "target" ? requireComputerTarget(input.migration) : input.migration;
   if (
     !migration.transportSessionId
     || !migration.transportExpiresAt
@@ -1687,7 +1796,7 @@ function buildTransportLeaseDelivery(input: {
     throw new Error("MIGRATION_TRANSPORT_NOT_PROVISIONED");
   }
   return {
-    machineId: role === "source" ? migration.sourceMachineId : migration.targetMachineId,
+    machineId: role === "source" ? migration.sourceMachineId : requireComputerTarget(migration).targetMachineId,
     role,
     message: {
       type: "machine:migration_transport:lease",
@@ -1707,7 +1816,7 @@ function buildTransportLeaseDelivery(input: {
       leaseId: migration.transportLeaseId,
       transportGeneration: migration.transportGeneration,
       sourceMachineId: migration.sourceMachineId,
-      targetMachineId: migration.targetMachineId,
+      targetMachineId: migrationTargetControlIdentity(migration),
       expectedMigrationRevision: migration.transportExpectedMigrationRevision,
     },
   };
@@ -1716,7 +1825,7 @@ function buildTransportLeaseDelivery(input: {
 async function insertAgentMigrationProvisioning(
   input: BeginAgentMigrationProvisioningInput,
   executor: DatabaseExecutor,
-): Promise<AgentMigrationProvisioningResult> {
+): Promise<AgentMigrationReprovisionResult> {
   const now = input.now ?? currentDate();
   const transportSessionId = input.transportSessionId ?? randomUUID();
   const transportGeneration = `agent_migration_transport:${randomUUID()}`;
@@ -1749,7 +1858,9 @@ async function insertAgentMigrationProvisioning(
   return {
     migration: updated,
     source: buildTransportLeaseDelivery({ migration: updated, role: "source", token: sourceToken }),
-    target: buildTransportLeaseDelivery({ migration: updated, role: "target", token: targetToken }),
+    target: isComputerTargetMigration(updated)
+      ? buildTransportLeaseDelivery({ migration: updated, role: "target", token: targetToken })
+      : null,
   };
 }
 
@@ -1771,7 +1882,7 @@ export async function reprovisionAgentMigrationTransport(input: {
   expectedTransportGeneration: string;
   provision: AgentMigrationObjectStoreTransferProvision;
   now?: Date;
-}): Promise<AgentMigrationProvisioningResult | null> {
+}): Promise<AgentMigrationReprovisionResult | null> {
   const now = input.now ?? currentDate();
   return await getDb().transaction(async (tx) => {
     const [row] = await tx.select().from(agentMigrations)
@@ -1817,7 +1928,9 @@ export async function reprovisionAgentMigrationTransport(input: {
     return {
       migration: updated,
       source: buildTransportLeaseDelivery({ migration: updated, role: "source", token: sourceToken }),
-      target: buildTransportLeaseDelivery({ migration: updated, role: "target", token: targetToken }),
+      target: isComputerTargetMigration(updated)
+        ? buildTransportLeaseDelivery({ migration: updated, role: "target", token: targetToken })
+        : null,
     };
   });
 }
@@ -1908,13 +2021,30 @@ export async function listAgentMigrationsAwaitingTransportOnMachine(machineId: s
 }
 
 export async function beginAgentMigrationProvisioning(
-  input: BeginAgentMigrationProvisioningInput,
+  input: BeginAgentMigrationProvisioningInput & { targetMachineId: string; hostedTarget?: undefined },
   executor: DatabaseExecutor = getDb(),
 ): Promise<AgentMigrationProvisioningResult> {
-  if ("transaction" in executor) {
-    return await executor.transaction(async (tx) => insertAgentMigrationProvisioning(input, tx));
-  }
-  return await insertAgentMigrationProvisioning(input, executor);
+  const result = "transaction" in executor
+    ? await executor.transaction(async (tx) => insertAgentMigrationProvisioning(input, tx))
+    : await insertAgentMigrationProvisioning(input, executor);
+  if (!result.target) throw new Error("MIGRATION_TARGET_NOT_COMPUTER");
+  return { ...result, target: result.target };
+}
+
+/**
+ * Start a migration to Raft hosted: the same source side as a Computer
+ * migration (quiesce, bundle upload), with no target daemon. The server's
+ * hosted importer takes it from `ready`.
+ */
+export async function beginHostedAgentMigrationProvisioning(
+  input: BeginAgentMigrationProvisioningInput & { targetMachineId?: undefined; hostedTarget: AgentMigrationHostedTargetInput },
+  executor: DatabaseExecutor = getDb(),
+): Promise<HostedAgentMigrationProvisioningResult> {
+  const withMaxBytes = { ...input, transportMaxBytes: input.transportMaxBytes ?? DEFAULT_HOSTED_AGENT_MIGRATION_TRANSPORT_MAX_BYTES };
+  const result = "transaction" in executor
+    ? await executor.transaction(async (tx) => insertAgentMigrationProvisioning(withMaxBytes, tx))
+    : await insertAgentMigrationProvisioning(withMaxBytes, executor);
+  return { migration: result.migration, source: result.source };
 }
 
 export async function markAgentMigrationTransportProvisionFailed(input: {
@@ -2767,11 +2897,15 @@ export function buildAgentMigrationCancellationDeliveries(
     sessionId: row.transportSessionId,
     disposition: row.cancelDisposition,
   };
+  const source = {
+    machineId: row.sourceMachineId,
+    message: { ...base, role: "source" as const, stopAgent: false },
+  };
+  // A hosted target has no daemon to tell; its side of a cancel is settled
+  // by the hosted importer (R4).
+  if (!isComputerTargetMigration(row)) return [source];
   return [
-    {
-      machineId: row.sourceMachineId,
-      message: { ...base, role: "source", stopAgent: false },
-    },
+    source,
     {
       machineId: row.targetMachineId,
       message: {
@@ -2840,6 +2974,10 @@ export async function requestAgentMigrationCancellation(input: {
       return { migration: row, disposition, dispatch: "none" };
     }
     if (row.revision !== input.expectedRevision) throw new Error("MIGRATION_REVISION_STALE");
+    // After the switch to hosted the agent already runs at the provider; there
+    // is no daemon to hand it back to, so the switch is final.
+    const hostedTarget = !isComputerTargetMigration(row);
+    if (hostedTarget && disposition === "post_flip_target_authoritative") throw new Error("MIGRATION_NOT_CANCELABLE");
 
     const [updated] = await tx.update(agentMigrations)
       .set({
@@ -2855,8 +2993,10 @@ export async function requestAgentMigrationCancellation(input: {
         cancelAttentionDeadlineAt: addMs(now, AGENT_MIGRATION_CANCEL_ATTENTION_WINDOW_MS),
         cancelSourceAckAt: null,
         cancelSourceOutcome: null,
-        cancelTargetAckAt: null,
-        cancelTargetOutcome: null,
+        // A hosted target has nothing to clean on a daemon: the server-side
+        // importer stops on the revision change, so its side is done now.
+        cancelTargetAckAt: hostedTarget ? now : null,
+        cancelTargetOutcome: hostedTarget ? "cleaned" : null,
         cancelNeedsAttentionAt: null,
         cancelErrorCode: null,
         cancelErrorMessage: null,
